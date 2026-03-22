@@ -101,6 +101,14 @@ impl ToolDispatcher {
         }
     }
 
+    /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
+    ///
+    /// Delegates to `ToolRegistry::generate_schemas` — each entry has `name`,
+    /// `description`, and `parameters` fields.
+    pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
+        self.registry.generate_schemas()
+    }
+
     /// Run the tool invocation pipeline for a single call.
     ///
     /// Returns `Ok(ToolOutput)` on success. Each gate returns a typed

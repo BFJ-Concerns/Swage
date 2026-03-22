@@ -3,3 +3,25 @@ name = "swage-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+swage-core = { path = "../swage-core" }
+swage-provider = { path = "../swage-provider" }
+swage-tool = { path = "../swage-tool" }
+swage-storage = { path = "../swage-storage" }
+swage-hook = { path = "../swage-hook" }
+swage-safety = { path = "../swage-safety" }
+
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
+futures = { workspace = true }

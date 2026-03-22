@@ -147,6 +147,7 @@ impl HookRegistry {
         indices.sort_by_key(|&i| self.hooks[i].priority);
 
         let mut current_event = event;
+        let mut was_modified = false;
 
         for &idx in &indices {
             let reg = &self.hooks[idx];
@@ -168,6 +169,7 @@ impl HookRegistry {
                 HookOutcome::ContinueModified(modified) => {
                     debug!(hook = %hook_name, "hook modified event");
                     current_event = *modified;
+                    was_modified = true;
                 }
                 HookOutcome::Block(reason) => {
                     debug!(hook = %hook_name, reason = %reason, "hook blocked execution");
@@ -176,7 +178,13 @@ impl HookRegistry {
             }
         }
 
-        HookOutcome::Continue
+        // Propagate the final event state to the caller so they can
+        // use the modified content (e.g. BeforeInbound content rewriting).
+        if was_modified {
+            HookOutcome::ContinueModified(Box::new(current_event))
+        } else {
+            HookOutcome::Continue
+        }
     }
 
     /// Executes a single hook with timeout enforcement.

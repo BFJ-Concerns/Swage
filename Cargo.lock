@@ -2000,6 +2000,24 @@ dependencies = [
 [[package]]
 name = "swage-agent"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "swage-core",
+ "swage-hook",
+ "swage-provider",
+ "swage-safety",
+ "swage-storage",
+ "swage-tool",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "swage-config"
