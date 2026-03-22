@@ -45,19 +45,23 @@ struct NoOpProvider;
 
 #[async_trait::async_trait]
 impl swage_provider::LlmProvider for NoOpProvider {
-    async fn send_message(
-        &self,
-        _request: swage_core::LlmRequest,
-    ) -> Result<swage_core::LlmResponse, swage_core::ProviderError> {
+    fn model_id(&self) -> &str { "noop" }
+
+    async fn complete(
+        &self, _request: swage_core::CompletionRequest,
+    ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in asset serving tests")
     }
 
-    fn stream_message(
-        &self,
-        _request: swage_core::LlmRequest,
-    ) -> std::pin::Pin<
-        Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>,
-    > {
+    async fn complete_with_tools(
+        &self, _request: swage_core::ToolCompletionRequest,
+    ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+        unimplemented!("not used in asset serving tests")
+    }
+
+    fn stream(
+        &self, _request: swage_core::CompletionRequest,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
         unimplemented!("not used in asset serving tests")
     }
 }

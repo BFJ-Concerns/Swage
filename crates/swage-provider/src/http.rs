@@ -204,6 +204,10 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
 // ---------------------------------------------------------------------------
 
 /// Map an HTTP error status code to the appropriate `ProviderError` variant.
+///
+/// Server errors (500, 502, 503, 504) are classified as `Network` — transient
+/// and retriable. This is critical for the reliability stack: retry, circuit
+/// breaker, and failover decorators all key off `is_retriable()`.
 pub(crate) fn map_http_error(
     status: u16,
     body: String,
@@ -216,6 +220,11 @@ pub(crate) fn map_http_error(
             provider: "anthropic".to_string(),
             // Convert seconds (u64) to Duration; None stays None.
             retry_after: retry_after.map(Duration::from_secs),
+        },
+        // Server errors are transient — the upstream may recover on retry.
+        500 | 502 | 503 | 504 => ProviderError::Network {
+            provider: "upstream".to_string(),
+            message: format!("HTTP {status}: {body}"),
         },
         _ => ProviderError::HttpError { status, body },
     }
@@ -331,11 +340,37 @@ mod tests {
         assert!(matches!(err, ProviderError::RateLimited { .. }));
     }
 
+    // --- 5xx → Network (transient, retriable) ---
+
     #[test]
-    fn map_500_to_http_error() {
+    fn map_500_to_network_error() {
         let err = map_http_error(500, "Internal Server Error".into(), None);
-        assert!(matches!(err, ProviderError::HttpError { status: 500, .. }));
+        assert!(matches!(err, ProviderError::Network { .. }));
+        assert!(err.is_retriable(), "500 must be retriable");
     }
+
+    #[test]
+    fn map_502_to_network_error() {
+        let err = map_http_error(502, "Bad Gateway".into(), None);
+        assert!(matches!(err, ProviderError::Network { .. }));
+        assert!(err.is_retriable(), "502 must be retriable");
+    }
+
+    #[test]
+    fn map_503_to_network_error() {
+        let err = map_http_error(503, "Service Unavailable".into(), None);
+        assert!(matches!(err, ProviderError::Network { .. }));
+        assert!(err.is_retriable(), "503 must be retriable");
+    }
+
+    #[test]
+    fn map_504_to_network_error() {
+        let err = map_http_error(504, "Gateway Timeout".into(), None);
+        assert!(matches!(err, ProviderError::Network { .. }));
+        assert!(err.is_retriable(), "504 must be retriable");
+    }
+
+    // --- Non-5xx errors remain as HttpError ---
 
     #[test]
     fn map_422_to_http_error() {

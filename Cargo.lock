@@ -2077,6 +2077,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",

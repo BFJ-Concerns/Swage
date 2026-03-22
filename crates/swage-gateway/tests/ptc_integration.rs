@@ -24,7 +24,10 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
-use swage_core::{LlmRequest, LlmResponse, ProviderError, StreamChunk};
+use swage_core::{
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{SqliteStorage, Storage};
@@ -48,13 +51,23 @@ impl MultiRoundProvider {
 
 #[async_trait]
 impl LlmProvider for MultiRoundProvider {
-    async fn send_message(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+    fn model_id(&self) -> &str { "mock-multi-round" }
+
+    async fn complete(
+        &self, _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in PTC integration tests")
     }
 
-    fn stream_message(
+    async fn complete_with_tools(
+        &self, _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in PTC integration tests")
+    }
+
+    fn stream(
         &self,
-        _request: LlmRequest,
+        _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let chunks = self
             .rounds

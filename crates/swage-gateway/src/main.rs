@@ -216,11 +216,18 @@ fn build_tool_registry(
 
 /// Create the LLM provider from resolved configuration.
 ///
+/// Dispatches to the correct provider implementation based on the configured
+/// protocol (Anthropic, OpenAI-compatible, Google, OpenRouter). The provider
+/// is wrapped in a retry decorator via `ProviderChainBuilder` for transient
+/// failure resilience.
+///
 /// If the API key environment variable is not set, the server starts anyway
 /// with a warning — the error surfaces through the WebSocket when a message
 /// is sent, rather than blocking startup.
 fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
+    use swage_provider::builder::ProviderChainBuilder;
+    use swage_provider::retry::RetryConfig;
 
     let provider_config = match ProviderConfig::try_from(&config.provider) {
         Ok(c) => c,
@@ -230,15 +237,51 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
                  The server will start, but messaging will fail \
                  until the API key is set."
             );
-            // Empty key — requests will fail with an auth error at the
+            // Derive a fallback base URL so the provider can at least be
+            // constructed. Requests will fail with an auth error at the
             // provider, which propagates as an error WebSocket event.
-            ProviderConfig::new("", &config.provider.model, "")
+            let base_url = match config.provider.protocol {
+                swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
+                swage_config::Protocol::Anthropic => "https://api.anthropic.com",
+                swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
+                swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
+            };
+            ProviderConfig::keyless(&config.provider.model, base_url)
         }
     };
 
-    // Only Anthropic is implemented in this phase. Other protocols will
-    // be wired up when their provider implementations are added.
-    Arc::new(swage_provider::anthropic::AnthropicProvider::from_config(
-        provider_config,
-    ))
+    // Dispatch to the correct provider implementation based on protocol,
+    // wrapping each in the reliability stack (retry with sensible defaults).
+    // Circuit breaker is omitted for single-provider setups — it adds
+    // complexity without a failover target to route to.
+    let retry = RetryConfig::default();
+
+    let provider: Box<dyn swage_provider::LlmProvider> = match config.provider.protocol {
+        swage_config::Protocol::Anthropic => {
+            ProviderChainBuilder::new()
+                .provider(swage_provider::anthropic::AnthropicProvider::from_config(
+                    provider_config,
+                ))
+                .with_retry(retry)
+                .build()
+        }
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => {
+            ProviderChainBuilder::new()
+                .provider(swage_provider::openai::OpenAiProvider::from_config(
+                    provider_config,
+                ))
+                .with_retry(retry)
+                .build()
+        }
+        swage_config::Protocol::Google => {
+            ProviderChainBuilder::new()
+                .provider(swage_provider::google::GoogleProvider::from_config(
+                    provider_config,
+                ))
+                .with_retry(retry)
+                .build()
+        }
+    };
+
+    Arc::from(provider)
 }

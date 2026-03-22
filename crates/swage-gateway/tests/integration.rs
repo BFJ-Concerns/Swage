@@ -20,7 +20,10 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
-use swage_core::{LlmRequest, LlmResponse, ProviderError, StreamChunk};
+use swage_core::{
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use swage_gateway::{server::build_router, shutdown::recover_orphaned_turns, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
@@ -47,20 +50,30 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    async fn send_message(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+    fn model_id(&self) -> &str { "mock-model" }
+
+    async fn complete(
+        &self, _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
-    fn stream_message(
+    async fn complete_with_tools(
+        &self, _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in streaming tests")
+    }
+
+    fn stream(
         &self,
-        _request: LlmRequest,
+        _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let chunks = std::mem::take(&mut *self.chunks.lock().unwrap());
         Box::pin(futures::stream::iter(chunks))
     }
 }
 
-/// Per-call control via channels — each `stream_message` call pops the next
+/// Per-call control via channels — each `stream` call pops the next
 /// receiver from the queue. The test sends chunks to the corresponding sender,
 /// giving it deterministic control over timing.
 struct ChannelProvider {
@@ -77,13 +90,23 @@ impl ChannelProvider {
 
 #[async_trait]
 impl LlmProvider for ChannelProvider {
-    async fn send_message(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+    fn model_id(&self) -> &str { "channel-model" }
+
+    async fn complete(
+        &self, _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
-    fn stream_message(
+    async fn complete_with_tools(
+        &self, _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in streaming tests")
+    }
+
+    fn stream(
         &self,
-        _request: LlmRequest,
+        _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let rx = self
             .receivers

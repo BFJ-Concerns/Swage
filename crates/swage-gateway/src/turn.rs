@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{
-    ChatMessage, GatewayError, LlmRequest, Role, StreamChunk, ToolCall, ToolResult,
-    build_tool_round_messages,
+    ChatMessage, CompletionRequest, GatewayError, Role, StreamChunk, ToolCall,
+    ToolResult, build_tool_round_messages,
 };
 use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
 
@@ -136,17 +136,25 @@ pub async fn process_turn(
         })
         .collect();
 
-    // Step 5: Include tool definitions from the registry in the request.
-    let tool_defs = state.tool_registry.definitions();
+    // Step 5: Build the completion request with system instructions and model.
+    //
+    // The system prompt is prepended as a system message so all providers
+    // can extract it in their preferred format (Anthropic separates it,
+    // OpenAI keeps it inline, Google uses system_instruction).
+    let mut request_messages = Vec::with_capacity(messages.len() + 1);
+    if !config.instructions.is_empty() {
+        request_messages.push(ChatMessage::new(Role::System, &config.instructions));
+    }
+    request_messages.extend(messages);
 
-    // Use the per-project model and instructions (falls back to startup config
-    // when no project-specific config.toml exists).
-    let mut request = LlmRequest::builder(&config.provider.model)
-        .messages(messages)
-        .system_prompt(&config.instructions)
-        .tools(tool_defs)
-        .stream(true)
-        .build();
+    let mut request = CompletionRequest {
+        messages: request_messages,
+        model: Some(config.provider.model.clone()),
+        max_tokens: Some(4096),
+        temperature: None,
+        stop_sequences: None,
+        metadata: None,
+    };
 
     // Step 6-8: Tool-aware streaming loop.
     //
@@ -160,7 +168,7 @@ pub async fn process_turn(
     let mut tool_position: i32 = 0;
 
     let outcome = 'outer: loop {
-        let mut stream = state.provider.stream_message(request.clone());
+        let mut stream = state.provider.stream(request.clone());
         // Text and tool calls collected in this streaming round.
         let mut round_text = String::new();
         let mut round_tool_calls: Vec<ToolCall> = Vec::new();
@@ -326,20 +334,13 @@ pub async fn process_turn(
         );
 
         // Extend the request's message history with the tool round.
-        // Re-use the resolved_config model so the loop stays on the
-        // project-specific model across all rounds.
+        // The system message and model carry forward from the original request.
         let mut updated_messages = request.messages.clone();
         updated_messages.extend(tool_messages);
-        // Preserve the per-project model; system_prompt carries forward from
-        // the previous request so we don't re-assemble instructions mid-turn.
-        request = LlmRequest::builder(&config.provider.model)
-            .messages(updated_messages)
-            .system_prompt(
-                request.system_prompt.as_deref().unwrap_or_default(),
-            )
-            .tools(request.tools.clone())
-            .stream(true)
-            .build();
+        request = CompletionRequest {
+            messages: updated_messages,
+            ..request.clone()
+        };
 
         // Reset round_text for the next iteration (accumulated carries forward).
         // The outer loop continues to stream the next response.
@@ -478,7 +479,10 @@ pub(crate) mod tests {
     use futures::stream;
     use tokio::sync::{Mutex, mpsc};
 
-    use swage_core::{LlmRequest, LlmResponse, ProviderError, StreamChunk};
+    use swage_core::{
+        CompletionRequest, CompletionResponse, FinishReason,
+        ProviderError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+    };
     use swage_provider::LlmProvider;
     use swage_core::StorageError;
     use swage_storage::{
@@ -495,7 +499,7 @@ pub(crate) mod tests {
     // -----------------------------------------------------------------------
     // Mock LLM providers
     //
-    // Uses `std::sync::Mutex` (not tokio) because `stream_message` is a sync
+    // Uses `std::sync::Mutex` (not tokio) because `stream` is a sync
     // function — we cannot `.await` inside it to take a tokio lock.
     // -----------------------------------------------------------------------
 
@@ -514,16 +518,23 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        async fn send_message(
-            &self,
-            _request: LlmRequest,
-        ) -> Result<LlmResponse, ProviderError> {
+        fn model_id(&self) -> &str { "mock-model" }
+
+        async fn complete(
+            &self, _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in streaming tests")
         }
 
-        fn stream_message(
+        async fn complete_with_tools(
+            &self, _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("not used in streaming tests")
+        }
+
+        fn stream(
             &self,
-            _request: LlmRequest,
+            _request: CompletionRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             // Drain the chunk list so each provider call gets its own sequence.
             let chunks = {
@@ -536,9 +547,9 @@ pub(crate) mod tests {
 
     /// A mock provider supporting multiple streaming rounds.
     ///
-    /// Each call to `stream_message` pops the next batch of chunks from the
-    /// front of the queue.  Used in tool execution tests where the model calls
-    /// a tool and then produces a final response.
+    /// Each call to `stream` pops the next batch of chunks from the front of
+    /// the queue.  Used in tool execution tests where the model calls a tool
+    /// and then produces a final response.
     pub(crate) struct MultiRoundMockProvider {
         rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
     }
@@ -553,16 +564,23 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for MultiRoundMockProvider {
-        async fn send_message(
-            &self,
-            _request: LlmRequest,
-        ) -> Result<LlmResponse, ProviderError> {
+        fn model_id(&self) -> &str { "mock-multi-round" }
+
+        async fn complete(
+            &self, _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in multi-round tests")
         }
 
-        fn stream_message(
+        async fn complete_with_tools(
+            &self, _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("not used in multi-round tests")
+        }
+
+        fn stream(
             &self,
-            _request: LlmRequest,
+            _request: CompletionRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             let chunks = self
                 .rounds
@@ -609,16 +627,23 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for PendingProvider {
-        async fn send_message(
-            &self,
-            _request: LlmRequest,
-        ) -> Result<LlmResponse, ProviderError> {
+        fn model_id(&self) -> &str { "pending-model" }
+
+        async fn complete(
+            &self, _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in cancellation tests")
         }
 
-        fn stream_message(
+        async fn complete_with_tools(
+            &self, _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("not used in cancellation tests")
+        }
+
+        fn stream(
             &self,
-            _request: LlmRequest,
+            _request: CompletionRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             // Never produces any chunks — the tokio::select! in process_turn will
             // block on this, allowing the cancellation token to fire.
@@ -1471,17 +1496,17 @@ pub(crate) mod tests {
     // Project context and config resolution tests
     // -----------------------------------------------------------------------
 
-    /// A provider that captures the LlmRequest passed to `stream_message`.
+    /// A provider that captures the CompletionRequest passed to `stream`.
     ///
     /// Used to assert that `process_turn` uses the correct model and system
     /// prompt derived from per-project config resolution.
     struct CapturingProvider {
-        captured: Arc<std::sync::Mutex<Option<LlmRequest>>>,
+        captured: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
         chunks: Vec<StreamChunk>,
     }
 
     impl CapturingProvider {
-        fn new(chunks: Vec<StreamChunk>) -> (Self, Arc<std::sync::Mutex<Option<LlmRequest>>>) {
+        fn new(chunks: Vec<StreamChunk>) -> (Self, Arc<std::sync::Mutex<Option<CompletionRequest>>>) {
             let captured = Arc::new(std::sync::Mutex::new(None));
             (
                 Self { captured: Arc::clone(&captured), chunks },
@@ -1492,11 +1517,21 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for CapturingProvider {
-        async fn send_message(&self, _: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        fn model_id(&self) -> &str { "capturing-model" }
+
+        async fn complete(
+            &self, _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!()
         }
 
-        fn stream_message(&self, request: LlmRequest) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        async fn complete_with_tools(
+            &self, _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!()
+        }
+
+        fn stream(&self, request: CompletionRequest) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             *self.captured.lock().unwrap() = Some(request);
             Box::pin(stream::iter(self.chunks.clone()))
         }
@@ -1641,7 +1676,8 @@ pub(crate) mod tests {
         // The request must have been issued with a non-empty model — whether from
         // the global config hierarchy or the state.config fallback.
         let req = captured_request.lock().unwrap().take().expect("request captured");
-        assert!(!req.model.is_empty(), "model must be non-empty regardless of config source");
+        let model = req.model.as_deref().unwrap_or("");
+        assert!(!model.is_empty(), "model must be non-empty regardless of config source");
     }
 
     #[tokio::test]
