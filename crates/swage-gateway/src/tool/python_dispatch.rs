@@ -1,9 +1,10 @@
-//! GatewayToolDispatcher — bridges Python tool calls to the gateway's ToolRegistry.
+//! GatewayToolDispatcher — bridges Python tool calls to the gateway's dispatch pipeline.
 //!
 //! Created once per `python_execute` invocation. All sub-tool events and storage
 //! records emitted by this dispatcher carry the `parent_call_id` of the enclosing
 //! `python_execute` call, enabling the frontend to render them nested.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
@@ -15,8 +16,9 @@ use uuid::Uuid;
 use swage_python::dispatch::{DispatchResult, ToolDispatcher};
 use swage_storage::model::NewToolCall;
 use swage_storage::store::Storage;
+// Alias to avoid name collision with the swage_python ToolDispatcher trait.
+use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
-use crate::tool::ToolRegistry;
 use crate::websocket::ServerEvent;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +26,8 @@ use crate::websocket::ServerEvent;
 // ---------------------------------------------------------------------------
 
 /// Implements `ToolDispatcher` by routing Python tool calls through the
-/// gateway's `ToolRegistry`.
+/// gateway's `SwageToolDispatcher` (the full permission → rate-limit →
+/// validate → execute → leak-detect pipeline).
 ///
 /// # Async-to-sync bridging
 ///
@@ -37,7 +40,9 @@ use crate::websocket::ServerEvent;
 /// This is safe because `python_execute` always runs the dispatcher inside
 /// `spawn_blocking`, so blocking the current thread is acceptable.
 pub struct GatewayToolDispatcher {
-    registry: Arc<ToolRegistry>,
+    /// The gateway's dispatch pipeline — handles lookup, permissions, rate
+    /// limiting, schema validation, execution, and leak detection.
+    dispatcher: Arc<SwageToolDispatcher>,
     /// Tokio handle used to drive async operations from the blocking thread.
     handle: tokio::runtime::Handle,
     /// Channel for forwarding sub-tool lifecycle events to the WebSocket sender.
@@ -48,6 +53,8 @@ pub struct GatewayToolDispatcher {
     turn_id: Uuid,
     /// call_id of the enclosing `python_execute` invocation.
     parent_call_id: String,
+    /// Working directory forwarded to tools that derive paths from context.
+    working_directory: PathBuf,
     /// Monotonically increasing position counter for ordering sub-tool records.
     ///
     /// `AtomicI32` provides interior mutability — `dispatch()` takes `&self`
@@ -57,20 +64,22 @@ pub struct GatewayToolDispatcher {
 
 impl GatewayToolDispatcher {
     pub fn new(
-        registry: Arc<ToolRegistry>,
+        dispatcher: Arc<SwageToolDispatcher>,
         handle: tokio::runtime::Handle,
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
         storage: Arc<dyn Storage>,
         turn_id: Uuid,
         parent_call_id: String,
+        working_directory: PathBuf,
     ) -> Self {
         Self {
-            registry,
+            dispatcher,
             handle,
             ws_tx,
             storage,
             turn_id,
             parent_call_id,
+            working_directory,
             position_counter: AtomicI32::new(0),
         }
     }
@@ -112,55 +121,56 @@ impl ToolDispatcher for GatewayToolDispatcher {
             self.handle.spawn(async move { storage.create_tool_call(new_call).await }),
         );
 
-        // Look up the tool. Unknown tools return a well-formed error so Python
-        // code can inspect the result rather than panicking.
-        let tool = match self.registry.get(tool_name) {
-            Some(t) => t,
-            None => {
-                let content = format!("Tool '{tool_name}' is not registered.");
-                self.send_error_end(&call_id, tool_name, &content, 0);
-                self.update_result(&call_id, &content, "error", 0, false, None);
-                return DispatchResult { content, is_error: true };
-            }
-        };
+        // Dispatch the tool call through the full pipeline.
+        // Build a context inside the spawn so it can be borrowed by dispatch().
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let working_directory = self.working_directory.clone();
+        let tool_name_owned = tool_name.to_string();
 
-        // Execute the tool on the runtime via handle.spawn() so that
-        // block_in_place is available inside tools that may use it internally.
         let start = Instant::now();
         let exec = self
             .handle
-            .block_on(self.handle.spawn(async move { tool.execute(arguments).await }))
-            .expect("tool execution task should not panic");
+            .block_on(self.handle.spawn(async move {
+                let ctx = swage_tool::context::MockToolContext {
+                    agent_id: "gateway-dispatcher".to_string(),
+                    session_id: String::new(),
+                    working_directory,
+                    allowed_paths: vec![],
+                    user_info: None,
+                };
+                dispatcher
+                    .dispatch(&tool_name_owned, arguments, &ctx, "gateway-dispatcher")
+                    .await
+            }))
+            .expect("tool dispatch task should not panic");
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let status = if exec.is_error { "error" } else { "success" };
+        let (output, is_error) = match exec {
+            Ok(tool_output) => (
+                tool_output.result["output"].as_str().unwrap_or("").to_string(),
+                false,
+            ),
+            Err(e) => (e.to_string(), true),
+        };
+
+        let status = if is_error { "error" } else { "success" };
 
         // Send ToolEnd to the WebSocket.
         let _ = self.ws_tx.send(ServerEvent::ToolEnd {
             call_id: call_id.clone(),
             tool: tool_name.to_string(),
-            result: serde_json::json!(&exec.content),
+            result: serde_json::json!(&output),
             status: status.to_string(),
             duration_ms,
-            truncated: exec.truncated,
-            total_bytes: exec.total_bytes.map(|b| b as u64),
+            truncated: false,
+            total_bytes: None,
             parent_call_id: Some(self.parent_call_id.clone()),
         });
 
         // Persist the completed result.
-        self.update_result(
-            &call_id,
-            &exec.content,
-            status,
-            duration_ms,
-            exec.truncated,
-            exec.total_bytes.map(|b| b as i64),
-        );
+        self.update_result(&call_id, &output, status, duration_ms, false, None);
 
-        DispatchResult {
-            content: exec.content,
-            is_error: exec.is_error,
-        }
+        DispatchResult { content: output, is_error }
     }
 }
 
@@ -169,23 +179,6 @@ impl ToolDispatcher for GatewayToolDispatcher {
 // ---------------------------------------------------------------------------
 
 impl GatewayToolDispatcher {
-    /// Send a `ToolEnd` event with error status and no duration.
-    ///
-    /// Called when a tool is not found — the client still expects a matching
-    /// end event for every start event to keep its state machine consistent.
-    fn send_error_end(&self, call_id: &str, tool_name: &str, content: &str, duration_ms: u64) {
-        let _ = self.ws_tx.send(ServerEvent::ToolEnd {
-            call_id: call_id.to_string(),
-            tool: tool_name.to_string(),
-            result: serde_json::json!(content),
-            status: "error".to_string(),
-            duration_ms,
-            truncated: false,
-            total_bytes: None,
-            parent_call_id: Some(self.parent_call_id.clone()),
-        });
-    }
-
     /// Persist the completed result for a sub-tool call record.
     fn update_result(
         &self,
@@ -222,18 +215,22 @@ impl GatewayToolDispatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use serde_json::json;
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
+    use swage_core::ToolError;
     use swage_storage::model::{NewProject, NewSession, NewTurn, TurnState};
     use swage_storage::store::{ProjectStore, SessionStore, Storage, ToolCallStore, TurnStore};
     use swage_storage::SqliteStorage;
+    use swage_tool::context::ToolContext;
+    use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
     use super::*;
-    use crate::tool::{Tool, ToolExecutionResult, ToolRegistry};
+    use crate::tool::Tool;
     use crate::websocket::ServerEvent;
 
     // ---- Mock tools ---------------------------------------------------------
@@ -252,14 +249,13 @@ mod tests {
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]})
         }
-        async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
+        async fn execute(
+            &self,
+            arguments: serde_json::Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<serde_json::Value, ToolError> {
             let text = arguments["text"].as_str().unwrap_or("").to_string();
-            ToolExecutionResult {
-                content: text,
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            }
+            Ok(json!({"output": text}))
         }
     }
 
@@ -277,38 +273,45 @@ mod tests {
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object"})
         }
-        async fn execute(&self, _arguments: serde_json::Value) -> ToolExecutionResult {
-            ToolExecutionResult {
-                content: "tool failed".to_string(),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            }
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<serde_json::Value, ToolError> {
+            Err(ToolError::ExecutionFailed {
+                name: "failing".to_string(),
+                message: "tool failed".to_string(),
+            })
         }
     }
 
     // ---- Helpers ------------------------------------------------------------
 
-    fn registry_with_echo() -> ToolRegistry {
-        let mut reg = ToolRegistry::new();
-        reg.register(Arc::new(EchoTool));
-        reg
+    fn dispatcher_with_echo() -> Arc<SwageToolDispatcher> {
+        Arc::new(SwageToolDispatcher::allow_all(vec![
+            Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>,
+        ]))
+    }
+
+    fn empty_dispatcher() -> Arc<SwageToolDispatcher> {
+        Arc::new(SwageToolDispatcher::allow_all(vec![]))
     }
 
     fn make_dispatcher(
-        registry: ToolRegistry,
+        sub_dispatcher: Arc<SwageToolDispatcher>,
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
         storage: Arc<dyn Storage>,
         turn_id: Uuid,
         parent_call_id: &str,
     ) -> GatewayToolDispatcher {
         GatewayToolDispatcher::new(
-            Arc::new(registry),
+            sub_dispatcher,
             tokio::runtime::Handle::current(),
             ws_tx,
             storage,
             turn_id,
             parent_call_id.to_string(),
+            PathBuf::from("/tmp"),
         )
     }
 
@@ -347,7 +350,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, _rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
-            registry_with_echo(),
+            dispatcher_with_echo(),
             tx,
             storage,
             Uuid::new_v4(),
@@ -370,7 +373,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, _rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
-            ToolRegistry::new(),
+            empty_dispatcher(),
             tx,
             storage,
             Uuid::new_v4(),
@@ -393,7 +396,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
-            registry_with_echo(),
+            dispatcher_with_echo(),
             tx,
             storage,
             Uuid::new_v4(),
@@ -420,7 +423,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
-            registry_with_echo(),
+            dispatcher_with_echo(),
             tx,
             storage,
             Uuid::new_v4(),
@@ -450,7 +453,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
 
         let d = Arc::new(make_dispatcher(
-            registry_with_echo(),
+            dispatcher_with_echo(),
             tx,
             storage,
             turn_id,
@@ -478,7 +481,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
 
         let d = Arc::new(make_dispatcher(
-            registry_with_echo(),
+            dispatcher_with_echo(),
             tx,
             storage,
             turn_id,
@@ -499,14 +502,15 @@ mod tests {
         assert_eq!(records[1].position, 1);
     }
 
-    /// Tool that returns is_error=true must produce an error result.
+    /// Tool that returns Err must produce an error result.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_failing_tool_returns_error_result() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(FailingTool));
+        let sub_dispatcher = Arc::new(SwageToolDispatcher::allow_all(vec![
+            Arc::new(FailingTool) as Arc<dyn swage_tool::tool::Tool>,
+        ]));
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let d = Arc::new(make_dispatcher(registry, tx, storage, Uuid::new_v4(), "py_fail"));
+        let d = Arc::new(make_dispatcher(sub_dispatcher, tx, storage, Uuid::new_v4(), "py_fail"));
 
         let result =
             tokio::task::spawn_blocking(move || d.dispatch("failing", json!({})))
@@ -523,6 +527,59 @@ mod tests {
         }
     }
 
+    /// A tool with an explicit deny permission is blocked at the pipeline gate.
+    ///
+    /// This verifies the security property: even if Python code calls swage.shell(),
+    /// the GatewayToolDispatcher routes through the full swage-tool pipeline, so a
+    /// deny-listed tool returns a permission error rather than executing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_denied_tool_returns_permission_error() {
+        use std::collections::HashMap;
+        use swage_safety::LeakDetector;
+        use swage_tool::permission::PermissionConfig;
+        use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
+
+        // Build a sub-dispatcher that registers "echo" but explicitly denies it.
+        // This simulates an agent config where shell (or any tool) is blocked.
+        let mut registry = swage_tool::registry::ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>).unwrap();
+        let restricted_dispatcher = Arc::new(SwageToolDispatcher::new(
+            Arc::new(registry),
+            PermissionConfig {
+                allow: vec![],
+                deny: vec!["echo".to_string()],
+                bundles: HashMap::new(),
+            },
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        ));
+
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let d = Arc::new(make_dispatcher(
+            restricted_dispatcher,
+            tx,
+            storage,
+            Uuid::new_v4(),
+            "py_deny",
+        ));
+
+        let result = tokio::task::spawn_blocking(move || {
+            d.dispatch("echo", json!({"text": "should be blocked"}))
+        })
+        .await
+        .unwrap();
+
+        assert!(result.is_error, "denied tool should return an error result");
+        assert!(
+            result.content.contains("permission denied"),
+            "error should describe permission denial, got: {}",
+            result.content
+        );
+    }
+
     /// Unknown tool must still emit matching ToolStart + ToolEnd events so the
     /// client state machine stays consistent.
     #[tokio::test(flavor = "multi_thread")]
@@ -530,7 +587,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
-            ToolRegistry::new(),
+            empty_dispatcher(),
             tx,
             storage,
             Uuid::new_v4(),

@@ -4,9 +4,13 @@
 //! alphabetically. Validates the target path stays within the workspace root.
 
 use std::path::PathBuf;
+
 use async_trait::async_trait;
-use serde_json::json;
-use crate::tool::{Tool, ToolExecutionResult};
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
+
+use crate::tool::Tool;
 use crate::tool::workspace::validate_path;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +31,7 @@ impl Tool for FileListTool {
         "List the contents of a directory in the workspace."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -40,43 +44,33 @@ impl Tool for FileListTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
-        let path_str = match arguments["path"].as_str() {
-            Some(p) => p.to_string(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: path".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let path_str = params["path"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: path".to_owned(),
+            })?
+            .to_string();
 
-        let resolved = match validate_path(&self.workspace_root, &path_str) {
-            Ok(p) => p,
-            Err(msg) => {
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
+        let resolved =
+            validate_path(&self.workspace_root, &path_str).map_err(|msg| {
+                ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: msg,
                 }
-            }
-        };
+            })?;
 
         // Verify the resolved path is a directory.
         match tokio::fs::metadata(&resolved).await {
             Ok(meta) if !meta.is_dir() => {
-                return ToolExecutionResult {
-                    content: format!("Not a directory: {path_str}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Not a directory: {path_str}"),
+                });
             }
             Err(e) => {
-                let msg = match e.kind() {
+                let message = match e.kind() {
                     std::io::ErrorKind::NotFound => {
                         format!("Directory not found: {path_str}")
                     }
@@ -85,28 +79,21 @@ impl Tool for FileListTool {
                     }
                     _ => format!("Failed to access {path_str}: {e}"),
                 };
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message,
+                });
             }
             Ok(_) => {} // is a directory — continue
         }
 
         // Read directory entries.
-        let mut read_dir = match tokio::fs::read_dir(&resolved).await {
-            Ok(rd) => rd,
-            Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Permission denied: {path_str}: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+        let mut read_dir = tokio::fs::read_dir(&resolved)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Permission denied: {path_str}: {e}"),
+            })?;
 
         let mut dirs: Vec<String> = Vec::new();
         let mut files: Vec<String> = Vec::new();
@@ -148,12 +135,7 @@ impl Tool for FileListTool {
             lines.join("\n")
         };
 
-        ToolExecutionResult {
-            content,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": content}))
     }
 }
 
@@ -164,6 +146,7 @@ impl Tool for FileListTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_tool::context::MockToolContext;
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileListTool {
@@ -172,16 +155,23 @@ mod tests {
         }
     }
 
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
+    }
+
     #[tokio::test]
     async fn lists_files_and_dirs() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("file.txt"), b"hello").unwrap();
 
-        let result = tool(&dir).execute(json!({ "path": "." })).await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("subdir"), "got: {}", result.content);
-        assert!(result.content.contains("file.txt"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "path": "." }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.contains("subdir"), "got: {}", output);
+        assert!(output.contains("file.txt"), "got: {}", output);
     }
 
     #[tokio::test]
@@ -190,10 +180,13 @@ mod tests {
         std::fs::write(dir.path().join("aaa.txt"), b"").unwrap();
         std::fs::create_dir(dir.path().join("zzz")).unwrap();
 
-        let result = tool(&dir).execute(json!({ "path": "." })).await;
-        assert!(!result.is_error, "got: {}", result.content);
-        let dir_pos = result.content.find("zzz").unwrap();
-        let file_pos = result.content.find("aaa.txt").unwrap();
+        let val = tool(&dir)
+            .execute(json!({ "path": "." }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        let dir_pos = output.find("zzz").unwrap();
+        let file_pos = output.find("aaa.txt").unwrap();
         assert!(dir_pos < file_pos, "dirs should precede files");
     }
 
@@ -202,9 +195,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("data.txt"), b"12345").unwrap();
 
-        let result = tool(&dir).execute(json!({ "path": "." })).await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("5 bytes"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "path": "." }), &ctx())
+            .await
+            .unwrap();
+        assert!(val["output"].as_str().unwrap().contains("5 bytes"));
     }
 
     #[tokio::test]
@@ -213,32 +208,34 @@ mod tests {
         let sub = dir.path().join("empty");
         std::fs::create_dir(&sub).unwrap();
 
-        let result = tool(&dir).execute(json!({ "path": "empty" })).await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("empty"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "path": "empty" }), &ctx())
+            .await
+            .unwrap();
+        assert!(val["output"].as_str().unwrap().contains("empty"));
     }
 
     #[tokio::test]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "../../etc" }))
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("outside"), "got: {}", result.content);
+        let err = tool(&dir)
+            .execute(json!({ "path": "../../etc" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside"), "got: {}", err);
     }
 
     #[tokio::test]
     async fn error_on_missing_directory() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "nonexistent" }))
-            .await;
-        assert!(result.is_error);
+        let err = tool(&dir)
+            .execute(json!({ "path": "nonexistent" }), &ctx())
+            .await
+            .unwrap_err();
         assert!(
-            result.content.contains("not found") || result.content.contains("No such"),
+            err.to_string().contains("not found") || err.to_string().contains("No such"),
             "got: {}",
-            result.content
+            err
         );
     }
 
@@ -246,14 +243,14 @@ mod tests {
     async fn error_on_file_not_directory() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), b"").unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "file.txt" }))
-            .await;
-        assert!(result.is_error);
+        let err = tool(&dir)
+            .execute(json!({ "path": "file.txt" }), &ctx())
+            .await
+            .unwrap_err();
         assert!(
-            result.content.contains("Not a directory"),
+            err.to_string().contains("Not a directory"),
             "got: {}",
-            result.content
+            err
         );
     }
 }

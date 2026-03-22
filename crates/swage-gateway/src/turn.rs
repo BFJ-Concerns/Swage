@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -12,8 +11,9 @@ use swage_core::{
 };
 use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
 
+use swage_tool::context::MockToolContext;
+
 use crate::{
-    context::{ProjectContext, PROJECT_CONTEXT},
     state::AppState,
     websocket::ServerEvent,
 };
@@ -47,7 +47,7 @@ pub async fn process_turn(
     }
 
     // Resolve the project for this session so we can load per-project config
-    // and build the ProjectContext that tools read via the task-local.
+    // and build the ToolContext passed to each tool invocation.
     let session = state
         .storage
         .get_session(session_id)
@@ -70,23 +70,17 @@ pub async fn process_turn(
         Err(_) => state.config.clone(),
     };
 
-    // Build the memory path for this project: ~/.swage/projects/{slug}/memory/
-    // Exposed via PROJECT_CONTEXT so MemoryTool can determine where to write.
-    let memory_path = std::env::var("HOME")
-        .ok()
-        .map(|h| {
-            PathBuf::from(h)
-                .join(".swage")
-                .join("projects")
-                .join(&project_slug)
-                .join("memory")
-        })
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    let project_ctx = ProjectContext {
-        project_id,
-        project_slug,
-        memory_path,
+    // Build the ToolContext passed to each tool invocation.
+    // The working_directory comes from the resolved workspace config — tools
+    // that operate on files (file_read, file_write, memory, shell) scope
+    // themselves to this root.
+    let working_dir = crate::tool::workspace::resolve_workspace_root(&config);
+    let tool_ctx = MockToolContext {
+        agent_id: "gateway".to_string(),
+        session_id: session_id.to_string(),
+        working_directory: working_dir,
+        allowed_paths: vec![],
+        user_info: None,
     };
 
     // Step 2: Create the turn record and register a cancellation token.
@@ -247,50 +241,43 @@ pub async fn process_turn(
             }).await;
             tool_position += 1;
 
-            // Look up the tool in the registry and execute it.
+            // Dispatch the tool call through the full pipeline:
+            // permission → rate limit → schema validation → execute → leak detection.
             //
-            // All executions are wrapped in PROJECT_CONTEXT.scope() so tools
-            // like MemoryTool can read the current project without parameters.
-            // For python_execute, PYTHON_CONTEXT is nested inside so the
-            // GatewayToolDispatcher gets the correct turn/WebSocket context.
+            // For python_execute, PYTHON_CONTEXT is set in scope so that
+            // GatewayToolDispatcher gets the correct turn/WebSocket context for
+            // sub-tool event emission. All other tools dispatch without the scope.
             let start = Instant::now();
-            let (result_content, is_error, truncated, total_bytes) =
-                match state.tool_registry.get(&call.name) {
-                    Some(tool) => {
-                        let exec_result = if call.name == "python_execute" {
-                            let ctx = PythonExecuteContext {
-                                ws_tx: ws_tx.clone(),
-                                turn_id: turn.id,
-                                call_id: call.call_id.clone(),
-                            };
-                            PROJECT_CONTEXT
-                                .scope(
-                                    project_ctx.clone(),
-                                    PYTHON_CONTEXT.scope(ctx, tool.execute(call.arguments.clone())),
-                                )
-                                .await
-                        } else {
-                            PROJECT_CONTEXT
-                                .scope(project_ctx.clone(), tool.execute(call.arguments.clone()))
-                                .await
-                        };
-                        (
-                            exec_result.content,
-                            exec_result.is_error,
-                            exec_result.truncated,
-                            exec_result.total_bytes,
-                        )
-                    }
-                    None => {
-                        // Unknown tool — return an error that the model can read.
-                        (
-                            format!("Tool '{}' is not registered.", call.name),
-                            true,
-                            false,
-                            None,
-                        )
-                    }
+            let dispatch_result = if call.name == "python_execute" {
+                let py_ctx = PythonExecuteContext {
+                    ws_tx: ws_tx.clone(),
+                    turn_id: turn.id,
+                    call_id: call.call_id.clone(),
                 };
+                PYTHON_CONTEXT
+                    .scope(
+                        py_ctx,
+                        state.tool_dispatcher.dispatch(
+                            &call.name,
+                            call.arguments.clone(),
+                            &tool_ctx,
+                            "gateway",
+                        ),
+                    )
+                    .await
+            } else {
+                state
+                    .tool_dispatcher
+                    .dispatch(&call.name, call.arguments.clone(), &tool_ctx, "gateway")
+                    .await
+            };
+            let (result_content, is_error) = match dispatch_result {
+                Ok(output) => (
+                    output.result["output"].as_str().unwrap_or("").to_string(),
+                    false,
+                ),
+                Err(e) => (e.to_string(), true),
+            };
             let duration = start.elapsed();
             let duration_ms = duration.as_millis() as u64;
 
@@ -303,8 +290,8 @@ pub async fn process_turn(
                 result: serde_json::json!(result_content),
                 status: status.to_string(),
                 duration_ms,
-                truncated,
-                total_bytes: total_bytes.map(|b| b as u64),
+                truncated: false,
+                total_bytes: None,
                 parent_call_id: None,
             });
 
@@ -315,8 +302,8 @@ pub async fn process_turn(
                 &result_content,
                 status,
                 duration_ms as i64,
-                truncated,
-                total_bytes.map(|b| b as i64),
+                false,
+                None,
             ).await;
 
             tool_results.push(ToolResult {
@@ -607,14 +594,13 @@ pub(crate) mod tests {
                 "required": ["text"]
             })
         }
-        async fn execute(&self, arguments: serde_json::Value) -> crate::tool::ToolExecutionResult {
+        async fn execute(
+            &self,
+            arguments: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
             let text = arguments["text"].as_str().unwrap_or("").to_string();
-            crate::tool::ToolExecutionResult {
-                content: format!("Echo: {text}"),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            }
+            Ok(serde_json::json!({"output": format!("Echo: {text}")}))
         }
     }
 
@@ -1040,7 +1026,7 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(crate::tool::ToolRegistry::new()),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
         };
         (state, session_id)
     }
@@ -1132,7 +1118,7 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(crate::tool::ToolRegistry::new()),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1253,14 +1239,10 @@ pub(crate) mod tests {
         async fn execute(
             &self,
             arguments: serde_json::Value,
-        ) -> crate::tool::ToolExecutionResult {
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
             let text = arguments["text"].as_str().unwrap_or("").to_string();
-            crate::tool::ToolExecutionResult {
-                content: text,
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            }
+            Ok(serde_json::json!({"output": text}))
         }
     }
 
@@ -1289,16 +1271,15 @@ pub(crate) mod tests {
 
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
 
-        let mut registry = crate::tool::ToolRegistry::new();
-        registry.register(Arc::new(EchoMockTool));
-
         let state = AppState {
             storage: storage as Arc<dyn swage_storage::store::Storage>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(registry),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+            ])),
         };
         (state, session_id)
     }
@@ -1537,40 +1518,34 @@ pub(crate) mod tests {
         }
     }
 
-    /// A tool that captures the `PROJECT_CONTEXT` task-local during execution.
+    /// A tool that captures the working_directory from the ToolContext during execution.
     ///
-    /// The captured (project_id, slug) pair is stored in `captured` for
-    /// assertion after the turn completes.
+    /// The captured path is stored in `captured` for assertion after the turn completes.
     struct ContextCaptureTool {
-        captured: Arc<std::sync::Mutex<Option<(Uuid, String)>>>,
+        captured: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for ContextCaptureTool {
         fn name(&self) -> &str { "capture_context" }
-        fn description(&self) -> &str { "Captures the project context task-local" }
+        fn description(&self) -> &str { "Captures the working_directory from the tool context" }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
 
-        async fn execute(&self, _: serde_json::Value) -> crate::tool::ToolExecutionResult {
-            // Read the project context from the task-local, if set.
-            let context = crate::context::PROJECT_CONTEXT
-                .try_with(|ctx| (ctx.project_id, ctx.project_slug.clone()))
-                .ok();
-            *self.captured.lock().unwrap() = context;
-            crate::tool::ToolExecutionResult {
-                content: "captured".into(),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            *self.captured.lock().unwrap() = Some(ctx.working_directory().to_path_buf());
+            Ok(serde_json::json!({"output": "captured"}))
         }
     }
 
     #[tokio::test]
-    async fn process_turn_sets_project_context_for_tool_execution() {
-        // Create a tool that captures the PROJECT_CONTEXT task-local.
+    async fn process_turn_passes_tool_context_to_tools() {
+        // Create a tool that captures the working_directory from the ToolContext.
         let captured = Arc::new(std::sync::Mutex::new(None));
         let capture_tool = Arc::new(ContextCaptureTool { captured: Arc::clone(&captured) });
 
@@ -1600,8 +1575,6 @@ pub(crate) mod tests {
         let round_2 = vec![StreamChunk::Delta { content: "done".into() }, StreamChunk::Done { finish_reason: None }];
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
-        let mut registry = crate::tool::ToolRegistry::new();
-        registry.register(capture_tool);
 
         let state = AppState {
             storage: storage as Arc<dyn swage_storage::store::Storage>,
@@ -1609,21 +1582,22 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(registry),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+                capture_tool as Arc<dyn crate::tool::Tool>,
+            ])),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(&state, session_id, "capture".into(), tx).await.expect("turn ok");
 
-        // The tool should have read the project context.
-        let (captured_id, captured_slug) = captured
+        // The tool should have received a ToolContext with a non-empty working_directory.
+        let working_dir = captured
             .lock()
             .unwrap()
             .take()
-            .expect("PROJECT_CONTEXT should have been set during tool execution");
+            .expect("ToolContext should have been passed during tool execution");
 
-        assert_eq!(captured_id, project.id, "project_id should match the session's project");
-        assert_eq!(captured_slug, "default", "slug should be 'default' for the default project");
+        assert!(working_dir.is_absolute(), "working_directory should be absolute: {working_dir:?}");
     }
 
     #[tokio::test]
@@ -1667,7 +1641,7 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(crate::tool::ToolRegistry::new()),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1702,40 +1676,34 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PROJECT_CONTEXT task-local tests
+    // ToolContext propagation tests
     // -----------------------------------------------------------------------
 
-    /// A tool that reads `PROJECT_CONTEXT` and returns the project slug.
-    /// Used to verify that `process_turn` correctly sets the context before
-    /// delegating to tool execution.
-    struct ProjectContextReadTool;
+    /// A tool that reads the working_directory from the ToolContext and returns it.
+    /// Used to verify that `process_turn` correctly builds and passes a ToolContext
+    /// before delegating to tool execution.
+    struct WorkingDirReadTool;
 
     #[async_trait::async_trait]
-    impl crate::tool::Tool for ProjectContextReadTool {
-        fn name(&self) -> &str { "project_context_read" }
-        fn description(&self) -> &str { "Returns the current project slug from PROJECT_CONTEXT" }
+    impl crate::tool::Tool for WorkingDirReadTool {
+        fn name(&self) -> &str { "working_dir_read" }
+        fn description(&self) -> &str { "Returns the working_directory from the ToolContext" }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({ "type": "object", "properties": {} })
         }
-        async fn execute(&self, _arguments: serde_json::Value) -> crate::tool::ToolExecutionResult {
-            let slug = PROJECT_CONTEXT
-                .try_with(|ctx| ctx.project_slug.clone())
-                // Returns a sentinel if the context was not set — the test asserts this
-                // value is NOT present, making the test fail before the implementation
-                // is in place.
-                .unwrap_or_else(|_| "no-context".to_string());
-            crate::tool::ToolExecutionResult {
-                content: slug,
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            }
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            let path = ctx.working_directory().to_string_lossy().into_owned();
+            Ok(serde_json::json!({"output": path}))
         }
     }
 
     #[tokio::test]
-    async fn project_context_is_set_during_tool_execution() {
-        // Create a project with a distinctive slug.
+    async fn tool_context_working_directory_is_passed_during_tool_execution() {
+        // Verify that process_turn builds a ToolContext and passes it to tools.
         let storage = Arc::new(MockStorage::new());
         let project = storage
             .create(NewProject {
@@ -1757,12 +1725,12 @@ pub(crate) mod tests {
             },
         );
 
-        // Round 1: model calls the context-reading tool.
+        // Round 1: model calls the working_dir_read tool.
         // Round 2: model produces its final response.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "ctx-check".into(),
-                name: "project_context_read".into(),
+                name: "working_dir_read".into(),
                 arguments: serde_json::json!({}),
             },
             StreamChunk::Done { finish_reason: None },
@@ -1774,16 +1742,15 @@ pub(crate) mod tests {
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-        let mut registry = crate::tool::ToolRegistry::new();
-        registry.register(Arc::new(ProjectContextReadTool));
-
         let state = AppState {
             storage: storage as Arc<dyn swage_storage::store::Storage>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(registry),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>,
+            ])),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1791,14 +1758,14 @@ pub(crate) mod tests {
             .await
             .expect("turn should complete");
 
-        // The tool result stored in the DB should contain the project slug.
+        // The tool result stored in the DB should be an absolute path (the working_directory).
         let turns = state.storage.list_turns_by_session(session_id).await.unwrap();
         let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(
-            tool_calls[0].result.as_deref(),
-            Some("my-project"),
-            "PROJECT_CONTEXT must be set with the project slug during tool execution"
+        let result = tool_calls[0].result.as_deref().unwrap_or("");
+        assert!(
+            std::path::Path::new(result).is_absolute(),
+            "working_directory should be an absolute path, got: {result}"
         );
     }
 }

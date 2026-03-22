@@ -35,7 +35,7 @@ fn make_router() -> Router {
         storage as Arc<dyn swage_storage::store::Storage>,
         provider,
         swage_config::ResolvedConfig::default(),
-        swage_gateway::tool::ToolRegistry::new(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
     );
     build_router(state)
 }

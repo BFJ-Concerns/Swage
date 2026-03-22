@@ -26,6 +26,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, shutdown::recover_orphaned_turns, state::AppState};
 use swage_provider::LlmProvider;
+use swage_tool;
 use swage_storage::{
     model::{NewTurn, TurnState},
     SqliteStorage,
@@ -143,14 +144,10 @@ impl swage_gateway::tool::Tool for EchoTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-    ) -> swage_gateway::tool::ToolExecutionResult {
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, swage_core::ToolError> {
         let text = arguments["text"].as_str().unwrap_or("").to_string();
-        swage_gateway::tool::ToolExecutionResult {
-            content: text,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(serde_json::json!({"output": text}))
     }
 }
 
@@ -165,20 +162,24 @@ impl swage_gateway::tool::Tool for EchoTool {
 async fn start_test_server(
     provider: impl LlmProvider + 'static,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
-    start_test_server_with_registry(provider, swage_gateway::tool::ToolRegistry::new()).await
+    start_test_server_with_dispatcher(
+        provider,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await
 }
 
-/// Spin up a test server with a custom tool registry.
-async fn start_test_server_with_registry(
+/// Spin up a test server with a pre-built tool dispatcher.
+async fn start_test_server_with_dispatcher(
     provider: impl LlmProvider + 'static,
-    registry: swage_gateway::tool::ToolRegistry,
+    dispatcher: swage_gateway::tool::ToolDispatcher,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
-        registry,
+        dispatcher,
     );
     let router = build_router(state);
 
@@ -706,10 +707,11 @@ async fn tool_execution_round_trip_with_persistence() {
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
 
-    // Register the echo tool so the execution loop can find it.
-    let mut registry = swage_gateway::tool::ToolRegistry::new();
-    registry.register(Arc::new(EchoTool));
-    let (router, addr, _) = start_test_server_with_registry(provider, registry).await;
+    // Build a dispatcher with the echo tool so the execution loop can find it.
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>,
+    ]);
+    let (router, addr, _) = start_test_server_with_dispatcher(provider, dispatcher).await;
 
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().unwrap().to_string();

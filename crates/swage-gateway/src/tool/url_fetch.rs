@@ -5,9 +5,13 @@
 //! to the configured byte limit.
 
 use std::time::Duration;
+
 use async_trait::async_trait;
-use serde_json::json;
-use crate::tool::{Tool, ToolExecutionResult};
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
+
+use crate::tool::Tool;
 use crate::tool::workspace::truncate_output;
 
 // ---------------------------------------------------------------------------
@@ -38,7 +42,7 @@ impl Tool for UrlFetchTool {
         "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -51,20 +55,16 @@ impl Tool for UrlFetchTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
-        let url = match arguments["url"].as_str() {
-            Some(u) => u.to_string(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: url".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let url = params["url"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: url".to_owned(),
+            })?
+            .to_string();
 
-        let client = match reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(self.timeout)
             .user_agent(concat!(
                 "Swage/",
@@ -72,52 +72,35 @@ impl Tool for UrlFetchTool {
                 " (url_fetch tool)"
             ))
             .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Failed to build HTTP client: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to build HTTP client: {e}"),
+            })?;
 
-        let response = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = if e.is_timeout() {
-                    format!(
-                        "Request timed out after {}s: {url}",
-                        self.timeout.as_secs()
-                    )
-                } else if e.is_connect() || e.is_request() {
-                    format!("Failed to reach {url}: {e}")
-                } else {
-                    format!("Request failed for {url}: {e}")
-                };
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+        let response = client.get(&url).send().await.map_err(|e| {
+            let message = if e.is_timeout() {
+                format!(
+                    "Request timed out after {}s: {url}",
+                    self.timeout.as_secs()
+                )
+            } else if e.is_connect() || e.is_request() {
+                format!("Failed to reach {url}: {e}")
+            } else {
+                format!("Request failed for {url}: {e}")
+            };
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message,
             }
-        };
+        })?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_default();
-            return ToolExecutionResult {
-                content: format!("HTTP {status}: {url}\n{body}"),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            };
+            let body = response.text().await.unwrap_or_default();
+            return Err(ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("HTTP {status}: {url}\n{body}"),
+            });
         }
 
         // Determine content type before consuming the body.
@@ -128,17 +111,13 @@ impl Tool for UrlFetchTool {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let body_bytes = match response.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Failed to read response body: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to read response body: {e}"),
+            })?;
 
         // Dispatch on content type.
         let text = if content_type.contains("text/html") {
@@ -149,22 +128,15 @@ impl Tool for UrlFetchTool {
             String::from_utf8_lossy(&body_bytes).into_owned()
         } else {
             // Binary content types — reject with a clear message.
-            return ToolExecutionResult {
-                content: format!("Unsupported content type: {content_type}"),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Err(ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Unsupported content type: {content_type}"),
+            });
         };
 
-        let (content, truncated, total_bytes) = truncate_output(&text, self.max_output_bytes);
+        let (content, _truncated, _total_bytes) = truncate_output(&text, self.max_output_bytes);
 
-        ToolExecutionResult {
-            content,
-            is_error: false,
-            truncated,
-            total_bytes: if truncated { Some(total_bytes) } else { None },
-        }
+        Ok(json!({"output": content}))
     }
 }
 
@@ -186,6 +158,7 @@ fn html_to_text(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_tool::context::MockToolContext;
 
     fn tool() -> UrlFetchTool {
         UrlFetchTool {
@@ -194,18 +167,18 @@ mod tests {
         }
     }
 
-    fn tool_with_limit(limit: usize) -> UrlFetchTool {
-        UrlFetchTool {
-            timeout: Duration::from_secs(10),
-            max_output_bytes: limit,
-        }
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
     }
 
     #[tokio::test]
     async fn returns_error_for_missing_url() {
-        let result = tool().execute(json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("url"), "got: {}", result.content);
+        let err = tool()
+            .execute(json!({}), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("url"), "got: {err}");
     }
 
     #[tokio::test]
@@ -226,10 +199,13 @@ mod tests {
             max_output_bytes: 1_000_000,
         };
         // RFC 5737 TEST-NET — guaranteed not routable, connection will time out.
-        let result = t.execute(json!({ "url": "http://192.0.2.1/test" })).await;
-        assert!(result.is_error);
+        let err = t
+            .execute(json!({ "url": "http://192.0.2.1/test" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
         // Should mention a timeout or connection failure, not panic.
-        assert!(!result.content.is_empty());
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]

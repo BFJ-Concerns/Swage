@@ -8,7 +8,7 @@ use swage_gateway::{
     server, shutdown,
     state::AppState,
     tool::{
-        ToolRegistry,
+        ToolDispatcher,
         file_list::FileListTool,
         file_read::FileReadTool,
         file_search::FileSearchTool,
@@ -70,11 +70,11 @@ async fn main() {
     // Step 6: Create the LLM provider from configuration.
     let provider = create_provider(&config);
 
-    // Step 7: Register built-in tools.
-    let tool_registry = build_tool_registry(&config, Arc::clone(&storage));
+    // Step 7: Build the tool dispatch pipeline with all built-in tools.
+    let tool_dispatcher = build_tool_dispatcher(&config, Arc::clone(&storage));
 
     // Step 8: Assemble application state and build the router.
-    let state = AppState::new(storage, provider, config.clone(), tool_registry);
+    let state = AppState::new(storage, provider, config.clone(), tool_dispatcher);
     let router = server::build_router(state.clone());
 
     // Step 9: Bind the TCP listener.
@@ -124,16 +124,19 @@ fn open_storage(path: &std::path::Path) -> Arc<dyn swage_storage::store::Storage
     }))
 }
 
-/// Build the tool registry with all built-in tools from configuration.
+/// Build the tool dispatch pipeline with all built-in tools from configuration.
 ///
-/// The base tools (shell, file ops, web) are collected first, then wrapped
-/// in a shared `Arc<ToolRegistry>` that `PythonExecuteTool` uses for
-/// sub-tool dispatch. This means python_execute can call any base tool
-/// but cannot call itself (no recursion).
-fn build_tool_registry(
+/// Base tools (shell, file ops, web) are assembled first and wrapped in a
+/// shared sub-dispatcher that `PythonExecuteTool` uses for sub-tool dispatch.
+/// This keeps python_execute out of the sub-dispatcher to prevent recursion.
+///
+/// The final dispatcher uses allow-all permissions and no rate limits — the
+/// default posture for the embedded gateway. Restrictive configs are a future
+/// configuration concern and can be wired through `ToolDispatcher::new`.
+fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
-) -> ToolRegistry {
+) -> ToolDispatcher {
     use std::time::Duration;
     use swage_gateway::tool::python_execute::PythonExecuteTool;
 
@@ -141,8 +144,8 @@ fn build_tool_registry(
     let max_output = config.tools.max_output_bytes;
     let shell_timeout = Duration::from_secs(config.tools.shell_timeout_secs);
 
-    // Collect base tools as a Vec so we can share them with both the
-    // sub-tool registry (for python_execute) and the final registry.
+    // Collect base tools. These are shared between the sub-dispatcher (for
+    // python_execute's sub-tool calls) and the final top-level dispatcher.
     let base_tools: Vec<Arc<dyn swage_gateway::tool::Tool>> = vec![
         Arc::new(ShellTool {
             workspace_root: workspace_root.clone(),
@@ -167,35 +170,27 @@ fn build_tool_registry(
             provider_config: config.tools.search.clone(),
         }),
         Arc::new(UrlFetchTool::default()),
-        // MemoryTool reads per-project context from the PROJECT_CONTEXT task-local
-        // set by the turn executor — no constructor args needed.
+        // MemoryTool derives the memory path from ctx.working_directory() at runtime —
+        // no constructor args needed.
         Arc::new(MemoryTool),
     ];
 
-    // Build a shared registry containing only the base tools. This is
-    // what PythonExecuteTool's GatewayToolDispatcher uses for sub-tool
-    // lookup — intentionally excludes python_execute to prevent recursion.
-    let mut sub_tool_registry = ToolRegistry::new();
-    for tool in &base_tools {
-        sub_tool_registry.register(Arc::clone(tool));
-    }
-    let sub_tool_registry = Arc::new(sub_tool_registry);
+    // Sub-dispatcher: base tools only. python_execute is excluded so that
+    // GatewayToolDispatcher cannot recursively invoke python_execute.
+    let sub_dispatcher = Arc::new(ToolDispatcher::allow_all(base_tools.iter().cloned()));
 
-    // Build the final registry starting with the base tools.
-    let mut registry = ToolRegistry::new();
-    for tool in base_tools {
-        registry.register(tool);
-    }
+    // Collect all tools for the top-level dispatcher, starting with the base set.
+    let mut all_tools = base_tools;
 
-    // Attempt to register python_execute if a Python runtime is available.
+    // Attempt to add python_execute if a Python runtime is available.
     // Graceful degradation: if Python isn't found, the tool is simply absent
     // from the model's tool list — everything else works normally.
     match swage_python::runtime::PythonRuntime::new(None) {
         Ok(runtime) => {
-            registry.register(Arc::new(PythonExecuteTool::new(
+            all_tools.push(Arc::new(PythonExecuteTool::new(
                 Arc::new(runtime),
                 Duration::from_secs(config.tools.shell_timeout_secs),
-                sub_tool_registry,
+                sub_dispatcher,
                 storage,
             )));
             info!("Python runtime available — python_execute tool registered");
@@ -207,11 +202,11 @@ fn build_tool_registry(
 
     info!(
         "Registered {} built-in tool(s), workspace root: {}",
-        registry.definitions().len(),
+        all_tools.len(),
         workspace_root.display(),
     );
 
-    registry
+    ToolDispatcher::allow_all(all_tools)
 }
 
 /// Create the LLM provider from resolved configuration.

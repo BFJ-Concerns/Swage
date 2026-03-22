@@ -20,8 +20,8 @@ pub mod tool;
 // ---------------------------------------------------------------------------
 
 pub use error::{
-    GatewayError, HookError, ProviderError, RuntimeError, SafetyError, SandboxError,
-    SecretError, StorageError, SwageError, ToolError,
+    GatewayError, HookError, PermissionDeniedReason, ProviderError, RuntimeError, SafetyError,
+    SandboxError, SecretError, StorageError, SwageError, ToolError,
 };
 pub use message::{ChatMessage, ContentPart, Role};
 pub use request::{

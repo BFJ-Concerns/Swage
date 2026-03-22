@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 swage-core = { path = "../swage-core" }
+swage-tool = { path = "../swage-tool" }
 swage-config = { path = "../swage-config" }
 swage-provider = { path = "../swage-provider" }
 swage-storage = { path = "../swage-storage" }
@@ -33,6 +34,7 @@ rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 
 [dev-dependencies]
+swage-safety = { path = "../swage-safety" }
 tower = { version = "0.4", features = ["util"] }
 tokio-tungstenite = "0.24"
 tempfile = { workspace = true }

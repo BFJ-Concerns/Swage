@@ -2045,6 +2045,7 @@ dependencies = [
  "swage-provider",
  "swage-python",
  "swage-storage",
+ "swage-tool",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2131,6 +2132,16 @@ dependencies = [
 [[package]]
 name = "swage-tool"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "swage-core",
+ "swage-safety",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "syn"

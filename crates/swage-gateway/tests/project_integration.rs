@@ -43,7 +43,7 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
-        swage_gateway::tool::ToolRegistry::new(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
     );
     let router = build_router(state);
     (router, storage)

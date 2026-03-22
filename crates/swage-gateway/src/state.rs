@@ -11,7 +11,7 @@ use swage_config::ResolvedConfig;
 use swage_provider::LlmProvider;
 use swage_storage::store::Storage;
 
-use crate::tool::ToolRegistry;
+use crate::tool::ToolDispatcher;
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -32,8 +32,9 @@ pub struct AppState {
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
     pub active_connections: Arc<Mutex<HashSet<Uuid>>>,
-    /// Registered built-in tools available for the model to invoke.
-    pub tool_registry: Arc<ToolRegistry>,
+    /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
+    /// schema validation, execution, and leak detection for every tool call.
+    pub tool_dispatcher: Arc<ToolDispatcher>,
 }
 
 impl AppState {
@@ -41,7 +42,7 @@ impl AppState {
         storage: Arc<dyn Storage>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
-        tool_registry: ToolRegistry,
+        tool_dispatcher: ToolDispatcher,
     ) -> Self {
         Self {
             storage,
@@ -49,7 +50,7 @@ impl AppState {
             config,
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(HashSet::new())),
-            tool_registry: Arc::new(tool_registry),
+            tool_dispatcher: Arc::new(tool_dispatcher),
         }
     }
 }

@@ -208,7 +208,7 @@ mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_registry: Arc::new(crate::tool::ToolRegistry::new()),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
         };
         (build_router(state), storage)
     }

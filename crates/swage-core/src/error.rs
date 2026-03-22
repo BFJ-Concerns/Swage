@@ -214,6 +214,18 @@ impl StorageError {
 // Tool errors
 // ---------------------------------------------------------------------------
 
+/// The reason a tool was denied by the permission resolver.
+///
+/// Distinguishes between two denial modes so callers can construct
+/// useful error messages and audit logs without parsing display strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionDeniedReason {
+    /// The tool was not found in any allow entry — default-deny applies.
+    NotAllowed,
+    /// The tool was found in the explicit deny list.
+    ExplicitlyDenied,
+}
+
 /// Errors from tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -235,8 +247,27 @@ pub enum ToolError {
     Timeout { name: String, duration: Duration },
 
     /// Tool access denied by policy (permanent).
-    #[error("permission denied for tool {name}")]
-    PermissionDenied { name: String },
+    ///
+    /// The `reason` field distinguishes between default-deny (not in any allow
+    /// entry) and an explicit deny-list hit, enabling precise audit logging.
+    #[error("permission denied for tool {name}: {reason}")]
+    PermissionDenied {
+        name: String,
+        reason: PermissionDeniedReason,
+    },
+}
+
+impl std::fmt::Display for PermissionDeniedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PermissionDeniedReason::NotAllowed => {
+                write!(f, "not in any allow entry")
+            }
+            PermissionDeniedReason::ExplicitlyDenied => {
+                write!(f, "explicitly denied")
+            }
+        }
+    }
 }
 
 impl ToolError {
@@ -690,8 +721,58 @@ mod tests {
     fn tool_permission_denied_is_permanent() {
         let err = ToolError::PermissionDenied {
             name: "shell".to_string(),
+            reason: PermissionDeniedReason::NotAllowed,
         };
         assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn permission_denied_not_allowed_display_includes_reason() {
+        let err = ToolError::PermissionDenied {
+            name: "shell".to_string(),
+            reason: PermissionDeniedReason::NotAllowed,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("shell"), "display must include tool name");
+        assert!(
+            msg.contains("not allowed") || msg.contains("not in any allow"),
+            "display must indicate not-allowed denial mode; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn permission_denied_explicitly_denied_display_includes_reason() {
+        let err = ToolError::PermissionDenied {
+            name: "shell".to_string(),
+            reason: PermissionDeniedReason::ExplicitlyDenied,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("shell"), "display must include tool name");
+        assert!(
+            msg.contains("explicitly denied") || msg.contains("deny list"),
+            "display must indicate explicit-denial mode; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn permission_denied_reason_serde_round_trip() {
+        let reason = PermissionDeniedReason::NotAllowed;
+        let json = serde_json::to_string(&reason).unwrap();
+        let decoded: PermissionDeniedReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(reason, decoded);
+
+        let reason2 = PermissionDeniedReason::ExplicitlyDenied;
+        let json2 = serde_json::to_string(&reason2).unwrap();
+        let decoded2: PermissionDeniedReason = serde_json::from_str(&json2).unwrap();
+        assert_eq!(reason2, decoded2);
+    }
+
+    #[test]
+    fn permission_denied_reasons_are_distinct() {
+        assert_ne!(
+            PermissionDeniedReason::NotAllowed,
+            PermissionDeniedReason::ExplicitlyDenied
+        );
     }
 
     // -- Hook errors ----------------------------------------------------------

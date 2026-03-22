@@ -31,6 +31,7 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{SqliteStorage, Storage};
+use swage_tool;
 
 // ---------------------------------------------------------------------------
 // Mock providers
@@ -93,14 +94,14 @@ async fn start_ptc_test_server(
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
-    // Build the sub-tool registry first — these are the tools that
-    // python_execute can dispatch to via GatewayToolDispatcher.
+    // Build the sub-dispatcher: echo and shell, but NOT python_execute.
+    // This prevents recursion when Python code dispatches sub-tool calls.
     let echo_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(EchoTool);
     let shell_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(MockShellTool);
-    let mut sub_registry = swage_gateway::tool::ToolRegistry::new();
-    sub_registry.register(Arc::clone(&echo_tool));
-    sub_registry.register(Arc::clone(&shell_tool));
-    let sub_registry = Arc::new(sub_registry);
+    let sub_dispatcher = Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::clone(&echo_tool),
+        Arc::clone(&shell_tool),
+    ]));
 
     // Create the PythonExecuteTool with access to sub-tools and storage.
     let runtime = swage_python::runtime::PythonRuntime::new(None)
@@ -108,20 +109,21 @@ async fn start_ptc_test_server(
     let ptc_tool = swage_gateway::tool::python_execute::PythonExecuteTool::new(
         Arc::new(runtime),
         Duration::from_secs(30),
-        sub_registry,
+        sub_dispatcher,
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
     );
 
-    // Final registry includes echo, shell, and python_execute.
-    let mut registry = swage_gateway::tool::ToolRegistry::new();
-    registry.register(echo_tool);
-    registry.register(shell_tool);
-    registry.register(Arc::new(ptc_tool));
+    // Final dispatcher includes echo, shell, and python_execute.
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        echo_tool,
+        shell_tool,
+        Arc::new(ptc_tool) as Arc<dyn swage_gateway::tool::Tool>,
+    ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
-        registry,
+        dispatcher,
     );
     let router = build_router(state);
 
@@ -152,14 +154,10 @@ impl swage_gateway::tool::Tool for EchoTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-    ) -> swage_gateway::tool::ToolExecutionResult {
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, swage_core::ToolError> {
         let text = arguments["text"].as_str().unwrap_or("").to_string();
-        swage_gateway::tool::ToolExecutionResult {
-            content: text,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": text}))
     }
 }
 
@@ -184,7 +182,8 @@ impl swage_gateway::tool::Tool for MockShellTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-    ) -> swage_gateway::tool::ToolExecutionResult {
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, swage_core::ToolError> {
         let command = arguments["command"].as_str().unwrap_or("").to_string();
         // Simulate `echo <arg>` by extracting the argument after "echo ".
         let output = if let Some(rest) = command.strip_prefix("echo ") {
@@ -192,12 +191,7 @@ impl swage_gateway::tool::Tool for MockShellTool {
         } else {
             command
         };
-        swage_gateway::tool::ToolExecutionResult {
-            content: output,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": output}))
     }
 }
 

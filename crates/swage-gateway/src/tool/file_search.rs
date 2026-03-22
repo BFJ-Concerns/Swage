@@ -5,10 +5,14 @@
 //! truncated if the total output exceeds the configured size limit.
 
 use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
-use serde_json::json;
-use crate::tool::{Tool, ToolExecutionResult};
-use crate::tool::workspace::{validate_path, is_binary_content, truncate_output};
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
+
+use crate::tool::Tool;
+use crate::tool::workspace::{is_binary_content, truncate_output, validate_path};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -35,7 +39,7 @@ impl Tool for FileSearchTool {
         "Search file contents for a pattern across the workspace or a subdirectory."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -52,58 +56,37 @@ impl Tool for FileSearchTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
-        let pattern = match arguments["pattern"].as_str() {
-            Some(p) => p.to_lowercase(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: pattern".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let pattern = params["pattern"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: pattern".to_owned(),
+            })?
+            .to_lowercase();
 
         // Optional subdirectory — default to workspace root.
-        let search_root = match arguments["path"].as_str() {
-            Some(sub) => match validate_path(&self.workspace_root, sub) {
-                Ok(p) => p,
-                Err(msg) => {
-                    return ToolExecutionResult {
-                        content: msg,
-                        is_error: true,
-                        truncated: false,
-                        total_bytes: None,
-                    }
+        let search_root = match params["path"].as_str() {
+            Some(sub) => validate_path(&self.workspace_root, sub).map_err(|msg| {
+                ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: msg,
                 }
-            },
+            })?,
             None => self.workspace_root.clone(),
         };
 
-        // Collect matches by walking the tree synchronously — tokio's fs helpers
-        // don't expose a recursive walk, and spinning up hundreds of tasks for
-        // each file would add unnecessary overhead for a sequential scan.
+        // Collect matches by walking the tree synchronously.
         let matches = search_tree(&search_root, &self.workspace_root, &pattern);
 
         if matches.is_empty() {
-            return ToolExecutionResult {
-                content: format!("No matches found for pattern: {pattern}"),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Ok(json!({"output": format!("No matches found for pattern: {pattern}")}));
         }
 
         let raw = matches.join("\n");
-        let (content, truncated, total_bytes) = truncate_output(&raw, self.max_output_bytes);
+        let (content, _truncated, _total_bytes) = truncate_output(&raw, self.max_output_bytes);
 
-        ToolExecutionResult {
-            content,
-            is_error: false,
-            truncated,
-            total_bytes: if truncated { Some(total_bytes) } else { None },
-        }
+        Ok(json!({"output": content}))
     }
 }
 
@@ -181,6 +164,7 @@ fn search_file(path: &Path, workspace_root: &Path, pattern: &str, results: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_tool::context::MockToolContext;
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileSearchTool {
@@ -197,38 +181,44 @@ mod tests {
         }
     }
 
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
+    }
+
     #[tokio::test]
     async fn finds_match_in_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"Hello world\nfoo bar\n").unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "hello" }))
-            .await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("notes.txt"), "got: {}", result.content);
-        assert!(result.content.contains(":1:"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "hello" }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.contains("notes.txt"), "got: {}", output);
+        assert!(output.contains(":1:"), "got: {}", output);
     }
 
     #[tokio::test]
     async fn case_insensitive_search() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"UPPERCASE match here\n").unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "uppercase" }))
-            .await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("a.txt"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "uppercase" }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.contains("a.txt"), "got: {}", output);
     }
 
     #[tokio::test]
     async fn no_match_returns_message_not_error() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"nothing relevant\n").unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "xyzzy_no_match" }))
-            .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("No matches"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "xyzzy_no_match" }), &ctx())
+            .await
+            .unwrap();
+        assert!(val["output"].as_str().unwrap().contains("No matches"));
     }
 
     #[tokio::test]
@@ -236,10 +226,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"foo in a\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), b"foo in b\n").unwrap();
-        let result = tool(&dir).execute(json!({ "pattern": "foo" })).await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("a.txt"), "got: {}", result.content);
-        assert!(result.content.contains("b.txt"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "foo" }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.contains("a.txt"), "got: {}", output);
+        assert!(output.contains("b.txt"), "got: {}", output);
     }
 
     #[tokio::test]
@@ -250,47 +243,47 @@ mod tests {
         std::fs::write(sub.join("inside.txt"), b"target pattern\n").unwrap();
         std::fs::write(dir.path().join("outside.txt"), b"target pattern\n").unwrap();
 
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "target", "path": "sub" }))
-            .await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("inside.txt"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "target", "path": "sub" }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.contains("inside.txt"), "got: {}", output);
         // The outside file should not appear in a scoped search.
-        assert!(!result.content.contains("outside.txt"), "got: {}", result.content);
+        assert!(!output.contains("outside.txt"), "got: {}", output);
     }
 
     #[tokio::test]
     async fn skips_binary_files() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("binary.bin"), b"\x00\x01\x02pattern\x03").unwrap();
-        // Binary file — even if pattern byte sequence is present, skip it.
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "pattern" }))
-            .await;
-        // Either no match or the binary file is not reported as a text match.
-        assert!(!result.content.contains("binary.bin"), "got: {}", result.content);
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "pattern" }), &ctx())
+            .await
+            .unwrap();
+        assert!(!val["output"].as_str().unwrap().contains("binary.bin"));
     }
 
     #[tokio::test]
     async fn truncates_large_results() {
         let dir = TempDir::new().unwrap();
-        // Write a file where every line matches — generates lots of output.
         let content: String = (1..=50).map(|i| format!("match line {i}\n")).collect();
         std::fs::write(dir.path().join("big.txt"), content.as_bytes()).unwrap();
-        let result = tool_with_limit(&dir, 50)
-            .execute(json!({ "pattern": "match" }))
-            .await;
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.truncated);
+        let val = tool_with_limit(&dir, 50)
+            .execute(json!({ "pattern": "match" }), &ctx())
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.len() <= 50, "output should be truncated: len={}", output.len());
     }
 
     #[tokio::test]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "pattern": "x", "path": "../../etc" }))
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("outside"), "got: {}", result.content);
+        let err = tool(&dir)
+            .execute(json!({ "pattern": "x", "path": "../../etc" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside"), "got: {}", err);
     }
 }

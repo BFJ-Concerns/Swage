@@ -6,9 +6,12 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use swage_config::SearchProviderConfig;
-use crate::tool::{Tool, ToolExecutionResult};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
+
+use crate::tool::Tool;
 
 // ---------------------------------------------------------------------------
 // Search provider abstraction
@@ -122,7 +125,7 @@ impl Tool for WebSearchTool {
         "Search the web for information. Returns titles, URLs, and snippets."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -140,35 +143,24 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Require search to be configured.
-        let config = match &self.provider_config {
-            Some(c) => c,
-            None => {
-                return ToolExecutionResult {
-                    content: "Web search is not configured. Set [tools.search] in your project config.".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
+        let config = self.provider_config.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: "Web search is not configured. Set [tools.search] in your project config.".to_owned(),
             }
-        };
+        })?;
 
-        let query = match arguments["query"].as_str() {
-            Some(q) => q.to_string(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: query".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+        let query = params["query"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: query".to_owned(),
+            })?
+            .to_string();
 
-        let max_results = arguments["max_results"]
-            .as_u64()
-            .unwrap_or(10) as usize;
+        let max_results = params["max_results"].as_u64().unwrap_or(10) as usize;
 
         // Build a provider from config. Only SearxNG is supported for now.
         let provider: Box<dyn SearchProvider> = match config.provider_type.as_str() {
@@ -178,25 +170,16 @@ impl Tool for WebSearchTool {
             }),
         };
 
-        let results = match provider.search(&query, max_results).await {
-            Ok(r) => r,
-            Err(msg) => {
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+        let results = provider
+            .search(&query, max_results)
+            .await
+            .map_err(|msg| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: msg,
+            })?;
 
         if results.is_empty() {
-            return ToolExecutionResult {
-                content: format!("No results found for: {query}"),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Ok(json!({"output": format!("No results found for: {query}")}));
         }
 
         // Format results as structured plain text.
@@ -206,12 +189,7 @@ impl Tool for WebSearchTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        ToolExecutionResult {
-            content,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": content}))
     }
 }
 
@@ -222,6 +200,7 @@ impl Tool for WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_tool::context::MockToolContext;
 
     fn unconfigured_tool() -> WebSearchTool {
         WebSearchTool { provider_config: None }
@@ -237,24 +216,31 @@ mod tests {
         }
     }
 
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
+    }
+
     #[tokio::test]
     async fn returns_config_error_when_unconfigured() {
-        let result = unconfigured_tool()
-            .execute(json!({ "query": "rust programming" }))
-            .await;
-        assert!(result.is_error);
+        let err = unconfigured_tool()
+            .execute(json!({ "query": "rust programming" }), &ctx())
+            .await
+            .unwrap_err();
         assert!(
-            result.content.contains("[tools.search]"),
+            err.to_string().contains("[tools.search]"),
             "got: {}",
-            result.content
+            err
         );
     }
 
     #[tokio::test]
     async fn returns_error_for_missing_query() {
-        let result = configured_tool().execute(json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("query"), "got: {}", result.content);
+        let err = configured_tool()
+            .execute(json!({}), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("query"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -269,16 +255,12 @@ mod tests {
 
     #[tokio::test]
     async fn formats_results_correctly() {
-        // Test the formatting logic by simulating what a provider would return.
-        // We can't call the real SearxNG in unit tests, but we can verify the
-        // format directly via the result formatting code.
-        let results = vec![
-            SearchResult {
-                title: "Rust Programming Language".to_string(),
-                url: "https://www.rust-lang.org".to_string(),
-                snippet: "A systems programming language".to_string(),
-            },
-        ];
+        // Test the formatting logic directly.
+        let results = vec![SearchResult {
+            title: "Rust Programming Language".to_string(),
+            url: "https://www.rust-lang.org".to_string(),
+            snippet: "A systems programming language".to_string(),
+        }];
 
         let content = results
             .iter()
@@ -293,7 +275,6 @@ mod tests {
 
     #[tokio::test]
     async fn gracefully_fails_when_provider_unreachable() {
-        // Point at a port nothing is listening on — should fail gracefully, not panic.
         let tool = WebSearchTool {
             provider_config: Some(SearchProviderConfig {
                 provider_type: "searxng".to_string(),
@@ -301,9 +282,10 @@ mod tests {
                 api_key: None,
             }),
         };
-        let result = tool.execute(json!({ "query": "test" })).await;
-        assert!(result.is_error);
-        // Should report a connection error, not panic.
-        assert!(!result.content.is_empty());
+        let err = tool
+            .execute(json!({ "query": "test" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 }

@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 
-use super::{Tool, ToolExecutionResult};
+use super::Tool;
 use super::workspace::truncate_output;
 
 // ---------------------------------------------------------------------------
@@ -35,8 +37,8 @@ impl Tool for ShellTool {
         "Execute a shell command in the workspace directory."
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
+    fn parameters(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "command": {
@@ -48,42 +50,32 @@ impl Tool for ShellTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Extract the command string from arguments.
-        let command = match arguments.get("command").and_then(|v| v.as_str()) {
+        let command = match params.get("command").and_then(|v| v.as_str()) {
             Some(cmd) if !cmd.is_empty() => cmd.to_owned(),
             _ => {
-                return ToolExecutionResult {
-                    content: "Missing or empty 'command' argument.".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Err(ToolError::InvalidParameters {
+                    name: self.name().to_owned(),
+                    message: "Missing or empty 'command' argument".to_owned(),
+                });
             }
         };
 
         // Spawn the command under sh -c so standard shell features are available.
-        let mut child = match Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&command)
             .current_dir(&self.workspace_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Failed to spawn command: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to spawn command: {e}"),
+            })?;
 
         // Take the piped stdout/stderr handles before starting the wait.
-        // We hold `child` so we can kill it on timeout.
         let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
         let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
 
@@ -96,8 +88,6 @@ impl Tool for ShellTool {
                 stdout_pipe.read_to_end(&mut stdout_buf),
                 stderr_pipe.read_to_end(&mut stderr_buf)
             );
-            // Propagate pipe read errors — unlikely but possible if the child
-            // process is killed or the fd is invalidated mid-read.
             stdout_res.expect("failed to read child stdout");
             stderr_res.expect("failed to read child stderr");
             (stdout_buf, stderr_buf)
@@ -109,30 +99,21 @@ impl Tool for ShellTool {
             Err(_elapsed) => {
                 // Timeout expired — kill the child to free resources.
                 let _ = kill_child(&mut child).await;
-                ToolExecutionResult {
-                    content: format!(
+                Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!(
                         "Command timed out after {:.1}s",
                         self.timeout.as_secs_f64()
                     ),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
+                })
             }
 
             Ok((stdout_bytes, stderr_bytes)) => {
                 // Reap the child to get the exit status.
-                let exit_status = match child.wait().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return ToolExecutionResult {
-                            content: format!("Failed to wait for command: {e}"),
-                            is_error: true,
-                            truncated: false,
-                            total_bytes: None,
-                        };
-                    }
-                };
+                let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to wait for command: {e}"),
+                })?;
 
                 let stdout_str = String::from_utf8_lossy(&stdout_bytes);
                 let stderr_str = String::from_utf8_lossy(&stderr_bytes);
@@ -146,17 +127,17 @@ impl Tool for ShellTool {
                     format!("{stdout_str}stderr: {stderr_str}")
                 };
 
-                let (content, truncated, total_bytes) =
+                let (content, _truncated, _total_bytes) =
                     truncate_output(&combined, self.max_output_bytes);
 
-                let total_bytes = if truncated { Some(total_bytes) } else { None };
-
-                ToolExecutionResult {
-                    content,
-                    is_error: !exit_status.success(),
-                    truncated,
-                    total_bytes,
+                if !exit_status.success() {
+                    return Err(ToolError::ExecutionFailed {
+                        name: self.name().to_owned(),
+                        message: content,
+                    });
                 }
+
+                Ok(json!({"output": content}))
             }
         }
     }
@@ -178,6 +159,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use swage_tool::context::MockToolContext;
 
     fn tool(timeout_secs: u64) -> ShellTool {
         ShellTool {
@@ -187,43 +169,46 @@ mod tests {
         }
     }
 
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn echo_hello_returns_output() {
         let t = tool(5);
-        let result = t.execute(serde_json::json!({"command": "echo hello"})).await;
-        assert!(!result.is_error, "echo should succeed");
-        assert_eq!(result.content.trim(), "hello");
-        assert!(!result.truncated);
+        let result = t.execute(json!({"command": "echo hello"}), &ctx()).await;
+        let val = result.expect("echo should succeed");
+        assert_eq!(val["output"].as_str().unwrap().trim(), "hello");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn nonzero_exit_sets_is_error() {
+    async fn nonzero_exit_returns_err() {
         let t = tool(5);
         // `false` always exits with code 1.
-        let result = t.execute(serde_json::json!({"command": "false"})).await;
-        assert!(result.is_error, "non-zero exit should set is_error");
+        let result = t.execute(json!({"command": "false"}), &ctx()).await;
+        assert!(result.is_err(), "non-zero exit should produce an error");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn stderr_output_included() {
+    async fn stderr_output_included_in_error() {
         let t = tool(5);
         let result = t
-            .execute(serde_json::json!({"command": "echo errout >&2; exit 1"}))
+            .execute(json!({"command": "echo errout >&2; exit 1"}), &ctx())
             .await;
-        assert!(result.is_error);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
         assert!(
-            result.content.contains("errout"),
-            "stderr should appear in content: {:?}",
-            result.content
+            msg.contains("errout"),
+            "stderr should appear in error message: {:?}",
+            msg
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn missing_command_returns_error() {
+    async fn missing_command_returns_invalid_params() {
         let t = tool(5);
-        let result = t.execute(serde_json::json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("command"));
+        let result = t.execute(json!({}), &ctx()).await;
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidParameters { .. }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -234,12 +219,13 @@ mod tests {
             timeout: Duration::from_millis(200),
             max_output_bytes: 1024 * 1024,
         };
-        let result = t.execute(serde_json::json!({"command": "sleep 10"})).await;
-        assert!(result.is_error, "timeout should produce an error");
+        let result = t.execute(json!({"command": "sleep 10"}), &ctx()).await;
+        assert!(result.is_err(), "timeout should produce an error");
+        let msg = result.unwrap_err().to_string();
         assert!(
-            result.content.contains("timed out"),
+            msg.contains("timed out"),
             "error message should mention timeout: {:?}",
-            result.content
+            msg
         );
     }
 
@@ -251,38 +237,34 @@ mod tests {
             // Small cap to trigger truncation.
             max_output_bytes: 10,
         };
-        // Generate output well above the cap.
         let result = t
-            .execute(serde_json::json!({"command": "printf '%0.s1234567890' $(seq 1 100)"}))
+            .execute(json!({"command": "printf '%0.s1234567890' $(seq 1 100)"}), &ctx())
             .await;
-        assert!(!result.is_error, "command should succeed");
-        assert!(result.truncated, "output should be flagged as truncated");
-        assert!(result.total_bytes.is_some());
-        assert!(
-            result.total_bytes.unwrap() > 10,
-            "total_bytes should reflect original size"
-        );
-        assert!(result.content.len() <= 10, "content should be capped");
+        let val = result.expect("command should succeed");
+        let output = val["output"].as_str().unwrap();
+        assert!(output.len() <= 10, "content should be capped: len={}", output.len());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cwd_is_workspace_root() {
         let dir = tempfile::tempdir().expect("temp dir");
+        let mut ctx = MockToolContext::new("agent-test", "sess-test");
+        ctx.working_directory = dir.path().to_path_buf();
         let t = ShellTool {
             workspace_root: dir.path().to_path_buf(),
             timeout: Duration::from_secs(5),
             max_output_bytes: 1024 * 1024,
         };
         // `pwd` should print the workspace root (canonicalised).
-        let result = t.execute(serde_json::json!({"command": "pwd"})).await;
-        assert!(!result.is_error);
-        // Both paths should be canonicalised — use contains as a stable check.
+        let result = t.execute(json!({"command": "pwd"}), &ctx).await;
+        let val = result.expect("pwd should succeed");
         let canonical = dir.path().canonicalize().unwrap();
+        let output = val["output"].as_str().unwrap().trim();
         assert!(
-            result.content.trim().contains(canonical.to_str().unwrap())
-                || canonical.to_str().unwrap().contains(result.content.trim()),
+            output.contains(canonical.to_str().unwrap())
+                || canonical.to_str().unwrap().contains(output),
             "pwd output {:?} should match workspace {:?}",
-            result.content.trim(),
+            output,
             canonical
         );
     }

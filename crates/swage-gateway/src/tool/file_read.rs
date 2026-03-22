@@ -4,10 +4,14 @@
 //! rejects binary files, and truncates output that exceeds the configured limit.
 
 use std::path::PathBuf;
+
 use async_trait::async_trait;
-use serde_json::json;
-use crate::tool::{Tool, ToolExecutionResult};
-use crate::tool::workspace::{validate_path, is_binary_content, truncate_output};
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
+
+use crate::tool::Tool;
+use crate::tool::workspace::{is_binary_content, truncate_output, validate_path};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -28,7 +32,7 @@ impl Tool for FileReadTool {
         "Read the contents of a file in the workspace."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -41,80 +45,54 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
-        // Extract the requested path from arguments.
-        let path_str = match arguments["path"].as_str() {
-            Some(p) => p.to_string(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: path".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
-            }
-        };
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let path_str = params["path"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: path".to_owned(),
+            })?
+            .to_string();
 
         // Validate and resolve path against workspace root.
-        let resolved = match validate_path(&self.workspace_root, &path_str) {
-            Ok(p) => p,
-            Err(msg) => {
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                }
+        let resolved = validate_path(&self.workspace_root, &path_str).map_err(|msg| {
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: msg,
             }
-        };
+        })?;
 
         // Read raw bytes from disk.
-        let bytes = match tokio::fs::read(&resolved).await {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = match e.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        format!("File not found: {path_str}")
-                    }
-                    std::io::ErrorKind::PermissionDenied => {
-                        format!("Permission denied: {path_str}")
-                    }
-                    _ => format!("Failed to read {path_str}: {e}"),
-                };
-                return ToolExecutionResult {
-                    content: msg,
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+        let bytes = tokio::fs::read(&resolved).await.map_err(|e| {
+            let message = match e.kind() {
+                std::io::ErrorKind::NotFound => format!("File not found: {path_str}"),
+                std::io::ErrorKind::PermissionDenied => {
+                    format!("Permission denied: {path_str}")
+                }
+                _ => format!("Failed to read {path_str}: {e}"),
+            };
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message,
             }
-        };
+        })?;
 
         // Reject binary files — they cannot be meaningfully displayed as text.
         if is_binary_content(&bytes) {
-            return ToolExecutionResult {
-                content: format!(
+            return Err(ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!(
                     "File appears to be binary ({} bytes). Cannot display binary content.",
                     bytes.len()
                 ),
-                is_error: true,
-                truncated: false,
-                total_bytes: Some(bytes.len()),
-            };
+            });
         }
 
         // Convert to UTF-8, replacing any invalid sequences rather than failing.
         let text = String::from_utf8_lossy(&bytes).into_owned();
+        let (content, _truncated, _total_bytes) = truncate_output(&text, self.max_output_bytes);
 
-        let (content, truncated, total_bytes) =
-            truncate_output(&text, self.max_output_bytes);
-
-        ToolExecutionResult {
-            content,
-            is_error: false,
-            truncated,
-            total_bytes: if truncated { Some(total_bytes) } else { None },
-        }
+        Ok(json!({"output": content}))
     }
 }
 
@@ -125,6 +103,7 @@ impl Tool for FileReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_tool::context::MockToolContext;
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileReadTool {
@@ -141,37 +120,42 @@ mod tests {
         }
     }
 
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
+    }
+
     #[tokio::test]
     async fn reads_text_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), b"Hello, world!").unwrap();
-        let result = tool(&dir).execute(json!({ "path": "hello.txt" })).await;
-        assert!(!result.is_error);
-        assert_eq!(result.content, "Hello, world!");
-        assert!(!result.truncated);
+        let val = tool(&dir)
+            .execute(json!({ "path": "hello.txt" }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(val["output"], "Hello, world!");
     }
 
     #[tokio::test]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "../../../etc/passwd" }))
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("outside"), "got: {}", result.content);
+        let err = tool(&dir)
+            .execute(json!({ "path": "../../../etc/passwd" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside"), "got: {}", err);
     }
 
     #[tokio::test]
     async fn returns_error_for_missing_file() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "nonexistent.txt" }))
-            .await;
-        assert!(result.is_error);
+        let err = tool(&dir)
+            .execute(json!({ "path": "nonexistent.txt" }), &ctx())
+            .await
+            .unwrap_err();
         assert!(
-            result.content.contains("not found") || result.content.contains("No such"),
+            err.to_string().contains("not found") || err.to_string().contains("No such"),
             "got: {}",
-            result.content
+            err
         );
     }
 
@@ -180,15 +164,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Write a file with null bytes — reliably detected as binary.
         std::fs::write(dir.path().join("data.bin"), b"\x00\x01\x02\x03").unwrap();
-        let result = tool(&dir)
-            .execute(json!({ "path": "data.bin" }))
-            .await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("binary"),
-            "got: {}",
-            result.content
-        );
+        let err = tool(&dir)
+            .execute(json!({ "path": "data.bin" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("binary"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -196,19 +176,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let content = "abcdefghij".repeat(10); // 100 bytes
         std::fs::write(dir.path().join("big.txt"), content.as_bytes()).unwrap();
-        let result = tool_with_limit(&dir, 20)
-            .execute(json!({ "path": "big.txt" }))
-            .await;
-        assert!(!result.is_error);
-        assert!(result.truncated);
-        assert_eq!(result.content.len(), 20);
+        let val = tool_with_limit(&dir, 20)
+            .execute(json!({ "path": "big.txt" }), &ctx())
+            .await
+            .unwrap();
+        assert!(val["output"].as_str().unwrap().len() <= 20);
     }
 
     #[tokio::test]
     async fn returns_error_for_missing_path_argument() {
         let dir = TempDir::new().unwrap();
-        let result = tool(&dir).execute(json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("Missing"), "got: {}", result.content);
+        let err = tool(&dir)
+            .execute(json!({}), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 }

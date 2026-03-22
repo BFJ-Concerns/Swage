@@ -5,18 +5,22 @@
 //! in an embedded interpreter with access to all registered tools via the
 //! `swage` namespace.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
+use swage_core::ToolError;
 use swage_python::runtime::PythonRuntime;
 use swage_storage::store::Storage;
+use swage_tool::context::ToolContext;
 
-use super::{Tool, ToolExecutionResult, ToolRegistry};
+use super::{Tool, ToolDispatcher};
 use crate::tool::python_dispatch::GatewayToolDispatcher;
 use crate::websocket::ServerEvent;
 
@@ -54,7 +58,7 @@ tokio::task_local! {
 
 /// Executes agent-generated Python code with access to Swage's built-in tools.
 ///
-/// Registered in `build_tool_registry` only when a Python runtime is
+/// Registered in `build_tool_dispatcher` only when a Python runtime is
 /// available. If the runtime isn't found at startup, this tool is simply
 /// absent from the model's tool list (graceful degradation).
 pub struct PythonExecuteTool {
@@ -62,9 +66,12 @@ pub struct PythonExecuteTool {
     runtime: Arc<PythonRuntime>,
     /// Wall-clock timeout for Python execution.
     timeout: Duration,
-    /// Shared tool registry — the GatewayToolDispatcher uses this to look
-    /// up tools that Python code calls via `swage.shell()` etc.
-    tool_registry: Arc<ToolRegistry>,
+    /// Shared dispatch pipeline — the GatewayToolDispatcher uses this to
+    /// route tool calls from Python code (e.g. `swage.shell()`) through
+    /// the full permission → rate-limit → validate → execute → leak-detect
+    /// pipeline. Intentionally excludes `python_execute` itself to prevent
+    /// infinite recursion.
+    sub_dispatcher: Arc<ToolDispatcher>,
     /// Shared storage for persisting sub-tool call records.
     storage: Arc<dyn Storage>,
 }
@@ -73,13 +80,13 @@ impl PythonExecuteTool {
     pub fn new(
         runtime: Arc<PythonRuntime>,
         timeout: Duration,
-        tool_registry: Arc<ToolRegistry>,
+        sub_dispatcher: Arc<ToolDispatcher>,
         storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
             runtime,
             timeout,
-            tool_registry,
+            sub_dispatcher,
             storage,
         }
     }
@@ -97,7 +104,7 @@ impl Tool for PythonExecuteTool {
          with variables, loops, or conditionals."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -110,42 +117,42 @@ impl Tool for PythonExecuteTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Extract the code argument.
-        let code = match arguments.get("code").and_then(|v| v.as_str()) {
-            Some(c) => c.to_string(),
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: 'code'".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+        let code = params
+            .get("code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: 'code'".to_owned(),
+            })?
+            .to_string();
 
         // Check runtime availability.
         if !self.runtime.is_available() {
-            return ToolExecutionResult {
-                content: "Python runtime not available".into(),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Err(ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: "Python runtime not available".to_owned(),
+            });
         }
+
+        // Snapshot the working directory for the dispatcher before the
+        // PYTHON_CONTEXT closure moves ownership.
+        let working_dir: PathBuf = ctx.working_directory().to_path_buf();
 
         // Read the per-invocation context from the task-local.
         // If it's not set (shouldn't happen in normal flow), fall back to
         // a no-op dispatcher that can't emit WebSocket events or persist.
         let dispatcher: Arc<dyn swage_python::dispatch::ToolDispatcher> =
-            match PYTHON_CONTEXT.try_with(|ctx| {
+            match PYTHON_CONTEXT.try_with(|py_ctx| {
                 Arc::new(GatewayToolDispatcher::new(
-                    Arc::clone(&self.tool_registry),
+                    Arc::clone(&self.sub_dispatcher),
                     tokio::runtime::Handle::current(),
-                    ctx.ws_tx.clone(),
+                    py_ctx.ws_tx.clone(),
                     Arc::clone(&self.storage),
-                    ctx.turn_id,
-                    ctx.call_id.clone(),
+                    py_ctx.turn_id,
+                    py_ctx.call_id.clone(),
+                    working_dir.clone(),
                 )) as Arc<dyn swage_python::dispatch::ToolDispatcher>
             }) {
                 Ok(d) => d,
@@ -154,8 +161,9 @@ impl Tool for PythonExecuteTool {
                     // Fall back to a stub that still dispatches tools but
                     // without WebSocket events or storage persistence.
                     Arc::new(FallbackDispatcher {
-                        registry: Arc::clone(&self.tool_registry),
-                    })
+                        sub_dispatcher: Arc::clone(&self.sub_dispatcher),
+                        working_directory: working_dir,
+                    }) as Arc<dyn swage_python::dispatch::ToolDispatcher>
                 }
             };
 
@@ -172,11 +180,13 @@ impl Tool for PythonExecuteTool {
             timed_out: false,
         });
 
-        ToolExecutionResult {
-            content: result.output,
-            is_error: result.timed_out,
-            truncated: false,
-            total_bytes: None,
+        if result.timed_out {
+            Err(ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: result.output,
+            })
+        } else {
+            Ok(serde_json::json!({"output": result.output}))
         }
     }
 }
@@ -187,10 +197,12 @@ impl Tool for PythonExecuteTool {
 
 /// Minimal dispatcher used when the task-local context is missing.
 ///
-/// Dispatches tool calls through the registry but cannot emit WebSocket
+/// Routes tool calls through the sub-dispatcher but cannot emit WebSocket
 /// events or persist call records. Only used as a safety fallback.
 struct FallbackDispatcher {
-    registry: Arc<ToolRegistry>,
+    sub_dispatcher: Arc<ToolDispatcher>,
+    /// Working directory forwarded to tools that derive paths from context.
+    working_directory: PathBuf,
 }
 
 impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
@@ -199,28 +211,37 @@ impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> swage_python::dispatch::DispatchResult {
-        let tool = match self.registry.get(tool_name) {
-            Some(t) => t,
-            None => {
-                return swage_python::dispatch::DispatchResult {
-                    content: format!("Tool '{tool_name}' is not registered."),
-                    is_error: true,
-                };
-            }
-        };
+        let working_directory = self.working_directory.clone();
+        let sub_dispatcher = Arc::clone(&self.sub_dispatcher);
+        let tool_name_owned = tool_name.to_string();
 
         // Bridge async → sync. Use handle.spawn() since this runs on a
         // plain OS thread (from execute_code) without a tokio context.
         let handle = tokio::runtime::Handle::current();
         let exec = handle
-            .block_on(handle.spawn(
-                async move { tool.execute(arguments).await },
-            ))
-            .expect("tool execution should not panic");
+            .block_on(handle.spawn(async move {
+                let ctx = swage_tool::context::MockToolContext {
+                    agent_id: "python-fallback".to_string(),
+                    session_id: String::new(),
+                    working_directory,
+                    allowed_paths: vec![],
+                    user_info: None,
+                };
+                sub_dispatcher
+                    .dispatch(&tool_name_owned, arguments, &ctx, "python-fallback")
+                    .await
+            }))
+            .expect("fallback dispatch should not panic");
 
-        swage_python::dispatch::DispatchResult {
-            content: exec.content,
-            is_error: exec.is_error,
+        match exec {
+            Ok(tool_output) => swage_python::dispatch::DispatchResult {
+                content: tool_output.result["output"].as_str().unwrap_or("").to_string(),
+                is_error: false,
+            },
+            Err(e) => swage_python::dispatch::DispatchResult {
+                content: e.to_string(),
+                is_error: true,
+            },
         }
     }
 }
@@ -232,22 +253,28 @@ impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{Tool, ToolRegistry};
     use std::sync::Arc;
     use std::time::Duration;
 
     use swage_python::runtime::PythonRuntime;
     use swage_storage::SqliteStorage;
+    use swage_tool::context::MockToolContext;
+    use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
     fn make_tool() -> PythonExecuteTool {
         let runtime = Arc::new(
             PythonRuntime::new(None).expect("system Python should be available in dev"),
         );
-        let registry = Arc::new(ToolRegistry::new());
+        // Empty sub-dispatcher — tests that execute Python don't call gateway tools.
+        let sub_dispatcher = Arc::new(SwageToolDispatcher::allow_all(vec![]));
         let storage =
             Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
 
-        PythonExecuteTool::new(runtime, Duration::from_secs(5), registry, storage)
+        PythonExecuteTool::new(runtime, Duration::from_secs(5), sub_dispatcher, storage)
+    }
+
+    fn ctx() -> MockToolContext {
+        MockToolContext::new("agent-test", "sess-test")
     }
 
     #[test]
@@ -264,34 +291,38 @@ mod tests {
     async fn execute_simple_print() {
         let tool = make_tool();
         let result = tool
-            .execute(serde_json::json!({ "code": "print('hello from python')" }))
-            .await;
+            .execute(serde_json::json!({ "code": "print('hello from python')" }), &ctx())
+            .await
+            .unwrap();
         assert!(
-            result.content.contains("hello from python"),
+            result["output"].as_str().unwrap().contains("hello from python"),
             "expected Python output, got: {}",
-            result.content
+            result["output"]
         );
-        assert!(!result.is_error);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_missing_code_argument() {
         let tool = make_tool();
-        let result = tool.execute(serde_json::json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("Missing"));
+        let err = tool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("Missing"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_syntax_error_returns_traceback() {
         let tool = make_tool();
         let result = tool
-            .execute(serde_json::json!({ "code": "def" }))
-            .await;
+            .execute(serde_json::json!({ "code": "def" }), &ctx())
+            .await
+            .unwrap();
         assert!(
-            result.content.contains("SyntaxError"),
+            result["output"].as_str().unwrap().contains("SyntaxError"),
             "expected SyntaxError, got: {}",
-            result.content
+            result["output"]
         );
     }
 
@@ -299,12 +330,13 @@ mod tests {
     async fn execute_runtime_error_returns_traceback() {
         let tool = make_tool();
         let result = tool
-            .execute(serde_json::json!({ "code": "1/0" }))
-            .await;
+            .execute(serde_json::json!({ "code": "1/0" }), &ctx())
+            .await
+            .unwrap();
         assert!(
-            result.content.contains("ZeroDivisionError"),
+            result["output"].as_str().unwrap().contains("ZeroDivisionError"),
             "expected ZeroDivisionError, got: {}",
-            result.content
+            result["output"]
         );
     }
 }

@@ -1,22 +1,22 @@
 //! MemoryTool — read and write persistent per-project memory files.
 //!
-//! The memory directory is resolved from the `PROJECT_CONTEXT` task-local set
-//! by the turn executor before each tool invocation.  This keeps the tool
-//! stateless: it holds no project reference itself, making it trivially thread-
-//! safe and requiring no constructor arguments.
+//! The memory directory is derived from the tool context's working directory:
+//! `{working_directory}/.swage/memory`. This keeps the tool stateless and
+//! thread-safe without requiring any constructor arguments or task-locals.
 //!
 //! Operations:
 //!   - **read**: read a specific file (with "file" param) or all files (no param)
 //!   - **write**: create or overwrite a named file
 //!   - **list**: return names of all memory files in sorted order
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
 
-use crate::context::PROJECT_CONTEXT;
-use crate::tool::{Tool, ToolExecutionResult};
+use crate::tool::Tool;
 
 // ---------------------------------------------------------------------------
 // File name validation
@@ -62,7 +62,7 @@ impl Tool for MemoryTool {
         "Read and write persistent per-project memory files."
     }
 
-    fn parameters(&self) -> serde_json::Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -85,47 +85,26 @@ impl Tool for MemoryTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> ToolExecutionResult {
-        // Resolve the memory directory from the project context task-local.
-        // Returns an error if called outside a turn (no task-local set).
-        let memory_dir = match PROJECT_CONTEXT.try_with(|ctx| ctx.memory_path.clone()) {
-            Ok(path) => path,
-            Err(_) => {
-                return ToolExecutionResult {
-                    content: "memory tool requires a project context \
-                              (must be called within a turn)"
-                        .into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        // Derive the memory directory from the context's working directory.
+        // Convention: {working_directory}/.swage/memory
+        let memory_dir: PathBuf = ctx.working_directory().join(".swage").join("memory");
 
-        let operation = match arguments["operation"].as_str() {
-            Some(op) => op,
-            None => {
-                return ToolExecutionResult {
-                    content: "Missing required argument: operation".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+        let operation = params["operation"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: operation".to_owned(),
+            })?;
 
         match operation {
-            "read" => self.read(&memory_dir, &arguments).await,
-            "write" => self.write(&memory_dir, &arguments).await,
+            "read" => self.read(&memory_dir, &params).await,
+            "write" => self.write(&memory_dir, &params).await,
             "list" => self.list(&memory_dir).await,
-            other => ToolExecutionResult {
-                content: format!(
-                    "Unknown operation '{other}': must be read, write, or list"
-                ),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            },
+            other => Err(ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: format!("Unknown operation '{other}': must be read, write, or list"),
+            }),
         }
     }
 }
@@ -135,38 +114,33 @@ impl MemoryTool {
     // read
     // -----------------------------------------------------------------------
 
-    async fn read(&self, memory_dir: &Path, arguments: &serde_json::Value) -> ToolExecutionResult {
-        match arguments["file"].as_str() {
+    async fn read(
+        &self,
+        memory_dir: &Path,
+        params: &Value,
+    ) -> Result<Value, ToolError> {
+        match params["file"].as_str() {
             Some(name) => {
                 // Read a specific named file.
                 if let Some(err) = validate_file_name(name) {
-                    return ToolExecutionResult {
-                        content: err,
-                        is_error: true,
-                        truncated: false,
-                        total_bytes: None,
-                    };
+                    return Err(ToolError::InvalidParameters {
+                        name: self.name().to_owned(),
+                        message: err,
+                    });
                 }
                 let path = memory_dir.join(format!("{name}.md"));
                 match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => ToolExecutionResult {
-                        content,
-                        is_error: false,
-                        truncated: false,
-                        total_bytes: None,
-                    },
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => ToolExecutionResult {
-                        content: format!("Memory file '{name}.md' not found"),
-                        is_error: true,
-                        truncated: false,
-                        total_bytes: None,
-                    },
-                    Err(e) => ToolExecutionResult {
-                        content: format!("Failed to read '{name}.md': {e}"),
-                        is_error: true,
-                        truncated: false,
-                        total_bytes: None,
-                    },
+                    Ok(content) => Ok(json!({"output": content})),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Err(ToolError::ExecutionFailed {
+                            name: self.name().to_owned(),
+                            message: format!("Memory file '{name}.md' not found"),
+                        })
+                    }
+                    Err(e) => Err(ToolError::ExecutionFailed {
+                        name: self.name().to_owned(),
+                        message: format!("Failed to read '{name}.md': {e}"),
+                    }),
                 }
             }
             None => {
@@ -176,23 +150,18 @@ impl MemoryTool {
         }
     }
 
-    async fn read_all(&self, memory_dir: &Path) -> ToolExecutionResult {
+    async fn read_all(&self, memory_dir: &Path) -> Result<Value, ToolError> {
         let mut dir = match tokio::fs::read_dir(memory_dir).await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return ToolExecutionResult {
-                    content: "No memory files found (memory directory does not exist yet)".into(),
-                    is_error: false,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Ok(json!({
+                    "output": "No memory files found (memory directory does not exist yet)"
+                }));
             }
             Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Failed to read memory directory: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to read memory directory: {e}"),
+                });
             }
             Ok(d) => d,
         };
@@ -215,12 +184,7 @@ impl MemoryTool {
         }
 
         if parts.is_empty() {
-            return ToolExecutionResult {
-                content: "No memory files found".into(),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Ok(json!({"output": "No memory files found"}));
         }
 
         // Sort by filename for deterministic output.
@@ -231,104 +195,70 @@ impl MemoryTool {
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
-        ToolExecutionResult {
-            content: combined,
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": combined}))
     }
 
     // -----------------------------------------------------------------------
     // write
     // -----------------------------------------------------------------------
 
-    async fn write(
-        &self,
-        memory_dir: &Path,
-        arguments: &serde_json::Value,
-    ) -> ToolExecutionResult {
-        let name = match arguments["file"].as_str() {
-            Some(n) => n,
-            None => {
-                return ToolExecutionResult {
-                    content: "write requires a 'file' argument".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+    async fn write(&self, memory_dir: &Path, params: &Value) -> Result<Value, ToolError> {
+        let name = params["file"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "write requires a 'file' argument".to_owned(),
+            })?;
 
-        let content = match arguments["content"].as_str() {
-            Some(c) => c,
-            None => {
-                return ToolExecutionResult {
-                    content: "write requires a 'content' argument".into(),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
-            }
-        };
+        let content = params["content"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "write requires a 'content' argument".to_owned(),
+            })?;
 
         if let Some(err) = validate_file_name(name) {
-            return ToolExecutionResult {
-                content: err,
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Err(ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: err,
+            });
         }
 
         // Create the memory directory on first write if it doesn't exist.
-        if let Err(e) = tokio::fs::create_dir_all(memory_dir).await {
-            return ToolExecutionResult {
-                content: format!("Failed to create memory directory: {e}"),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            };
-        }
+        tokio::fs::create_dir_all(memory_dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to create memory directory: {e}"),
+            })?;
 
         let path = memory_dir.join(format!("{name}.md"));
-        match tokio::fs::write(&path, content).await {
-            Ok(()) => ToolExecutionResult {
-                content: format!("Wrote {name}.md ({} bytes)", content.len()),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            },
-            Err(e) => ToolExecutionResult {
-                content: format!("Failed to write '{name}.md': {e}"),
-                is_error: true,
-                truncated: false,
-                total_bytes: None,
-            },
-        }
+        tokio::fs::write(&path, content)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to write '{name}.md': {e}"),
+            })?;
+
+        Ok(json!({"output": format!("Wrote {name}.md ({} bytes)", content.len())}))
     }
 
     // -----------------------------------------------------------------------
     // list
     // -----------------------------------------------------------------------
 
-    async fn list(&self, memory_dir: &Path) -> ToolExecutionResult {
+    async fn list(&self, memory_dir: &Path) -> Result<Value, ToolError> {
         let mut dir = match tokio::fs::read_dir(memory_dir).await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return ToolExecutionResult {
-                    content: "No memory files found (memory directory does not exist yet)".into(),
-                    is_error: false,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Ok(json!({
+                    "output": "No memory files found (memory directory does not exist yet)"
+                }));
             }
             Err(e) => {
-                return ToolExecutionResult {
-                    content: format!("Failed to read memory directory: {e}"),
-                    is_error: true,
-                    truncated: false,
-                    total_bytes: None,
-                };
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to read memory directory: {e}"),
+                });
             }
             Ok(d) => d,
         };
@@ -348,21 +278,11 @@ impl MemoryTool {
         }
 
         if names.is_empty() {
-            return ToolExecutionResult {
-                content: "No memory files found".into(),
-                is_error: false,
-                truncated: false,
-                total_bytes: None,
-            };
+            return Ok(json!({"output": "No memory files found"}));
         }
 
         names.sort();
-        ToolExecutionResult {
-            content: names.join("\n"),
-            is_error: false,
-            truncated: false,
-            total_bytes: None,
-        }
+        Ok(json!({"output": names.join("\n")}))
     }
 }
 
@@ -375,28 +295,34 @@ mod tests {
     use std::path::PathBuf;
 
     use tempfile::TempDir;
-    use uuid::Uuid;
 
-    use crate::context::{ProjectContext, PROJECT_CONTEXT};
+    use swage_tool::context::MockToolContext;
 
     use super::*;
 
-    /// Run a tool operation with PROJECT_CONTEXT set to `memory_dir`.
+    /// Build a MockToolContext with the given directory as working_directory.
     ///
-    /// All tests use this helper so the task-local is in scope for the async
-    /// closure, exactly as it would be in a real turn execution.
-    async fn run_with_context(
-        memory_dir: PathBuf,
-        args: serde_json::Value,
-    ) -> ToolExecutionResult {
-        let ctx = ProjectContext {
-            project_id: Uuid::new_v4(),
-            project_slug: "test-project".to_string(),
-            memory_path: memory_dir,
-        };
-        PROJECT_CONTEXT
-            .scope(ctx, async move { MemoryTool.execute(args).await })
-            .await
+    /// The memory dir will be {dir}/.swage/memory — derived inside execute().
+    fn ctx_with_root(dir: &TempDir) -> MockToolContext {
+        MockToolContext {
+            agent_id: "test-agent".to_string(),
+            session_id: "test-session".to_string(),
+            working_directory: dir.path().to_path_buf(),
+            allowed_paths: vec![],
+            user_info: None,
+        }
+    }
+
+    /// Path where MemoryTool will look for files given ctx_with_root.
+    fn memory_dir(dir: &TempDir) -> PathBuf {
+        dir.path().join(".swage").join("memory")
+    }
+
+    /// Convenience: create the memory directory and write a file into it.
+    fn seed_file(dir: &TempDir, name: &str, content: &[u8]) {
+        let mdir = memory_dir(dir);
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join(name), content).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -428,85 +354,94 @@ mod tests {
     #[tokio::test]
     async fn write_creates_file_with_md_extension() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "write", "file": "notes", "content": "# My Notes\n\nHello!" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(
+                json!({ "operation": "write", "file": "notes", "content": "# My Notes\n\nHello!" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
 
-        assert!(!result.is_error, "write should succeed: {}", result.content);
-        assert!(result.content.contains("notes.md"), "confirmation should mention the file");
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("notes.md"), "confirmation should mention the file");
 
-        let written = std::fs::read_to_string(dir.path().join("notes.md")).unwrap();
+        let written = std::fs::read_to_string(memory_dir(&dir).join("notes.md")).unwrap();
         assert_eq!(written, "# My Notes\n\nHello!");
     }
 
     #[tokio::test]
     async fn write_overwrites_existing_file() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("notes.md"), b"old content").unwrap();
+        seed_file(&dir, "notes.md", b"old content");
 
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "write", "file": "notes", "content": "new content" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        MemoryTool
+            .execute(
+                json!({ "operation": "write", "file": "notes", "content": "new content" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
 
-        assert!(!result.is_error);
-        let written = std::fs::read_to_string(dir.path().join("notes.md")).unwrap();
+        let written = std::fs::read_to_string(memory_dir(&dir).join("notes.md")).unwrap();
         assert_eq!(written, "new content");
     }
 
     #[tokio::test]
     async fn write_creates_directory_if_missing() {
         let dir = TempDir::new().unwrap();
-        // Point to a subdirectory that doesn't exist yet.
-        let memory_dir = dir.path().join("memory");
-        assert!(!memory_dir.exists());
+        // The .swage/memory directory must not exist yet.
+        assert!(!memory_dir(&dir).exists());
 
-        let result = run_with_context(
-            memory_dir.clone(),
-            json!({ "operation": "write", "file": "context", "content": "data" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        MemoryTool
+            .execute(
+                json!({ "operation": "write", "file": "context", "content": "data" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
 
-        assert!(!result.is_error, "write should create the directory: {}", result.content);
-        assert!(memory_dir.join("context.md").exists());
+        assert!(memory_dir(&dir).join("context.md").exists());
     }
 
     #[tokio::test]
     async fn write_error_when_file_missing() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "write", "content": "data" }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("file"), "got: {}", result.content);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({ "operation": "write", "content": "data" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("file"), "got: {err}");
     }
 
     #[tokio::test]
     async fn write_error_when_content_missing() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "write", "file": "notes" }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("content"), "got: {}", result.content);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({ "operation": "write", "file": "notes" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("content"), "got: {err}");
     }
 
     #[tokio::test]
     async fn write_rejects_invalid_file_name() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "write", "file": "../evil", "content": "bad" }),
-        )
-        .await;
-        assert!(result.is_error);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(
+                json!({ "operation": "write", "file": "../evil", "content": "bad" }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -516,39 +451,38 @@ mod tests {
     #[tokio::test]
     async fn read_specific_file_returns_content() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("facts.md"), b"Important fact.").unwrap();
+        seed_file(&dir, "facts.md", b"Important fact.");
 
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "read", "file": "facts" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "read", "file": "facts" }), &ctx)
+            .await
+            .unwrap();
 
-        assert!(!result.is_error, "got: {}", result.content);
-        assert_eq!(result.content, "Important fact.");
+        assert_eq!(result["output"].as_str().unwrap(), "Important fact.");
     }
 
     #[tokio::test]
     async fn read_specific_file_not_found_returns_error() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "read", "file": "nonexistent" }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("nonexistent.md"), "got: {}", result.content);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({ "operation": "read", "file": "nonexistent" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(err.to_string().contains("nonexistent.md"), "got: {err}");
     }
 
     #[tokio::test]
     async fn read_rejects_invalid_file_name() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "read", "file": "foo/bar" }),
-        )
-        .await;
-        assert!(result.is_error);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({ "operation": "read", "file": "foo/bar" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -558,48 +492,49 @@ mod tests {
     #[tokio::test]
     async fn read_all_returns_all_md_files_with_headers() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("alpha.md"), b"A content").unwrap();
-        std::fs::write(dir.path().join("beta.md"), b"B content").unwrap();
+        seed_file(&dir, "alpha.md", b"A content");
+        seed_file(&dir, "beta.md", b"B content");
         // Non-.md file — should be ignored.
-        std::fs::write(dir.path().join("ignored.txt"), b"ignored").unwrap();
+        std::fs::write(memory_dir(&dir).join("ignored.txt"), b"ignored").unwrap();
 
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "read" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "read" }), &ctx)
+            .await
+            .unwrap();
 
-        assert!(!result.is_error, "got: {}", result.content);
-        assert!(result.content.contains("alpha.md"), "should include alpha filename");
-        assert!(result.content.contains("A content"), "should include alpha content");
-        assert!(result.content.contains("beta.md"), "should include beta filename");
-        assert!(result.content.contains("B content"), "should include beta content");
-        assert!(!result.content.contains("ignored"), "txt file should be skipped");
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("alpha.md"), "should include alpha filename");
+        assert!(output.contains("A content"), "should include alpha content");
+        assert!(output.contains("beta.md"), "should include beta filename");
+        assert!(output.contains("B content"), "should include beta content");
+        assert!(!output.contains("ignored"), "txt file should be skipped");
     }
 
     #[tokio::test]
     async fn read_all_empty_directory_returns_no_files_message() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "read" }),
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("No memory files"), "got: {}", result.content);
+        // Create the memory dir but leave it empty.
+        std::fs::create_dir_all(memory_dir(&dir)).unwrap();
+
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "read" }), &ctx)
+            .await
+            .unwrap();
+        assert!(result["output"].as_str().unwrap().contains("No memory files"));
     }
 
     #[tokio::test]
     async fn read_all_missing_directory_returns_friendly_message() {
         let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("nonexistent");
-        let result = run_with_context(
-            missing,
-            json!({ "operation": "read" }),
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("does not exist"), "got: {}", result.content);
+        // Don't create the memory dir — it shouldn't exist.
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "read" }), &ctx)
+            .await
+            .unwrap();
+        assert!(result["output"].as_str().unwrap().contains("does not exist"));
     }
 
     // -----------------------------------------------------------------------
@@ -609,60 +544,59 @@ mod tests {
     #[tokio::test]
     async fn list_returns_sorted_md_filenames() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("zebra.md"), b"z").unwrap();
-        std::fs::write(dir.path().join("alpha.md"), b"a").unwrap();
-        std::fs::write(dir.path().join("ignored.txt"), b"x").unwrap();
+        seed_file(&dir, "zebra.md", b"z");
+        seed_file(&dir, "alpha.md", b"a");
+        std::fs::write(memory_dir(&dir).join("ignored.txt"), b"x").unwrap();
 
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "list" }),
-        )
-        .await;
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "list" }), &ctx)
+            .await
+            .unwrap();
 
-        assert!(!result.is_error, "got: {}", result.content);
-        let lines: Vec<&str> = result.content.lines().collect();
+        let output = result["output"].as_str().unwrap();
+        let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines, ["alpha.md", "zebra.md"], "should be sorted, no txt");
     }
 
     #[tokio::test]
     async fn list_empty_directory_returns_no_files_message() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "list" }),
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("No memory files"), "got: {}", result.content);
+        std::fs::create_dir_all(memory_dir(&dir)).unwrap();
+
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "list" }), &ctx)
+            .await
+            .unwrap();
+        assert!(result["output"].as_str().unwrap().contains("No memory files"));
     }
 
     #[tokio::test]
     async fn list_missing_directory_returns_friendly_message() {
         let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("nonexistent");
-        let result = run_with_context(
-            missing,
-            json!({ "operation": "list" }),
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("does not exist"), "got: {}", result.content);
+        // Don't create the memory dir.
+        let ctx = ctx_with_root(&dir);
+        let result = MemoryTool
+            .execute(json!({ "operation": "list" }), &ctx)
+            .await
+            .unwrap();
+        assert!(result["output"].as_str().unwrap().contains("does not exist"));
     }
 
     // -----------------------------------------------------------------------
-    // no project context
+    // missing operation
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn execute_without_project_context_returns_error() {
-        // Call execute directly — no PROJECT_CONTEXT.scope(), so try_with fails.
-        let result = MemoryTool.execute(json!({ "operation": "list" })).await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("project context"),
-            "error should explain the requirement: {}",
-            result.content
-        );
+    async fn missing_operation_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -672,12 +606,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_operation_returns_error() {
         let dir = TempDir::new().unwrap();
-        let result = run_with_context(
-            dir.path().to_path_buf(),
-            json!({ "operation": "delete" }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("delete"), "got: {}", result.content);
+        let ctx = ctx_with_root(&dir);
+        let err = MemoryTool
+            .execute(json!({ "operation": "delete" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters { .. }));
+        assert!(err.to_string().contains("delete"), "got: {err}");
     }
 }
