@@ -106,6 +106,7 @@ impl ToolDispatcher for GatewayToolDispatcher {
         let storage = Arc::clone(&self.storage);
         let new_call = NewToolCall {
             turn_id: self.turn_id,
+            agent_id: "gateway".to_string(),
             call_id: call_id.clone(),
             tool: tool_name.to_string(),
             arguments: serde_json::to_string(&arguments).unwrap_or_default(),
@@ -223,8 +224,8 @@ mod tests {
     use uuid::Uuid;
 
     use swage_core::ToolError;
-    use swage_storage::model::{NewProject, NewSession, NewTurn, TurnState};
-    use swage_storage::store::{ProjectStore, SessionStore, Storage, ToolCallStore, TurnStore};
+    use swage_storage::model::{NewProject, NewSession, NewThread, NewTurn, TurnState};
+    use swage_storage::store::{ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore};
     use swage_storage::SqliteStorage;
     use swage_tool::context::ToolContext;
     use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
@@ -323,20 +324,32 @@ mod tests {
         events
     }
 
-    /// Set up an in-memory DB with a project, session, and turn so that
+    /// Set up an in-memory DB with a project, session, thread, and turn so that
     /// `create_tool_call` can satisfy foreign key constraints.
     async fn make_seeded_turn() -> (Arc<dyn Storage>, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject { name: "test".into(), slug: "test".into(), workspace_path: None })
-            .await
-            .unwrap();
+        let project = ProjectStore::create(
+            &storage,
+            NewProject { name: "test".into(), slug: "test".into(), workspace_path: None },
+        )
+        .await
+        .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id })
+            .create_session(NewSession { project_id: project.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
+        let thread = ThreadStore::create(
+            &storage,
+            NewThread { session_id: session.id, agent_id: "gateway".to_string() },
+        )
+        .await
+        .unwrap();
         let turn = storage
-            .create_turn(NewTurn { session_id: session.id, state: TurnState::InProgress })
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Processing,
+            })
             .await
             .unwrap();
         (Arc::new(storage) as Arc<dyn Storage>, turn.id)

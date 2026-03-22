@@ -4,8 +4,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    Message, NewMessage, NewProject, NewSession, NewToolCall, NewTurn, Project, Session, Turn,
-    ToolCallRecord, TurnState,
+    Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session,
+    Thread, ThreadState, Turn, ToolCallRecord, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,6 +46,8 @@ pub trait SessionStore: Send + Sync {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
     /// List sessions in the project ordered by updated_at DESC.
     async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError>;
+    /// List sessions belonging to an agent, ordered by updated_at DESC.
+    async fn list_sessions_by_agent_id(&self, agent_id: &str) -> Result<Vec<Session>, StorageError>;
     /// Delete a session. Returns true if it existed and was removed.
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
@@ -56,27 +58,53 @@ pub trait SessionStore: Send + Sync {
 pub trait TurnStore: Send + Sync {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
-    /// List turns for a session ordered by created_at ascending.
-    async fn list_turns_by_session(&self, session_id: Uuid) -> Result<Vec<Turn>, StorageError>;
-    /// Transition a turn to a new state. Validates via `can_transition_to`.
+    /// List all turns for a thread ordered by created_at ascending.
+    async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
+    /// Update a turn's state.
+    ///
+    /// State is consumer-driven — the storage layer records whatever state is
+    /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
-    /// Find all in-progress turns (used by startup recovery).
-    async fn find_in_progress_turns(&self) -> Result<Vec<Turn>, StorageError>;
+    /// Find all turns in Pending or Processing state for a given agent.
+    ///
+    /// Used by startup recovery to identify orphaned in-flight turns.
+    async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError>;
+    /// Persist the assistant's response text onto a completed turn.
+    async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError>;
+    /// Persist token counts after the LLM call completes.
+    async fn update_tokens(&self, id: Uuid, input: i64, output: i64) -> Result<(), StorageError>;
 }
 
+/// Store for message CRUD operations.
+///
+/// Messages belong to threads (not turns). `position` is monotonically
+/// increasing within a thread and is used to reconstruct conversation order.
 #[async_trait]
 pub trait MessageStore: Send + Sync {
+    /// Persist a new message. Returns the stored record with its assigned id.
     async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError>;
-    /// List all messages for a session, ordered by turn created_at then position.
-    async fn list_messages_by_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Vec<Message>, StorageError>;
-    async fn list_messages_by_turn(&self, turn_id: Uuid) -> Result<Vec<Message>, StorageError>;
-    async fn get_latest_message_for_session(
+
+    /// Fetch all messages in a thread ordered by position ascending.
+    async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError>;
+
+    /// Fetch the most recent message in a session, across all its threads.
+    ///
+    /// Used for conversation summaries. Returns `None` if the session has
+    /// no messages yet.
+    async fn get_latest_for_session(
         &self,
         session_id: Uuid,
     ) -> Result<Option<Message>, StorageError>;
+
+    /// Fetch a single message by id. Returns `None` if not found.
+    async fn get_message(&self, id: Uuid) -> Result<Option<Message>, StorageError>;
+
+    /// Delete all messages belonging to a thread.
+    ///
+    /// Called when the thread itself is deleted, as a complement to the
+    /// database's ON DELETE CASCADE (useful when callers need to know the
+    /// count of removed rows or trigger application-level cleanup).
+    async fn delete_by_thread(&self, thread_id: Uuid) -> Result<(), StorageError>;
 }
 
 #[async_trait]
@@ -86,6 +114,9 @@ pub trait ToolCallStore: Send + Sync {
         &self,
         tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError>;
+
+    /// Fetch a single tool call by id. Returns `None` if not found.
+    async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError>;
 
     /// Write the completed result back onto an in-progress tool call.
     ///
@@ -108,19 +139,52 @@ pub trait ToolCallStore: Send + Sync {
     ) -> Result<Vec<ToolCallRecord>, StorageError>;
 }
 
+/// Store for thread CRUD operations.
+///
+/// Threads scope a single agent's execution within a session. Each agent
+/// invocation gets its own thread; the thread's state machine tracks whether
+/// the agent is currently active.
+#[async_trait]
+pub trait ThreadStore: Send + Sync {
+    /// Persist a new thread. Returns the stored record with its assigned id.
+    async fn create(&self, thread: NewThread) -> Result<Thread, StorageError>;
+
+    /// Fetch a thread by id. Returns `None` if not found.
+    async fn get(&self, id: Uuid) -> Result<Option<Thread>, StorageError>;
+
+    /// List all threads for a session ordered by created_at ascending.
+    async fn list_by_session(&self, session_id: Uuid) -> Result<Vec<Thread>, StorageError>;
+
+    /// List all threads owned by an agent, ordered by created_at ascending.
+    async fn list_threads_by_agent_id(&self, agent_id: &str) -> Result<Vec<Thread>, StorageError>;
+
+    /// Transition a thread to a new state.
+    ///
+    /// Implementations must fetch the current state and reject invalid
+    /// transitions with `StorageError::ConstraintViolation`. Returns
+    /// `StorageError::NotFound` if `id` is unknown.
+    async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError>;
+
+    /// Delete a thread. Returns `true` if it existed and was removed.
+    async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
 
 /// Combined storage interface implemented by `SqliteStorage`.
+///
+/// `ProjectStore` is not included — it is independently available and consumers
+/// that need project operations import it separately.
 pub trait Storage:
-    ProjectStore + SessionStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
 {
 }
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: ProjectStore + SessionStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    T: SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
 {
 }
 
@@ -132,7 +196,6 @@ impl<T> Storage for T where
 mod tests {
     use super::*;
     use crate::model::{NewToolCall, ToolCallRecord};
-    use std::future::Future;
 
     /// Compile-time check: a type implementing all sub-traits satisfies Storage.
     ///
@@ -179,6 +242,9 @@ mod tests {
         async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
+        async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
+            unimplemented!()
+        }
         async fn delete_session(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
@@ -195,13 +261,19 @@ mod tests {
         async fn get_turn(&self, _: Uuid) -> Result<Option<Turn>, StorageError> {
             unimplemented!()
         }
-        async fn list_turns_by_session(&self, _: Uuid) -> Result<Vec<Turn>, StorageError> {
+        async fn list_turns_by_thread(&self, _thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
             unimplemented!()
         }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn find_in_progress_turns(&self) -> Result<Vec<Turn>, StorageError> {
+        async fn find_in_progress_by_agent(&self, _agent_id: &str) -> Result<Vec<Turn>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_response(&self, _id: Uuid, _response: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_tokens(&self, _id: Uuid, _input: i64, _output: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
     }
@@ -211,19 +283,38 @@ mod tests {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
             unimplemented!()
         }
-        async fn list_messages_by_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<Message>, StorageError> {
+        async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
             unimplemented!()
         }
-        async fn list_messages_by_turn(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
+        async fn get_latest_for_session(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
             unimplemented!()
         }
-        async fn get_latest_message_for_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<Message>, StorageError> {
+        async fn get_message(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_by_thread(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ThreadStore for StubStorage {
+        async fn create(&self, _: NewThread) -> Result<Thread, StorageError> {
+            unimplemented!()
+        }
+        async fn get(&self, _: Uuid) -> Result<Option<Thread>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_session(&self, _: Uuid) -> Result<Vec<Thread>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_threads_by_agent_id(&self, _: &str) -> Result<Vec<Thread>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_state(&self, _: Uuid, _: ThreadState) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -234,6 +325,12 @@ mod tests {
             &self,
             _: NewToolCall,
         ) -> Result<ToolCallRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn get_tool_call(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
         async fn update_tool_call_result(
@@ -256,6 +353,48 @@ mod tests {
         }
     }
 
+    // --- MessageStore: thread-ownership API compile checks ---
+
+    /// list_messages_by_thread exists on MessageStore and is callable via T: MessageStore.
+    #[test]
+    fn message_store_list_messages_by_thread_compile_check() {
+        fn _assert<T: MessageStore>(t: &T) {
+            let _ = t.list_messages_by_thread(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// get_message exists on MessageStore.
+    #[test]
+    fn message_store_get_message_compile_check() {
+        fn _assert<T: MessageStore>(t: &T) {
+            let _ = t.get_message(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// delete_by_thread exists on MessageStore.
+    #[test]
+    fn message_store_delete_by_thread_compile_check() {
+        fn _assert<T: MessageStore>(t: &T) {
+            let _ = t.delete_by_thread(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// get_latest_for_session (renamed from get_latest_message_for_session) exists.
+    #[test]
+    fn message_store_get_latest_for_session_compile_check() {
+        fn _assert<T: MessageStore>(t: &T) {
+            let _ = t.get_latest_for_session(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
     /// Verify that a type implementing all sub-traits satisfies the Storage supertrait.
     #[test]
     fn storage_supertrait_includes_tool_call_store() {
@@ -264,5 +403,36 @@ mod tests {
         fn _assert_is_storage<T: Storage>(_: &T) {}
         let stub = StubStorage;
         _assert_is_storage(&stub);
+    }
+
+    /// Compile-time check: StubStorage implements ThreadStore.
+    #[test]
+    fn thread_store_compile_check() {
+        fn _assert_is_thread_store<T: ThreadStore>(_: &T) {}
+        let stub = StubStorage;
+        _assert_is_thread_store(&stub);
+    }
+
+    /// Compile-time check: Storage implies ThreadStore.
+    ///
+    /// `update_state` is unique to `ThreadStore`. Calling it via a
+    /// `T: Storage` bound only compiles when Storage ⊇ ThreadStore.
+    #[test]
+    fn storage_supertrait_includes_thread_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.update_state(Uuid::new_v4(), ThreadState::Processing);
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: TurnStore has list_turns_by_thread and find_in_progress_by_agent.
+    #[test]
+    fn turn_store_new_methods_compile_check() {
+        fn _assert_turn_store<T: TurnStore>(_: &T) {}
+        let stub = StubStorage;
+        _assert_turn_store(&stub);
+        // The existence of the impl above is enough — if the new methods are missing
+        // from StubStorage, the trait impl won't compile.
     }
 }

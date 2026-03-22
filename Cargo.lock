@@ -2044,6 +2044,7 @@ dependencies = [
  "swage-core",
  "swage-provider",
  "swage-python",
+ "swage-safety",
  "swage-storage",
  "swage-tool",
  "tempfile",

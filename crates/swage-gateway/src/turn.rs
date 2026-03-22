@@ -22,31 +22,41 @@ use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
-/// 1. Guard: reject if a turn is already InProgress for this session.
-/// 2. Create a Turn record (state=InProgress) and register a CancellationToken.
-/// 3. Store the user message as position 0 in the new turn.
-/// 4. Build message history and send a streaming request to the provider.
-/// 5. For each chunk: forward Token events to the WebSocket, accumulate content.
-/// 6. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
-/// 7. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
-/// 8. On provider Error: mark the turn Failed, send an Error event.
-/// 9. Cleanup: remove the CancellationToken from active_turns.
+/// 1. Guard: reject if a turn is already Processing for this session's thread.
+/// 2. Look up the session's default thread (created alongside the session).
+/// 3. Create a Turn record (state=Pending), immediately advance to Processing.
+/// 4. Store the user message with thread_id and position.
+/// 5. Build message history from the thread and send a streaming request to the provider.
+/// 6. For each chunk: forward Token events to the WebSocket, accumulate content.
+/// 7. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
+/// 8. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
+/// 9. On provider Error: mark the turn Failed, send an Error event.
+/// 10. Cleanup: remove the CancellationToken from active_turns.
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
     content: String,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<(), GatewayError> {
-    // Step 1: Reject if a turn is already InProgress for this session.
-    let existing_turns = state.storage.list_turns_by_session(session_id).await?;
+    // Step 1: Resolve the session's thread. The gateway creates one thread per
+    // session in create_conversation / create_session_in_project.
+    let threads = state.storage.list_by_session(session_id).await?;
+    let thread = threads
+        .into_iter()
+        .next()
+        .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+    let thread_id = thread.id;
+
+    // Step 2: Guard — reject if a turn is already Processing for this thread.
+    let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
     if existing_turns
         .iter()
-        .any(|t| t.state == TurnState::InProgress)
+        .any(|t| t.state == TurnState::Processing)
     {
         return Err(GatewayError::TurnInProgress { session_id });
     }
 
-    // Resolve the project for this session so we can load per-project config
+    // Step 3: Resolve the project for this session so we can load per-project config
     // and build the ToolContext passed to each tool invocation.
     let session = state
         .storage
@@ -56,7 +66,7 @@ pub async fn process_turn(
     let project_id = session.project_id;
 
     let project = state
-        .storage
+        .project_store
         .get(project_id)
         .await?
         .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
@@ -71,9 +81,6 @@ pub async fn process_turn(
     };
 
     // Build the ToolContext passed to each tool invocation.
-    // The working_directory comes from the resolved workspace config — tools
-    // that operate on files (file_read, file_write, memory, shell) scope
-    // themselves to this root.
     let working_dir = crate::tool::workspace::resolve_workspace_root(&config);
     let tool_ctx = MockToolContext {
         agent_id: "gateway".to_string(),
@@ -83,14 +90,17 @@ pub async fn process_turn(
         user_info: None,
     };
 
-    // Step 2: Create the turn record and register a cancellation token.
+    // Step 4: Create the turn record (Pending), then advance to Processing.
     let turn = state
         .storage
         .create_turn(NewTurn {
-            session_id,
-            state: TurnState::InProgress,
+            thread_id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Pending,
         })
         .await?;
+
+    state.storage.update_turn_state(turn.id, TurnState::Processing).await?;
 
     let cancel_token = CancellationToken::new();
     {
@@ -98,10 +108,11 @@ pub async fn process_turn(
         turns.insert(session_id, cancel_token.clone());
     }
 
-    // Step 3: Store the user message (position 0 in this turn).
-    let user_message_count = state
+    // Step 5: Store the user message.
+    // Position is the current count of messages in the thread.
+    let user_position = state
         .storage
-        .list_messages_by_turn(turn.id)
+        .list_messages_by_thread(thread_id)
         .await
         .map(|msgs| msgs.len() as i32)
         .unwrap_or(0);
@@ -109,15 +120,16 @@ pub async fn process_turn(
     state
         .storage
         .create_message(NewMessage {
-            turn_id: turn.id,
+            thread_id,
             role: Role::User.to_string(),
             content: content.clone(),
-            position: user_message_count,
+            position: user_position,
+            agent_id: "gateway".to_string(),
         })
         .await?;
 
-    // Step 4: Build message history for the provider request.
-    let history = state.storage.list_messages_by_session(session_id).await?;
+    // Step 6: Build message history for the provider request from the full thread.
+    let history = state.storage.list_messages_by_thread(thread_id).await?;
     let messages: Vec<ChatMessage> = history
         .into_iter()
         .map(|m| {
@@ -130,11 +142,7 @@ pub async fn process_turn(
         })
         .collect();
 
-    // Step 5: Build the completion request with system instructions and model.
-    //
-    // The system prompt is prepended as a system message so all providers
-    // can extract it in their preferred format (Anthropic separates it,
-    // OpenAI keeps it inline, Google uses system_instruction).
+    // Step 7: Build the completion request with system instructions and model.
     let mut request_messages = Vec::with_capacity(messages.len() + 1);
     if !config.instructions.is_empty() {
         request_messages.push(ChatMessage::new(Role::System, &config.instructions));
@@ -150,27 +158,18 @@ pub async fn process_turn(
         metadata: None,
     };
 
-    // Step 6-8: Tool-aware streaming loop.
-    //
-    // Each iteration streams one provider response. If the response contains
-    // ToolUse chunks, we execute each tool, build result messages, append them
-    // to the request, and loop again. The loop exits when a response produces
-    // no tool calls (text-only finish) or on cancellation/error.
+    // Step 8-10: Tool-aware streaming loop.
     let mut accumulated = String::new();
     let mut stored_usage = None;
-    // Running position counter for tool calls within this turn.
     let mut tool_position: i32 = 0;
 
     let outcome = 'outer: loop {
         let mut stream = state.provider.stream(request.clone());
-        // Text and tool calls collected in this streaming round.
         let mut round_text = String::new();
         let mut round_tool_calls: Vec<ToolCall> = Vec::new();
 
-        // Stream one provider response.
         let _round_outcome = loop {
             tokio::select! {
-                // Cancellation takes priority.
                 _ = cancel_token.cancelled() => {
                     break 'outer TurnOutcome::Cancelled;
                 }
@@ -201,23 +200,17 @@ pub async fn process_turn(
             }
         };
 
-        // If no tool calls in this round, we're done.
         if round_tool_calls.is_empty() {
             break 'outer TurnOutcome::Done;
         }
 
-        // Execute each tool call and collect results.
         let mut tool_results: Vec<ToolResult> = Vec::new();
 
         for call in &round_tool_calls {
-            // Check cancellation between tool executions.
             if cancel_token.is_cancelled() {
                 break 'outer TurnOutcome::Cancelled;
             }
 
-            // Send ToolStart event to the WebSocket.
-            // Native tool calls (dispatched directly by the model) have no parent.
-            // Sub-tool calls from python_execute pass Some(parent_id) here.
             let _ = ws_tx.send(ServerEvent::ToolStart {
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
@@ -225,9 +218,9 @@ pub async fn process_turn(
                 parent_call_id: None,
             });
 
-            // Store the tool call record (no result yet).
             let _ = state.storage.create_tool_call(NewToolCall {
                 turn_id: turn.id,
+                agent_id: "gateway".to_string(),
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
                 arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
@@ -241,12 +234,6 @@ pub async fn process_turn(
             }).await;
             tool_position += 1;
 
-            // Dispatch the tool call through the full pipeline:
-            // permission → rate limit → schema validation → execute → leak detection.
-            //
-            // For python_execute, PYTHON_CONTEXT is set in scope so that
-            // GatewayToolDispatcher gets the correct turn/WebSocket context for
-            // sub-tool event emission. All other tools dispatch without the scope.
             let start = Instant::now();
             let dispatch_result = if call.name == "python_execute" {
                 let py_ctx = PythonExecuteContext {
@@ -283,7 +270,6 @@ pub async fn process_turn(
 
             let status = if is_error { "error" } else { "success" };
 
-            // Send ToolEnd event.
             let _ = ws_tx.send(ServerEvent::ToolEnd {
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
@@ -295,7 +281,6 @@ pub async fn process_turn(
                 parent_call_id: None,
             });
 
-            // Update the tool call record with the result.
             let _ = state.storage.update_tool_call_result(
                 &call.call_id,
                 turn.id,
@@ -313,33 +298,27 @@ pub async fn process_turn(
             });
         }
 
-        // Build tool_result messages and append to the conversation.
         let tool_messages = build_tool_round_messages(
             &round_tool_calls,
             &tool_results,
             &round_text,
         );
 
-        // Extend the request's message history with the tool round.
-        // The system message and model carry forward from the original request.
         let mut updated_messages = request.messages.clone();
         updated_messages.extend(tool_messages);
         request = CompletionRequest {
             messages: updated_messages,
             ..request.clone()
         };
-
-        // Reset round_text for the next iteration (accumulated carries forward).
-        // The outer loop continues to stream the next response.
     };
 
-    // Step 9: Finalise based on outcome, then clean up.
+    // Step 11: Finalise based on outcome, then clean up.
     match outcome {
         TurnOutcome::Done => {
-            // Store the assistant's message.
+            // Position = current message count in thread.
             let position = state
                 .storage
-                .list_messages_by_turn(turn.id)
+                .list_messages_by_thread(thread_id)
                 .await
                 .map(|msgs| msgs.len() as i32)
                 .unwrap_or(1);
@@ -347,14 +326,14 @@ pub async fn process_turn(
             state
                 .storage
                 .create_message(NewMessage {
-                    turn_id: turn.id,
+                    thread_id,
                     role: Role::Assistant.to_string(),
                     content: accumulated,
                     position,
+                    agent_id: "gateway".to_string(),
                 })
                 .await?;
 
-            // Log usage if provided (non-fatal if storage isn't ready for it yet).
             let _ = stored_usage;
 
             state
@@ -368,11 +347,10 @@ pub async fn process_turn(
         }
 
         TurnOutcome::Cancelled => {
-            // Store whatever accumulated before cancellation (may be empty).
             if !accumulated.is_empty() {
                 let position = state
                     .storage
-                    .list_messages_by_turn(turn.id)
+                    .list_messages_by_thread(thread_id)
                     .await
                     .map(|msgs| msgs.len() as i32)
                     .unwrap_or(1);
@@ -380,10 +358,11 @@ pub async fn process_turn(
                 state
                     .storage
                     .create_message(NewMessage {
-                        turn_id: turn.id,
+                        thread_id,
                         role: Role::Assistant.to_string(),
                         content: accumulated,
                         position,
+                        agent_id: "gateway".to_string(),
                     })
                     .await?;
             }
@@ -474,10 +453,10 @@ pub(crate) mod tests {
     use swage_core::StorageError;
     use swage_storage::{
         model::{
-            Message, NewMessage, NewProject, NewSession, NewToolCall, NewTurn, Project, Session,
-            ToolCallRecord, Turn, TurnState,
+            Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project,
+            Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
         },
-        store::{MessageStore, ProjectStore, SessionStore, ToolCallStore, TurnStore},
+        store::{MessageStore, ProjectStore, SessionStore, ThreadStore, ToolCallStore, TurnStore},
     };
 
     use super::*;
@@ -485,9 +464,6 @@ pub(crate) mod tests {
 
     // -----------------------------------------------------------------------
     // Mock LLM providers
-    //
-    // Uses `std::sync::Mutex` (not tokio) because `stream` is a sync
-    // function — we cannot `.await` inside it to take a tokio lock.
     // -----------------------------------------------------------------------
 
     /// A mock provider that streams a fixed sequence of chunks.
@@ -523,7 +499,6 @@ pub(crate) mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-            // Drain the chunk list so each provider call gets its own sequence.
             let chunks = {
                 let mut lock = self.chunks.lock().expect("mock lock poisoned");
                 std::mem::take(&mut *lock)
@@ -533,10 +508,6 @@ pub(crate) mod tests {
     }
 
     /// A mock provider supporting multiple streaming rounds.
-    ///
-    /// Each call to `stream` pops the next batch of chunks from the front of
-    /// the queue.  Used in tool execution tests where the model calls a tool
-    /// and then produces a final response.
     pub(crate) struct MultiRoundMockProvider {
         rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
     }
@@ -579,36 +550,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A simple tool that echoes its "text" argument, prefixed with "Echo: ".
-    /// Used in tool execution loop tests.
-    struct EchoTool;
-
-    #[async_trait]
-    impl crate::tool::Tool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "Echoes text back" }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "text": { "type": "string" } },
-                "required": ["text"]
-            })
-        }
-        async fn execute(
-            &self,
-            arguments: serde_json::Value,
-            _ctx: &dyn swage_tool::context::ToolContext,
-        ) -> Result<serde_json::Value, swage_core::ToolError> {
-            let text = arguments["text"].as_str().unwrap_or("").to_string();
-            Ok(serde_json::json!({"output": format!("Echo: {text}")}))
-        }
-    }
-
     /// A mock provider whose stream blocks forever.
-    ///
-    /// Used in cancellation tests: the turn task blocks on the pending stream,
-    /// giving the test time to call `cancel_turn` without racing against stream
-    /// completion.
     pub(crate) struct PendingProvider;
 
     #[async_trait]
@@ -631,8 +573,6 @@ pub(crate) mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-            // Never produces any chunks — the tokio::select! in process_turn will
-            // block on this, allowing the cancellation token to fire.
             Box::pin(futures::stream::pending())
         }
     }
@@ -650,6 +590,7 @@ pub(crate) mod tests {
     pub(crate) struct InMemoryDb {
         pub(crate) projects: HashMap<Uuid, Project>,
         pub(crate) sessions: HashMap<Uuid, Session>,
+        pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
         pub(crate) messages: Vec<Message>,
         pub(crate) tool_calls: Vec<ToolCallRecord>,
@@ -697,7 +638,7 @@ pub(crate) mod tests {
             if let Some(p) = self.get_by_name("default").await? {
                 return Ok(p);
             }
-            self.create(NewProject {
+            ProjectStore::create(self, NewProject {
                 name: "default".to_string(),
                 slug: "default".to_string(),
                 workspace_path: None,
@@ -761,6 +702,7 @@ pub(crate) mod tests {
             let s = Session {
                 id: Uuid::new_v4(),
                 project_id: session.project_id,
+                agent_id: session.agent_id,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -787,6 +729,18 @@ pub(crate) mod tests {
                 .collect())
         }
 
+        async fn list_sessions_by_agent_id(&self, agent_id: &str) -> Result<Vec<Session>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .sessions
+                .values()
+                .filter(|s| s.agent_id == agent_id)
+                .cloned()
+                .collect())
+        }
+
         async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError> {
             Ok(self.db.lock().await.sessions.remove(&id).is_some())
         }
@@ -800,12 +754,87 @@ pub(crate) mod tests {
     }
 
     #[async_trait]
+    impl ThreadStore for MockStorage {
+        async fn create(&self, thread: NewThread) -> Result<Thread, StorageError> {
+            let t = Thread {
+                id: Uuid::new_v4(),
+                session_id: thread.session_id,
+                agent_id: thread.agent_id,
+                state: ThreadState::Idle,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.threads.insert(t.id, t.clone());
+            Ok(t)
+        }
+
+        async fn get(&self, id: Uuid) -> Result<Option<Thread>, StorageError> {
+            Ok(self.db.lock().await.threads.get(&id).cloned())
+        }
+
+        async fn list_by_session(&self, session_id: Uuid) -> Result<Vec<Thread>, StorageError> {
+            let mut threads: Vec<Thread> = self
+                .db
+                .lock()
+                .await
+                .threads
+                .values()
+                .filter(|t| t.session_id == session_id)
+                .cloned()
+                .collect();
+            threads.sort_by_key(|t| t.created_at);
+            Ok(threads)
+        }
+
+        async fn list_threads_by_agent_id(&self, agent_id: &str) -> Result<Vec<Thread>, StorageError> {
+            let mut threads: Vec<Thread> = self
+                .db
+                .lock()
+                .await
+                .threads
+                .values()
+                .filter(|t| t.agent_id == agent_id)
+                .cloned()
+                .collect();
+            threads.sort_by_key(|t| t.created_at);
+            Ok(threads)
+        }
+
+        async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError> {
+            let mut db = self.db.lock().await;
+            match db.threads.get_mut(&id) {
+                None => Err(StorageError::NotFound { entity: "Thread".into(), id: id.to_string() }),
+                Some(t) => {
+                    if !t.state.can_transition_to(&state) {
+                        return Err(StorageError::ConstraintViolation(format!(
+                            "invalid thread state transition: {:?} → {:?}",
+                            t.state, state
+                        )));
+                    }
+                    t.state = state;
+                    t.updated_at = chrono::Utc::now();
+                    Ok(())
+                }
+            }
+        }
+
+        async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self.db.lock().await.threads.remove(&id).is_some())
+        }
+    }
+
+    #[async_trait]
     impl TurnStore for MockStorage {
         async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
             let t = Turn {
                 id: Uuid::new_v4(),
-                session_id: turn.session_id,
+                thread_id: turn.thread_id,
+                agent_id: turn.agent_id,
                 state: turn.state,
+                user_input: None,
+                assistant_response: None,
+                input_tokens: None,
+                output_tokens: None,
                 created_at: chrono::Utc::now(),
                 completed_at: None,
             };
@@ -817,19 +846,21 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.turns.get(&id).cloned())
         }
 
-        async fn list_turns_by_session(
+        async fn list_turns_by_thread(
             &self,
-            session_id: Uuid,
+            thread_id: Uuid,
         ) -> Result<Vec<Turn>, StorageError> {
-            Ok(self
+            let mut turns: Vec<Turn> = self
                 .db
                 .lock()
                 .await
                 .turns
                 .values()
-                .filter(|t| t.session_id == session_id)
+                .filter(|t| t.thread_id == thread_id)
                 .cloned()
-                .collect())
+                .collect();
+            turns.sort_by_key(|t| t.created_at);
+            Ok(turns)
         }
 
         async fn update_turn_state(
@@ -837,22 +868,52 @@ pub(crate) mod tests {
             id: Uuid,
             state: TurnState,
         ) -> Result<(), StorageError> {
-            if let Some(turn) = self.db.lock().await.turns.get_mut(&id) {
+            let mut db = self.db.lock().await;
+            if let Some(turn) = db.turns.get_mut(&id) {
+                if matches!(state, TurnState::Completed | TurnState::Failed | TurnState::Interrupted) {
+                    turn.completed_at = Some(chrono::Utc::now());
+                }
                 turn.state = state;
             }
             Ok(())
         }
 
-        async fn find_in_progress_turns(&self) -> Result<Vec<Turn>, StorageError> {
+        async fn find_in_progress_by_agent(
+            &self,
+            agent_id: &str,
+        ) -> Result<Vec<Turn>, StorageError> {
             Ok(self
                 .db
                 .lock()
                 .await
                 .turns
                 .values()
-                .filter(|t| t.state == TurnState::InProgress)
+                .filter(|t| {
+                    t.agent_id == agent_id
+                        && matches!(t.state, TurnState::Pending | TurnState::Processing)
+                })
                 .cloned()
                 .collect())
+        }
+
+        async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError> {
+            if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+                t.assistant_response = Some(response.to_string());
+            }
+            Ok(())
+        }
+
+        async fn update_tokens(
+            &self,
+            id: Uuid,
+            input: i64,
+            output: i64,
+        ) -> Result<(), StorageError> {
+            if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+                t.input_tokens = Some(input);
+                t.output_tokens = Some(output);
+            }
+            Ok(())
         }
     }
 
@@ -861,69 +922,62 @@ pub(crate) mod tests {
         async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError> {
             let m = Message {
                 id: Uuid::new_v4(),
-                turn_id: message.turn_id,
+                thread_id: message.thread_id,
                 role: message.role,
                 content: message.content,
                 position: message.position,
+                agent_id: message.agent_id,
+                tool_call_id: None,
+                tool_name: None,
                 created_at: chrono::Utc::now(),
             };
             self.db.lock().await.messages.push(m.clone());
             Ok(m)
         }
 
-        async fn list_messages_by_session(
+        async fn list_messages_by_thread(
             &self,
-            session_id: Uuid,
+            thread_id: Uuid,
         ) -> Result<Vec<Message>, StorageError> {
             let db = self.db.lock().await;
-            let turn_ids: std::collections::HashSet<Uuid> = db
-                .turns
-                .values()
-                .filter(|t| t.session_id == session_id)
-                .map(|t| t.id)
-                .collect();
             let mut msgs: Vec<Message> = db
                 .messages
                 .iter()
-                .filter(|m| turn_ids.contains(&m.turn_id))
+                .filter(|m| m.thread_id == thread_id)
                 .cloned()
                 .collect();
             msgs.sort_by_key(|m| m.position);
             Ok(msgs)
         }
 
-        async fn list_messages_by_turn(
-            &self,
-            turn_id: Uuid,
-        ) -> Result<Vec<Message>, StorageError> {
-            let db = self.db.lock().await;
-            let mut msgs: Vec<Message> = db
-                .messages
-                .iter()
-                .filter(|m| m.turn_id == turn_id)
-                .cloned()
-                .collect();
-            msgs.sort_by_key(|m| m.position);
-            Ok(msgs)
-        }
-
-        async fn get_latest_message_for_session(
+        async fn get_latest_for_session(
             &self,
             session_id: Uuid,
         ) -> Result<Option<Message>, StorageError> {
             let db = self.db.lock().await;
-            let turn_ids: std::collections::HashSet<Uuid> = db
-                .turns
+            // Collect thread_ids belonging to this session.
+            let thread_ids: std::collections::HashSet<Uuid> = db
+                .threads
                 .values()
                 .filter(|t| t.session_id == session_id)
                 .map(|t| t.id)
                 .collect();
+            // Return the message with the highest position across all threads.
             Ok(db
                 .messages
                 .iter()
-                .filter(|m| turn_ids.contains(&m.turn_id))
-                .max_by_key(|m| m.position)
+                .filter(|m| thread_ids.contains(&m.thread_id))
+                .max_by_key(|m| (m.created_at, m.position))
                 .cloned())
+        }
+
+        async fn get_message(&self, id: Uuid) -> Result<Option<Message>, StorageError> {
+            Ok(self.db.lock().await.messages.iter().find(|m| m.id == id).cloned())
+        }
+
+        async fn delete_by_thread(&self, thread_id: Uuid) -> Result<(), StorageError> {
+            self.db.lock().await.messages.retain(|m| m.thread_id != thread_id);
+            Ok(())
         }
     }
 
@@ -936,6 +990,7 @@ pub(crate) mod tests {
             let record = ToolCallRecord {
                 id: Uuid::new_v4(),
                 turn_id: tool_call.turn_id,
+                agent_id: tool_call.agent_id,
                 call_id: tool_call.call_id,
                 tool: tool_call.tool,
                 arguments: tool_call.arguments,
@@ -950,6 +1005,14 @@ pub(crate) mod tests {
             };
             self.db.lock().await.tool_calls.push(record.clone());
             Ok(record)
+        }
+
+        async fn get_tool_call(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<ToolCallRecord>, StorageError> {
+            let db = self.db.lock().await;
+            Ok(db.tool_calls.iter().find(|tc| tc.id == id).cloned())
         }
 
         async fn update_tool_call_result(
@@ -997,31 +1060,43 @@ pub(crate) mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
-    /// Build an AppState with a pre-populated session for testing.
+    /// Build an AppState with a pre-populated session and its default thread.
+    ///
+    /// Returns the state and the session_id. The thread is created automatically
+    /// so that `process_turn` can look it up via `list_by_session`.
     pub(crate) async fn make_state_with_session(
         provider_chunks: Vec<StreamChunk>,
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
-        let session_id = Uuid::new_v4();
 
-        // Pre-populate with a session so update_activity doesn't fail.
+        // Create the default project via ProjectStore.
         let project = storage
             .get_or_create_default()
             .await
             .expect("create default project");
-        storage.db.lock().await.sessions.insert(
-            session_id,
-            Session {
-                id: session_id,
+
+        // Create a session.
+        let session = storage
+            .create_session(NewSession {
                 project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        // Create the default thread for this session.
+        ThreadStore::create(&*storage, NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("create default thread");
 
         let provider = Arc::new(MockProvider::new(provider_chunks));
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1050,7 +1125,6 @@ pub(crate) mod tests {
             .await
             .expect("turn should complete without error");
 
-        // Collect events — expect 3 tokens then TurnComplete.
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
         let token_contents: Vec<String> = events
@@ -1069,12 +1143,11 @@ pub(crate) mod tests {
             .iter()
             .any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
 
-        // Verify messages were stored in the DB.
-        let messages = state
-            .storage
-            .list_messages_by_session(session_id)
-            .await
-            .unwrap();
+        // Get thread_id and verify messages stored in the DB.
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
+        let messages = state.storage.list_messages_by_thread(thread_id).await.unwrap();
         assert_eq!(messages.len(), 2, "user message + assistant message");
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "Hi");
@@ -1082,38 +1155,39 @@ pub(crate) mod tests {
         assert_eq!(messages[1].content, "Hello, world!");
 
         // Verify the turn was marked Completed.
-        let turns = state
-            .storage
-            .list_turns_by_session(session_id)
-            .await
-            .unwrap();
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].state, TurnState::Completed);
     }
 
     #[tokio::test]
     async fn cancelled_turn_stores_partial_and_marks_interrupted() {
-        // Use PendingProvider so the stream never resolves on its own.
-        // This guarantees the turn is still active when we call cancel_turn.
         let storage = Arc::new(MockStorage::new());
-        let session_id = Uuid::new_v4();
 
         let project = storage
             .get_or_create_default()
             .await
             .expect("create default project");
-        storage.db.lock().await.sessions.insert(
-            session_id,
-            Session {
-                id: session_id,
+
+        let session = storage
+            .create_session(NewSession {
                 project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(&*storage, NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("create default thread");
 
         let state = Arc::new(AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1123,15 +1197,11 @@ pub(crate) mod tests {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        // Spawn the turn in a background task.
         let state_clone = Arc::clone(&state);
         let handle = tokio::spawn(async move {
             process_turn(&*state_clone, session_id, "Hi".to_string(), tx).await
         });
 
-        // Wait until the cancellation token is registered in active_turns.
-        // With a pending stream, the turn task will hit the select! loop and yield.
-        // Polling active_turns is more reliable than a fixed sleep.
         for _ in 0..50 {
             tokio::task::yield_now().await;
             if state.active_turns.lock().await.contains_key(&session_id) {
@@ -1139,7 +1209,6 @@ pub(crate) mod tests {
             }
         }
 
-        // Token must now be registered.
         assert!(
             state.active_turns.lock().await.contains_key(&session_id),
             "turn should be active before cancel"
@@ -1151,7 +1220,6 @@ pub(crate) mod tests {
 
         handle.await.expect("task should not panic").expect("process_turn ok");
 
-        // Verify Cancelled event was sent.
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
             events.iter().any(|e| matches!(e, ServerEvent::Cancelled {})),
@@ -1159,11 +1227,9 @@ pub(crate) mod tests {
         );
 
         // Verify turn is Interrupted in storage.
-        let turns = state
-            .storage
-            .list_turns_by_session(session_id)
-            .await
-            .unwrap();
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         assert_eq!(turns[0].state, TurnState::Interrupted);
     }
 
@@ -1185,27 +1251,33 @@ pub(crate) mod tests {
             ServerEvent::Error { code, .. } if code == "provider_error"
         )));
 
-        let turns = state
-            .storage
-            .list_turns_by_session(session_id)
-            .await
-            .unwrap();
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         assert_eq!(turns[0].state, TurnState::Failed);
     }
 
     #[tokio::test]
     async fn concurrent_turn_rejected_with_turn_in_progress() {
-        // We create a turn manually in InProgress state to simulate an active turn,
-        // then attempt to start another one for the same session.
+        // Manually create a Processing turn to simulate an active turn.
         let (state, session_id) = make_state_with_session(vec![]).await;
 
-        // Manually insert an InProgress turn to simulate an active turn.
-        state
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
+        // Create a turn and advance it to Processing.
+        let turn = state
             .storage
             .create_turn(NewTurn {
-                session_id,
-                state: TurnState::InProgress,
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
             })
+            .await
+            .unwrap();
+        state
+            .storage
+            .update_turn_state(turn.id, TurnState::Processing)
             .await
             .unwrap();
 
@@ -1219,10 +1291,9 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Mock tool for the execution loop (returns text directly without prefix)
+    // Mock tool for the execution loop
     // -----------------------------------------------------------------------
 
-    /// A tool that echoes its "text" argument back — predictable output for tests.
     struct EchoMockTool;
 
     #[async_trait::async_trait]
@@ -1246,33 +1317,38 @@ pub(crate) mod tests {
         }
     }
 
-    /// Build an AppState with a multi-round provider and a ToolRegistry
-    /// containing the EchoMockTool.
+    /// Build an AppState with a multi-round provider and an EchoMockTool.
     async fn make_state_with_tools(
         rounds: Vec<Vec<StreamChunk>>,
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
-        let session_id = Uuid::new_v4();
 
         let project = storage
             .get_or_create_default()
             .await
             .expect("create default project");
 
-        storage.db.lock().await.sessions.insert(
-            session_id,
-            Session {
-                id: session_id,
+        let session = storage
+            .create_session(NewSession {
                 project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(&*storage, NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("create default thread");
 
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
 
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1290,8 +1366,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn tool_call_sends_tool_start_and_tool_end_events() {
-        // Round 1: model calls the echo tool.
-        // Round 2: model produces final text.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "call_1".into(),
@@ -1314,7 +1388,6 @@ pub(crate) mod tests {
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        // ToolStart must be emitted with the right tool name.
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1324,7 +1397,6 @@ pub(crate) mod tests {
             "expected ToolStart event, got: {events:?}"
         );
 
-        // ToolEnd must follow.
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1334,7 +1406,6 @@ pub(crate) mod tests {
             "expected ToolEnd event, got: {events:?}"
         );
 
-        // Final text should also appear.
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1343,7 +1414,6 @@ pub(crate) mod tests {
             "expected token with 'hello', got: {events:?}"
         );
 
-        // Turn should complete.
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
     }
 
@@ -1369,8 +1439,9 @@ pub(crate) mod tests {
             .await
             .expect("turn should complete");
 
-        // Check the tool call was persisted in storage.
-        let turns = state.storage.list_turns_by_session(session_id).await.unwrap();
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
         assert_eq!(tool_calls.len(), 1, "expected 1 tool call record");
         assert_eq!(tool_calls[0].call_id, "call_store");
@@ -1381,7 +1452,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn unknown_tool_returns_error_to_model() {
-        // Model calls a tool that doesn't exist in the registry.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "call_unknown".into(),
@@ -1404,7 +1474,6 @@ pub(crate) mod tests {
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        // ToolEnd should have an error status.
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1413,15 +1482,11 @@ pub(crate) mod tests {
             "expected ToolEnd with error status, got: {events:?}"
         );
 
-        // Turn should still complete — the model gets the error and can respond.
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
     }
 
     #[tokio::test]
     async fn multi_round_tool_calling() {
-        // Round 1: model calls echo twice.
-        // Round 2: model calls echo once more.
-        // Round 3: model produces final text.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "c1".into(),
@@ -1458,18 +1523,17 @@ pub(crate) mod tests {
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        // Should have 3 ToolStart/ToolEnd pairs.
         let tool_starts: Vec<_> = events.iter().filter(|e| matches!(e, ServerEvent::ToolStart { .. })).collect();
         let tool_ends: Vec<_> = events.iter().filter(|e| matches!(e, ServerEvent::ToolEnd { .. })).collect();
         assert_eq!(tool_starts.len(), 3, "expected 3 ToolStart events");
         assert_eq!(tool_ends.len(), 3, "expected 3 ToolEnd events");
 
-        // All 3 tool calls should be stored.
-        let turns = state.storage.list_turns_by_session(session_id).await.unwrap();
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
         assert_eq!(tool_calls.len(), 3, "expected 3 tool call records");
 
-        // Final text and TurnComplete.
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
     }
 
@@ -1477,10 +1541,6 @@ pub(crate) mod tests {
     // Project context and config resolution tests
     // -----------------------------------------------------------------------
 
-    /// A provider that captures the CompletionRequest passed to `stream`.
-    ///
-    /// Used to assert that `process_turn` uses the correct model and system
-    /// prompt derived from per-project config resolution.
     struct CapturingProvider {
         captured: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
         chunks: Vec<StreamChunk>,
@@ -1518,9 +1578,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A tool that captures the working_directory from the ToolContext during execution.
-    ///
-    /// The captured path is stored in `captured` for assertion after the turn completes.
     struct ContextCaptureTool {
         captured: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
@@ -1543,27 +1600,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// Create a storage with a session + thread and return (storage, session_id).
+    async fn make_storage_with_session() -> (Arc<MockStorage>, Uuid) {
+        let storage = Arc::new(MockStorage::new());
+        let project = storage.get_or_create_default().await.expect("project");
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("session");
+        let session_id = session.id;
+        ThreadStore::create(&*storage, NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("thread");
+        (storage, session_id)
+    }
+
     #[tokio::test]
     async fn process_turn_passes_tool_context_to_tools() {
-        // Create a tool that captures the working_directory from the ToolContext.
         let captured = Arc::new(std::sync::Mutex::new(None));
         let capture_tool = Arc::new(ContextCaptureTool { captured: Arc::clone(&captured) });
 
-        let storage = Arc::new(MockStorage::new());
-        let project = storage.get_or_create_default().await.expect("default project");
-        let session_id = Uuid::new_v4();
-        storage.db.lock().await.sessions.insert(
-            session_id,
-            Session {
-                id: session_id,
-                project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+        let (storage, session_id) = make_storage_with_session().await;
 
-        // Round 1: model calls capture_context.
-        // Round 2: model produces final text.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "cc_1".into(),
@@ -1577,7 +1641,8 @@ pub(crate) mod tests {
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1590,7 +1655,6 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(&state, session_id, "capture".into(), tx).await.expect("turn ok");
 
-        // The tool should have received a ToolContext with a non-empty working_directory.
         let working_dir = captured
             .lock()
             .unwrap()
@@ -1602,10 +1666,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn process_turn_resolves_config_per_project_and_completes_turn() {
-        // Verify that per-project config resolution does not break the turn
-        // lifecycle. The resolved config may come from the global ~/.swage/
-        // hierarchy or fall back to state.config — either way the turn should
-        // complete and the request must have a non-empty model string.
         let chunks = vec![
             StreamChunk::Delta { content: "Hello".into() },
             StreamChunk::Done { finish_reason: None },
@@ -1613,30 +1673,31 @@ pub(crate) mod tests {
         let (provider, captured_request) = CapturingProvider::new(chunks);
 
         let storage = Arc::new(MockStorage::new());
-        // Create a project with a slug that has no project-level config.toml —
-        // config resolution will use only the global level (or fall back to
-        // state.config when the root can't be resolved).
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "Test Config Project".to_string(),
-                slug: "test-config-resolution-no-project-toml".to_string(),
-                workspace_path: None,
+        let project = ProjectStore::create(&*storage, swage_storage::model::NewProject {
+            name: "Test Config Project".to_string(),
+            slug: "test-config-resolution-no-project-toml".to_string(),
+            workspace_path: None,
+        })
+        .await
+        .expect("create test project");
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
             })
             .await
-            .expect("create test project");
-        let session_id = Uuid::new_v4();
-        storage.db.lock().await.sessions.insert(
+            .expect("session");
+        let session_id = session.id;
+        ThreadStore::create(&*storage, NewThread {
             session_id,
-            Session {
-                id: session_id,
-                project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("thread");
 
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1647,8 +1708,6 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(&state, session_id, "hi".into(), tx).await.expect("turn ok");
 
-        // The request must have been issued with a non-empty model — whether from
-        // the global config hierarchy or the state.config fallback.
         let req = captured_request.lock().unwrap().take().expect("request captured");
         let model = req.model.as_deref().unwrap_or("");
         assert!(!model.is_empty(), "model must be non-empty regardless of config source");
@@ -1656,7 +1715,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn text_only_turn_still_works_with_tool_registry() {
-        // Verify that the tool-aware loop doesn't break text-only responses.
         let (state, session_id) = make_state_with_tools(vec![vec![
             StreamChunk::Delta { content: "Just text".into() },
             StreamChunk::Done { finish_reason: None },
@@ -1671,7 +1729,6 @@ pub(crate) mod tests {
         assert!(events.iter().any(|e| matches!(e, ServerEvent::Token { content } if content == "Just text")));
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
 
-        // No tool events.
         assert!(!events.iter().any(|e| matches!(e, ServerEvent::ToolStart { .. })));
     }
 
@@ -1679,9 +1736,6 @@ pub(crate) mod tests {
     // ToolContext propagation tests
     // -----------------------------------------------------------------------
 
-    /// A tool that reads the working_directory from the ToolContext and returns it.
-    /// Used to verify that `process_turn` correctly builds and passes a ToolContext
-    /// before delegating to tool execution.
     struct WorkingDirReadTool;
 
     #[async_trait::async_trait]
@@ -1703,30 +1757,31 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn tool_context_working_directory_is_passed_during_tool_execution() {
-        // Verify that process_turn builds a ToolContext and passes it to tools.
         let storage = Arc::new(MockStorage::new());
-        let project = storage
-            .create(NewProject {
-                name: "my-project".to_string(),
-                slug: "my-project".to_string(),
-                workspace_path: None,
+        let project = ProjectStore::create(&*storage, NewProject {
+            name: "my-project".to_string(),
+            slug: "my-project".to_string(),
+            workspace_path: None,
+        })
+        .await
+        .expect("create project");
+
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
             })
             .await
-            .expect("create project");
+            .expect("create session");
+        let session_id = session.id;
 
-        let session_id = Uuid::new_v4();
-        storage.db.lock().await.sessions.insert(
+        ThreadStore::create(&*storage, NewThread {
             session_id,
-            Session {
-                id: session_id,
-                project_id: project.id,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        );
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("thread");
 
-        // Round 1: model calls the working_dir_read tool.
-        // Round 2: model produces its final response.
         let round_1 = vec![
             StreamChunk::ToolUse {
                 call_id: "ctx-check".into(),
@@ -1743,7 +1798,8 @@ pub(crate) mod tests {
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1758,8 +1814,9 @@ pub(crate) mod tests {
             .await
             .expect("turn should complete");
 
-        // The tool result stored in the DB should be an absolute path (the working_directory).
-        let turns = state.storage.list_turns_by_session(session_id).await.unwrap();
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
         assert_eq!(tool_calls.len(), 1);
         let result = tool_calls[0].result.as_deref().unwrap_or("");

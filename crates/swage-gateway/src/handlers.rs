@@ -37,7 +37,7 @@ pub struct ConversationListResponse {
 pub async fn create_conversation(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     let resp: ConversationResponse = svc.create_conversation().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -48,7 +48,7 @@ pub async fn create_conversation(
 pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -60,7 +60,7 @@ pub async fn get_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     let detail = svc.get_conversation(id).await?;
     Ok(Json(detail))
 }
@@ -72,7 +72,7 @@ pub async fn list_project_sessions(
     State(state): State<AppState>,
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     let conversations = svc.list_sessions_by_project(project_id).await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -84,7 +84,7 @@ pub async fn create_project_session(
     State(state): State<AppState>,
     Path(project_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     let resp = svc.create_session_in_project(project_id).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -96,7 +96,7 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ConversationService::new(state.storage);
+    let svc = ConversationService::new(state.storage, state.project_store);
     svc.delete_conversation(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -112,7 +112,7 @@ pub async fn create_project(
     State(state): State<AppState>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ProjectService::new(state.storage);
+    let svc = ProjectService::new(state.project_store);
     let resp = svc.create_project(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -123,7 +123,7 @@ pub async fn create_project(
 pub async fn list_projects(
     State(state): State<AppState>,
 ) -> Result<Json<ProjectListResponse>, ApiError> {
-    let svc = ProjectService::new(state.storage);
+    let svc = ProjectService::new(state.project_store);
     let resp = svc.list_projects().await?;
     Ok(Json(resp))
 }
@@ -135,7 +135,7 @@ pub async fn get_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    let svc = ProjectService::new(state.storage);
+    let svc = ProjectService::new(state.project_store);
     let resp = svc.get_project(id).await?;
     Ok(Json(resp))
 }
@@ -148,7 +148,7 @@ pub async fn update_project(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateProjectRequest>,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    let svc = ProjectService::new(state.storage);
+    let svc = ProjectService::new(state.project_store);
     let resp = svc.update_project(id, req).await?;
     Ok(Json(resp))
 }
@@ -161,7 +161,7 @@ pub async fn delete_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ProjectService::new(state.storage);
+    let svc = ProjectService::new(state.project_store);
     svc.delete_project(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -204,6 +204,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
+            project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
             provider: provider as Arc<dyn swage_provider::LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -654,8 +655,8 @@ mod tests {
 
         let (router, storage) = make_router();
         // Get the default project's ID.
-        let svc = ProjectService::new(Arc::clone(&storage) as Arc<dyn Storage>);
-        let default_project = svc.storage.get_or_create_default().await.unwrap();
+        let svc = ProjectService::new(Arc::clone(&storage) as Arc<dyn ProjectStore>);
+        let default_project = svc.project_store.get_or_create_default().await.unwrap();
         let id = default_project.id;
 
         let resp = router
@@ -692,11 +693,11 @@ mod tests {
 
         // Add two sessions to that project.
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project.id })
+            .create_session(swage_storage::model::NewSession { project_id: project.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project.id })
+            .create_session(swage_storage::model::NewSession { project_id: project.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
 
@@ -741,15 +742,15 @@ mod tests {
 
         // One session in A, two in B.
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_a.id })
+            .create_session(swage_storage::model::NewSession { project_id: project_a.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_b.id })
+            .create_session(swage_storage::model::NewSession { project_id: project_b.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_b.id })
+            .create_session(swage_storage::model::NewSession { project_id: project_b.id, agent_id: "gateway".to_string() })
             .await
             .unwrap();
 

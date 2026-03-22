@@ -30,7 +30,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, Storage};
+use swage_storage::{SqliteStorage, Storage, store::ProjectStore};
 use swage_tool;
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,8 @@ async fn start_ptc_test_server(
         Arc::new(ptc_tool) as Arc<dyn swage_gateway::tool::Tool>,
     ]);
     let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,

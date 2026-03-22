@@ -53,12 +53,13 @@ async fn main() {
         dir.join("swage.db")
     };
 
-    // Step 4: Open persistent storage.
-    let storage = open_storage(&db_path);
+    // Step 4: Open persistent storage. SqliteStorage implements both Storage
+    // and ProjectStore, so we open one instance and type-erase it twice.
+    let raw_storage = open_storage(&db_path);
 
-    // Step 5: Recover any turns left InProgress by a previous unclean shutdown.
+    // Step 5: Recover any turns left Processing by a previous unclean shutdown.
     // This must complete before the server begins accepting connections.
-    match shutdown::recover_orphaned_turns(&*storage).await {
+    match shutdown::recover_orphaned_turns(&*raw_storage).await {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
         Err(e) => {
@@ -71,10 +72,16 @@ async fn main() {
     let provider = create_provider(&config);
 
     // Step 7: Build the tool dispatch pipeline with all built-in tools.
-    let tool_dispatcher = build_tool_dispatcher(&config, Arc::clone(&storage));
+    let tool_dispatcher = build_tool_dispatcher(
+        &config,
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+    );
 
     // Step 8: Assemble application state and build the router.
-    let state = AppState::new(storage, provider, config.clone(), tool_dispatcher);
+    // Type-erase the storage into its two distinct trait objects.
+    let storage: Arc<dyn swage_storage::store::Storage> = Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
+    let project_store: Arc<dyn swage_storage::store::ProjectStore> = raw_storage;
+    let state = AppState::new(storage, project_store, provider, config.clone(), tool_dispatcher);
     let router = server::build_router(state.clone());
 
     // Step 9: Bind the TCP listener.
@@ -117,7 +124,11 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 /// Open the persistent SQLite storage backend.
-fn open_storage(path: &std::path::Path) -> Arc<dyn swage_storage::store::Storage> {
+///
+/// Returns `Arc<SqliteStorage>` rather than an erased trait object so the caller
+/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn ProjectStore>`
+/// from the same underlying connection pool.
+fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
     Arc::new(swage_storage::SqliteStorage::open(path).unwrap_or_else(|e| {
         eprintln!("Failed to open database at {}: {e}", path.display());
         std::process::exit(1);

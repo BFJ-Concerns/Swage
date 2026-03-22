@@ -28,7 +28,8 @@ use swage_gateway::{server::build_router, shutdown::recover_orphaned_turns, stat
 use swage_provider::LlmProvider;
 use swage_tool;
 use swage_storage::{
-    model::{NewTurn, TurnState},
+    model::{NewThread, NewTurn, TurnState},
+    store::ProjectStore,
     SqliteStorage,
 };
 
@@ -176,7 +177,8 @@ async fn start_test_server_with_dispatcher(
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,
@@ -486,24 +488,32 @@ async fn stream_cancellation_preserves_partial_response() {
 ///   with the interrupted turn visible.
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_recovery_marks_orphaned_turns() {
-    use swage_storage::{NewSession, store::{ProjectStore, SessionStore, TurnStore}};
+    use swage_storage::{NewSession, store::{ProjectStore, SessionStore, ThreadStore, TurnStore}};
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
     // Get the default project (seeded by migration).
     let project = storage.get_or_create_default().await.unwrap();
 
-    // Session 1: an orphaned InProgress turn (simulates a crash mid-turn).
+    // Session 1: an orphaned Processing turn (simulates a crash mid-turn).
     let session_orphan = storage
         .create_session(NewSession {
             project_id: project.id,
+            agent_id: "gateway".to_string(),
         })
         .await
         .unwrap();
+    let thread_orphan = ThreadStore::create(&*storage, NewThread {
+        session_id: session_orphan.id,
+        agent_id: "gateway".to_string(),
+    })
+    .await
+    .unwrap();
     let turn_orphan = storage
         .create_turn(NewTurn {
-            session_id: session_orphan.id,
-            state: TurnState::InProgress,
+            thread_id: thread_orphan.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
         })
         .await
         .unwrap();
@@ -512,13 +522,21 @@ async fn startup_recovery_marks_orphaned_turns() {
     let session_ok = storage
         .create_session(NewSession {
             project_id: project.id,
+            agent_id: "gateway".to_string(),
         })
         .await
         .unwrap();
+    let thread_ok = ThreadStore::create(&*storage, NewThread {
+        session_id: session_ok.id,
+        agent_id: "gateway".to_string(),
+    })
+    .await
+    .unwrap();
     let turn_ok = storage
         .create_turn(NewTurn {
-            session_id: session_ok.id,
-            state: TurnState::InProgress,
+            thread_id: thread_ok.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
         })
         .await
         .unwrap();

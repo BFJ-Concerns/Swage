@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use swage_config::ResolvedConfig;
 use swage_provider::LlmProvider;
-use swage_storage::store::Storage;
+use swage_storage::store::{ProjectStore, Storage};
 
 use crate::tool::ToolDispatcher;
 
@@ -20,8 +20,12 @@ use crate::tool::ToolDispatcher;
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
-    /// Persistent storage backend.
+    /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
+    /// Project storage backend. Separate from `storage` because `ProjectStore` is
+    /// not included in the `Storage` supertrait — consumers that need project
+    /// operations import it independently.
+    pub project_store: Arc<dyn ProjectStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
     /// Resolved configuration (server, provider, workspace, etc.).
@@ -40,12 +44,14 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         storage: Arc<dyn Storage>,
+        project_store: Arc<dyn ProjectStore>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
     ) -> Self {
         Self {
             storage,
+            project_store,
             provider,
             config,
             active_turns: Arc::new(Mutex::new(HashMap::new())),

@@ -506,8 +506,11 @@ mod tests {
     fn make_empty_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
+        let storage_arc: Arc<dyn swage_storage::store::Storage> = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
+        let project_store: Arc<dyn swage_storage::store::ProjectStore> = storage as Arc<dyn swage_storage::store::ProjectStore>;
         AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: storage_arc,
+            project_store,
             provider,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -533,14 +536,18 @@ mod tests {
             Session {
                 id: session_id,
                 project_id: project.id,
+                agent_id: "gateway".to_string(),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             },
         );
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
+        let storage_arc: Arc<dyn swage_storage::store::Storage> = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
+        let project_store: Arc<dyn swage_storage::store::ProjectStore> = storage as Arc<dyn swage_storage::store::ProjectStore>;
         let state = AppState {
-            storage: storage as Arc<dyn swage_storage::store::Storage>,
+            storage: storage_arc,
+            project_store,
             provider,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),

@@ -27,7 +27,7 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::SqliteStorage;
+use swage_storage::{SqliteStorage, store::ProjectStore};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -40,7 +40,8 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
     // storage, not LLM streaming.
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -15,29 +15,32 @@ use crate::store::ToolCallStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
+/// Map a row from `SELECT id, turn_id, agent_id, call_id, tool, arguments,
+/// result, status, duration_ms, truncated, total_bytes, position, created_at,
+/// parent_call_id`.
 fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
     let id: String = row.get(0)?;
     let turn_id: String = row.get(1)?;
-    let created: String = row.get(11)?;
+    let created: String = row.get(12)?;
 
     // SQLite stores booleans as integers; map 0/1 back to bool.
-    let truncated_int: i64 = row.get(8)?;
+    let truncated_int: i64 = row.get(9)?;
 
     Ok(ToolCallRecord {
         id: parse_uuid(&id)?,
         turn_id: parse_uuid(&turn_id)?,
-        call_id: row.get(2)?,
-        tool: row.get(3)?,
-        arguments: row.get(4)?,
-        result: row.get(5)?,
-        status: row.get(6)?,
-        duration_ms: row.get(7)?,
+        agent_id: row.get(2)?,
+        call_id: row.get(3)?,
+        tool: row.get(4)?,
+        arguments: row.get(5)?,
+        result: row.get(6)?,
+        status: row.get(7)?,
+        duration_ms: row.get(8)?,
         truncated: truncated_int != 0,
-        total_bytes: row.get(9)?,
-        position: row.get(10)?,
+        total_bytes: row.get(10)?,
+        position: row.get(11)?,
         created_at: parse_dt(&created)?,
-        // Column 12: nullable, present after migration 003.
-        parent_call_id: row.get(12)?,
+        parent_call_id: row.get(13)?,
     })
 }
 
@@ -72,13 +75,14 @@ impl ToolCallStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO tool_calls
-                 (id, turn_id, call_id, tool, arguments, result, status,
+                 (id, turn_id, agent_id, call_id, tool, arguments, result, status,
                   duration_ms, truncated, total_bytes, position, created_at,
                   parent_call_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     id.to_string(),
                     tool_call.turn_id.to_string(),
+                    &tool_call.agent_id,
                     &tool_call.call_id,
                     &tool_call.tool,
                     &tool_call.arguments,
@@ -96,6 +100,7 @@ impl ToolCallStore for SqliteStorage {
             Ok(ToolCallRecord {
                 id,
                 turn_id: tool_call.turn_id,
+                agent_id: tool_call.agent_id,
                 call_id: tool_call.call_id,
                 tool: tool_call.tool,
                 arguments: tool_call.arguments,
@@ -108,6 +113,21 @@ impl ToolCallStore for SqliteStorage {
                 created_at: now,
                 parent_call_id: tool_call.parent_call_id,
             })
+        })
+        .await
+    }
+
+    async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, turn_id, agent_id, call_id, tool, arguments, result, status,
+                        duration_ms, truncated, total_bytes, position, created_at,
+                        parent_call_id
+                 FROM tool_calls WHERE id = ?1",
+                params![id.to_string()],
+                row_to_tool_call,
+            )
+            .optional()
         })
         .await
     }
@@ -153,7 +173,7 @@ impl ToolCallStore for SqliteStorage {
     ) -> Result<Vec<ToolCallRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, turn_id, call_id, tool, arguments, result, status,
+                "SELECT id, turn_id, agent_id, call_id, tool, arguments, result, status,
                         duration_ms, truncated, total_bytes, position, created_at,
                         parent_call_id
                  FROM tool_calls
@@ -178,19 +198,40 @@ mod tests {
 
     use super::*;
 
-    /// Set up an in-memory DB with a project, session, and turn.
+    /// Set up an in-memory DB with a project, session, thread, and turn.
+    ///
+    /// Inserts the thread via raw SQL because create_thread (task 6ay8) is not
+    /// yet implemented. Task 1byf will update this once the trait lands.
     async fn make_turn() -> (SqliteStorage, Uuid) {
+        use chrono::Utc;
+        use rusqlite::params as sql_params;
+
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
             .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id })
+            .create_session(NewSession { project_id: project.id, agent_id: "test-agent".to_string() })
             .await
             .unwrap();
+
+        // Insert a thread row so the FK on turns.thread_id is satisfied.
+        let thread_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO threads (id, session_id, agent_id, created_at, updated_at)
+                     VALUES (?1, ?2, 'test-agent', ?3, ?3)",
+                    sql_params![thread_id.to_string(), session.id.to_string(), &now],
+                )
+            })
+            .await
+            .unwrap();
+
         let turn = storage
-            .create_turn(NewTurn { session_id: session.id, state: TurnState::InProgress })
+            .create_turn(NewTurn { thread_id, agent_id: "test-agent".into(), state: TurnState::Pending })
             .await
             .unwrap();
         (storage, turn.id)
@@ -199,6 +240,7 @@ mod tests {
     fn new_call(turn_id: Uuid, call_id: &str, position: i32) -> NewToolCall {
         NewToolCall {
             turn_id,
+            agent_id: "agent-test".into(),
             call_id: call_id.into(),
             tool: "shell".into(),
             arguments: r#"{"cmd":"ls"}"#.into(),
@@ -326,6 +368,48 @@ mod tests {
         );
     }
 
+    /// get_tool_call returns the stored record with agent_id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_tool_call_returns_record_with_agent_id() {
+        let (storage, turn_id) = make_turn().await;
+        let created = storage
+            .create_tool_call(new_call(turn_id, "toolu_get", 0))
+            .await
+            .unwrap();
+
+        let fetched = storage.get_tool_call(created.id).await.unwrap();
+        assert!(fetched.is_some(), "should find tool call by id");
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.agent_id, "agent-test");
+        assert_eq!(fetched.call_id, "toolu_get");
+        assert_eq!(fetched.tool, "shell");
+    }
+
+    /// get_tool_call returns None for unknown id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_tool_call_returns_none_for_unknown() {
+        let (storage, _) = make_turn().await;
+        let result = storage.get_tool_call(Uuid::new_v4()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    /// create_tool_call persists agent_id and it round-trips through list_by_turn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_id_persists_through_create_and_list() {
+        let (storage, turn_id) = make_turn().await;
+        let record = storage
+            .create_tool_call(new_call(turn_id, "toolu_aid", 0))
+            .await
+            .unwrap();
+
+        assert_eq!(record.agent_id, "agent-test");
+
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].agent_id, "agent-test");
+    }
+
     /// Full round-trip: create → update → list → verify all fields.
     #[tokio::test(flavor = "multi_thread")]
     async fn full_round_trip() {
@@ -335,6 +419,7 @@ mod tests {
         let call_a = storage
             .create_tool_call(NewToolCall {
                 turn_id,
+                agent_id: "agent-test".into(),
                 call_id: "toolu_a".into(),
                 tool: "file_read".into(),
                 arguments: r#"{"path":"/etc/hosts"}"#.into(),
@@ -352,6 +437,7 @@ mod tests {
         let _call_b = storage
             .create_tool_call(NewToolCall {
                 turn_id,
+                agent_id: "agent-test".into(),
                 call_id: "toolu_b".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),

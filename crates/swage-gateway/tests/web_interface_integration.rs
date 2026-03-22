@@ -18,7 +18,7 @@ use axum::{
 use tower::ServiceExt;
 
 use swage_gateway::{server::build_router, state::AppState};
-use swage_storage::SqliteStorage;
+use swage_storage::{SqliteStorage, store::ProjectStore};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -32,7 +32,8 @@ fn make_router() -> Router {
     let provider =
         Arc::new(NoOpProvider) as Arc<dyn swage_provider::LlmProvider>;
     let state = AppState::new(
-        storage as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

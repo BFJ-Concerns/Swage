@@ -5,8 +5,10 @@ pub mod sqlite;
 pub mod store;
 
 pub use model::{
-    Message, NewMessage, NewProject, NewSession, NewToolCall, NewTurn, Project, Session, Turn,
-    ToolCallRecord, TurnState,
+    Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session,
+    Thread, ThreadState, Turn, ToolCallRecord, TurnState,
 };
 pub use sqlite::SqliteStorage;
-pub use store::{MessageStore, ProjectStore, SessionStore, Storage, ToolCallStore, TurnStore};
+pub use store::{
+    MessageStore, ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+};

@@ -58,20 +58,21 @@ pub async fn shutdown_active_turns(state: &AppState) {
     }
 }
 
-/// Transition all InProgress turns to Interrupted.
+/// Transition all Processing turns for the gateway agent to Interrupted.
 ///
 /// Runs at startup — before the server begins accepting connections — to clean
 /// up turns left dangling by a previous unclean shutdown.
 ///
 /// Returns the number of turns recovered.
 pub async fn recover_orphaned_turns(storage: &dyn Storage) -> Result<usize, StorageError> {
-    let orphans = storage.find_in_progress_turns().await?;
+    // "gateway" is the agent_id used by the embedded single-agent mode.
+    let orphans = storage.find_in_progress_by_agent("gateway").await?;
     let count = orphans.len();
 
     for turn in &orphans {
         warn!(
-            "Recovered orphaned turn {} for session {}",
-            turn.id, turn.session_id,
+            "Recovered orphaned turn {} for thread {}",
+            turn.id, turn.thread_id,
         );
         storage.update_turn_state(turn.id, TurnState::Interrupted).await?;
     }
@@ -89,8 +90,8 @@ mod tests {
 
     use uuid::Uuid;
 
-    use swage_storage::model::{NewTurn, TurnState};
-    use swage_storage::store::TurnStore;
+    use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
+    use swage_storage::store::{ProjectStore, SessionStore, ThreadStore, TurnStore};
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -99,29 +100,50 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// Build a MockStorage pre-populated with `in_progress` InProgress turns
-    /// and `completed` Completed turns (all belonging to a single session).
-    async fn make_storage(in_progress: usize, completed: usize) -> Arc<MockStorage> {
+    /// Build a MockStorage pre-populated with `processing` Processing turns
+    /// and `completed` Completed turns (all belonging to a single thread).
+    async fn make_storage(processing: usize, completed: usize) -> Arc<MockStorage> {
         let storage = Arc::new(MockStorage::new());
-        let session_id = Uuid::new_v4();
 
-        for _ in 0..in_progress {
+        // Create the project → session → thread hierarchy required for FK integrity.
+        let project = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let thread_id = thread.id;
+
+        for _ in 0..processing {
             storage
                 .create_turn(NewTurn {
-                    session_id,
-                    state: TurnState::InProgress,
+                    thread_id,
+                    agent_id: "gateway".to_string(),
+                    state: TurnState::Processing,
                 })
                 .await
                 .unwrap();
         }
 
         for _ in 0..completed {
-            // Create as InProgress (MockStorage accepts any state on create),
-            // then immediately transition to Completed.
+            // Create as Processing (the normal pre-terminal state), then
+            // immediately transition to Completed.
             let turn = storage
                 .create_turn(NewTurn {
-                    session_id,
-                    state: TurnState::InProgress,
+                    thread_id,
+                    agent_id: "gateway".to_string(),
+                    state: TurnState::Processing,
                 })
                 .await
                 .unwrap();
@@ -151,11 +173,11 @@ mod tests {
         let db = storage.db.lock().await;
         let n_interrupted = db.turns.values().filter(|t| t.state == TurnState::Interrupted).count();
         let n_completed = db.turns.values().filter(|t| t.state == TurnState::Completed).count();
-        let n_in_progress = db.turns.values().filter(|t| t.state == TurnState::InProgress).count();
+        let n_processing = db.turns.values().filter(|t| t.state == TurnState::Processing).count();
 
         assert_eq!(n_interrupted, 2, "2 orphaned turns should be Interrupted");
         assert_eq!(n_completed, 1, "Completed turn should be unchanged");
-        assert_eq!(n_in_progress, 0, "no turns should remain InProgress");
+        assert_eq!(n_processing, 0, "no turns should remain Processing");
     }
 
     #[tokio::test]

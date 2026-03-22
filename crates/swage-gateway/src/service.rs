@@ -7,8 +7,8 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use serde_json::Value as JsonValue;
 use swage_storage::{
-    model::{NewProject, NewSession, TurnState},
-    store::Storage,
+    model::{NewProject, NewSession, NewThread, TurnState},
+    store::{ProjectStore, Storage},
 };
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ pub struct MessageView {
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
-    /// State of the turn this message belongs to.
+    /// State of the last turn in the thread this message belongs to.
     pub turn_state: TurnState,
     /// Tool calls that occurred in this message's turn.
     ///
@@ -92,20 +92,33 @@ pub struct MessageView {
 #[derive(Clone)]
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) project_store: Arc<dyn ProjectStore>,
 }
 
 impl ConversationService {
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+    pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
+        Self { storage, project_store }
     }
 
     /// Create a new conversation in the default project.
+    ///
+    /// Also creates a default thread for the session so that process_turn has
+    /// a thread_id to attach turns and messages to.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, GatewayError> {
-        let project = self.storage.get_or_create_default().await?;
+        let project = self.project_store.get_or_create_default().await?;
         let session = self
             .storage
             .create_session(NewSession {
                 project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await?;
+
+        // Create the default thread. The gateway uses one thread per session.
+        self.storage
+            .create(NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
             })
             .await?;
 
@@ -119,7 +132,7 @@ impl ConversationService {
 
     /// List all conversations in the default project, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
-        let project = self.storage.get_or_create_default().await?;
+        let project = self.project_store.get_or_create_default().await?;
         let sessions = self.storage.list_by_project(project.id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
@@ -127,12 +140,14 @@ impl ConversationService {
         for session in sessions {
             let preview = self
                 .storage
-                .get_latest_message_for_session(session.id)
+                .get_latest_for_session(session.id)
                 .await?
                 .map(|m| m.content);
 
-            let turns = self.storage.list_turns_by_session(session.id).await?;
-            let has_interrupted_turn = turns.iter().any(|t| t.state == TurnState::Interrupted);
+            // Check whether any thread has an Interrupted turn.
+            let has_interrupted_turn = self
+                .has_interrupted_turn_in_session(session.id)
+                .await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -157,80 +172,80 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
-        let messages = self.storage.list_messages_by_session(id).await?;
-        let turns = self.storage.list_turns_by_session(id).await?;
+        // Collect messages and tool calls across all threads for this session.
+        // The gateway uses one thread per session; this handles the general case.
+        let threads = self.storage.list_by_session(id).await?;
 
-        // Build a turn_id → TurnState map for O(1) annotation of each message.
-        let turn_states: HashMap<Uuid, TurnState> = turns
-            .iter()
-            .map(|t| (t.id, t.state.clone()))
-            .collect();
+        let mut all_messages = Vec::new();
+        // All tool calls across all turns in all threads.
+        let mut all_tool_call_views: Vec<ToolCallView> = Vec::new();
+        // State of the last turn across all threads; default to Completed when none.
+        let mut last_turn_state = TurnState::Completed;
 
-        // Load tool calls for all turns in this session, indexed by turn_id.
-        // Only fetches turns that have at least one message to avoid unnecessary queries.
-        let mut tool_calls_by_turn: HashMap<Uuid, Vec<ToolCallView>> = HashMap::new();
-        for turn in &turns {
-            let records = self.storage.list_tool_calls_by_turn(turn.id).await?;
-            if !records.is_empty() {
-                let views = records
-                    .into_iter()
-                    .map(|r| {
-                        // Arguments are stored as a JSON string — parse to Value.
-                        let arguments = serde_json::from_str(&r.arguments)
-                            .unwrap_or(JsonValue::String(r.arguments));
+        for thread in &threads {
+            // Messages for this thread, already ordered by position.
+            let messages = self.storage.list_messages_by_thread(thread.id).await?;
+            all_messages.extend(messages);
 
-                        // Results may be arbitrary text or JSON; normalise to Value.
-                        let result = r.result.map(|text| {
-                            serde_json::from_str(&text)
-                                .unwrap_or(JsonValue::String(text))
-                        });
+            // Turns for this thread — the last turn's state represents the thread's
+            // final LLM interaction result.
+            let turns = self.storage.list_turns_by_thread(thread.id).await?;
+            if let Some(last) = turns.last() {
+                last_turn_state = last.state.clone();
+            }
 
-                        ToolCallView {
-                            call_id: r.call_id,
-                            tool: r.tool,
-                            arguments,
-                            result,
-                            status: r.status,
-                            // i64 → u64: negative values shouldn't occur in practice.
-                            duration_ms: r.duration_ms.map(|ms| ms.max(0) as u64),
-                            truncated: r.truncated,
-                            total_bytes: r.total_bytes.map(|b| b.max(0) as u64),
-                            parent_call_id: r.parent_call_id,
-                        }
-                    })
-                    .collect();
-                tool_calls_by_turn.insert(turn.id, views);
+            // Collect tool call views for every turn in this thread.
+            // Note: in a single-thread/single-turn session this is exact. For
+            // multi-turn threads, all tool calls are surfaced on every assistant
+            // message — a known limitation until Message gains a turn_id link.
+            for turn in &turns {
+                let records = self.storage.list_tool_calls_by_turn(turn.id).await?;
+                for r in records {
+                    let arguments = serde_json::from_str(&r.arguments)
+                        .unwrap_or(JsonValue::String(r.arguments));
+                    let result = r.result.map(|text| {
+                        serde_json::from_str(&text).unwrap_or(JsonValue::String(text))
+                    });
+                    all_tool_call_views.push(ToolCallView {
+                        call_id: r.call_id,
+                        tool: r.tool,
+                        arguments,
+                        result,
+                        status: r.status,
+                        duration_ms: r.duration_ms.map(|ms| ms.max(0) as u64),
+                        truncated: r.truncated,
+                        total_bytes: r.total_bytes.map(|b| b.max(0) as u64),
+                        parent_call_id: r.parent_call_id,
+                    });
+                }
             }
         }
 
-        let mut message_views = Vec::with_capacity(messages.len());
-        for m in messages {
-            // Defensive default: if a message's turn was deleted or never recorded,
-            // treat it as completed — the message content is still valid.
-            let turn_state = turn_states
-                .get(&m.turn_id)
-                .cloned()
-                .unwrap_or(TurnState::Completed);
+        // Sort all messages by position (threads use per-thread position, so sort
+        // by created_at if positions overlap across threads).
+        all_messages.sort_by(|a, b| {
+            a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at))
+        });
 
-            // Tool calls are attached to assistant messages only.
-            let tool_calls = if m.role == "assistant" {
-                tool_calls_by_turn
-                    .get(&m.turn_id)
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            };
+        let message_views = all_messages
+            .into_iter()
+            .map(|m| {
+                // Tool calls are attached to assistant messages only.
+                let tool_calls = if m.role == "assistant" {
+                    all_tool_call_views.clone()
+                } else {
+                    vec![]
+                };
 
-            message_views.push(MessageView {
-                role: m.role,
-                content: m.content,
-                timestamp: m.created_at,
-                turn_state,
-                tool_calls,
-            });
-        }
-        let message_views = message_views;
+                MessageView {
+                    role: m.role,
+                    content: m.content,
+                    timestamp: m.created_at,
+                    turn_state: last_turn_state.clone(),
+                    tool_calls,
+                }
+            })
+            .collect();
 
         Ok(ConversationDetail {
             id: session.id,
@@ -250,7 +265,7 @@ impl ConversationService {
     ) -> Result<Vec<ConversationSummary>, GatewayError> {
         // Verify the project exists before listing — gives a clean 404 rather
         // than silently returning an empty list for a non-existent project.
-        self.storage
+        self.project_store
             .get(project_id)
             .await?
             .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
@@ -261,12 +276,13 @@ impl ConversationService {
         for session in sessions {
             let preview = self
                 .storage
-                .get_latest_message_for_session(session.id)
+                .get_latest_for_session(session.id)
                 .await?
                 .map(|m| m.content);
 
-            let turns = self.storage.list_turns_by_session(session.id).await?;
-            let has_interrupted_turn = turns.iter().any(|t| t.state == TurnState::Interrupted);
+            let has_interrupted_turn = self
+                .has_interrupted_turn_in_session(session.id)
+                .await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -288,14 +304,22 @@ impl ConversationService {
         project_id: Uuid,
     ) -> Result<ConversationResponse, GatewayError> {
         // Verify the project exists — return 404 rather than a FK constraint error.
-        self.storage
+        self.project_store
             .get(project_id)
             .await?
             .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
 
         let session = self
             .storage
-            .create_session(NewSession { project_id })
+            .create_session(NewSession { project_id, agent_id: "gateway".to_string() })
+            .await?;
+
+        // Create the default thread for the new session.
+        self.storage
+            .create(NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            })
             .await?;
 
         Ok(ConversationResponse {
@@ -316,6 +340,25 @@ impl ConversationService {
 
         self.storage.delete_session(id).await?;
         Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------------------
+
+    /// Returns true if any thread in the session has an Interrupted turn.
+    async fn has_interrupted_turn_in_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<bool, GatewayError> {
+        let threads = self.storage.list_by_session(session_id).await?;
+        for thread in &threads {
+            let turns = self.storage.list_turns_by_thread(thread.id).await?;
+            if turns.iter().any(|t| t.state == TurnState::Interrupted) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -375,12 +418,12 @@ fn projects_base_dir() -> Option<PathBuf> {
 /// Mediates between HTTP project handlers and storage.
 #[derive(Clone)]
 pub struct ProjectService {
-    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) project_store: Arc<dyn ProjectStore>,
 }
 
 impl ProjectService {
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+    pub fn new(project_store: Arc<dyn ProjectStore>) -> Self {
+        Self { project_store }
     }
 
     /// Create a new project.
@@ -407,7 +450,7 @@ impl ProjectService {
         }
 
         // Check name uniqueness.
-        if self.storage.get_by_name(&req.name).await?.is_some() {
+        if self.project_store.get_by_name(&req.name).await?.is_some() {
             return Err(GatewayError::ProjectConflict(format!(
                 "a project named '{}' already exists",
                 req.name
@@ -424,7 +467,7 @@ impl ProjectService {
             let _ = std::fs::create_dir_all(&memory_dir);
         }
 
-        let project = self.storage.create(NewProject {
+        let project = self.project_store.create(NewProject {
             name: req.name,
             slug,
             workspace_path: req.workspace_path,
@@ -435,7 +478,7 @@ impl ProjectService {
 
     /// List all projects.
     pub async fn list_projects(&self) -> Result<ProjectListResponse, GatewayError> {
-        let projects = self.storage.list_all().await?;
+        let projects = self.project_store.list_all().await?;
         Ok(ProjectListResponse {
             projects: projects.into_iter().map(project_to_response).collect(),
         })
@@ -443,7 +486,7 @@ impl ProjectService {
 
     /// Get a project by ID.
     pub async fn get_project(&self, id: Uuid) -> Result<ProjectResponse, GatewayError> {
-        self.storage
+        self.project_store
             .get(id)
             .await?
             .map(project_to_response)
@@ -477,7 +520,7 @@ impl ProjectService {
         // Derive the new slug from the new name, if name is being updated.
         let new_slug = req.name.as_deref().map(slugify);
 
-        let project = self.storage
+        let project = self.project_store
             .update(id, req.name, new_slug, req.workspace_path)
             .await
             .map_err(|e| match e {
@@ -496,7 +539,7 @@ impl ProjectService {
     /// Returns 404 if not found. Returns a conflict error if called on the
     /// default project. The project directory on disk is preserved.
     pub async fn delete_project(&self, id: Uuid) -> Result<(), GatewayError> {
-        let found = self.storage.delete(id).await.map_err(|e| match e {
+        let found = self.project_store.delete(id).await.map_err(|e| match e {
             swage_core::StorageError::ConstraintViolation(msg) => {
                 GatewayError::ProjectConflict(msg)
             }
@@ -533,15 +576,18 @@ mod tests {
 
     use swage_storage::{
         model::{NewMessage, NewToolCall, NewTurn, TurnState},
-        store::SessionStore,
+        store::{SessionStore, TurnStore},
     };
 
     use super::*;
     use crate::turn::tests::MockStorage;
 
     fn make_service() -> ConversationService {
-        let storage = Arc::new(MockStorage::new()) as Arc<dyn Storage>;
-        ConversationService::new(storage)
+        let storage = Arc::new(MockStorage::new());
+        ConversationService::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn ProjectStore>,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -593,22 +639,28 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        // Get the default thread created alongside the session.
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         // Insert a turn and a message via the underlying storage.
         let turn = svc
             .storage
             .create_turn(NewTurn {
-                session_id,
-                state: TurnState::InProgress,
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
             })
             .await
             .unwrap();
 
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
                 role: "user".to_string(),
                 content: "Hello!".to_string(),
                 position: 0,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
@@ -632,11 +684,15 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         let turn = svc
             .storage
             .create_turn(NewTurn {
-                session_id,
-                state: TurnState::InProgress,
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
             })
             .await
             .unwrap();
@@ -661,30 +717,36 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         let turn = svc
             .storage
             .create_turn(NewTurn {
-                session_id,
-                state: TurnState::InProgress,
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
             })
             .await
             .unwrap();
 
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
                 role: "user".to_string(),
                 content: "Hi".to_string(),
                 position: 0,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
                 role: "assistant".to_string(),
                 content: "Hello!".to_string(),
                 position: 1,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
@@ -753,28 +815,37 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         let turn = svc
             .storage
-            .create_turn(NewTurn { session_id, state: TurnState::InProgress })
-            .await
-            .unwrap();
-
-        svc.storage
-            .create_message(NewMessage {
-                turn_id: turn.id,
-                role: "user".into(),
-                content: "list files".into(),
-                position: 0,
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
             })
             .await
             .unwrap();
 
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
+                role: "user".into(),
+                content: "list files".into(),
+                position: 0,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .unwrap();
+
+        svc.storage
+            .create_message(NewMessage {
+                thread_id,
                 role: "assistant".into(),
                 content: "I'll run ls for you.".into(),
                 position: 1,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
@@ -782,6 +853,7 @@ mod tests {
         svc.storage
             .create_tool_call(NewToolCall {
                 turn_id: turn.id,
+                agent_id: "gateway".to_string(),
                 call_id: "toolu_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"ls"}"#.into(),
@@ -826,18 +898,26 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         let turn = svc
             .storage
-            .create_turn(NewTurn { session_id, state: TurnState::InProgress })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+            })
             .await
             .unwrap();
 
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
                 role: "assistant".into(),
                 content: "Ran python".into(),
                 position: 0,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
@@ -846,6 +926,7 @@ mod tests {
         svc.storage
             .create_tool_call(NewToolCall {
                 turn_id: turn.id,
+                agent_id: "gateway".to_string(),
                 call_id: "py_01".into(),
                 tool: "python_execute".into(),
                 arguments: r#"{"code":"1+1"}"#.into(),
@@ -864,6 +945,7 @@ mod tests {
         svc.storage
             .create_tool_call(NewToolCall {
                 turn_id: turn.id,
+                agent_id: "gateway".to_string(),
                 call_id: "sub_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"echo hi"}"#.into(),
@@ -902,17 +984,25 @@ mod tests {
         let resp = svc.create_conversation().await.unwrap();
         let session_id = resp.id;
 
+        let threads = svc.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
         let turn = svc
             .storage
-            .create_turn(NewTurn { session_id, state: TurnState::InProgress })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+            })
             .await
             .unwrap();
         svc.storage
             .create_message(NewMessage {
-                turn_id: turn.id,
+                thread_id,
                 role: "assistant".into(),
                 content: "Hello".into(),
                 position: 0,
+                agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
