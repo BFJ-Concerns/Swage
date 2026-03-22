@@ -1,0 +1,949 @@
+//! Error types for the Swage framework.
+//!
+//! Provides a structured error hierarchy with retriability semantics to enable
+//! intelligent retry logic in agent orchestration. Each error variant carries
+//! structured fields for programmatic error handling.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Top-level error
+// ---------------------------------------------------------------------------
+
+/// Unified error type for the Swage framework.
+///
+/// Wraps all domain-specific error categories and delegates `is_retriable()`
+/// to each inner type, enabling callers to decide retry policy uniformly.
+#[derive(Debug, Error)]
+pub enum SwageError {
+    /// LLM provider communication failure.
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+
+    /// Persistent storage failure.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+
+    /// Tool execution failure.
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+
+    /// Hook execution failure.
+    #[error(transparent)]
+    Hook(#[from] HookError),
+
+    /// Safety subsystem failure.
+    #[error(transparent)]
+    Safety(#[from] SafetyError),
+
+    /// Sandbox subsystem failure.
+    #[error(transparent)]
+    Sandbox(#[from] SandboxError),
+
+    /// Tokio runtime failure.
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+
+    /// Secret retrieval failure.
+    #[error(transparent)]
+    Secret(#[from] SecretError),
+
+    /// Gateway-level failure (routing, session management, validation).
+    #[error(transparent)]
+    Gateway(#[from] GatewayError),
+}
+
+impl SwageError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            SwageError::Provider(e) => e.is_retriable(),
+            SwageError::Storage(e) => e.is_retriable(),
+            SwageError::Tool(e) => e.is_retriable(),
+            SwageError::Hook(e) => e.is_retriable(),
+            SwageError::Safety(e) => e.is_retriable(),
+            SwageError::Sandbox(e) => e.is_retriable(),
+            SwageError::Runtime(e) => e.is_retriable(),
+            SwageError::Secret(e) => e.is_retriable(),
+            SwageError::Gateway(e) => e.is_retriable(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider errors
+// ---------------------------------------------------------------------------
+
+/// Errors from LLM provider interactions.
+#[derive(Debug, Clone, Serialize, Deserialize, Error)]
+pub enum ProviderError {
+    /// Rate limit exceeded (transient).
+    #[error("rate limited by provider {provider}")]
+    RateLimited {
+        provider: String,
+        retry_after: Option<Duration>,
+    },
+
+    /// Request timed out (transient).
+    #[error("request to provider {provider} timed out after {duration:?}")]
+    Timeout { provider: String, duration: Duration },
+
+    /// Network-level failure (transient).
+    #[error("network error communicating with provider {provider}: {message}")]
+    Network { provider: String, message: String },
+
+    /// Authentication or authorisation failure (permanent).
+    #[error("authentication failed for provider {provider}")]
+    Auth { provider: String },
+
+    /// Invalid provider configuration (permanent).
+    #[error("invalid provider configuration: {message}")]
+    InvalidConfig { message: String },
+
+    /// Malformed request rejected by the provider (permanent).
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
+
+    /// Model-specific error (permanent).
+    #[error("model error for {model}: {message}")]
+    ModelError { model: String, message: String },
+
+    /// Raw HTTP error from the provider (permanent — callers may inspect
+    /// `status` for retry decisions on 5xx, but the default is non-retriable).
+    #[error("HTTP error {status}: {body}")]
+    HttpError { status: u16, body: String },
+
+    /// Error reading or parsing a streaming response (transient).
+    #[error("stream error: {0}")]
+    StreamError(String),
+
+    /// Provider returned a well-formed response with unexpected content (permanent).
+    #[error("invalid response: {0}")]
+    InvalidResponse(String),
+}
+
+impl ProviderError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            ProviderError::RateLimited { .. } => true,
+            ProviderError::Timeout { .. } => true,
+            ProviderError::Network { .. } => true,
+            ProviderError::Auth { .. } => false,
+            ProviderError::InvalidConfig { .. } => false,
+            ProviderError::InvalidRequest { .. } => false,
+            ProviderError::ModelError { .. } => false,
+            // Callers can inspect `status` for finer control; the conservative
+            // default is non-retriable to avoid duplicate side effects.
+            ProviderError::HttpError { .. } => false,
+            ProviderError::StreamError(_) => true,
+            ProviderError::InvalidResponse(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage errors
+// ---------------------------------------------------------------------------
+
+/// Errors from persistent storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// Underlying I/O failure (permanent — caller should inspect the inner error).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// Serialisation or deserialisation failure (permanent).
+    #[error("serialisation error: {message}")]
+    Serialisation { message: String },
+
+    /// Requested entity not found (permanent).
+    #[error("{entity} not found: {id}")]
+    NotFound { entity: String, id: String },
+
+    /// Data corruption detected (permanent).
+    #[error("data corruption: {message}")]
+    Corruption { message: String },
+
+    /// Storage capacity exceeded (transient — may succeed after cleanup).
+    #[error("capacity exceeded: {message}")]
+    CapacityExceeded { message: String },
+
+    /// Database connection could not be established (transient).
+    #[error("connection failed: {0}")]
+    ConnectionFailed(String),
+
+    /// SQL or query-level failure (permanent — likely a programming error).
+    #[error("query failed: {0}")]
+    QueryFailed(String),
+
+    /// Schema migration failed (permanent).
+    #[error("migration failed: {0}")]
+    MigrationFailed(String),
+
+    /// Unique constraint or foreign key violation (permanent).
+    #[error("constraint violation: {0}")]
+    ConstraintViolation(String),
+}
+
+impl StorageError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            StorageError::Io(_) => false,
+            StorageError::Serialisation { .. } => false,
+            StorageError::NotFound { .. } => false,
+            StorageError::Corruption { .. } => false,
+            StorageError::CapacityExceeded { .. } => true,
+            StorageError::ConnectionFailed(_) => true,
+            StorageError::QueryFailed(_) => false,
+            StorageError::MigrationFailed(_) => false,
+            StorageError::ConstraintViolation(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool errors
+// ---------------------------------------------------------------------------
+
+/// Errors from tool execution.
+#[derive(Debug, Error)]
+pub enum ToolError {
+    /// Tool not found in registry (permanent).
+    #[error("tool not found: {name}")]
+    NotFound { name: String },
+
+    /// Tool execution failed (transient — external command may have been
+    /// interrupted or returned a transient error).
+    #[error("tool {name} execution failed: {message}")]
+    ExecutionFailed { name: String, message: String },
+
+    /// Invalid parameters supplied to tool (permanent).
+    #[error("invalid parameters for tool {name}: {message}")]
+    InvalidParameters { name: String, message: String },
+
+    /// Tool execution timed out (transient).
+    #[error("tool {name} timed out after {duration:?}")]
+    Timeout { name: String, duration: Duration },
+
+    /// Tool access denied by policy (permanent).
+    #[error("permission denied for tool {name}")]
+    PermissionDenied { name: String },
+}
+
+impl ToolError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            ToolError::NotFound { .. } => false,
+            ToolError::ExecutionFailed { .. } => true,
+            ToolError::InvalidParameters { .. } => false,
+            ToolError::Timeout { .. } => true,
+            ToolError::PermissionDenied { .. } => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hook errors
+// ---------------------------------------------------------------------------
+
+/// Errors from hook execution.
+#[derive(Debug, Error)]
+pub enum HookError {
+    /// Hook script or handler failed (permanent).
+    #[error("hook {hook_name} execution failed: {message}")]
+    ExecutionFailed {
+        hook_name: String,
+        message: String,
+    },
+
+    /// Hook timed out (permanent — hooks should complete promptly).
+    #[error("hook {hook_name} timed out after {duration:?}")]
+    Timeout {
+        hook_name: String,
+        duration: Duration,
+    },
+
+    /// Hook matcher pattern is invalid (permanent).
+    #[error("invalid matcher pattern '{pattern}': {message}")]
+    InvalidMatcher { pattern: String, message: String },
+}
+
+impl HookError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            HookError::ExecutionFailed { .. } => false,
+            HookError::Timeout { .. } => false,
+            HookError::InvalidMatcher { .. } => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Safety errors
+// ---------------------------------------------------------------------------
+
+/// Errors from the safety subsystem (leak detection, redaction).
+#[derive(Debug, Error)]
+pub enum SafetyError {
+    /// Invalid detection pattern (permanent).
+    #[error("invalid safety pattern: {message}")]
+    InvalidPattern { message: String },
+
+    /// Redaction process failed (permanent).
+    #[error("redaction failed: {message}")]
+    RedactionFailed { message: String },
+}
+
+impl SafetyError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            SafetyError::InvalidPattern { .. } => false,
+            SafetyError::RedactionFailed { .. } => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox errors
+// ---------------------------------------------------------------------------
+
+/// Errors from the sandboxed execution environment.
+#[derive(Debug, Error)]
+pub enum SandboxError {
+    /// Failed to spawn sandbox process (permanent).
+    #[error("sandbox spawn failed: {message}")]
+    SpawnFailed { message: String },
+
+    /// Inter-process communication failure (permanent).
+    #[error("sandbox IPC error: {message}")]
+    IpcError { message: String },
+
+    /// Sandbox environment is not available (permanent).
+    #[error("sandbox unavailable: {message}")]
+    Unavailable { message: String },
+}
+
+impl SandboxError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            SandboxError::SpawnFailed { .. } => false,
+            SandboxError::IpcError { .. } => false,
+            SandboxError::Unavailable { .. } => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during runtime operations.
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    /// Attempted to create a nested Tokio runtime (permanent).
+    #[error("cannot create nested runtime: already inside a Tokio runtime context")]
+    NestedRuntime,
+
+    /// Failed to create Tokio runtime (permanent).
+    #[error("failed to create runtime: {0}")]
+    CreationFailed(String),
+}
+
+impl RuntimeError {
+    /// Returns true if the error represents a transient failure that may succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            RuntimeError::NestedRuntime => false,
+            RuntimeError::CreationFailed(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secret errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during secret retrieval.
+#[derive(Debug, Error)]
+pub enum SecretError {
+    /// Secret not found (permanent).
+    #[error("secret not found: {key}")]
+    NotFound { key: String },
+
+    /// Access to secret denied (permanent).
+    #[error("access denied for secret: {key}")]
+    AccessDenied { key: String },
+
+    /// Secret value contains invalid encoding (permanent).
+    #[error("secret has invalid encoding: {key}")]
+    InvalidEncoding { key: String },
+}
+
+impl SecretError {
+    /// Returns true if the error represents a transient failure that may succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            SecretError::NotFound { .. } => false,
+            SecretError::AccessDenied { .. } => false,
+            SecretError::InvalidEncoding { .. } => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gateway errors
+// ---------------------------------------------------------------------------
+
+/// Errors from the HTTP/WebSocket gateway layer (routing, sessions, validation).
+#[derive(Debug, Error)]
+pub enum GatewayError {
+    /// Invalid or missing configuration (permanent).
+    #[error("config error: {0}")]
+    ConfigError(String),
+
+    /// Failed to bind the listening socket (permanent).
+    #[error("bind error: {0}")]
+    BindError(String),
+
+    /// Upstream provider failure (delegates retriability to inner error).
+    #[error("provider error: {0}")]
+    Provider(#[from] ProviderError),
+
+    /// Upstream storage failure (delegates retriability to inner error).
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+
+    /// WebSocket-level error (transient — connections can be re-established).
+    #[error("websocket error: {0}")]
+    WebSocketError(String),
+
+    /// Shutdown signalling failed (permanent).
+    #[error("shutdown error: {0}")]
+    ShutdownError(String),
+
+    /// Another turn is already in progress for this session (transient —
+    /// the client can retry once the active turn completes).
+    #[error("turn already in progress for session {session_id}")]
+    TurnInProgress { session_id: Uuid },
+
+    /// Conversation does not exist (permanent).
+    #[error("conversation {id} not found")]
+    ConversationNotFound { id: Uuid },
+
+    /// Project does not exist (permanent).
+    #[error("project {id} not found")]
+    ProjectNotFound { id: Uuid },
+
+    /// Project name or slug conflicts with an existing project (permanent).
+    #[error("project conflict: {0}")]
+    ProjectConflict(String),
+
+    /// Request body or parameters failed validation (permanent).
+    #[error("validation error: {0}")]
+    ValidationError(String),
+}
+
+impl GatewayError {
+    /// Returns true if the error represents a transient failure that may
+    /// succeed on retry.
+    pub fn is_retriable(&self) -> bool {
+        match self {
+            GatewayError::ConfigError(_) => false,
+            GatewayError::BindError(_) => false,
+            GatewayError::Provider(e) => e.is_retriable(),
+            GatewayError::Storage(e) => e.is_retriable(),
+            GatewayError::WebSocketError(_) => true,
+            GatewayError::ShutdownError(_) => false,
+            GatewayError::TurnInProgress { .. } => true,
+            GatewayError::ConversationNotFound { .. } => false,
+            GatewayError::ProjectNotFound { .. } => false,
+            GatewayError::ProjectConflict(_) => false,
+            GatewayError::ValidationError(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Provider errors ------------------------------------------------------
+
+    #[test]
+    fn provider_rate_limited_is_retriable() {
+        let err = ProviderError::RateLimited {
+            provider: "openai".to_string(),
+            retry_after: Some(Duration::from_secs(30)),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn provider_rate_limited_without_retry_after_is_retriable() {
+        let err = ProviderError::RateLimited {
+            provider: "anthropic".to_string(),
+            retry_after: None,
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn provider_timeout_is_retriable() {
+        let err = ProviderError::Timeout {
+            provider: "openai".to_string(),
+            duration: Duration::from_secs(60),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn provider_network_is_retriable() {
+        let err = ProviderError::Network {
+            provider: "google".to_string(),
+            message: "connection reset".to_string(),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn provider_auth_is_permanent() {
+        let err = ProviderError::Auth {
+            provider: "openai".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn provider_invalid_config_is_permanent() {
+        let err = ProviderError::InvalidConfig {
+            message: "missing API key".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn provider_invalid_request_is_permanent() {
+        let err = ProviderError::InvalidRequest {
+            message: "bad JSON".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn provider_model_error_is_permanent() {
+        let err = ProviderError::ModelError {
+            model: "gpt-4".to_string(),
+            message: "context window exceeded".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn provider_http_error_is_permanent() {
+        let err = ProviderError::HttpError {
+            status: 429,
+            body: "too many requests".to_string(),
+        };
+        // Conservative default: non-retriable; callers inspect status for retry logic.
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn provider_stream_error_is_retriable() {
+        let err = ProviderError::StreamError("disconnect".to_string());
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn provider_invalid_response_is_permanent() {
+        let err = ProviderError::InvalidResponse("unexpected format".to_string());
+        assert!(!err.is_retriable());
+    }
+
+    // -- Storage errors -------------------------------------------------------
+
+    #[test]
+    fn storage_io_is_permanent() {
+        let err = StorageError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file gone",
+        ));
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_serialisation_is_permanent() {
+        let err = StorageError::Serialisation {
+            message: "invalid UTF-8".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_not_found_is_permanent() {
+        let err = StorageError::NotFound {
+            entity: "session".to_string(),
+            id: "abc-123".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_corruption_is_permanent() {
+        let err = StorageError::Corruption {
+            message: "checksum mismatch".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_capacity_exceeded_is_retriable() {
+        let err = StorageError::CapacityExceeded {
+            message: "disk full".to_string(),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn storage_connection_failed_is_retriable() {
+        let err = StorageError::ConnectionFailed("ECONNREFUSED".to_string());
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn storage_query_failed_is_permanent() {
+        let err = StorageError::QueryFailed("syntax error near WHERE".to_string());
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_migration_failed_is_permanent() {
+        let err = StorageError::MigrationFailed("schema mismatch".to_string());
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn storage_constraint_violation_is_permanent() {
+        let err = StorageError::ConstraintViolation("UNIQUE constraint failed".to_string());
+        assert!(!err.is_retriable());
+    }
+
+    // -- Tool errors ----------------------------------------------------------
+
+    #[test]
+    fn tool_not_found_is_permanent() {
+        let err = ToolError::NotFound {
+            name: "calculator".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn tool_execution_failed_is_retriable() {
+        let err = ToolError::ExecutionFailed {
+            name: "web_search".to_string(),
+            message: "503 service unavailable".to_string(),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn tool_invalid_parameters_is_permanent() {
+        let err = ToolError::InvalidParameters {
+            name: "calculator".to_string(),
+            message: "missing operand".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn tool_timeout_is_retriable() {
+        let err = ToolError::Timeout {
+            name: "web_search".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn tool_permission_denied_is_permanent() {
+        let err = ToolError::PermissionDenied {
+            name: "shell".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    // -- Hook errors ----------------------------------------------------------
+
+    #[test]
+    fn hook_execution_failed_is_permanent() {
+        let err = HookError::ExecutionFailed {
+            hook_name: "pre-commit".to_string(),
+            message: "exit code 1".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn hook_timeout_is_permanent() {
+        let err = HookError::Timeout {
+            hook_name: "lint".to_string(),
+            duration: Duration::from_secs(10),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn hook_invalid_matcher_is_permanent() {
+        let err = HookError::InvalidMatcher {
+            pattern: "[invalid".to_string(),
+            message: "unclosed bracket".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    // -- Safety errors --------------------------------------------------------
+
+    #[test]
+    fn safety_invalid_pattern_is_permanent() {
+        let err = SafetyError::InvalidPattern {
+            message: "regex syntax error".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn safety_redaction_failed_is_permanent() {
+        let err = SafetyError::RedactionFailed {
+            message: "replacement failed".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    // -- Sandbox errors -------------------------------------------------------
+
+    #[test]
+    fn sandbox_spawn_failed_is_permanent() {
+        let err = SandboxError::SpawnFailed {
+            message: "no bubblewrap".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn sandbox_ipc_error_is_permanent() {
+        let err = SandboxError::IpcError {
+            message: "pipe broken".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn sandbox_unavailable_is_permanent() {
+        let err = SandboxError::Unavailable {
+            message: "sandboxing not supported on this platform".to_string(),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    // -- SwageError delegation ------------------------------------------------
+
+    #[test]
+    fn swage_error_delegates_retriable_for_transient_provider() {
+        let err: SwageError = ProviderError::RateLimited {
+            provider: "openai".to_string(),
+            retry_after: Some(Duration::from_secs(5)),
+        }
+        .into();
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_permanent_provider() {
+        let err: SwageError = ProviderError::Auth {
+            provider: "openai".to_string(),
+        }
+        .into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_runtime() {
+        let err: SwageError = RuntimeError::NestedRuntime.into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_secret() {
+        let err: SwageError = SecretError::NotFound {
+            key: "API_KEY".to_string(),
+        }
+        .into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_tool() {
+        let err: SwageError = ToolError::Timeout {
+            name: "search".to_string(),
+            duration: Duration::from_secs(30),
+        }
+        .into();
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_storage() {
+        let err: SwageError = StorageError::CapacityExceeded {
+            message: "full".to_string(),
+        }
+        .into();
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_hook() {
+        let err: SwageError = HookError::ExecutionFailed {
+            hook_name: "pre-commit".to_string(),
+            message: "failed".to_string(),
+        }
+        .into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_safety() {
+        let err: SwageError = SafetyError::InvalidPattern {
+            message: "bad regex".to_string(),
+        }
+        .into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_sandbox() {
+        let err: SwageError = SandboxError::Unavailable {
+            message: "not supported".to_string(),
+        }
+        .into();
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_gateway_transient() {
+        let err: SwageError = GatewayError::TurnInProgress {
+            session_id: Uuid::new_v4(),
+        }
+        .into();
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn swage_error_delegates_retriable_for_gateway_permanent() {
+        let err: SwageError =
+            GatewayError::ConversationNotFound { id: Uuid::new_v4() }.into();
+        assert!(!err.is_retriable());
+    }
+
+    // -- Error display --------------------------------------------------------
+
+    #[test]
+    fn provider_rate_limited_display_includes_provider() {
+        let err = ProviderError::RateLimited {
+            provider: "openai".to_string(),
+            retry_after: None,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("openai"));
+        assert!(msg.contains("rate limited"));
+    }
+
+    #[test]
+    fn tool_timeout_display_includes_name_and_duration() {
+        let err = ToolError::Timeout {
+            name: "search".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("search"));
+        assert!(msg.contains("30s"));
+    }
+
+    #[test]
+    fn provider_http_error_display() {
+        let err = ProviderError::HttpError {
+            status: 429,
+            body: "too many".to_string(),
+        };
+        assert_eq!(err.to_string(), "HTTP error 429: too many");
+    }
+
+    #[test]
+    fn provider_rate_limited_display_no_retry_after() {
+        let err = ProviderError::RateLimited {
+            provider: "anthropic".to_string(),
+            retry_after: None,
+        };
+        assert!(err.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn storage_not_found_display() {
+        let err = StorageError::NotFound {
+            entity: "conversation".to_string(),
+            id: "abc".to_string(),
+        };
+        assert_eq!(err.to_string(), "conversation not found: abc");
+    }
+
+    // -- GatewayError conversions --------------------------------------------
+
+    #[test]
+    fn gateway_error_from_provider() {
+        // GatewayError::from(ProviderError) must work via #[from].
+        let provider_err = ProviderError::Auth {
+            provider: "bad key".to_string(),
+        };
+        let gateway_err = GatewayError::from(provider_err);
+        assert!(gateway_err.to_string().contains("provider error"));
+    }
+
+    #[test]
+    fn gateway_error_from_storage() {
+        let storage_err = StorageError::QueryFailed("syntax error".to_string());
+        let gateway_err = GatewayError::from(storage_err);
+        assert!(gateway_err.to_string().contains("storage error"));
+    }
+
+    // -- ProviderError serde --------------------------------------------------
+
+    #[test]
+    fn provider_error_serde_round_trip() {
+        let err = ProviderError::StreamError("disconnect".to_string());
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: ProviderError = serde_json::from_str(&json).unwrap();
+        // Compare display strings since PartialEq isn't derived for Duration-containing types.
+        assert_eq!(err.to_string(), decoded.to_string());
+    }
+}

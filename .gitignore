@@ -1,0 +1,40 @@
+# Local overrides
+*.local
+*.local.*
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors & IDEs
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Rust
+/target/
+
+# Node
+node_modules/
+dist/
+
+# Python (for embedded runtime build artifacts)
+__pycache__/
+*.pyc
+
+# Claude
+.claude/
+.motes/
+forge-progress.md

@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/swage",
+    "crates/swage-core",
+    "crates/swage-safety",
+    "crates/swage-hook",
+    "crates/swage-provider",
+    "crates/swage-tool",
+    "crates/swage-storage",
+    "crates/swage-agent",
+    "crates/swage-sandbox",
+    "crates/swage-config",
+    "crates/swage-gateway",
+    "crates/swage-python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Identifiers and time
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+bytes = "1"
+
+# Web framework
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Pattern matching (leak detection)
+aho-corasick = "1"
+regex = "1"
+
+# URL handling
+url = "2"
+
+# Python embedding
+pyo3 = { version = "0.24", features = ["auto-initialize", "abi3-py39"] }
+
+# Frontend embedding
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+# Testing
+tempfile = "3"
