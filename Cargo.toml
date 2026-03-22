@@ -70,5 +70,8 @@ pyo3 = { version = "0.24", features = ["auto-initialize", "abi3-py39"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
+# System interfaces
+libc = "0.2"
+
 # Testing
 tempfile = "3"

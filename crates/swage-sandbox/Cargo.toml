@@ -3,3 +3,32 @@ name = "swage-sandbox"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+# Workspace crates
+swage-core = { path = "../swage-core" }
+swage-tool = { path = "../swage-tool" }
+
+# Serialisation
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Identifiers
+uuid = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# System interfaces (prctl, landlock syscalls)
+libc = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+tempfile = { workspace = true }

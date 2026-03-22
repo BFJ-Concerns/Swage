@@ -2130,6 +2130,20 @@ dependencies = [
 [[package]]
 name = "swage-sandbox"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "swage-core",
+ "swage-tool",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "swage-storage"
