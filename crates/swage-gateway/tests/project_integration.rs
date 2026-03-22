@@ -45,6 +45,7 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
     );
     let router = build_router(state);
     (router, storage)

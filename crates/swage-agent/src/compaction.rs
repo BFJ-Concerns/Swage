@@ -53,9 +53,11 @@ pub fn exceeds_threshold(messages: &[ChatMessage], threshold: &CompactionThresho
 /// - `messages`: Current active message history.
 /// - `threshold`: When context is considered too large.
 /// - `provider`: LLM provider used for tier-1 summarisation.
-/// - `_storage`: Storage backend; provided for future tier-3 queries. Removed
+/// - `_storage`: Currently unused — reserved for future tier-3 storage queries.
+///   The underscore prefix signals intentional non-use to the compiler. Removed
 ///   messages already exist in the DB from earlier persistence calls.
-/// - `_thread_id`: Owning thread identifier; reserved for scoped storage queries.
+/// - `_thread_id`: Currently unused — owning thread identifier, reserved for
+///   scoped storage queries in future tier implementations.
 pub async fn compact(
     messages: Vec<ChatMessage>,
     threshold: &CompactionThreshold,

@@ -89,6 +89,22 @@ impl RetryProvider {
         Self { inner: Arc::from(inner), config }
     }
 
+    /// Shared backoff core: `initial × 2^attempt`, capped at `max_backoff`, with
+    /// full jitter applied.
+    ///
+    /// Returns a value in `[0, min(initial × 2^attempt, max_backoff)]`.
+    fn jittered_backoff(config: &RetryConfig, attempt: u32) -> Duration {
+        // Exponential window: initial * 2^attempt, capped at max_backoff.
+        let base = config
+            .initial_backoff
+            .saturating_mul(2u32.saturating_pow(attempt));
+        let capped = base.min(config.max_backoff);
+
+        // Full jitter: pick a uniform random fraction of the window.
+        let jitter: f64 = rand::random();
+        capped.mul_f64(jitter)
+    }
+
     /// Compute the sleep duration for the given attempt number.
     ///
     /// Uses full-jitter exponential backoff:
@@ -103,29 +119,9 @@ impl RetryProvider {
             None
         };
 
-        // Exponential window: initial * 2^attempt, capped at max_backoff.
-        let base = self.config
-            .initial_backoff
-            .saturating_mul(2u32.saturating_pow(attempt));
-        let capped = base.min(self.config.max_backoff);
-
-        // Full jitter: pick a uniform random fraction of the window.
-        let jitter: f64 = rand::random();
-        let jittered = capped.mul_f64(jitter);
-
         // Honour the provider's retry-after hint — always wait at least that long.
-        jittered.max(retry_after.unwrap_or(Duration::ZERO))
-    }
-
-    /// Compute the backoff for a stream retry attempt (no ProviderError available,
-    /// only the attempt number).
-    fn compute_stream_backoff(config: &RetryConfig, attempt: u32) -> Duration {
-        let base = config
-            .initial_backoff
-            .saturating_mul(2u32.saturating_pow(attempt));
-        let capped = base.min(config.max_backoff);
-        let jitter: f64 = rand::random();
-        capped.mul_f64(jitter)
+        Self::jittered_backoff(&self.config, attempt)
+            .max(retry_after.unwrap_or(Duration::ZERO))
     }
 }
 
@@ -219,7 +215,7 @@ impl LlmProvider for RetryProvider {
                         }
                         // Transient stream error — back off and retry from scratch.
                         Some(_) => {
-                            let delay = Self::compute_stream_backoff(&config, attempt);
+                            let delay = RetryProvider::jittered_backoff(&config, attempt);
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         }

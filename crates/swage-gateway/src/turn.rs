@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{
-    ChatMessage, CompletionRequest, GatewayError, Role, StreamChunk, ToolCall,
-    ToolResult, build_tool_round_messages,
+    ChatMessage, CompletionRequest, GatewayError, Role, SandboxError, StreamChunk,
+    ToolCall, ToolResult, build_tool_round_messages,
 };
 use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
 
@@ -22,16 +22,27 @@ use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
-/// 1. Guard: reject if a turn is already Processing for this session's thread.
-/// 2. Look up the session's default thread (created alongside the session).
-/// 3. Create a Turn record (state=Pending), immediately advance to Processing.
-/// 4. Store the user message with thread_id and position.
-/// 5. Build message history from the thread and send a streaming request to the provider.
-/// 6. For each chunk: forward Token events to the WebSocket, accumulate content.
-/// 7. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
-/// 8. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
-/// 9. On provider Error: mark the turn Failed, send an Error event.
-/// 10. Cleanup: remove the CancellationToken from active_turns.
+/// 1. Look up the session's default thread (created alongside the session).
+/// 2. Guard: reject if a turn is already Processing for this thread.
+/// 3. Resolve the project for the session; load per-project config and build ToolContext.
+/// 4. Create a Turn record (state=Pending), immediately advance to Processing.
+/// 5. Store the user message with thread_id and position.
+/// 6. Build message history from the thread and send a streaming request to the provider.
+/// 7. For each chunk: forward Token events to the WebSocket, accumulate content.
+/// 8. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
+/// 9. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
+/// 10. On provider Error: mark the turn Failed, send an Error event.
+/// 11. Cleanup: remove the CancellationToken from active_turns.
+// Because process_turn is spawned as a tokio task, it won't inherit the
+// HTTP request span. The instrument macro creates a self-contained "turn"
+// span so all log entries within the turn share the same turn_id and
+// session_id. turn_id is Empty at span creation and recorded once the
+// Turn record exists.
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx),
+    fields(turn_id = tracing::field::Empty),
+)]
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
@@ -77,7 +88,10 @@ pub async fn process_turn(
     // the normal case for most projects.
     let config = match swage_config::load_resolved_config(&project_slug, "default") {
         Ok(c) => c,
-        Err(_) => state.config.clone(),
+        Err(e) => {
+            tracing::warn!("failed to load project config for '{project_slug}', using startup config: {e}");
+            state.config.clone()
+        }
     };
 
     // Build the ToolContext passed to each tool invocation.
@@ -102,6 +116,11 @@ pub async fn process_turn(
 
     state.storage.update_turn_state(turn.id, TurnState::Processing).await?;
 
+    // Record the turn_id now that we have the Turn record. session_id was
+    // already recorded by the #[instrument] macro from the function parameter.
+    tracing::Span::current().record("turn_id", turn.id.to_string());
+    tracing::debug!("processing turn");
+
     let cancel_token = CancellationToken::new();
     {
         let mut turns = state.active_turns.lock().await;
@@ -114,8 +133,17 @@ pub async fn process_turn(
         .storage
         .list_messages_by_thread(thread_id)
         .await
+        .map_err(|e| {
+            // Log before discarding: a transient read error here would silently
+            // assign position 0 to all subsequent messages, corrupting order.
+            tracing::warn!(error = %e, "failed to read message count; defaulting position to 0");
+            e
+        })
         .map(|msgs| msgs.len() as i32)
-        .unwrap_or(0);
+        .unwrap_or_else(|e| {
+            tracing::warn!("failed to read message count for position, defaulting to 0: {e}");
+            0
+        });
 
     state
         .storage
@@ -163,7 +191,22 @@ pub async fn process_turn(
     let mut stored_usage = None;
     let mut tool_position: i32 = 0;
 
+    // Hard cap on tool-call rounds to prevent infinite loops driven by a
+    // misbehaving model or circular tool dependencies.
+    const MAX_TOOL_ROUNDS: usize = 25;
+    let mut round = 0usize;
+
     let outcome = 'outer: loop {
+        if round >= MAX_TOOL_ROUNDS {
+            let msg = format!(
+                "\n\n[Tool-call round limit ({MAX_TOOL_ROUNDS}) reached — stopping to prevent an infinite loop.]"
+            );
+            accumulated.push_str(&msg);
+            let _ = ws_tx.send(ServerEvent::Token { content: msg });
+            break TurnOutcome::Done;
+        }
+        round += 1;
+
         let mut stream = state.provider.stream(request.clone());
         let mut round_text = String::new();
         let mut round_tool_calls: Vec<ToolCall> = Vec::new();
@@ -178,8 +221,14 @@ pub async fn process_turn(
                         None => break RoundOutcome::Done,
                         Some(StreamChunk::Done { .. }) => break RoundOutcome::Done,
                         Some(StreamChunk::Delta { content }) => {
+                            // Each streaming token counts as activity so a long response
+                            // doesn't trigger the idle monitor mid-stream.
+                            state.activity_tracker.record_activity();
                             round_text.push_str(&content);
                             accumulated.push_str(&content);
+                            // Each token is a sign of life — reset the idle timer so
+                            // a slow but active stream doesn't trigger idle shutdown.
+                            state.activity_tracker.record_activity();
                             let _ = ws_tx.send(ServerEvent::Token { content });
                         }
                         Some(StreamChunk::Usage(usage)) => {
@@ -218,7 +267,7 @@ pub async fn process_turn(
                 parent_call_id: None,
             });
 
-            let _ = state.storage.create_tool_call(NewToolCall {
+            if let Err(e) = state.storage.create_tool_call(NewToolCall {
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: call.call_id.clone(),
@@ -231,39 +280,68 @@ pub async fn process_turn(
                 total_bytes: None,
                 position: tool_position,
                 parent_call_id: None,
-            }).await;
+            }).await {
+                tracing::warn!("failed to record tool call {}: {e}", call.call_id);
+            }
             tool_position += 1;
 
+            // A running tool is a form of activity — reset the idle timer so
+            // long-running tool calls don't trigger an idle shutdown mid-turn.
+            state.activity_tracker.record_activity();
             let start = Instant::now();
-            let dispatch_result = if call.name == "python_execute" {
-                let py_ctx = PythonExecuteContext {
-                    ws_tx: ws_tx.clone(),
-                    turn_id: turn.id,
-                    call_id: call.call_id.clone(),
-                };
-                PYTHON_CONTEXT
-                    .scope(
-                        py_ctx,
-                        state.tool_dispatcher.dispatch(
-                            &call.name,
-                            call.arguments.clone(),
-                            &tool_ctx,
-                            "gateway",
-                        ),
-                    )
-                    .await
+            let (result_content, is_error) = if let Some(sandbox) = state.sandbox.as_ref() {
+                // Route through the sandboxed agent process — credentials and
+                // filesystem access are mediated by the sandbox; tool code never
+                // runs directly in the gateway process.
+                match sandbox.execute_tool(&call.name, call.arguments.clone()).await {
+                    Ok(result) => match result.error {
+                        // The sandboxed tool itself reported a failure.
+                        Some(err_msg) => (err_msg, true),
+                        None => {
+                            // Prefer a plain string output; fall back to JSON serialisation.
+                            let content = result.output.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| result.output.to_string());
+                            (content, false)
+                        }
+                    },
+                    Err(SandboxError::IpcError { message }) => {
+                        (format!("sandbox communication error: {message}"), true)
+                    }
+                    Err(e) => (e.to_string(), true),
+                }
             } else {
-                state
-                    .tool_dispatcher
-                    .dispatch(&call.name, call.arguments.clone(), &tool_ctx, "gateway")
-                    .await
-            };
-            let (result_content, is_error) = match dispatch_result {
-                Ok(output) => (
-                    output.result["output"].as_str().unwrap_or("").to_string(),
-                    false,
-                ),
-                Err(e) => (e.to_string(), true),
+                // Direct dispatch: sandbox is disabled or unavailable.
+                let dispatch_result = if call.name == "python_execute" {
+                    let py_ctx = PythonExecuteContext {
+                        ws_tx: ws_tx.clone(),
+                        turn_id: turn.id,
+                        call_id: call.call_id.clone(),
+                    };
+                    PYTHON_CONTEXT
+                        .scope(
+                            py_ctx,
+                            state.tool_dispatcher.dispatch(
+                                &call.name,
+                                call.arguments.clone(),
+                                &tool_ctx,
+                                "gateway",
+                            ),
+                        )
+                        .await
+                } else {
+                    state
+                        .tool_dispatcher
+                        .dispatch(&call.name, call.arguments.clone(), &tool_ctx, "gateway")
+                        .await
+                };
+                match dispatch_result {
+                    Ok(output) => (
+                        output.result["output"].as_str().unwrap_or("").to_string(),
+                        false,
+                    ),
+                    Err(e) => (e.to_string(), true),
+                }
             };
             let duration = start.elapsed();
             let duration_ms = duration.as_millis() as u64;
@@ -281,7 +359,7 @@ pub async fn process_turn(
                 parent_call_id: None,
             });
 
-            let _ = state.storage.update_tool_call_result(
+            if let Err(e) = state.storage.update_tool_call_result(
                 &call.call_id,
                 turn.id,
                 &result_content,
@@ -289,7 +367,9 @@ pub async fn process_turn(
                 duration_ms as i64,
                 false,
                 None,
-            ).await;
+            ).await {
+                tracing::warn!("failed to update tool call result {}: {e}", call.call_id);
+            }
 
             tool_results.push(ToolResult {
                 call_id: call.call_id.clone(),
@@ -1102,6 +1182,8 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
         (state, session_id)
     }
@@ -1193,6 +1275,8 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1356,6 +1440,8 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
             ])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
         (state, session_id)
     }
@@ -1650,6 +1736,8 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
                 capture_tool as Arc<dyn crate::tool::Tool>,
             ])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1703,6 +1791,8 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1807,6 +1897,8 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>,
             ])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1823,6 +1915,314 @@ pub(crate) mod tests {
         assert!(
             std::path::Path::new(result).is_absolute(),
             "working_directory should be an absolute path, got: {result}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox dispatch routing tests
+    // -----------------------------------------------------------------------
+
+    /// Records calls and returns a predefined result.
+    struct MockSandbox {
+        calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        result: std::sync::Mutex<Option<Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>>>,
+    }
+
+    impl MockSandbox {
+        fn returning(result: Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(vec![])),
+                result: std::sync::Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl swage_sandbox::Sandbox for MockSandbox {
+        async fn spawn_agent(&mut self) -> Result<(), swage_core::SandboxError> {
+            Ok(())
+        }
+
+        async fn execute_tool(
+            &self,
+            name: &str,
+            params: serde_json::Value,
+        ) -> Result<swage_sandbox::ToolCallResult, swage_core::SandboxError> {
+            self.calls.lock().await.push((name.to_string(), params));
+            self.result.lock().unwrap().take().expect("execute_tool called more than once")
+        }
+
+        async fn shutdown(&mut self) -> Result<(), swage_core::SandboxError> {
+            Ok(())
+        }
+    }
+
+    /// Build an AppState with an active sandbox and no tools in the direct dispatcher.
+    ///
+    /// With no tools registered, direct dispatch would always fail — this lets
+    /// us verify sandbox routing by checking whether the tool call succeeds.
+    async fn make_state_with_sandbox(
+        rounds: Vec<Vec<StreamChunk>>,
+        sandbox: Arc<dyn swage_sandbox::Sandbox>,
+    ) -> (AppState, Uuid) {
+        let storage = Arc::new(MockStorage::new());
+
+        let project = storage.get_or_create_default().await.expect("project");
+        let session = storage
+            .create_session(NewSession { project_id: project.id, agent_id: "gateway".to_string() })
+            .await
+            .expect("session");
+        let session_id = session.id;
+
+        ThreadStore::create(&*storage, NewThread { session_id, agent_id: "gateway".to_string() })
+            .await
+            .expect("thread");
+
+        let provider = Arc::new(MultiRoundMockProvider::new(rounds));
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            provider: provider as Arc<dyn LlmProvider>,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            // Intentionally empty: direct dispatch would fail for any tool name.
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: Some(sandbox),
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+        };
+        (state, session_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sandbox_routes_tool_calls_through_sandbox_when_present() {
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "sb_call".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "sandbox_hi"}),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta { content: "done".into() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+
+        let sandbox = Arc::new(MockSandbox::returning(Ok(
+            swage_sandbox::ToolCallResult::success(serde_json::json!("sandbox_output"), 5),
+        )));
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(&state, session_id, "Use echo".to_string(), tx)
+            .await
+            .expect("turn should complete");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        // The empty direct dispatcher would produce status="error". Only the
+        // sandbox path can produce status="success" here.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ServerEvent::ToolEnd { call_id, status, .. }
+                if call_id == "sb_call" && status == "success"
+            )),
+            "sandbox tool call should succeed; got events: {events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sandbox_ipc_error_produces_tool_end_error_with_communication_message() {
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "err_call".into(),
+                name: "broken".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta { content: "done".into() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+
+        let sandbox = Arc::new(MockSandbox::returning(Err(
+            swage_core::SandboxError::IpcError { message: "pipe broken".to_string() },
+        )));
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(&state, session_id, "Use broken".to_string(), tx)
+            .await
+            .expect("turn should complete");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let tool_end = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolEnd { call_id, .. } if call_id == "err_call"))
+            .expect("expected ToolEnd for err_call");
+
+        match tool_end {
+            ServerEvent::ToolEnd { status, result, .. } => {
+                assert_eq!(status, "error", "IPC error must produce error status");
+                let msg = result.as_str().unwrap_or("");
+                assert!(
+                    msg.contains("sandbox communication error"),
+                    "result should contain 'sandbox communication error', got: {msg}"
+                );
+            }
+            _ => panic!("expected ToolEnd"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sandbox_tool_error_field_produces_tool_end_error() {
+        // ToolCallResult.error = Some(...) means the sandboxed tool itself failed.
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "fail_call".into(),
+                name: "fail_tool".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta { content: "done".into() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+
+        let sandbox = Arc::new(MockSandbox::returning(Ok(
+            swage_sandbox::ToolCallResult::failed("tool execution failed inside sandbox", 10),
+        )));
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(&state, session_id, "Use fail_tool".to_string(), tx)
+            .await
+            .expect("turn should complete");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let tool_end = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolEnd { call_id, .. } if call_id == "fail_call"))
+            .expect("expected ToolEnd for fail_call");
+
+        match tool_end {
+            ServerEvent::ToolEnd { status, result, .. } => {
+                assert_eq!(status, "error");
+                let msg = result.as_str().unwrap_or("");
+                assert!(
+                    msg.contains("tool execution failed"),
+                    "result should contain the sandbox error message, got: {msg}"
+                );
+            }
+            _ => panic!("expected ToolEnd"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Turn ID correlation span test
+    // -----------------------------------------------------------------------
+
+    /// The `process_turn` function creates a tracing span named "turn" carrying
+    /// `turn_id` and `session_id` fields so that all log entries within the turn
+    /// are correlated by the same identifiers.
+    ///
+    /// Uses a custom `Layer` that records span metadata to an in-process buffer,
+    /// avoiding external log capture and filesystem dependencies.
+    #[test]
+    fn process_turn_creates_correlation_span() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+        use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+        // Accumulates (span_name, [field_names]) for every span created
+        // during process_turn. Shared between the subscriber and the assertions.
+        let recorded: StdArc<StdMutex<Vec<(String, Vec<String>)>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+        let captured = StdArc::clone(&recorded);
+
+        // Minimal Layer that records span names and field names on creation.
+        struct SpanFieldRecorder(StdArc<StdMutex<Vec<(String, Vec<String>)>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanFieldRecorder {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _id: &tracing::span::Id,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let name = attrs.metadata().name().to_string();
+                let mut fields = Vec::new();
+
+                // Collect field names from metadata — this captures both
+                // value-filled and Empty (deferred) fields, so turn_id is
+                // visible even though it's recorded after span creation.
+                attrs.metadata().fields().iter().for_each(|f| {
+                    fields.push(f.name().to_string());
+                });
+                self.0.lock().unwrap().push((name, fields));
+            }
+        }
+
+        let subscriber = Registry::default().with(SpanFieldRecorder(captured));
+
+        // Scope the subscriber around the entire async execution via with_default.
+        // This is more reliable than set_default inside #[tokio::test] because
+        // with_default brackets the runtime creation itself, ensuring the subscriber
+        // is active when tracing rebuilds callsite interest caches (which happens
+        // when SCOPED_COUNT transitions 0→1). A gap between set_default and
+        // process_turn can let concurrent tests drain SCOPED_COUNT to 0, causing
+        // tracing to rebuild with a noop subscriber and cache "never" interest —
+        // so spans are silently dropped before reaching our recorder.
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let chunks = vec![
+                        StreamChunk::Delta { content: "ok".to_string() },
+                        StreamChunk::Done { finish_reason: None },
+                    ];
+                    let (state, session_id) = make_state_with_session(chunks).await;
+                    let (tx, _rx) = mpsc::unbounded_channel();
+
+                    // Re-seed callsite interest immediately before process_turn.
+                    // In a parallel test run, concurrent tests can trigger
+                    // rebuild_interest_cache() on their own threads (when their
+                    // scoped subscriber guards drop), resetting our callsite's
+                    // interest to "never". Calling it here — with our subscriber
+                    // still active — re-establishes "sometimes" interest just
+                    // before the span would be created.
+                    tracing::callsite::rebuild_interest_cache();
+
+                    process_turn(&state, session_id, "test".to_string(), tx)
+                        .await
+                        .expect("turn should complete");
+                });
+        });
+
+        let spans = recorded.lock().unwrap();
+        let turn_spans: Vec<_> = spans.iter().filter(|(name, _)| name == "turn").collect();
+
+        assert!(
+            !turn_spans.is_empty(),
+            "expected a 'turn' span during process_turn; saw spans: {:?}",
+            spans.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        );
+
+        let (_, fields) = &turn_spans[0];
+        assert!(
+            fields.contains(&"turn_id".to_string()),
+            "turn span should have 'turn_id' field, got: {fields:?}",
+        );
+        assert!(
+            fields.contains(&"session_id".to_string()),
+            "turn span should have 'session_id' field, got: {fields:?}",
         );
     }
 }

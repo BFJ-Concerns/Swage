@@ -18,6 +18,19 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Health check
+// ---------------------------------------------------------------------------
+
+/// `GET /api/health` — lightweight startup and readiness check.
+///
+/// Returns `{"status": "ok"}` with no database queries or provider calls.
+/// Used by process managers (systemd, wrapper scripts) to verify the gateway
+/// is up and accepting connections before routing traffic to it.
+pub async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ---------------------------------------------------------------------------
 // Wrapper type for list endpoint
 // ---------------------------------------------------------------------------
 
@@ -210,6 +223,8 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
         (build_router(state), storage)
     }

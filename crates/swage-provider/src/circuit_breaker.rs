@@ -31,6 +31,38 @@ pub struct CircuitBreakerConfig {
     pub recovery_timeout: Duration,
 }
 
+impl CircuitBreakerConfig {
+    /// Construct a validated config.
+    ///
+    /// Returns `Err` when `failure_threshold` is 0 — which would open the circuit
+    /// after every single failure — or when `recovery_timeout` is zero — which
+    /// disables the recovery window entirely.
+    pub fn new(failure_threshold: u32, recovery_timeout: Duration) -> Result<Self, ProviderError> {
+        let config = Self { failure_threshold, recovery_timeout };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Check for degenerate field values, returning a descriptive error if any are found.
+    ///
+    /// Useful when configs are deserialized from external sources rather than
+    /// constructed via [`CircuitBreakerConfig::new`].
+    pub fn validate(&self) -> Result<(), ProviderError> {
+        if self.failure_threshold == 0 {
+            return Err(ProviderError::InvalidConfig {
+                message: "failure_threshold must be >= 1; 0 opens the circuit on every failure"
+                    .into(),
+            });
+        }
+        if self.recovery_timeout == Duration::ZERO {
+            return Err(ProviderError::InvalidConfig {
+                message: "recovery_timeout must be > zero; Duration::ZERO disables recovery".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
         Self {
@@ -148,7 +180,16 @@ pub struct CircuitBreakerProvider {
 
 impl CircuitBreakerProvider {
     /// Wrap a provider with the given circuit-breaker configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config` has degenerate values — see [`CircuitBreakerConfig::validate`].
+    /// These are programmer errors: a zero threshold or zero timeout indicate a
+    /// misconfigured setup that should be caught at startup, not during request handling.
     pub fn new(inner: Box<dyn LlmProvider>, config: CircuitBreakerConfig) -> Self {
+        config
+            .validate()
+            .expect("invalid CircuitBreakerConfig — check failure_threshold and recovery_timeout");
         Self {
             inner,
             state: Arc::new(Mutex::new(CircuitBreakerInner::new(config))),
@@ -574,5 +615,59 @@ mod tests {
         let mock = MockProvider::new(vec![]);
         let breaker = CircuitBreakerProvider::new(Box::new(mock), CircuitBreakerConfig::default());
         assert_eq!(breaker.model_id(), "mock-model");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: config validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_new_rejects_zero_failure_threshold() {
+        let err = CircuitBreakerConfig::new(0, Duration::from_secs(30)).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn config_new_rejects_zero_recovery_timeout() {
+        let err = CircuitBreakerConfig::new(5, Duration::ZERO).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn config_new_accepts_minimal_valid_values() {
+        // threshold=1 and 1 ns timeout are the smallest valid values.
+        assert!(CircuitBreakerConfig::new(1, Duration::from_nanos(1)).is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_threshold() {
+        let config = CircuitBreakerConfig { failure_threshold: 0, recovery_timeout: Duration::from_secs(1) };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_timeout() {
+        let config = CircuitBreakerConfig { failure_threshold: 5, recovery_timeout: Duration::ZERO };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid CircuitBreakerConfig")]
+    fn provider_new_panics_on_zero_threshold() {
+        let mock = MockProvider::new(vec![]);
+        CircuitBreakerProvider::new(
+            Box::new(mock),
+            CircuitBreakerConfig { failure_threshold: 0, recovery_timeout: Duration::from_secs(30) },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid CircuitBreakerConfig")]
+    fn provider_new_panics_on_zero_recovery_timeout() {
+        let mock = MockProvider::new(vec![]);
+        CircuitBreakerProvider::new(
+            Box::new(mock),
+            CircuitBreakerConfig { failure_threshold: 5, recovery_timeout: Duration::ZERO },
+        );
     }
 }

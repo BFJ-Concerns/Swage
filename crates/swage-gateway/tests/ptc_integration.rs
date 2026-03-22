@@ -125,6 +125,7 @@ async fn start_ptc_test_server(
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,
+        None,
     );
     let router = build_router(state);
 

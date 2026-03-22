@@ -137,8 +137,12 @@ impl ToolDispatcher {
         match self.rate_limiter.check(agent_id, tool_name, &self.rate_config) {
             RateLimitDecision::Allowed => {}
             RateLimitDecision::Limited { retry_after } => {
-                // ToolError has no RateLimited variant; ExecutionFailed
-                // carries the retry information in a human-readable message.
+                // ToolError has no RateLimited variant by design: rate-limit
+                // rejections are transient, and agents back off from them the
+                // same way they do for any ExecutionFailed. A dedicated variant
+                // would expand every match site without changing caller
+                // behaviour. The retry interval is surfaced in the message
+                // string for human-readable diagnostics.
                 return Err(ToolError::ExecutionFailed {
                     name: tool_name.to_owned(),
                     message: format!(

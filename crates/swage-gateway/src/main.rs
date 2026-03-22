@@ -2,6 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use swage_config::LogLevel;
 
 use swage_config::load_resolved_config;
 use swage_gateway::{
@@ -20,17 +21,13 @@ use swage_gateway::{
         workspace::resolve_workspace_root,
     },
 };
+use swage_sandbox::{BubblewrapSandbox, Sandbox, SandboxConfig};
 
 #[tokio::main]
 async fn main() {
-    // Step 1: Initialise tracing (env filter, default INFO).
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
-    // Step 2: Load configuration. Report all validation errors before exiting.
+    // Step 1: Load configuration first so the logging subscriber can be
+    // initialised from the configured log level. Errors at this stage go
+    // to stderr directly — no structured logging is available yet.
     let config = match load_resolved_config("default", "default") {
         Ok(c) => c,
         Err(e) => {
@@ -40,6 +37,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Step 2: Initialise the logging subscriber from configuration.
+    // JSON structured format on stderr for production; set SWAGE_LOG_FORMAT=pretty
+    // for human-readable development output. TEVIK_LOG overrides config level.
+    init_logging(&config);
 
     // Step 3: Determine database path (~/.swage/swage.db) and ensure the
     // parent directory exists before we try to open the file.
@@ -77,14 +79,20 @@ async fn main() {
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
     );
 
-    // Step 8: Assemble application state and build the router.
+    // Step 8: Initialise the sandbox agent when enabled. The sandbox runs tool
+    // calls inside a bubblewrap namespace with credential isolation via IPC.
+    // When disabled or when bwrap is unavailable, tool dispatch falls back to
+    // the normal in-process path with no sandbox overhead.
+    let sandbox = build_sandbox(&config, Arc::clone(&provider)).await;
+
+    // Step 9: Assemble application state and build the router.
     // Type-erase the storage into its two distinct trait objects.
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let project_store: Arc<dyn swage_storage::store::ProjectStore> = raw_storage;
-    let state = AppState::new(storage, project_store, provider, config.clone(), tool_dispatcher);
+    let state = AppState::new(storage, project_store, provider, config.clone(), tool_dispatcher, sandbox);
     let router = server::build_router(state.clone());
 
-    // Step 9: Bind the TCP listener.
+    // Step 10: Bind the TCP listener.
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
         .parse()
         .unwrap_or_else(|e| {
@@ -106,17 +114,44 @@ async fn main() {
         }
     };
 
-    // Step 10: Start serving. Graceful shutdown cancels active turns and
+    // Step 11: Start serving. Graceful shutdown cancels active turns and
     // drains in-flight connections before the process exits.
+    //
+    // Either a signal (SIGTERM / ctrl-c) or the idle monitor reaching its
+    // threshold triggers the shutdown sequence. Both paths call
+    // shutdown_active_turns so in-flight work is cancelled cleanly.
     info!("Swage gateway listening on {addr}");
     let state_for_shutdown = state.clone();
+    let idle_timeout = config.lifecycle.idle_timeout;
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            shutdown::graceful_shutdown().await;
+            tokio::select! {
+                _ = shutdown::graceful_shutdown() => {}
+                _ = shutdown::idle_monitor(state_for_shutdown.clone(), idle_timeout) => {
+                    info!("Idle timeout triggered shutdown");
+                }
+            }
             shutdown::shutdown_active_turns(&state_for_shutdown).await;
         })
         .await
         .expect("server error");
+
+    // Step 12: Shut down sandbox cleanly. After serve completes, all route
+    // handler clones have been dropped, leaving `state` as the sole Arc holder.
+    // Arc::get_mut therefore succeeds and we can call shutdown() mutably.
+    if let Some(mut sandbox_arc) = state.sandbox {
+        if let Some(sandbox) = Arc::get_mut(&mut sandbox_arc) {
+            if let Err(e) = sandbox.shutdown().await {
+                warn!("Sandbox shutdown returned an error: {e}");
+            } else {
+                info!("Sandbox agent shut down cleanly");
+            }
+        } else {
+            // Unexpected: another reference still alive. The OS will reclaim
+            // the child process when the host exits.
+            warn!("Sandbox Arc has unexpected extra references at shutdown — skipping clean shutdown");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +255,132 @@ fn build_tool_dispatcher(
     ToolDispatcher::allow_all(all_tools)
 }
 
+// ---------------------------------------------------------------------------
+// Logging initialisation helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `LogLevel` enum variant to its tracing directive string.
+///
+/// The directive is the level name in lowercase, matching the syntax accepted
+/// by `EnvFilter::new` and RUST_LOG-style env vars (e.g. `"debug"`, `"warn"`).
+fn log_level_to_directive(level: &LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "trace",
+        LogLevel::Debug => "debug",
+        LogLevel::Info  => "info",
+        LogLevel::Warn  => "warn",
+        LogLevel::Error => "error",
+    }
+}
+
+/// Build an `EnvFilter` from a config level and an optional explicit override.
+///
+/// When `override_directive` is `Some` and parses successfully, it takes
+/// precedence over the config level (same semantics as TEVIK_LOG / RUST_LOG).
+/// An invalid override is silently ignored, falling back to the config level.
+///
+/// Accepts an explicit override rather than reading the env directly so that
+/// unit tests can exercise the logic without mutating process environment.
+fn build_log_filter(config_level: &LogLevel, override_directive: Option<&str>) -> EnvFilter {
+    // Try the explicit override first; fall back to the config level.
+    override_directive
+        .and_then(|d| EnvFilter::try_new(d).ok())
+        .unwrap_or_else(|| EnvFilter::new(log_level_to_directive(config_level)))
+}
+
+/// Initialise the global tracing subscriber from resolved configuration.
+///
+/// Format is selected by the `SWAGE_LOG_FORMAT` env var:
+/// - `"pretty"` → human-readable output (development)
+/// - anything else → JSON structured output on stderr (production default)
+///
+/// The `TEVIK_LOG` env var overrides the config log level using RUST_LOG
+/// directive syntax (e.g. `TEVIK_LOG=debug` or `TEVIK_LOG=swage_gateway=trace`).
+///
+/// Failures are reported via `eprintln!` and do not crash the gateway — a
+/// subscriber may already be registered (common in tests).
+fn init_logging(config: &swage_config::ResolvedConfig) {
+    let override_env = std::env::var("TEVIK_LOG").ok();
+    let filter = build_log_filter(&config.logging.level, override_env.as_deref());
+
+    let use_pretty = std::env::var("SWAGE_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("pretty"))
+        .unwrap_or(false);
+
+    if use_pretty {
+        // Human-readable output — useful during development.
+        if let Err(e) = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init()
+        {
+            eprintln!("Warning: failed to initialise logging subscriber: {e}");
+        }
+    } else {
+        // JSON structured output — machine-parseable with timestamp, level,
+        // target, and message fields for production log ingestion.
+        if let Err(e) = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init()
+        {
+            eprintln!("Warning: failed to initialise logging subscriber: {e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_directive_maps_all_variants() {
+        assert_eq!(log_level_to_directive(&LogLevel::Trace), "trace");
+        assert_eq!(log_level_to_directive(&LogLevel::Debug), "debug");
+        assert_eq!(log_level_to_directive(&LogLevel::Info),  "info");
+        assert_eq!(log_level_to_directive(&LogLevel::Warn),  "warn");
+        assert_eq!(log_level_to_directive(&LogLevel::Error), "error");
+    }
+
+    #[test]
+    fn build_log_filter_uses_config_level_when_no_override() {
+        // No override: filter should encode the config level.
+        let filter = build_log_filter(&LogLevel::Debug, None);
+        assert!(
+            filter.to_string().contains("debug"),
+            "expected 'debug' in filter, got: {}",
+            filter,
+        );
+    }
+
+    #[test]
+    fn build_log_filter_uses_override_when_valid() {
+        // Valid override takes precedence over config level.
+        let filter = build_log_filter(&LogLevel::Info, Some("warn"));
+        assert!(
+            filter.to_string().contains("warn"),
+            "expected 'warn' in filter, got: {}",
+            filter,
+        );
+    }
+
+    #[test]
+    fn build_log_filter_falls_back_on_invalid_override() {
+        // An unparseable override should fall back to the config level.
+        let filter = build_log_filter(&LogLevel::Error, Some("!!!invalid!!!"));
+        assert!(
+            filter.to_string().contains("error"),
+            "expected 'error' in filter, got: {}",
+            filter,
+        );
+    }
+}
+
 /// Create the LLM provider from resolved configuration.
 ///
 /// Dispatches to the correct provider implementation based on the configured
@@ -290,4 +451,73 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
     };
 
     Arc::from(provider)
+}
+
+/// Initialise the sandbox agent when configuration enables it.
+///
+/// Creates a `BubblewrapSandbox` with the workspace root as its working
+/// directory and spawns the child agent process. Returns `None` if:
+/// - `config.sandbox.enabled` is false (disabled by configuration), or
+/// - bubblewrap (`bwrap`) is not installed on the host, or
+/// - the agent process fails to start for any other reason.
+///
+/// In all `None` cases, tool calls fall back to the normal in-process
+/// dispatch path — no sandbox overhead, no credential isolation.
+async fn build_sandbox(
+    config: &swage_config::ResolvedConfig,
+    provider: Arc<dyn swage_provider::LlmProvider>,
+) -> Option<Arc<dyn Sandbox>> {
+    use swage_core::SandboxError;
+    use swage_sandbox::llm_handler::HostLlmHandler;
+
+    if !config.sandbox.enabled {
+        return None;
+    }
+
+    let workspace_root = resolve_workspace_root(config);
+
+    // Build sandbox configuration. The workspace root is mounted read-write
+    // so tool calls can write files in the project directory.
+    let sandbox_config = match SandboxConfig::builder()
+        .working_directory(&workspace_root)
+        .read_write_mount(&workspace_root)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to build sandbox config: {e} — sandbox disabled");
+            return None;
+        }
+    };
+
+    // Wire the host's LLM provider into the sandbox's LLM proxy handler.
+    // The sandboxed agent never sees API keys — completions are forwarded
+    // through this closure from the host side.
+    let llm_handler = HostLlmHandler::new(move |req: swage_core::CompletionRequest| {
+        let p = Arc::clone(&provider);
+        async move {
+            p.complete(req)
+                .await
+                .map_err(|e| SandboxError::IpcError { message: e.to_string() })
+        }
+    });
+
+    let mut sandbox = BubblewrapSandbox::new(sandbox_config, llm_handler);
+    match sandbox.spawn_agent().await {
+        Ok(()) => {
+            info!("Sandbox agent spawned — tool calls will run in an isolated process");
+            Some(Arc::new(sandbox) as Arc<dyn Sandbox>)
+        }
+        Err(SandboxError::Unavailable { .. }) => {
+            warn!(
+                "Sandbox enabled but bubblewrap not available — \
+                 falling back to direct execution"
+            );
+            None
+        }
+        Err(e) => {
+            warn!("Sandbox initialisation failed: {e} — falling back to direct execution");
+            None
+        }
+    }
 }

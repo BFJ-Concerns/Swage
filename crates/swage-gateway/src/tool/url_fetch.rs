@@ -77,7 +77,7 @@ impl Tool for UrlFetchTool {
                 message: format!("Failed to build HTTP client: {e}"),
             })?;
 
-        let response = client.get(&url).send().await.map_err(|e| {
+        let mut response = client.get(&url).send().await.map_err(|e| {
             let message = if e.is_timeout() {
                 format!(
                     "Request timed out after {}s: {url}",
@@ -111,13 +111,27 @@ impl Tool for UrlFetchTool {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Failed to read response body: {e}"),
-            })?;
+        // Stream the response body with a running byte counter, stopping when
+        // max_output_bytes is reached. Avoids buffering the entire response
+        // before the cap is applied — large fast responses could exhaust RAM.
+        let mut body_bytes: Vec<u8> = Vec::new();
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to read response body: {e}"),
+                })?;
+            let Some(chunk) = chunk else { break };
+            let remaining = self.max_output_bytes.saturating_sub(body_bytes.len());
+            if remaining == 0 {
+                // Cap reached — stop collecting and drop the rest of the body.
+                break;
+            }
+            let to_take = chunk.len().min(remaining);
+            body_bytes.extend_from_slice(&chunk[..to_take]);
+        }
 
         // Dispatch on content type.
         let text = if content_type.contains("text/html") {

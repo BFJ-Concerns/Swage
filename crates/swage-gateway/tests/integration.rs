@@ -182,6 +182,7 @@ async fn start_test_server_with_dispatcher(
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,
+        None,
     );
     let router = build_router(state);
 

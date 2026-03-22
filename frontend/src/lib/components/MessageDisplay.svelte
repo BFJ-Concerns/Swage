@@ -3,6 +3,7 @@
   Handles markdown rendering, syntax highlighting, auto-scroll, and streaming.
 -->
 <script lang="ts">
+  import DOMPurify from "dompurify";
   import { marked } from "marked";
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js";
@@ -48,7 +49,10 @@
 
   function renderMarkdown(content: string): string {
     // marked.parse is synchronous when no async extensions are loaded.
-    return marked.parse(content) as string;
+    // DOMPurify sanitises the output to prevent XSS via crafted tool results
+    // or prompt injection carrying malicious HTML/script payloads.
+    const raw = marked.parse(content) as string;
+    return DOMPurify.sanitize(raw);
   }
 
   // ---- Props ----------------------------------------------------------------

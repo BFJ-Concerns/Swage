@@ -1,9 +1,60 @@
 //! Swage gateway — HTTP and WebSocket server for the Swage platform.
+//!
+//! The gateway is the primary runtime surface of Swage. It exposes a REST API
+//! for conversation and project management, a WebSocket interface for streaming
+//! agent turns in real time, and an embedded Svelte SPA served from the same
+//! process.
+//!
+//! ## Modules
+//!
+//! | Module | Responsibility |
+//! |--------|----------------|
+//! | [`handlers`] | HTTP route handlers for conversations, projects, and health |
+//! | [`websocket`] | WebSocket upgrade and bidirectional message protocol |
+//! | [`turn`] | Agent turn orchestration: provider streaming, tool dispatch, storage |
+//! | [`tool`] | Tool dispatch pipeline with permission checks and rate limiting |
+//! | [`service`] | Request/response DTOs shared by handlers and the websocket layer |
+//! | [`state`] | [`state::AppState`] — shared runtime state cloned into every handler |
+//! | [`server`] | Router construction and request-pipeline middleware |
+//! | [`lifecycle`] | [`lifecycle::ActivityTracker`] — atomic last-activity timestamp |
+//! | [`shutdown`] | Idle monitor, graceful shutdown, and orphaned turn recovery |
+//! | [`context`] | Provider and tool context assembly |
+//! | [`assets`] | Embedded frontend SPA served at the fallback route |
+//! | [`error`] | [`error::AppError`] — axum-compatible error type |
+//!
+//! ## Structured Logging
+//!
+//! The gateway emits structured JSON logs to stderr via `tracing`. Two
+//! correlation identifiers propagate through the log stream:
+//!
+//! - `request_id` — a UUID assigned by [`server::build_router`] middleware to
+//!   every inbound HTTP request; returned to clients as `X-Request-Id`.
+//! - `turn_id` — the database turn UUID recorded on the tracing span at the
+//!   start of each agent turn in [`turn::process_turn`].
+//!
+//! ## On-Demand Lifecycle
+//!
+//! When `idle_timeout_secs` is non-zero the gateway shuts itself down after
+//! the configured period of inactivity. Activity is tracked by
+//! [`lifecycle::ActivityTracker`] and recorded by the activity middleware on
+//! every non-health HTTP request and on every streaming token in a turn.
+//! [`shutdown::idle_monitor`] polls the tracker and, when the idle threshold is
+//! exceeded, either shuts down immediately (no active turns) or enters a grace
+//! period equal to `idle_timeout_secs` before proceeding.
+//!
+//! ## Graceful Shutdown
+//!
+//! [`shutdown::graceful_shutdown`] waits for SIGTERM or SIGINT. Once either
+//! resolves, axum drains in-flight connections and
+//! [`shutdown::shutdown_active_turns`] cancels any remaining agent turns.
+//! [`shutdown::recover_orphaned_turns`] runs at startup to mark turns left
+//! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod assets;
 pub mod context;
 pub mod error;
 pub mod handlers;
+pub mod lifecycle;
 pub mod server;
 pub mod service;
 pub mod shutdown;

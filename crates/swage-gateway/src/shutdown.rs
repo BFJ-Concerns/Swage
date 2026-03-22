@@ -1,6 +1,37 @@
+//! Gateway shutdown and recovery.
+//!
+//! Four functions manage the process lifecycle:
+//!
+//! - [`idle_monitor`] — polls [`crate::lifecycle::ActivityTracker`] and resolves
+//!   when the gateway has been idle for `idle_timeout_secs`. Disabled (never
+//!   resolves) when the timeout is zero. Defers shutdown if active turns are
+//!   in flight, waiting up to one further `idle_timeout_secs` grace period
+//!   before proceeding anyway.
+//!
+//! - [`graceful_shutdown`] — awaits SIGTERM or SIGINT. Pass this to axum's
+//!   `serve().with_graceful_shutdown()` so the server stops accepting new
+//!   connections while existing ones drain.
+//!
+//! - [`shutdown_active_turns`] — cancels every in-flight turn's
+//!   `CancellationToken` and waits 500 ms for turn tasks to write partial
+//!   responses before the process exits.
+//!
+//! - [`recover_orphaned_turns`] — runs once at startup to transition any turns
+//!   left in `Processing` state by a previous unclean exit to `Interrupted`.
+//!
+//! Typical call sequence at shutdown:
+//! ```text
+//! tokio::select! {
+//!     _ = graceful_shutdown() => {}
+//!     _ = idle_monitor(state, timeout) => {}
+//! }
+//! shutdown_active_turns(&state).await;
+//! ```
+
 use std::time::Duration;
 
 use tokio::time;
+use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use swage_core::StorageError;
@@ -8,6 +39,89 @@ use swage_storage::model::TurnState;
 use swage_storage::store::Storage;
 
 use crate::state::AppState;
+
+/// Monitor for idle-triggered gateway shutdown.
+///
+/// Resolves when the gateway should shut down due to inactivity, allowing the
+/// caller to race it against signal-based shutdown with `tokio::select!`.
+///
+/// # Behaviour
+///
+/// - **`idle_timeout_secs == 0`**: idle shutdown is disabled — this future
+///   never resolves, leaving shutdown entirely to signals.
+/// - **Idle detected, no active turns**: resolves immediately.
+/// - **Idle detected, active turns present**: defers and logs. A grace period
+///   equal to `idle_timeout_secs` begins; if turns are still active after the
+///   grace period the monitor resolves anyway (the outer shutdown sequence
+///   calls [`shutdown_active_turns`] to cancel them).
+///
+/// The caller is responsible for calling [`shutdown_active_turns`] once this
+/// future resolves.
+pub async fn idle_monitor(state: AppState, idle_timeout_secs: u64) {
+    if idle_timeout_secs == 0 {
+        // Idle shutdown disabled — yield indefinitely; only signals can stop us.
+        std::future::pending::<()>().await;
+        return;
+    }
+
+    let grace_period = Duration::from_secs(idle_timeout_secs);
+
+    // Check every second so short test timeouts (1s) work without a long wait.
+    let mut interval = time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    // When Some, records the instant we first noticed the idle threshold was exceeded.
+    let mut idle_grace_started: Option<std::time::Instant> = None;
+
+    loop {
+        interval.tick().await;
+
+        let idle_secs = state.activity_tracker.seconds_since_last_activity();
+        if idle_secs < idle_timeout_secs {
+            // Still within the active window — clear any grace-period tracking.
+            idle_grace_started = None;
+            continue;
+        }
+
+        // Idle threshold exceeded — check for in-flight turns.
+        let active_count = state.active_turns.lock().await.len();
+        if active_count == 0 {
+            // Clean idle shutdown.
+            info!(
+                idle_secs,
+                idle_timeout_secs,
+                "Idle for {idle_secs}s (threshold {idle_timeout_secs}s) — initiating shutdown"
+            );
+            return;
+        }
+
+        // Turns are still running. Start (or check) the grace period.
+        let grace_elapsed = {
+            let start = *idle_grace_started.get_or_insert_with(std::time::Instant::now);
+            start.elapsed()
+        };
+
+        if grace_elapsed >= grace_period {
+            warn!(
+                active_count,
+                grace_secs = grace_elapsed.as_secs(),
+                "Grace period expired with {active_count} active turn(s) — \
+                 proceeding with shutdown"
+            );
+            return; // Outer shutdown sequence cancels turns via shutdown_active_turns.
+        }
+
+        let remaining = grace_period.saturating_sub(grace_elapsed);
+        info!(
+            active_count,
+            grace_remaining_secs = remaining.as_secs(),
+            "Idle timeout reached but {active_count} turn(s) active, deferring \
+             ({}/{} grace period elapsed)",
+            grace_elapsed.as_secs(),
+            grace_period.as_secs(),
+        );
+    }
+}
 
 /// Wait for SIGTERM or SIGINT, then log and return.
 ///

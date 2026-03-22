@@ -1,5 +1,6 @@
 //! Shell execution tool — runs commands in the project's workspace directory.
 
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,18 +80,36 @@ impl Tool for ShellTool {
         let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
         let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
 
+        let cap = self.max_output_bytes;
+        let tool_name = self.name().to_owned();
+
         // Read stdout and stderr concurrently to prevent pipe-buffer deadlocks.
-        let read_fut = async {
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
-            // join! drives both reads concurrently — critical to avoid deadlock.
+        // Each stream is bounded at max_output_bytes so a high-throughput command
+        // (e.g. `yes`, `dd if=/dev/urandom`) cannot exhaust memory before the
+        // timeout fires. The pipes are always fully drained to avoid stalling the
+        // child process on a full pipe buffer.
+        let read_fut = async move {
             let (stdout_res, stderr_res) = tokio::join!(
-                stdout_pipe.read_to_end(&mut stdout_buf),
-                stderr_pipe.read_to_end(&mut stderr_buf)
+                // join! drives both reads concurrently — critical to avoid deadlock.
+                read_bounded(&mut stdout_pipe, cap),
+                read_bounded(&mut stderr_pipe, cap),
             );
-            stdout_res.expect("failed to read child stdout");
-            stderr_res.expect("failed to read child stderr");
-            (stdout_buf, stderr_buf)
+
+            // Propagate I/O errors rather than panicking — a panic inside
+            // tokio::spawn is silently swallowed, leaving the turn in
+            // Processing state forever.
+            let (stdout_bytes, stdout_over) =
+                stdout_res.map_err(|e| ToolError::ExecutionFailed {
+                    name: tool_name.clone(),
+                    message: format!("Failed to read command stdout: {e}"),
+                })?;
+            let (stderr_bytes, stderr_over) =
+                stderr_res.map_err(|e| ToolError::ExecutionFailed {
+                    name: tool_name,
+                    message: format!("Failed to read command stderr: {e}"),
+                })?;
+
+            Ok::<_, ToolError>((stdout_bytes, stderr_bytes, stdout_over, stderr_over))
         };
 
         let read_result = tokio::time::timeout(self.timeout, read_fut).await;
@@ -108,7 +127,13 @@ impl Tool for ShellTool {
                 })
             }
 
-            Ok((stdout_bytes, stderr_bytes)) => {
+            Ok(Err(e)) => {
+                // I/O error reading output — kill the child and propagate.
+                let _ = kill_child(&mut child).await;
+                Err(e)
+            }
+
+            Ok(Ok((stdout_bytes, stderr_bytes, stdout_over, stderr_over))) => {
                 // Reap the child to get the exit status.
                 let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
@@ -118,13 +143,25 @@ impl Tool for ShellTool {
                 let stdout_str = String::from_utf8_lossy(&stdout_bytes);
                 let stderr_str = String::from_utf8_lossy(&stderr_bytes);
 
-                // Combine stdout then stderr (prefixed) so the model sees both.
-                let combined = if stderr_str.is_empty() {
-                    stdout_str.into_owned()
-                } else if stdout_str.is_empty() {
-                    format!("stderr: {stderr_str}")
+                // Append truncation notes so the model knows the stream was cut.
+                let stdout_display = if stdout_over {
+                    format!("{stdout_str}\n[stdout truncated: exceeded {cap} bytes]")
                 } else {
-                    format!("{stdout_str}stderr: {stderr_str}")
+                    stdout_str.into_owned()
+                };
+                let stderr_display = if stderr_over {
+                    format!("{stderr_str}\n[stderr truncated: exceeded {cap} bytes]")
+                } else {
+                    stderr_str.into_owned()
+                };
+
+                // Combine stdout then stderr (prefixed) so the model sees both.
+                let combined = if stderr_display.is_empty() {
+                    stdout_display
+                } else if stdout_display.is_empty() {
+                    format!("stderr: {stderr_display}")
+                } else {
+                    format!("{stdout_display}stderr: {stderr_display}")
                 };
 
                 let (content, _truncated, _total_bytes) =
@@ -141,6 +178,35 @@ impl Tool for ShellTool {
             }
         }
     }
+}
+
+/// Reads from `reader` until EOF, storing at most `cap` bytes.
+///
+/// Continues draining after the cap so the child process never stalls on a
+/// full pipe buffer. Returns `(buffer, was_truncated)`.
+async fn read_bounded<R>(reader: &mut R, cap: usize) -> io::Result<(Vec<u8>, bool)>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut buf = Vec::with_capacity(cap.min(65536));
+    let mut tmp = [0u8; 4096];
+    let mut total = 0usize;
+
+    loop {
+        let n = reader.read(&mut tmp).await?;
+        if n == 0 {
+            break; // EOF
+        }
+        // Store bytes up to the cap; keep reading (but discarding) beyond it
+        // so the child's writes never block on a full pipe buffer.
+        if total < cap {
+            let to_store = (cap - total).min(n);
+            buf.extend_from_slice(&tmp[..to_store]);
+        }
+        total += n;
+    }
+
+    Ok((buf, total > cap))
 }
 
 /// Kill a child process, ignoring errors (it may have already exited).

@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "dompurify": "^3.3.3",
     "highlight.js": "^11.11.0",
     "marked": "^15.0.0",
     "marked-highlight": "^2.2.0"
@@ -20,6 +21,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@tsconfig/svelte": "^5.0.0",
+    "@types/dompurify": "^3.0.5",
     "jsdom": "^29.0.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",

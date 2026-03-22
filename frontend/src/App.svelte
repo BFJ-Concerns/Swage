@@ -53,20 +53,28 @@
   // these instead of the originals, keeping the URL and connection in sync.
 
   async function selectAndNavigate(id: string): Promise<void> {
-    await conversationStore.selectConversation(id);
-    connectionStore.connectTo(id);
-    // router is declared below but will be initialised before this is called.
-    router.navigate(`/conversations/${id}`);
+    try {
+      await conversationStore.selectConversation(id);
+      connectionStore.connectTo(id);
+      // router is declared below but will be initialised before this is called.
+      router.navigate(`/conversations/${id}`);
+    } catch (err) {
+      console.error("Failed to select conversation:", err);
+    }
   }
 
   async function createAndNavigate(): Promise<void> {
-    // Use the currently selected project — should always be set after startup.
-    const projectId = projectStore.currentProject?.id ?? "";
-    await conversationStore.createConversation(projectId);
-    const id = conversationStore.activeConversation?.id;
-    if (id) {
-      connectionStore.connectTo(id);
-      router.navigate(`/conversations/${id}`);
+    try {
+      // Use the currently selected project — should always be set after startup.
+      const projectId = projectStore.currentProject?.id ?? "";
+      await conversationStore.createConversation(projectId);
+      const id = conversationStore.activeConversation?.id;
+      if (id) {
+        connectionStore.connectTo(id);
+        router.navigate(`/conversations/${id}`);
+      }
+    } catch (err) {
+      console.error("Failed to create conversation:", err);
     }
   }
 
@@ -127,15 +135,19 @@
   // Reloads the conversation list for the newly active project and clears
   // any cross-project UI state (active conversation, WebSocket connection).
   async function handleProjectChange(): Promise<void> {
-    const projectId = projectStore.currentProject?.id;
-    if (!projectId) return;
+    try {
+      const projectId = projectStore.currentProject?.id;
+      if (!projectId) return;
 
-    // Drop the WebSocket — it was bound to the previous project's session.
-    connectionStore.disconnect();
-    // Reset the URL so the router doesn't try to restore a stale conversation.
-    router.navigate("/");
-    // Load the new project's conversations.
-    await conversationStore.loadConversations(projectId);
+      // Drop the WebSocket — it was bound to the previous project's session.
+      connectionStore.disconnect();
+      // Reset the URL so the router doesn't try to restore a stale conversation.
+      router.navigate("/");
+      // Load the new project's conversations.
+      await conversationStore.loadConversations(projectId);
+    } catch (err) {
+      console.error("Failed to switch project:", err);
+    }
   }
 
   onMount(async () => {

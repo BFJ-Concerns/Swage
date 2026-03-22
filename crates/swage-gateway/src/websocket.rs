@@ -207,6 +207,9 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                     }
                     Some(Ok(Message::Close(_))) => break,
                     Some(Ok(Message::Text(text))) => {
+                        // Only actual messages reset the idle timer —
+                        // an open but silent connection does not count.
+                        state.activity_tracker.record_activity();
                         dispatch_client_message(
                             text.as_str(),
                             &state,
@@ -516,6 +519,8 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         }
     }
 
@@ -553,6 +558,8 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
         };
 
         (state, session_id)

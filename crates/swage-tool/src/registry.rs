@@ -121,10 +121,8 @@ impl ToolRegistry {
     /// (the tool's JSON Schema). This is the format expected by providers in
     /// `ToolCompletionRequest.tool_definitions`.
     pub fn generate_schemas(&self) -> Vec<serde_json::Value> {
-        let mut names: Vec<&str> = self.tools.keys().map(String::as_str).collect();
-        names.sort_unstable();
-
-        names
+        // Delegate sorting to list() to avoid duplicating the sort+collect logic.
+        self.list()
             .into_iter()
             .map(|name| {
                 let tool = &self.tools[name];
