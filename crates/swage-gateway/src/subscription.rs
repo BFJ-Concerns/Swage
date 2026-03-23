@@ -141,6 +141,9 @@ impl SubscriptionState {
             ServerEvent::Token { .. }
             | ServerEvent::Error { .. }
             | ServerEvent::Cancelled {}
+            | ServerEvent::SkillActivated { .. }
+            | ServerEvent::SkillAlreadyActive { .. }
+            | ServerEvent::SkillDeactivated { .. }
             | ServerEvent::Shutdown { .. } => true,
         }
     }

@@ -10,7 +10,10 @@ use tiktoken_rs::{cl100k_base, o200k_base, CoreBPE};
 ///
 /// Object-safe so the assembly engine can hold a `Box<dyn Tokeniser>`
 /// without threading generic parameters through the entire call stack.
-pub trait Tokeniser {
+///
+/// `Send + Sync` are required so that `&dyn Tokeniser` can cross async
+/// await points inside `Send` futures (e.g. the WebSocket handler).
+pub trait Tokeniser: Send + Sync {
     /// Count tokens in a raw text string.
     fn count_text(&self, text: &str) -> usize;
 

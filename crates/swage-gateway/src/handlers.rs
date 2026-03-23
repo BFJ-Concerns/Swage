@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
@@ -181,6 +181,130 @@ pub async fn delete_project(
     let svc = ProjectService::new(state.project_store);
     svc.delete_project(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Skills listing
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/skills`.
+#[derive(Debug, Deserialize)]
+pub struct SkillsQueryParams {
+    /// ID of the project to list skills for (required).
+    pub project_id: Uuid,
+    /// Agent ID to include agent-level skills. When provided, the agent's
+    /// directory is searched for a `skills/` folder.
+    pub agent_id: Option<String>,
+}
+
+/// A single skill entry in the `GET /api/skills` response.
+#[derive(Debug, Serialize)]
+pub struct SkillItem {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub description: String,
+    /// Hierarchy level where this skill was resolved: "agent", "project",
+    /// "team", "lens", or "global".
+    pub level: String,
+    /// Tool names the skill requests access to.
+    pub tools: Vec<String>,
+    /// True for agent-level skills — they are always active and cannot be
+    /// deactivated by the user.
+    pub always_active: bool,
+}
+
+/// Response body for `GET /api/skills`.
+#[derive(Debug, Serialize)]
+pub struct SkillListResponse {
+    pub skills: Vec<SkillItem>,
+}
+
+/// `GET /api/skills` — list skills available for a project/agent combination.
+///
+/// Resolves skills from the Swage config hierarchy (global → project → agent),
+/// applying override rules when the same skill name appears at multiple levels.
+/// Returns 200 with `{ skills: [...] }`, sorted agent-first then alphabetically.
+///
+/// Returns 404 if `project_id` does not correspond to a known project.
+/// Returns 400 if `project_id` is missing or not a valid UUID (axum `Query`
+/// extractor enforces this automatically).
+///
+/// When the Swage config root directory does not exist (e.g. on a fresh
+/// install or in a test environment without `SWAGE_HOME`), returns an empty
+/// skills list rather than an error.
+pub async fn list_skills(
+    State(state): State<AppState>,
+    Query(params): Query<SkillsQueryParams>,
+) -> Result<Json<SkillListResponse>, ApiError> {
+    use swage_config::{HierarchyLevel, resolve_root};
+    use swage_config::skill::discover_skills;
+    use swage_storage::store::ProjectStore;
+
+    // Verify the project exists — return 404 for unknown IDs.
+    let project = state
+        .project_store
+        .get(params.project_id)
+        .await
+        .map_err(|e| ApiError(GatewayError::Storage(e)))?
+        .ok_or_else(|| ApiError(GatewayError::ProjectNotFound { id: params.project_id }))?;
+
+    // Resolve the config root. When it doesn't exist (no `~/.swage/` directory
+    // and `SWAGE_HOME` unset or pointing at a missing path), degrade gracefully
+    // by returning an empty list — skill discovery is a best-effort operation.
+    let root = match resolve_root() {
+        Ok(r) => r,
+        Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
+    };
+
+    // Build the hierarchy: global always included; project and agent directories
+    // are included only when they exist on disk.
+    let project_dir = root.join("projects").join(&project.slug);
+    let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> = vec![
+        (HierarchyLevel::Global, root.clone()),
+    ];
+
+    if project_dir.is_dir() {
+        levels.push((HierarchyLevel::Project, project_dir.clone()));
+
+        if let Some(ref agent_id) = params.agent_id {
+            let agent_dir = project_dir.join("agents").join(agent_id);
+            if agent_dir.is_dir() {
+                levels.push((HierarchyLevel::Agent, agent_dir));
+            }
+        }
+    }
+
+    // discover_skills takes borrowed (Level, &Path) pairs — build the refs here.
+    let level_refs: Vec<(HierarchyLevel, &std::path::Path)> = levels
+        .iter()
+        .map(|(l, p)| (l.clone(), p.as_path()))
+        .collect();
+
+    let (skills, _warnings) = discover_skills(&level_refs);
+
+    let skill_items: Vec<SkillItem> = skills
+        .into_iter()
+        .map(|s| {
+            let always_active = s.level == HierarchyLevel::Agent;
+            let level = match s.level {
+                HierarchyLevel::Agent   => "agent",
+                HierarchyLevel::Team    => "team",
+                HierarchyLevel::Project => "project",
+                HierarchyLevel::Lens    => "lens",
+                HierarchyLevel::Global  => "global",
+            };
+            SkillItem {
+                name: s.name,
+                display_name: s.display_name,
+                description: s.description,
+                level: level.to_string(),
+                tools: s.tools,
+                always_active,
+            }
+        })
+        .collect();
+
+    Ok(Json(SkillListResponse { skills: skill_items }))
 }
 
 /// `GET /api/turns/:id/context` — fetch the context assembly report for a completed turn.

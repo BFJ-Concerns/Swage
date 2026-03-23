@@ -305,6 +305,22 @@ mod tests {
             unimplemented!()
         }
     }
+
+    #[async_trait]
+    impl swage_storage::store::SkillActivationStore for StubStorage {
+        async fn activate_skill(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_active_skills(&self, _: Uuid) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
     // Helpers
     // -----------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("001_complete_schema", COMPLETE_SCHEMA),
         ("002_context_snapshots", CREATE_CONTEXT_SNAPSHOTS),
         ("003_turn_cost", ADD_TURN_COST_COLUMN),
+        ("004_active_skills", CREATE_ACTIVE_SKILLS),
     ]
 }
 
@@ -35,6 +36,20 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
 /// NULL when pricing was not configured at the time of the turn.
 const ADD_TURN_COST_COLUMN: &str = "
     ALTER TABLE turns ADD COLUMN cost_microcents INTEGER;
+";
+
+/// Skill activation state per session.
+///
+/// Composite primary key on (session_id, skill_name) ensures each skill can
+/// only appear once per session. Cascades on session delete so that removing
+/// a session cleans up its active skills automatically.
+const CREATE_ACTIVE_SKILLS: &str = "
+    CREATE TABLE IF NOT EXISTS active_skills (
+        session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        skill_name    TEXT NOT NULL,
+        activated_at  TEXT NOT NULL,
+        PRIMARY KEY (session_id, skill_name)
+    );
 ";
 
 /// Full target schema produced in a single migration.

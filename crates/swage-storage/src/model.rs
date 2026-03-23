@@ -268,6 +268,18 @@ pub struct Thread {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A skill that is currently active for a session.
+///
+/// Skills are activated by name and persist until explicitly deactivated or
+/// until the session is deleted. The `activated_at` timestamp is used to
+/// reconstruct the activation order when listing active skills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveSkillRecord {
+    pub session_id: Uuid,
+    pub skill_name: String,
+    pub activated_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Creation types — inputs for insert operations (no auto-generated fields)
 // ---------------------------------------------------------------------------

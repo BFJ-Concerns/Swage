@@ -74,17 +74,27 @@ pub fn default_assembly(
     for element in &active {
         let content = element.content();
         let token_count = element.token_count(tokeniser);
+        let source = element.source();
 
         if element.name() == "history" {
             let range_start = assembled.len();
             history_range = Some(range_start..range_start + content.len());
         }
 
+        // Populate a preview for skills elements: a comma-separated list of
+        // active skill names extracted from the source string. Other elements
+        // do not yet provide previews.
+        let preview = if element.name() == "skills" {
+            extract_skill_names_preview(&source)
+        } else {
+            None
+        };
+
         element_reports.push(ElementReport {
             name: element.name().to_string(),
-            source: element.source(),
+            source,
             token_count,
-            preview: None,
+            preview,
             priority: element.priority(),
         });
 
@@ -161,6 +171,39 @@ pub fn default_assembly(
     // If assembled is empty the caller provided no viable elements — that is a
     // programming error, not a runtime condition, so we panic here.
     AssemblyOutput::new_unchecked(assembled, report)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Private helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract a comma-separated list of skill names from a `SkillsElement` source string.
+///
+/// Source format produced by `SkillsElement::source()`:
+/// - `"skills: name1 (level, ~N tokens), name2 (level, ~N tokens)"` — active skills
+/// - `"skills (none active)"` — no active skills
+///
+/// Returns `Some("name1, name2")` when skills are present, `None` otherwise.
+/// The parenthesised level/token annotations are stripped; only the bare names remain.
+fn extract_skill_names_preview(source: &str) -> Option<String> {
+    // Only process the "skills: ..." form; "skills (none active)" → None.
+    let after_prefix = source.strip_prefix("skills: ")?;
+
+    // Each entry is "name (level, ~N tokens)". We split on "), " to separate
+    // entries (preserving the inner comma in the parentheses), then take the
+    // portion before " (" to isolate the name.
+    let names: Vec<&str> = after_prefix
+        .split("), ")
+        .filter_map(|entry| {
+            entry.split(" (").next().filter(|n| !n.is_empty())
+        })
+        .collect();
+
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -730,5 +773,109 @@ mod tests {
         let err = make_error("my-assembly", "invalid_output", "empty message list");
         assert_eq!(err.error_kind, "invalid_output");
         assert_eq!(err.fallback_used, "default");
+    }
+
+    // ── SkillsElement integration [kw92] ──────────────────────────────────────
+
+    fn skills_element(source: &'static str, instructions: Option<&str>) -> Box<dyn ContextElement> {
+        let messages = match instructions {
+            Some(text) => vec![ChatMessage::new(Role::System, text)],
+            None => vec![],
+        };
+        Box::new(MockElement {
+            name: "skills",
+            priority: 75,
+            messages,
+            source,
+        })
+    }
+
+    #[test]
+    fn skills_element_appears_between_prompts_and_history() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            history_element(&[("Hello", "Hi!")]),
+            skills_element(
+                "skills: code-review (project, ~35 tokens)",
+                Some("Always review for correctness."),
+            ),
+            prompts_element("You are helpful."),
+        ];
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
+
+        // Expected order: System (prompts), System (skills), User, Assistant
+        assert_eq!(output.messages.len(), 4);
+        assert_eq!(output.messages[0].role, Role::System); // prompts
+        assert_eq!(output.messages[1].role, Role::System); // skills
+        assert_eq!(output.messages[2].role, Role::User);   // history
+        assert_eq!(output.messages[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn empty_skills_element_appears_in_report_with_zero_tokens() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            prompts_element("Instructions."),
+            skills_element("skills (none active)", None),
+            history_element(&[("Hi", "Hello")]),
+        ];
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
+
+        // Skills element produces no messages — total is prompts + history only.
+        assert_eq!(output.messages.len(), 3, "empty skills element adds no messages");
+
+        // But the skills element must still appear in the report.
+        let skills_report = output.report.elements.iter().find(|e| e.name == "skills");
+        assert!(skills_report.is_some(), "empty skills element should appear in report");
+        assert_eq!(skills_report.unwrap().token_count, 0);
+    }
+
+    #[test]
+    fn skills_element_report_preview_contains_skill_names() {
+        let source = "skills: code-review (project, ~35 tokens), persona (agent, ~22 tokens)";
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            history_element(&[("Hi", "Hello")]),
+            skills_element(source, Some("Review code. Be a persona.")),
+        ];
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
+
+        let skills_report = output.report.elements.iter().find(|e| e.name == "skills").unwrap();
+        let preview = skills_report.preview.as_deref().unwrap_or("");
+        assert!(preview.contains("code-review"), "preview must include skill name");
+        assert!(preview.contains("persona"), "preview must include second skill name");
+    }
+
+    #[test]
+    fn empty_skills_element_report_has_no_preview() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            history_element(&[("Hi", "Hello")]),
+            skills_element("skills (none active)", None),
+        ];
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
+
+        let skills_report = output.report.elements.iter().find(|e| e.name == "skills").unwrap();
+        // No active skills → preview should be None.
+        assert!(skills_report.preview.is_none(), "empty skills should have no preview");
+    }
+
+    #[test]
+    fn memory_remains_excluded_when_skills_element_present() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            prompts_element("Instructions."),
+            skills_element("skills: my-skill (project, ~10 tokens)", Some("Skill instructions.")),
+            memory_element(),
+            history_element(&[("Hi", "Hello")]),
+        ];
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
+
+        // Prompts (1) + skills (1) + history (2) = 4. Memory excluded.
+        assert_eq!(output.messages.len(), 4, "memory must remain excluded");
+
+        let report_names: Vec<&str> = output.report.elements.iter().map(|e| e.name.as_str()).collect();
+        assert!(!report_names.contains(&"memory"), "memory must not appear in report");
+        assert!(report_names.contains(&"skills"), "skills must appear in report");
     }
 }

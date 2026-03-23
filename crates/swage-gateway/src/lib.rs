@@ -58,6 +58,7 @@ pub mod lifecycle;
 pub mod server;
 pub mod service;
 pub mod shutdown;
+pub mod skill;
 pub mod state;
 pub mod subscription;
 pub mod tool;

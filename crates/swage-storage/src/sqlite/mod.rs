@@ -3,6 +3,7 @@ pub mod message;
 pub mod migrations;
 pub mod project;
 pub mod session;
+pub mod skill_activation;
 pub mod thread;
 pub mod tool_call;
 pub mod turn;

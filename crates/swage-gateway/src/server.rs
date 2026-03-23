@@ -106,6 +106,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/projects/:project_id/sessions",
             get(handlers::list_project_sessions).post(handlers::create_project_session),
         )
+        // Skills listing — resolved hierarchy for a project/agent combination.
+        .route("/api/skills", get(handlers::list_skills))
         // Turn context snapshots — assembly reports for past turns.
         .route("/api/turns/:id/context", get(handlers::get_turn_context))
         // Graceful shutdown endpoint — localhost only, broadcasts Shutdown event.

@@ -9,6 +9,7 @@ pub mod instructions;
 pub mod discovery;
 pub mod resolve;
 pub mod prompt_rule;
+pub mod skill;
 
 // ---------------------------------------------------------------------------
 // Re-exports — public surface of the crate

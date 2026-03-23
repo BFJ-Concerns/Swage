@@ -4,8 +4,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session,
-    Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
+    Project, Session, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,40 @@ pub trait ThreadStore: Send + Sync {
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
+/// Store for per-session skill activation state.
+///
+/// Tracks which skills are currently active for a session. State survives
+/// client disconnections and gateway restarts because it is persisted in
+/// the `active_skills` table, which cascades on session delete.
+#[async_trait]
+pub trait SkillActivationStore: Send + Sync {
+    /// Mark a skill as active for a session. Idempotent — calling this for
+    /// an already-active skill is a no-op (INSERT OR IGNORE).
+    async fn activate_skill(&self, session_id: Uuid, skill_name: &str) -> Result<(), StorageError>;
+
+    /// Remove a skill from the active set.
+    ///
+    /// Returns `true` if the skill was active and has been removed, or `false`
+    /// if the skill was not in the active set (nothing to remove).
+    async fn deactivate_skill(
+        &self,
+        session_id: Uuid,
+        skill_name: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// List all skills currently active for a session, ordered by activation
+    /// time ascending (the order in which they were activated).
+    async fn list_active_skills(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ActiveSkillRecord>, StorageError>;
+
+    /// Remove all active skills for a session in one operation.
+    ///
+    /// Used when resetting or closing a session without deleting it.
+    async fn clear_active_skills(&self, session_id: Uuid) -> Result<(), StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -197,15 +231,29 @@ pub trait ThreadStore: Send + Sync {
 /// `ProjectStore` is not included — it is independently available and consumers
 /// that need project operations import it separately.
 pub trait Storage:
-    SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + ContextSnapshotStore
-    + Send + Sync
+    SessionStore
+    + ThreadStore
+    + TurnStore
+    + MessageStore
+    + ToolCallStore
+    + ContextSnapshotStore
+    + SkillActivationStore
+    + Send
+    + Sync
 {
 }
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + ContextSnapshotStore
-        + Send + Sync
+    T: SessionStore
+        + ThreadStore
+        + TurnStore
+        + MessageStore
+        + ToolCallStore
+        + ContextSnapshotStore
+        + SkillActivationStore
+        + Send
+        + Sync
 {
 }
 
@@ -388,6 +436,22 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl SkillActivationStore for StubStorage {
+        async fn activate_skill(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_active_skills(&self, _: Uuid) -> Result<Vec<ActiveSkillRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
     // --- MessageStore: thread-ownership API compile checks ---
 
     /// list_messages_by_thread exists on MessageStore and is callable via T: MessageStore.
@@ -487,6 +551,29 @@ mod tests {
         fn _assert<T: ContextSnapshotStore>(t: &T) {
             let _ = t.store_snapshot(Uuid::new_v4(), "{\"total_tokens\":100}");
             let _ = t.get_snapshot(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: SkillActivationStore has the expected methods.
+    #[test]
+    fn skill_activation_store_compile_check() {
+        fn _assert<T: SkillActivationStore>(t: &T) {
+            let _ = t.activate_skill(Uuid::new_v4(), "forge");
+            let _ = t.deactivate_skill(Uuid::new_v4(), "forge");
+            let _ = t.list_active_skills(Uuid::new_v4());
+            let _ = t.clear_active_skills(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies SkillActivationStore.
+    #[test]
+    fn storage_supertrait_includes_skill_activation_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.activate_skill(Uuid::new_v4(), "forge");
         }
         let stub = StubStorage;
         _assert(&stub);

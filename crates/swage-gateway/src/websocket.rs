@@ -32,6 +32,10 @@ pub enum ClientEvent {
     Subscribe { channels: Vec<String> },
     /// Unsubscribe from one or more observability channels by name.
     Unsubscribe { channels: Vec<String> },
+    /// Client requests activating a named skill for the current session.
+    ActivateSkill { name: String },
+    /// Client requests deactivating a named skill for the current session.
+    DeactivateSkill { name: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -111,14 +115,30 @@ pub enum ServerEvent {
     /// misses this event will simply see the connection close without a
     /// graceful handshake.
     Shutdown { reason: String },
+    /// A skill was successfully activated for the current session.
+    ///
+    /// Includes metadata so the client can display the skill without a
+    /// separate lookup.
+    SkillActivated {
+        name: String,
+        display_name: String,
+        description: String,
+        /// Token budget consumed by this skill's instructions in the context window.
+        token_count: usize,
+    },
+    /// A skill was already active — no state change occurred.
+    SkillAlreadyActive { name: String },
+    /// A skill was successfully deactivated for the current session.
+    SkillDeactivated { name: String },
 }
 
 /// Well-known error codes for the `Error` event.
 pub mod error_codes {
-    pub const PROVIDER_ERROR: &str = "provider_error";
-    pub const TURN_IN_PROGRESS: &str = "turn_in_progress";
-    pub const INVALID_CONFIG: &str = "invalid_config";
-    pub const INTERNAL_ERROR: &str = "internal_error";
+    pub const PROVIDER_ERROR:    &str = "provider_error";
+    pub const TURN_IN_PROGRESS:  &str = "turn_in_progress";
+    pub const INVALID_CONFIG:    &str = "invalid_config";
+    pub const INTERNAL_ERROR:    &str = "internal_error";
+    pub const SKILL_NOT_FOUND:   &str = "skill_not_found";
 }
 
 // ---------------------------------------------------------------------------
@@ -331,10 +351,67 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     }
 }
 
+/// Discover skills available to a session (fail-open).
+///
+/// Resolves the Swage root, looks up the session's project slug and agent id,
+/// builds the config hierarchy, and delegates to [`crate::skill::SkillManager`].
+/// On any failure (missing root, unknown session, storage error) it logs a
+/// warning and returns an empty skill set so the caller can degrade gracefully.
+async fn discover_available_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Vec<swage_config::skill::SkillDefinition> {
+    use swage_storage::store::ProjectStore;
+
+    // Fetch session to get project_id and agent_id.
+    let session = match state.storage.get_session(session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!(%session_id, "session not found during skill discovery");
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!(%session_id, error = %e, "storage error during skill discovery");
+            return Vec::new();
+        }
+    };
+
+    // Fetch project to get the slug used in path construction.
+    let project = match state.project_store.get(session.project_id).await {
+        Ok(Some(p)) => p,
+        _ => {
+            tracing::warn!(%session_id, project_id = %session.project_id, "project not found during skill discovery");
+            return Vec::new();
+        }
+    };
+
+    // Resolve the Swage root directory.
+    let root = match swage_config::discovery::resolve_root() {
+        Ok(r) => r,
+        Err(e) => {
+            // Missing root is expected in development environments — not a fatal error.
+            tracing::debug!(%session_id, "skill discovery skipped: {e}");
+            return Vec::new();
+        }
+    };
+
+    // Build hierarchy paths that mirror load_resolved_config_from.
+    let project_dir = root.join("projects").join(&project.slug);
+    let agent_dir   = project_dir.join("agents").join(&session.agent_id);
+
+    let (skills, _warnings) = crate::skill::SkillManager::discover_available(
+        &root,
+        &project_dir,
+        Some(&agent_dir),
+    );
+    skills
+}
+
 /// Parse and dispatch a raw text frame from the client.
 ///
-/// Subscribe and Unsubscribe events update the per-connection
-/// [`SubscriptionState`]; SendMessage and Cancel behave as before.
+/// Subscribe/Unsubscribe update per-connection [`SubscriptionState`].
+/// SendMessage intercepts slash commands before spawning a turn.
+/// ActivateSkill and DeactivateSkill delegate to [`crate::skill::SkillManager`].
 async fn dispatch_client_message(
     text: &str,
     state: &AppState,
@@ -342,6 +419,9 @@ async fn dispatch_client_message(
     tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
 ) {
+    use crate::skill::{SkillActivationResult, SkillError, SkillManager, SlashCommandResult};
+    use swage_context::tokeniser::TiktokenTokeniser;
+
     let event = match serde_json::from_str::<ClientEvent>(text) {
         Ok(e) => e,
         Err(e) => {
@@ -362,17 +442,67 @@ async fn dispatch_client_message(
         ClientEvent::Unsubscribe { channels } => {
             subscription.lock().await.unsubscribe(&channels);
         }
+
         ClientEvent::SendMessage { content } => {
-            // Spawn the turn so the receive loop remains available for Cancel events.
-            let state = state.clone();
-            let sub = Arc::clone(&subscription);
-            tokio::spawn(async move {
-                if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub).await {
-                    let (code, message) = classify_gateway_error(&e);
-                    let _ = tx.send(ServerEvent::Error { code, message });
+            // Check for a slash command before deciding whether to spawn a turn.
+            match crate::skill::parse_slash_command(&content) {
+                SlashCommandResult::SkillActivation { skill_name, remaining_text } => {
+                    let available = discover_available_for_session(state, session_id).await;
+                    let is_known = available.iter().any(|s| s.name == skill_name);
+
+                    if is_known {
+                        // Activate the skill and forward any trailing text as a turn.
+                        let tok = TiktokenTokeniser::new(&state.config.provider.model);
+                        match SkillManager::activate(session_id, &skill_name, &available, state.storage.as_ref(), &tok).await {
+                            Ok(SkillActivationResult::Activated { name, display_name, description, token_count }) => {
+                                let _ = tx.send(ServerEvent::SkillActivated { name, display_name, description, token_count });
+                            }
+                            Ok(SkillActivationResult::AlreadyActive) => {
+                                let _ = tx.send(ServerEvent::SkillAlreadyActive { name: skill_name.clone() });
+                            }
+                            Err(e) => {
+                                tracing::warn!(%session_id, skill = %skill_name, error = ?e, "slash command skill activation failed");
+                            }
+                        }
+
+                        // If the slash command had trailing text, forward it as a turn message.
+                        if let Some(text) = remaining_text {
+                            let state = state.clone();
+                            let sub   = Arc::clone(&subscription);
+                            tokio::spawn(async move {
+                                if let Err(e) = turn::process_turn(&state, session_id, text, tx.clone(), sub).await {
+                                    let (code, message) = classify_gateway_error(&e);
+                                    let _ = tx.send(ServerEvent::Error { code, message });
+                                }
+                            });
+                        }
+                        // Bare `/skill-name` (no trailing text) completes with activation only.
+                    } else {
+                        // Unknown skill — pass the original message through unchanged.
+                        let state = state.clone();
+                        let sub   = Arc::clone(&subscription);
+                        tokio::spawn(async move {
+                            if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub).await {
+                                let (code, message) = classify_gateway_error(&e);
+                                let _ = tx.send(ServerEvent::Error { code, message });
+                            }
+                        });
+                    }
                 }
-            });
+                SlashCommandResult::NotACommand => {
+                    // Regular message — spawn the turn as normal.
+                    let state = state.clone();
+                    let sub   = Arc::clone(&subscription);
+                    tokio::spawn(async move {
+                        if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub).await {
+                            let (code, message) = classify_gateway_error(&e);
+                            let _ = tx.send(ServerEvent::Error { code, message });
+                        }
+                    });
+                }
+            }
         }
+
         ClientEvent::Cancel {} => {
             if let Err(e) = turn::cancel_turn(state, session_id).await {
                 tracing::warn!(%session_id, error = %e, "cancel_turn failed");
@@ -380,6 +510,56 @@ async fn dispatch_client_message(
                     code: error_codes::INTERNAL_ERROR.to_string(),
                     message: e.to_string(),
                 });
+            }
+        }
+
+        ClientEvent::ActivateSkill { name } => {
+            let available = discover_available_for_session(state, session_id).await;
+            let tok = TiktokenTokeniser::new(&state.config.provider.model);
+
+            match SkillManager::activate(session_id, &name, &available, state.storage.as_ref(), &tok).await {
+                Ok(SkillActivationResult::Activated { name, display_name, description, token_count }) => {
+                    let _ = tx.send(ServerEvent::SkillActivated { name, display_name, description, token_count });
+                }
+                Ok(SkillActivationResult::AlreadyActive) => {
+                    let _ = tx.send(ServerEvent::SkillAlreadyActive { name });
+                }
+                Err(SkillError::NotFound(n)) => {
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::SKILL_NOT_FOUND.to_string(),
+                        message: format!("skill '{n}' not found"),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(%session_id, skill = %name, error = ?e, "skill activation error");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message: "skill activation failed".to_string(),
+                    });
+                }
+            }
+        }
+
+        ClientEvent::DeactivateSkill { name } => {
+            let available = discover_available_for_session(state, session_id).await;
+
+            match SkillManager::deactivate(session_id, &name, &available, state.storage.as_ref()).await {
+                Ok(()) => {
+                    let _ = tx.send(ServerEvent::SkillDeactivated { name });
+                }
+                Err(SkillError::AgentLevelCannotDeactivate(n)) => {
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message: format!("Cannot deactivate agent-level skill '{n}'"),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(%session_id, skill = %name, error = ?e, "skill deactivation error");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message: "skill deactivation failed".to_string(),
+                    });
+                }
             }
         }
     }
@@ -722,6 +902,129 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&serialised).unwrap();
         assert_eq!(parsed["type"], "shutdown");
         assert_eq!(parsed["reason"], "admin request");
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill event serialisation / deserialisation [e65s]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_event_activate_skill_deserialises() {
+        let json = r#"{"type": "activate_skill", "name": "code-review"}"#;
+        let event: ClientEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, ClientEvent::ActivateSkill { name } if name == "code-review"));
+    }
+
+    #[test]
+    fn client_event_deactivate_skill_deserialises() {
+        let json = r#"{"type": "deactivate_skill", "name": "code-review"}"#;
+        let event: ClientEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, ClientEvent::DeactivateSkill { name } if name == "code-review"));
+    }
+
+    #[test]
+    fn server_event_skill_activated_serialises() {
+        let event = ServerEvent::SkillActivated {
+            name: "code-review".to_string(),
+            display_name: "Code Review".to_string(),
+            description: "Reviews code for quality issues".to_string(),
+            token_count: 512,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "skill_activated");
+        assert_eq!(json["name"], "code-review");
+        assert_eq!(json["display_name"], "Code Review");
+        assert_eq!(json["description"], "Reviews code for quality issues");
+        assert_eq!(json["token_count"], 512);
+    }
+
+    #[test]
+    fn server_event_skill_already_active_serialises() {
+        let event = ServerEvent::SkillAlreadyActive {
+            name: "code-review".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "skill_already_active");
+        assert_eq!(json["name"], "code-review");
+    }
+
+    #[test]
+    fn server_event_skill_deactivated_serialises() {
+        let event = ServerEvent::SkillDeactivated {
+            name: "code-review".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "skill_deactivated");
+        assert_eq!(json["name"], "code-review");
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill dispatch tests [5cpd]
+    // -----------------------------------------------------------------------
+
+    /// ActivateSkill for an unknown skill name sends a skill_not_found error event.
+    ///
+    /// The mock storage has no skill root on disk, so discover_available returns
+    /// an empty set, causing SkillManager::activate to return NotFound.
+    #[tokio::test]
+    async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
+        let (state, session_id) = make_state_with_session().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let json = r#"{"type":"activate_skill","name":"ghost-skill"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an event");
+        match event {
+            ServerEvent::Error { code, .. } => {
+                assert_eq!(code, "skill_not_found", "expected skill_not_found error code");
+            }
+            other => panic!("expected Error event, got: {other:?}"),
+        }
+    }
+
+    /// DeactivateSkill for a skill not in available (and not in storage) sends SkillDeactivated.
+    ///
+    /// Since the skill is not in the available set there's no agent-level check,
+    /// and storage.deactivate_skill is a no-op that returns Ok(false) → success.
+    #[tokio::test]
+    async fn deactivate_skill_event_sends_skill_deactivated() {
+        let (state, session_id) = make_state_with_session().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let json = r#"{"type":"deactivate_skill","name":"code-review"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an event");
+        assert!(
+            matches!(event, ServerEvent::SkillDeactivated { name } if name == "code-review"),
+            "expected SkillDeactivated event",
+        );
+    }
+
+    /// A plain (non-slash) SendMessage still dispatches normally — no skill events.
+    #[tokio::test]
+    async fn plain_send_message_does_not_emit_skill_event() {
+        let (state, session_id) = make_state_with_session().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let json = r#"{"type":"send_message","content":"hello world"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        // The turn spawned by MockProvider will eventually send an event, but
+        // we're only verifying no *skill* event appears first.
+        // Give the spawned turn a moment to produce events, then drain.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, ServerEvent::SkillActivated { .. } | ServerEvent::SkillAlreadyActive { .. }),
+                "unexpected skill event for plain message: {event:?}",
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

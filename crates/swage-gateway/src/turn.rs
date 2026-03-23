@@ -16,8 +16,11 @@ use swage_storage::store::ContextSnapshotStore;
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
 use swage_context::prompts::PromptsElement;
+use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_config::prompt_rule::PromptRule;
+
+use crate::skill::SkillManager;
 
 use swage_tool::context::MockToolContext;
 
@@ -30,15 +33,18 @@ use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
 
 /// Build the context assembly elements for a turn.
 ///
-/// Constructs a `PromptsElement` from the resolved instruction string and
-/// a `HistoryElement` from the thread's message history. Returns a boxed
-/// element vec suitable for passing to `swage_context::assembly::assemble()`.
+/// Constructs a `PromptsElement` from the resolved instruction string, a
+/// `SkillsElement` from the active skill set, and a `HistoryElement` from the
+/// thread's message history. Returns a boxed element vec suitable for passing
+/// to `swage_context::assembly::assemble()`.
 ///
 /// When instructions are empty the `PromptsElement` produces no messages,
 /// matching era 0.1 behaviour where an empty instruction string produced no
-/// system message.
+/// system message. When no skills are active the `SkillsElement` contributes
+/// zero tokens but still participates in assembly (provenance is reported).
 fn build_assembly_elements(
     instructions: &str,
+    active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
@@ -58,6 +64,7 @@ fn build_assembly_elements(
 
     vec![
         Box::new(PromptsElement::new(rules)),
+        Box::new(SkillsElement::new(active_skills)),
         Box::new(HistoryElement::new(history)),
     ]
 }
@@ -137,6 +144,76 @@ pub async fn process_turn(
             state.config.clone()
         }
     };
+
+    // Discover available skills for this project+agent context, then build the
+    // active skill set by matching stored activation records against definitions.
+    //
+    // Fail-open: if root resolution or storage fails, we log a warning and
+    // proceed with an empty set — the turn is not aborted for a skill lookup
+    // error. Missing skill definitions for recorded activations are silently
+    // skipped by SkillManager::build_active_skills.
+    let active_skills: Vec<ActiveSkill> =
+        match swage_config::discovery::resolve_root() {
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.kind,
+                    "failed to resolve swage root for skill discovery; proceeding without skills"
+                );
+                vec![]
+            }
+            Ok(root) => {
+                let project_dir = root.join("projects").join(&project_slug);
+                // Resolve the agent directory for agent-level skill discovery.
+                // The session's agent_id (typically "gateway") maps to the agents
+                // subdirectory under the project.
+                let agent_dir = project_dir.join("agents").join(&session.agent_id);
+                let agent_dir_opt = if agent_dir.is_dir() { Some(agent_dir.as_path()) } else { None };
+                let (available, _warnings) =
+                    SkillManager::discover_available(&root, &project_dir, agent_dir_opt);
+
+                // Ensure agent-level skills are activated for this session.
+                // Idempotent — INSERT OR IGNORE in storage means repeated calls
+                // on subsequent turns are harmless.
+                if let Err(e) = SkillManager::auto_activate_agent_skills(
+                    session_id,
+                    &available,
+                    state.storage.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error = ?e,
+                        "failed to auto-activate agent-level skills; proceeding"
+                    );
+                }
+
+                match SkillManager::build_active_skills(
+                    session_id,
+                    &available,
+                    state.storage.as_ref(),
+                )
+                .await
+                {
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "failed to load active skills; proceeding without skills"
+                        );
+                        vec![]
+                    }
+                    Ok(infos) => infos
+                        .into_iter()
+                        .map(|info| ActiveSkill {
+                            name: info.name,
+                            instructions: info.instructions,
+                            level: info.level,
+                            is_agent_level: info.is_agent_level,
+                            activation_order: info.activation_order as u32,
+                        })
+                        .collect(),
+                }
+            }
+        };
 
     // Build the ToolContext passed to each tool invocation.
     let working_dir = crate::tool::workspace::resolve_workspace_root(&config);
@@ -219,7 +296,7 @@ pub async fn process_turn(
     // Run context assembly in a scoped block so the non-Send element and
     // tokeniser values are dropped before the streaming loop's await points.
     let (assembled_messages, assembly_report) = {
-        let elements = build_assembly_elements(&config.instructions, history_messages);
+        let elements = build_assembly_elements(&config.instructions, active_skills, history_messages);
         let tokeniser = TiktokenTokeniser::new(&config.provider.model);
 
         // Use default_assembly directly — it's synchronous and avoids Send
@@ -684,12 +761,12 @@ pub(crate) mod tests {
     use swage_core::StorageError;
     use swage_storage::{
         model::{
-            Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project,
-            Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
+            ActiveSkillRecord, Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall,
+            NewTurn, Project, Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
         },
         store::{
-            ContextSnapshotStore, MessageStore, ProjectStore, SessionStore, ThreadStore,
-            ToolCallStore, TurnStore,
+            ContextSnapshotStore, MessageStore, ProjectStore, SessionStore, SkillActivationStore,
+            ThreadStore, ToolCallStore, TurnStore,
         },
     };
 
@@ -1315,6 +1392,22 @@ pub(crate) mod tests {
         }
     }
 
+    // Stub: skill activation is not exercised in gateway turn tests.
+    #[async_trait]
+    impl SkillActivationStore for MockStorage {
+        async fn activate_skill(&self, _session_id: Uuid, _skill_name: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn deactivate_skill(&self, _session_id: Uuid, _skill_name: &str) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+        async fn list_active_skills(&self, _session_id: Uuid) -> Result<Vec<ActiveSkillRecord>, StorageError> {
+            Ok(vec![])
+        }
+        async fn clear_active_skills(&self, _session_id: Uuid) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -2636,32 +2729,34 @@ pub(crate) mod tests {
     /// the turn's context assembly. This function is tested directly to verify
     /// the wiring before it's used in process_turn.
     #[test]
-    fn build_assembly_elements_creates_prompts_and_history() {
+    fn build_assembly_elements_creates_prompts_skills_and_history() {
         let instructions = "Be helpful.";
         let history = vec![
             ChatMessage::new(Role::User, "Hi"),
             ChatMessage::new(Role::Assistant, "Hello!"),
         ];
 
-        let elements = build_assembly_elements(instructions, history);
+        let elements = build_assembly_elements(instructions, vec![], history);
 
-        // Should produce two elements: prompts (priority 100) and history (priority 0).
-        assert_eq!(elements.len(), 2);
+        // Should produce three elements: prompts, skills (empty), and history.
+        assert_eq!(elements.len(), 3);
 
         let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
         assert!(names.contains(&"prompts"), "should include prompts element");
+        assert!(names.contains(&"skills"), "should include skills element");
         assert!(names.contains(&"history"), "should include history element");
     }
 
     /// When instructions are empty, build_assembly_elements still includes the
-    /// prompts element (which will produce no system message) and the history.
+    /// prompts element (which will produce no system message), the skills
+    /// element, and the history.
     #[test]
     fn build_assembly_elements_with_empty_instructions() {
-        let elements = build_assembly_elements("", vec![
+        let elements = build_assembly_elements("", vec![], vec![
             ChatMessage::new(Role::User, "Hello"),
         ]);
 
-        assert_eq!(elements.len(), 2);
+        assert_eq!(elements.len(), 3);
         // PromptsElement with empty rules produces no messages.
         let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
         assert!(prompts.content().is_empty());

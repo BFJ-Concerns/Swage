@@ -11,4 +11,5 @@ pub mod history;
 pub mod memory;
 pub mod prompts;
 pub mod report;
+pub mod skills;
 pub mod tokeniser;
