@@ -69,7 +69,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -121,9 +121,30 @@ dependencies = [
 
 [[package]]
 name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
+name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "bit-set"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bitflags"
@@ -138,6 +159,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "regex-automata",
+ "serde",
 ]
 
 [[package]]
@@ -302,6 +334,17 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fancy-regex"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "531e46835a22af56d1e3b66f04844bed63158bc094a628bec1d321d9b4c44bf2"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "fastrand"
@@ -691,7 +734,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1353,7 +1396,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash",
+ "rustc-hash 2.1.1",
  "rustls",
  "socket2",
  "thiserror 2.0.18",
@@ -1373,7 +1416,7 @@ dependencies = [
  "lru-slab",
  "rand 0.9.2",
  "ring",
- "rustc-hash",
+ "rustc-hash 2.1.1",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -1521,7 +1564,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -1624,6 +1667,12 @@ dependencies = [
  "sha2",
  "walkdir",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
@@ -1933,7 +1982,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swage"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "futures",
@@ -1955,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "swage-agent"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1977,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "swage-config"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "serde",
  "tempfile",
@@ -1986,8 +2035,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "swage-context"
+version = "0.2603.2200"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "swage-config",
+ "swage-core",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tiktoken-rs",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "swage-core"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2002,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "swage-gateway"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "axum",
@@ -2036,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "swage-hook"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "regex",
@@ -2049,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "swage-provider"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2067,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "swage-python"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "pyo3",
  "serde_json",
@@ -2077,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "swage-safety"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -2086,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "swage-sandbox"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2104,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "swage-storage"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2121,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "swage-tool"
-version = "0.1.0"
+version = "0.2603.2200"
 dependencies = [
  "async-trait",
  "serde",
@@ -2262,6 +2328,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tiktoken-rs"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44075987ee2486402f0808505dd65692163d243a337fc54363d49afac41087f6"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "bstr",
+ "fancy-regex",
+ "lazy_static",
+ "parking_lot",
+ "regex",
+ "rustc-hash 1.1.0",
 ]
 
 [[package]]

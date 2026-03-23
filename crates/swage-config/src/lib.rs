@@ -8,6 +8,7 @@ pub mod validation;
 pub mod instructions;
 pub mod discovery;
 pub mod resolve;
+pub mod prompt_rule;
 
 // ---------------------------------------------------------------------------
 // Re-exports — public surface of the crate
@@ -15,6 +16,7 @@ pub mod resolve;
 
 // Resolved config types
 pub use model::{
+    ContextConfig,
     HierarchyLevel,
     LifecycleConfig,
     LogLevel,

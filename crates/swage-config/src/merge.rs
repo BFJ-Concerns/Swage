@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::model::{
-    LogLevel, Protocol, ResolvedConfig, ServerConfig, ProviderConfig, ToolConfig,
+    ContextConfig, LogLevel, Protocol, ResolvedConfig, ServerConfig, ProviderConfig, ToolConfig,
     WorkspaceConfig, SandboxConfig, LifecycleConfig, LoggingConfig,
 };
 
@@ -47,6 +47,19 @@ pub struct PartialLoggingConfig {
     pub level: Option<LogLevel>,
 }
 
+/// Partial mirror of `ContextConfig`.
+///
+/// `budget` uses a double-option to distinguish "field not present" (outer `None`)
+/// from "field explicitly set to None" (`Some(None)`) from "field set to N"
+/// (`Some(Some(n))`). The outer option controls inheritance; the inner mirrors
+/// the `Option<usize>` in the resolved type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialContextConfig {
+    pub assembly: Option<String>,
+    pub timeout: Option<u64>,
+    pub budget: Option<Option<usize>>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -57,6 +70,7 @@ pub struct PartialConfig {
     pub sandbox: Option<PartialSandboxConfig>,
     pub lifecycle: Option<PartialLifecycleConfig>,
     pub logging: Option<PartialLoggingConfig>,
+    pub context: Option<PartialContextConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +125,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         logging: merge_section(base.logging, overlay.logging, |b, o| PartialLoggingConfig {
             level: o.level.or(b.level),
         }),
+        context: merge_section(base.context, overlay.context, |b, o| PartialContextConfig {
+            assembly: o.assembly.or(b.assembly),
+            timeout: o.timeout.or(b.timeout),
+            budget: o.budget.or(b.budget),
+        }),
     }
 }
 
@@ -164,6 +183,16 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // ToolConfig is not yet merged from partial layers — defaults only for now.
         tools: ToolConfig::default(),
+        context: {
+            let dc = ContextConfig::default();
+            let c = partial.context.unwrap_or_default();
+            ContextConfig {
+                assembly: c.assembly.unwrap_or(dc.assembly),
+                timeout: c.timeout.unwrap_or(dc.timeout),
+                // Double-option: outer None → inherit default (None), Some(x) → use x.
+                budget: c.budget.unwrap_or(dc.budget),
+            }
+        },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
     }
@@ -330,5 +359,96 @@ mod tests {
         assert_eq!(resolved.server.host, ServerConfig::default().host);
         // port from partial
         assert_eq!(resolved.server.port, 9000);
+    }
+
+    // --- PartialContextConfig tests ---
+
+    fn partial_with_context_assembly(assembly: &str) -> PartialConfig {
+        PartialConfig {
+            context: Some(PartialContextConfig {
+                assembly: Some(assembly.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn context_overlay_wins_over_base() {
+        let base = partial_with_context_assembly("base-assembly");
+        let overlay = partial_with_context_assembly("overlay-assembly");
+        let merged = merge_partial(base, overlay);
+        assert_eq!(
+            merged.context.unwrap().assembly.as_deref(),
+            Some("overlay-assembly"),
+        );
+    }
+
+    #[test]
+    fn context_fields_are_independent() {
+        // base sets assembly, overlay only sets timeout — both should survive
+        let base = partial_with_context_assembly("base-assembly");
+        let overlay = PartialConfig {
+            context: Some(PartialContextConfig {
+                timeout: Some(30),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge_partial(base, overlay);
+        let ctx = merged.context.unwrap();
+        assert_eq!(ctx.assembly.as_deref(), Some("base-assembly"), "assembly from base survives");
+        assert_eq!(ctx.timeout, Some(30), "timeout from overlay present");
+    }
+
+    #[test]
+    fn context_missing_section_passes_through() {
+        // base has context, overlay does not — base context should survive
+        let base = partial_with_context_assembly("base-assembly");
+        let overlay = PartialConfig::default();
+        let merged = merge_partial(base, overlay);
+        assert_eq!(
+            merged.context.unwrap().assembly.as_deref(),
+            Some("base-assembly"),
+        );
+    }
+
+    #[test]
+    fn resolve_context_uses_partial_values() {
+        let partial = PartialConfig {
+            context: Some(PartialContextConfig {
+                assembly: Some("custom".to_string()),
+                timeout: Some(15),
+                budget: Some(Some(8192)),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(partial);
+        assert_eq!(resolved.context.assembly, "custom");
+        assert_eq!(resolved.context.timeout, 15);
+        assert_eq!(resolved.context.budget, Some(8192));
+    }
+
+    #[test]
+    fn resolve_context_uses_defaults_when_absent() {
+        let resolved = resolve(PartialConfig::default());
+        let default = ContextConfig::default();
+        assert_eq!(resolved.context.assembly, default.assembly);
+        assert_eq!(resolved.context.timeout, default.timeout);
+        assert_eq!(resolved.context.budget, default.budget);
+    }
+
+    #[test]
+    fn resolve_context_budget_explicit_none() {
+        // budget: Some(None) means "explicitly unset" — should resolve to None
+        let partial = PartialConfig {
+            context: Some(PartialContextConfig {
+                budget: Some(None),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(partial);
+        assert_eq!(resolved.context.budget, None);
     }
 }

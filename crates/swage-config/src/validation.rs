@@ -7,9 +7,11 @@ use crate::merge::PartialConfig;
 // Schema constants
 // ---------------------------------------------------------------------------
 
+
 /// Top-level TOML sections recognised by the config schema.
 const KNOWN_SECTIONS: &[&str] = &[
     "server", "provider", "workspace", "sandbox", "lifecycle", "logging",
+    "tools", "context",
 ];
 
 /// Valid field names for each known section.
@@ -21,6 +23,8 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "sandbox"   => &["enabled"],
         "lifecycle" => &["idle_timeout"],
         "logging"   => &["level"],
+        "tools"     => &["shell_timeout_secs", "max_output_bytes", "search"],
+        "context"   => &["assembly", "timeout", "budget"],
         _           => &[],
     }
 }
@@ -79,8 +83,14 @@ fn check_field_type(
         ("provider",  "api_key_env") => ("string",  matches!(value, Value::String(_))),
         ("workspace", "path")        => ("string",  matches!(value, Value::String(_))),
         ("sandbox",   "enabled")     => ("boolean", matches!(value, Value::Boolean(_))),
-        ("lifecycle", "idle_timeout")=> ("integer", matches!(value, Value::Integer(_))),
-        ("logging",   "level")       => ("string",  matches!(value, Value::String(_))),
+        ("lifecycle", "idle_timeout")  => ("integer", matches!(value, Value::Integer(_))),
+        ("logging",   "level")         => ("string",  matches!(value, Value::String(_))),
+        ("tools",  "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
+        ("tools",  "max_output_bytes")   => ("integer", matches!(value, Value::Integer(_))),
+        ("tools",  "search")             => ("table",   matches!(value, Value::Table(_))),
+        ("context", "assembly")          => ("string",  matches!(value, Value::String(_))),
+        ("context", "timeout")           => ("integer", matches!(value, Value::Integer(_))),
+        ("context", "budget")            => ("integer", matches!(value, Value::Integer(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
     };
@@ -168,6 +178,36 @@ fn check_field_semantics(
                         Some(field_path.to_string()),
                         ConfigProblemKind::SemanticError {
                             message: "provider.model must not be empty".to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+        ("context", "timeout") => {
+            if let Value::Integer(t) = value {
+                if *t < 1 || *t > 60 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "context.timeout must be between 1 and 60, got {t}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("context", "budget") => {
+            if let Value::Integer(b) = value {
+                if *b < 1 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "context.budget must be a positive integer, got {b}"
+                            ),
                         },
                     ));
                 }
@@ -459,5 +499,121 @@ model = "claude-opus"
         let result = parse_and_validate(toml, &path("config.toml"));
         assert!(result.is_err(), "invalid TOML should return Err");
         assert!(!result.unwrap_err().is_empty());
+    }
+
+    // --- [tools] and [context] section tests ---
+
+    #[test]
+    fn tools_section_validates_without_warnings() {
+        let toml = r#"
+[tools]
+shell_timeout_secs = 60
+max_output_bytes = 50000
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid [tools] config should produce no errors, got: {problems:?}");
+    }
+
+    #[test]
+    fn context_section_validates_without_warnings() {
+        let toml = r#"
+[context]
+assembly = "default"
+timeout = 10
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid [context] config should produce no errors, got: {problems:?}");
+    }
+
+    #[test]
+    fn tools_shell_timeout_wrong_type_produces_error() {
+        let toml = "[tools]\nshell_timeout_secs = \"sixty\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for shell_timeout_secs should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn context_assembly_wrong_type_produces_error() {
+        let toml = "[context]\nassembly = 42";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "integer value for context.assembly should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn context_timeout_zero_produces_semantic_error() {
+        // timeout range is 1-60; 0 is out of range
+        let toml = "[context]\ntimeout = 0";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "timeout=0 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn context_timeout_above_max_produces_semantic_error() {
+        let toml = "[context]\ntimeout = 61";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "timeout=61 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn context_timeout_boundary_valid() {
+        // 1 and 60 are the inclusive bounds — should produce no errors
+        for timeout in [1_i64, 60] {
+            let toml = format!("[context]\ntimeout = {timeout}");
+            let problems = validate_toml_string(&toml, &path("config.toml"));
+            assert!(
+                problems.is_empty(),
+                "timeout={timeout} is a valid boundary value, got: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_budget_zero_produces_semantic_error() {
+        // budget must be a positive integer (> 0)
+        let toml = "[context]\nbudget = 0";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "budget=0 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn context_budget_negative_produces_semantic_error() {
+        let toml = "[context]\nbudget = -1";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "budget=-1 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn context_budget_positive_is_valid() {
+        let toml = "[context]\nbudget = 4096";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "budget=4096 is valid, got: {problems:?}");
+    }
+
+    #[test]
+    fn tools_search_must_be_table() {
+        let toml = "[tools]\nsearch = \"http://localhost\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for tools.search should produce TypeError"
+        );
     }
 }

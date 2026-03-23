@@ -147,6 +147,30 @@ impl Default for ToolConfig {
     }
 }
 
+/// Context assembly settings — controls how the agent's context window is built
+/// before each inference call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Assembly strategy name to use (must match a registered assembly).
+    pub assembly: String,
+    /// Seconds allowed for assembly before fail-open triggers.
+    /// Clamped to the range 1–60 at validation time.
+    pub timeout: u64,
+    /// Token budget for the assembled context. `None` means the model's
+    /// context window limit is used as the upper bound.
+    pub budget: Option<usize>,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            assembly: "default".to_string(),
+            timeout: 5,
+            budget: None,
+        }
+    }
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -162,6 +186,7 @@ pub struct ResolvedConfig {
     pub lifecycle: LifecycleConfig,
     pub logging: LoggingConfig,
     pub tools: ToolConfig,
+    pub context: ContextConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
 }
@@ -279,5 +304,41 @@ mod tests {
         assert_eq!(cfg.tools.shell_timeout_secs, 30);
         assert_eq!(cfg.tools.max_output_bytes, 100_000);
         assert_eq!(cfg.tools.search, None);
+    }
+
+    #[test]
+    fn context_config_defaults() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.assembly, "default");
+        assert_eq!(cfg.timeout, 5);
+        assert_eq!(cfg.budget, None);
+    }
+
+    #[test]
+    fn context_config_serialise_round_trip() {
+        let original = ContextConfig {
+            assembly: "custom".to_string(),
+            timeout: 10,
+            budget: Some(4096),
+        };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ContextConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn context_config_default_round_trip() {
+        let original = ContextConfig::default();
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ContextConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn resolved_config_includes_context() {
+        let cfg = ResolvedConfig::default();
+        assert_eq!(cfg.context.assembly, "default");
+        assert_eq!(cfg.context.timeout, 5);
+        assert_eq!(cfg.context.budget, None);
     }
 }
