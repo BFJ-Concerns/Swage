@@ -51,6 +51,7 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod assets;
+pub mod cli;
 pub mod context;
 pub mod error;
 pub mod handlers;
@@ -59,6 +60,7 @@ pub mod server;
 pub mod service;
 pub mod shutdown;
 pub mod skill;
+pub mod startup;
 pub mod state;
 pub mod subscription;
 pub mod tool;
