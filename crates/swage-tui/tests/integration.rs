@@ -70,8 +70,14 @@ fn complete_turn_produces_correct_final_state() {
     assert_eq!(msg.tool_calls.len(), 1);
     assert_eq!(msg.tool_calls[0].name, "read_file");
 
-    // TODO: Replace this scaffold-level assertion with the full pipeline test
-    // once [zyls] and [2uwu] are implemented.
+    // TODO: Replace scaffold with full pipeline test — all five journeys are stale
+    // tags: test-coverage, review:branch-era-02-delivery
+    // Era 0.2 phase 06 is complete; the motes [zyls], [2uwu], [bzm1] etc. are
+    // implemented. These tests still exercise types directly rather than wiring
+    // the full event → handle_server_event → ConversationState → UI path.
+    // Journey 1 should call handle_server_event with a Token/ToolStart/ToolEnd/
+    // TurnComplete sequence and assert on the resulting ConversationState fields.
+    // ---
 }
 
 // ---------------------------------------------------------------------------

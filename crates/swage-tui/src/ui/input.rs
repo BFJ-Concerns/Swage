@@ -197,6 +197,15 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState, is_
 /// logical line index and `col` is the char offset within that line. This
 /// does not account for word-wrap reflow — it reflects the underlying logical
 /// structure rather than the rendered layout.
+// TODO Cursor position ignores word-wrap — hidden or misplaced on long lines
+// priority: normal | tags: correctness, review:branch-era-02-delivery
+// `cursor_row_col` returns logical (row, col) without accounting for wrapping applied
+// by the `Wrap { trim: false }` `Paragraph`. When a typed line exceeds the widget
+// width, the col coordinate overruns the visible area, placing the terminal cursor
+// outside the widget or beyond the right edge of the screen.
+// Fix: compute the rendered (row, col) by dividing the logical col by the inner
+// widget width to find the wrapped row offset, as ratatui applies hard wrapping.
+// ---
 fn cursor_row_col(input_state: &InputState) -> (usize, usize) {
     if !input_state.is_multi_line {
         return (0, input_state.cursor_position);

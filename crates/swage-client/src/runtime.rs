@@ -115,11 +115,10 @@ impl RuntimeMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    // Serialise env-touching tests to prevent variable pollution across parallel runs.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Shared crate-wide lock — prevents races with http.rs tests that also
+    // manipulate XDG_RUNTIME_DIR during parallel test execution.
+    use crate::test_helpers::ENV_LOCK;
 
     /// Run `f` with `XDG_RUNTIME_DIR` pointing at a temporary directory,
     /// cleaning up the variable afterwards regardless of panics.

@@ -88,6 +88,15 @@ fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
         .join(project_slug)
         .join("memory");
 
+    // TODO Synchronous filesystem reads in `load_project_memory` block async executor
+    // priority: normal | tags: performance, review:branch-era-02-delivery
+    // `std::fs::read_dir` and `std::fs::read_to_string` are synchronous and block the
+    // Tokio worker thread for the duration of each disk operation. `load_project_memory`
+    // is called inside the async `process_turn` path on every turn. For projects with
+    // many or large memory files this degrades gateway responsiveness under load.
+    // Fix: replace with `tokio::fs::read_dir` / `tokio::fs::read_to_string` or wrap
+    // in `tokio::task::spawn_blocking`.
+    // ---
     let entries = match std::fs::read_dir(&memory_dir) {
         Ok(rd) => rd,
         // Missing directory is the common case for new projects.
@@ -300,12 +309,6 @@ pub async fn process_turn(
         .storage
         .list_messages_by_thread(thread_id)
         .await
-        .map_err(|e| {
-            // Log before discarding: a transient read error here would silently
-            // assign position 0 to all subsequent messages, corrupting order.
-            tracing::warn!(error = %e, "failed to read message count; defaulting position to 0");
-            e
-        })
         .map(|msgs| msgs.len() as i32)
         .unwrap_or_else(|e| {
             tracing::warn!("failed to read message count for position, defaulting to 0: {e}");
@@ -479,9 +482,6 @@ pub async fn process_turn(
                             state.activity_tracker.record_activity();
                             round_text.push_str(&content);
                             accumulated.push_str(&content);
-                            // Each token is a sign of life — reset the idle timer so
-                            // a slow but active stream doesn't trigger idle shutdown.
-                            state.activity_tracker.record_activity();
                             let _ = ws_tx.send(ServerEvent::Token { content });
                         }
                         Some(StreamChunk::Usage(usage)) => {
@@ -531,7 +531,10 @@ pub async fn process_turn(
                 agent_id: "gateway".to_string(),
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
-                arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|e| {
+                    tracing::warn!(call_id = %call.call_id, "failed to serialise tool call arguments, storing empty: {e}");
+                    String::new()
+                }),
                 result: None,
                 status: None,
                 duration_ms: None,
@@ -664,7 +667,10 @@ pub async fn process_turn(
                 .list_messages_by_thread(thread_id)
                 .await
                 .map(|msgs| msgs.len() as i32)
-                .unwrap_or(1);
+                .unwrap_or_else(|e| {
+                    tracing::warn!(%thread_id, "failed to read message count for position (Done), defaulting to 1: {e}");
+                    1
+                });
 
             state
                 .storage
@@ -748,7 +754,10 @@ pub async fn process_turn(
                     .list_messages_by_thread(thread_id)
                     .await
                     .map(|msgs| msgs.len() as i32)
-                    .unwrap_or(1);
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(%thread_id, "failed to read message count for position (Cancelled), defaulting to 1: {e}");
+                        1
+                    });
 
                 state
                     .storage

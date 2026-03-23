@@ -82,19 +82,22 @@ impl TruncationCompactor {
         // Iteratively drop the oldest candidate until within budget or exhausted.
         let mut removed: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        for &idx in &droppable {
-            // Recount after each removal so framing overhead is accurately reflected.
-            let remaining: Vec<ChatMessage> = messages
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !removed.contains(i))
-                .map(|(_, m)| m.clone())
-                .collect();
+        // Pre-compute the token cost of each droppable message so the loop runs in
+        // O(N) rather than O(N²). Per-message counts may slightly undercount framing
+        // overhead that only appears in a full list, but the approximation is acceptable
+        // for truncation and the difference is at most a handful of tokens per message.
+        let droppable_costs: Vec<usize> = droppable
+            .iter()
+            .map(|&i| tokeniser.count_messages(std::slice::from_ref(&messages[i])))
+            .collect();
 
-            if tokeniser.count_messages(&remaining) <= budget {
+        let mut running_total = tokens_before;
+
+        for (&idx, &cost) in droppable.iter().zip(droppable_costs.iter()) {
+            if running_total <= budget {
                 break;
             }
-
+            running_total = running_total.saturating_sub(cost);
             removed.insert(idx);
         }
 
@@ -192,6 +195,14 @@ impl CompactionExecutor {
         pending: Vec<PendingCompaction>,
         provider: &(dyn LlmProvider + '_),
     ) -> Vec<CompactionResult> {
+        // TODO Hardcoded "gpt-4" tokeniser produces wrong counts for o200k-based models
+        // priority: normal | tags: correctness, review:branch-era-02-delivery
+        // `TiktokenTokeniser::new("gpt-4")` always uses the cl100k_base encoding.
+        // Models such as GPT-4o use o200k_base, which has a different vocabulary —
+        // token counts will be inaccurate, leading to budget violations or over-truncation
+        // when the session is configured for such a model.
+        // Fix: thread the model name through `execute_pending` and derive the tokeniser from it.
+        // ---
         let tokeniser = TiktokenTokeniser::new("gpt-4");
         let compactor = TruncationCompactor::new();
 

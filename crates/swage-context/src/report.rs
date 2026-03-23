@@ -1,7 +1,7 @@
 //! Assembly report types — structured output describing what the assembly produced.
 //!
-//! The report is returned with every assembly execution and is consumed by
-//! the context inspector in Phase 02.
+//! The report is serialised into the `ContextAssembled` WebSocket event and
+//! consumed by the gateway's context inspector panel.
 
 use serde::{Deserialize, Serialize};
 use swage_core::ChatMessage;

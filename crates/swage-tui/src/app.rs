@@ -78,6 +78,15 @@ impl App {
             // Use a larger step for page scroll — keeps some context visible.
             AppAction::ScrollPageUp => self.state.scroll_up(10),
             AppAction::ScrollPageDown => self.state.scroll_down(10, 20),
+            // TODO NewConversation must also reset the backend session
+            // priority: high | tags: review:branch-era-02-delivery
+            // state.clear() erases the local display but ConnectionManager::conversation_id
+            // still points at the old session. The next send_message reuses that session,
+            // so the model sees the full previous history and both turns are persisted
+            // together. Fix: this action requires async I/O (like SendMessage) and should
+            // be handled in event_loop — clear state.conversation_id and call
+            // connection.reconnect() (or disconnect + reconnect) to create a fresh session.
+            // ---
             AppAction::NewConversation => self.state.clear(),
             AppAction::OpenProjectSelector => self.project_selector.show(),
             // SendMessage requires async I/O — handled in event_loop.
@@ -208,7 +217,13 @@ impl App {
                                                 .connect_for_project(project.id)
                                                 .await
                                             {
-                                                Ok(()) => self.state.set_project(project),
+                                                Ok(()) => {
+                                                    // Clear stale messages, tokens, and streaming state
+                                                    // before switching projects so the display reflects the
+                                                    // fresh session rather than the previous one.
+                                                    self.state.clear();
+                                                    self.state.set_project(project)
+                                                }
                                                 Err(e) => {
                                                     self.state.messages.push(DisplayMessage {
                                                         role: "error".to_string(),
@@ -284,13 +299,27 @@ impl App {
                                 self.connection.disconnect().await;
                             }
                         }
+                        // TODO No reconnection attempt after WebSocket close — TUI dead-ends
+                        // priority: high | tags: correctness, review:branch-era-02-delivery
+                        // On a clean WebSocket close the app disconnects and the gateway arm
+                        // transitions to `pending()` indefinitely. `ConnectionManager::reconnect_with_backoff`
+                        // exists but is never called here. The user must restart the TUI to recover
+                        // from any transient gateway restart or network blip.
+                        // Fix: spawn a reconnection task (or call `reconnect_with_backoff` inline)
+                        // when the clean-close branch fires.
+                        // ---
                         Ok(None) => {
                             // Clean WebSocket close — gateway disconnected.
                             self.connection.disconnect().await;
                         }
-                        Err(_) => {
-                            // WebSocket error — disconnect; the user can
-                            // reconnect via a new conversation or restart.
+                        Err(e) => {
+                            tracing::warn!(error = %e, "WebSocket error");
+                            self.state.messages.push(DisplayMessage {
+                                role: "error".to_string(),
+                                content: format!("Connection error: {e}"),
+                                timestamp: Utc::now(),
+                                tool_calls: vec![],
+                            });
                             self.connection.disconnect().await;
                         }
                     }

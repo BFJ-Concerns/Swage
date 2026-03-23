@@ -52,6 +52,9 @@ const KNOWN_EVENT_TYPES = new Set([
   "tool_end",
   "context_assembled",
   "shutdown",
+  "skill_activated",
+  "skill_already_active",
+  "skill_deactivated",
 ]);
 
 // ---------------------------------------------------------------------------

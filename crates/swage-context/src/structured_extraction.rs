@@ -80,6 +80,7 @@ pub enum ExtractionError {
 pub struct StructuredExtractionCompactor;
 
 impl StructuredExtractionCompactor {
+    /// Construct a compactor. Currently stateless; reserved for future options.
     pub fn new() -> Self {
         Self
     }

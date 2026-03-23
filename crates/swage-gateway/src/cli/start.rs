@@ -171,6 +171,17 @@ pub(crate) fn build_spawn_args(
     host: Option<String>,
     config: Option<String>,
 ) -> Vec<String> {
+    // TODO Background daemon spawn args are unrecognised by the top-level parser
+    // priority: high | tags: correctness, review:branch-era-02-delivery
+    // `build_spawn_args` places `--port`, `--host`, and `--config` at the top level
+    // (e.g. `swage --server-mode --port 8080`), but those flags belong to the
+    // `gateway start` subcommand in `StartArgs`. Clap rejects them as unknown
+    // arguments, so the child process exits with a parse error before reaching the
+    // `--server-mode` branch. Any `swage gateway start --port X` invocation silently
+    // fails to launch the daemon with the requested overrides.
+    // Fix: either add the override flags to `Cli` directly and read them in `main.rs`,
+    // or pass the config via the environment rather than re-parsing argv.
+    // ---
     let mut args = vec!["--server-mode".to_string()];
     if let Some(p) = port {
         args.push("--port".to_string());

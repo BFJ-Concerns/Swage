@@ -139,6 +139,25 @@ export type ServerEvent =
   | {
       type: "shutdown";
       reason: string;
+    }
+  // A skill was successfully activated for the current session. Includes metadata
+  // so the client can display the skill without a separate lookup.
+  | {
+      type: "skill_activated";
+      name: string;
+      display_name: string;
+      description: string;
+      token_count: number;
+    }
+  // A skill was already active — no state change occurred.
+  | {
+      type: "skill_already_active";
+      name: string;
+    }
+  // A skill was successfully deactivated for the current session.
+  | {
+      type: "skill_deactivated";
+      name: string;
     };
 
 // -------------------------------------------------------------------------

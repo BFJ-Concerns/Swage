@@ -95,13 +95,20 @@ impl ConnectionManager {
             conv.id
         };
 
-        let mut ws = GatewayWebSocket::connect(&self.url, conv_id).await?;
-        ws.subscribe(vec!["context".to_string(), "tools".to_string()]).await?;
-
-        self.ws = Some(ws);
-        self.state = ConnectionState::Connected;
-        Ok(())
+        let ws = GatewayWebSocket::connect(&self.url, conv_id).await?;
+        self.finish_connect(ws).await
     }
+
+    // TODO Add unit tests for connect_for_project
+    // tags: test-coverage, review:branch-era-02-delivery
+    // connect_for_project is the code path exercised when the user switches
+    // projects in the TUI's project selector overlay. It differs from connect()
+    // in that it always creates a new conversation and sets project_id. Neither
+    // the happy-path (correct project_id stored, state → Connected) nor the
+    // error path (health check failure, conversation creation failure) are tested.
+    // Gateway integration tests cover the REST side; this client path needs its
+    // own test, e.g. via a mock GatewayClient.
+    // ---
 
     /// Like `connect()`, but creates the conversation inside a specific project.
     ///
@@ -115,9 +122,18 @@ impl ConnectionManager {
         let conv = self.client.create_project_conversation(project_id).await?;
         self.conversation_id = Some(conv.id);
 
-        let mut ws = GatewayWebSocket::connect(&self.url, conv.id).await?;
-        ws.subscribe(vec!["context".to_string(), "tools".to_string()]).await?;
+        let ws = GatewayWebSocket::connect(&self.url, conv.id).await?;
+        self.finish_connect(ws).await
+    }
 
+    /// Subscribes the WebSocket to observability channels, stores it, and marks
+    /// the connection as `Connected`.
+    ///
+    /// Shared tail of `connect()` and `connect_for_project()` — both obtain a
+    /// fresh `GatewayWebSocket` and then need identical subscription + state
+    /// bookkeeping.
+    async fn finish_connect(&mut self, mut ws: GatewayWebSocket) -> Result<(), ClientError> {
+        ws.subscribe(vec!["context".into(), "tools".into()]).await?;
         self.ws = Some(ws);
         self.state = ConnectionState::Connected;
         Ok(())
@@ -142,7 +158,7 @@ impl ConnectionManager {
     /// handling path.
     pub async fn reconnect_with_backoff(
         &mut self,
-        cancel: watch::Receiver<bool>,
+        mut cancel: watch::Receiver<bool>,
     ) -> Result<(), ClientError> {
         self.state = ConnectionState::Reconnecting;
         let mut attempt = 0u32;
@@ -164,7 +180,15 @@ impl ConnectionManager {
                     }
                     let delay = backoff_delay(attempt);
                     attempt += 1;
-                    tokio::time::sleep(delay).await;
+                    // Race the backoff delay against the cancel signal so the
+                    // application can exit promptly even during a long wait.
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {},
+                        _ = cancel.changed() => {
+                            self.state = ConnectionState::Disconnected;
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
@@ -172,31 +196,31 @@ impl ConnectionManager {
 
     // --- Event I/O ---
 
+    /// Returns a mutable reference to the active WebSocket, or a
+    /// `WebSocketFailed` error if the connection is not open.
+    ///
+    /// Used by `next_event()` and `send_message()` to avoid duplicating the
+    /// identical `None` arm in each match.
+    fn ws_required(&mut self) -> Result<&mut GatewayWebSocket, ClientError> {
+        self.ws.as_mut().ok_or_else(|| ClientError::WebSocketFailed {
+            address: self.url.clone(),
+            message: "WebSocket is not connected".to_string(),
+        })
+    }
+
     /// Reads the next typed event from the WebSocket stream.
     ///
     /// Returns `Ok(None)` on a clean close. Returns
     /// `ClientError::WebSocketFailed` if the WebSocket is not open.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, ClientError> {
-        match &mut self.ws {
-            Some(ws) => ws.next_event().await,
-            None => Err(ClientError::WebSocketFailed {
-                address: self.url.clone(),
-                message: "WebSocket is not connected".to_string(),
-            }),
-        }
+        self.ws_required()?.next_event().await
     }
 
     /// Sends a user message to the active conversation turn.
     ///
     /// Returns `ClientError::WebSocketFailed` if the WebSocket is not open.
     pub async fn send_message(&mut self, content: String) -> Result<(), ClientError> {
-        match &mut self.ws {
-            Some(ws) => ws.send(ClientEvent::SendMessage { content }).await,
-            None => Err(ClientError::WebSocketFailed {
-                address: self.url.clone(),
-                message: "WebSocket is not connected".to_string(),
-            }),
-        }
+        self.ws_required()?.send(ClientEvent::SendMessage { content }).await
     }
 }
 

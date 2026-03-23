@@ -239,17 +239,9 @@ impl AssemblyContext {
     ) -> Self {
         let search_levels = data.search_levels.clone();
         Self {
-            total_budget: budget,
-            remaining_budget: budget,
-            model,
-            agent_id,
-            messages: Vec::new(),
-            element_reports: Vec::new(),
-            pending_compactions: Vec::new(),
-            include_stack: Vec::new(),
-            warnings: Vec::new(),
             search_levels,
             assembly_data: Some(data),
+            ..Self::new(budget, model, agent_id)
         }
     }
 
@@ -531,12 +523,9 @@ impl AssemblyContext {
         budget: Option<usize>,
         strategy: Option<String>,
     ) -> PyResult<PyElement> {
-        let data = self.assembly_data.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "history_older requires AssemblyData (context not initialised with element data)",
-            )
-        })?;
+        let data = self.require_data("history_older")?;
 
+        let history_source = data.history_source.clone();
         let messages = &data.history_messages;
         let per_msg_tokens = &data.history_per_message_tokens;
 
@@ -588,7 +577,7 @@ impl AssemblyContext {
 
         Ok(PyElement::new(
             "history".to_string(),
-            format!("{} (older)", data.history_source),
+            format!("{} (older)", history_source),
             final_messages,
             final_tokens,
             0,

@@ -521,4 +521,18 @@ mod tests {
         let url = build_ws_url("ws://localhost:3000", id).unwrap();
         assert_eq!(url, "ws://localhost:3000/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
     }
+
+    #[test]
+    fn wss_address_is_passed_through() {
+        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let url = build_ws_url("wss://example.com:443", id).unwrap();
+        assert_eq!(url, "wss://example.com:443/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
+    }
+
+    #[test]
+    fn unknown_scheme_returns_error() {
+        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let err = build_ws_url("ftp://example.com", id).unwrap_err();
+        assert!(err.contains("ftp://example.com"), "error should include the offending address");
+    }
 }

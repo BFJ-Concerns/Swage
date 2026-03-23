@@ -120,43 +120,43 @@ pub fn default_assembly(
     if let Some(budget) = config.budget {
         let total_tokens = tokeniser.count_messages(&assembled);
 
-        if total_tokens > budget && history_range.is_some() {
-            let range = history_range.clone().unwrap();
+        if total_tokens > budget {
+            if let Some(range) = history_range.clone() {
+                // Compute the token cost of non-history messages (prompts, etc.).
+                // History gets whatever budget remains after the other elements.
+                let non_history_tokens: usize = {
+                    let non_history: Vec<&ChatMessage> = assembled
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !range.contains(i))
+                        .map(|(_, m)| m)
+                        .collect();
+                    // Collect into owned Vec<ChatMessage> for the tokeniser call.
+                    let owned: Vec<ChatMessage> = non_history.into_iter().cloned().collect();
+                    tokeniser.count_messages(&owned)
+                };
 
-            // Compute the token cost of non-history messages (prompts, etc.).
-            // History gets whatever budget remains after the other elements.
-            let non_history_tokens: usize = {
-                let non_history: Vec<&ChatMessage> = assembled
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !range.contains(i))
-                    .map(|(_, m)| m)
-                    .collect();
-                // Collect into owned Vec<ChatMessage> for the tokeniser call.
-                let owned: Vec<ChatMessage> = non_history.into_iter().cloned().collect();
-                tokeniser.count_messages(&owned)
-            };
+                let history_budget = budget.saturating_sub(non_history_tokens);
 
-            let history_budget = budget.saturating_sub(non_history_tokens);
+                // Extract history messages, compact, then splice back in.
+                let history_msgs: Vec<ChatMessage> = assembled[range.clone()].to_vec();
+                let compactor = TruncationCompactor::new();
+                let (compacted, record) = compactor.compact(history_msgs, history_budget, tokeniser);
 
-            // Extract history messages, compact, then splice back in.
-            let history_msgs: Vec<ChatMessage> = assembled[range.clone()].to_vec();
-            let compactor = TruncationCompactor::new();
-            let (compacted, record) = compactor.compact(history_msgs, history_budget, tokeniser);
+                // Update the element report token count to reflect post-compaction cost.
+                if let Some(report) = element_reports.iter_mut().find(|r| r.name == "history") {
+                    report.token_count = record.tokens_after;
+                }
 
-            // Update the element report token count to reflect post-compaction cost.
-            if let Some(report) = element_reports.iter_mut().find(|r| r.name == "history") {
-                report.token_count = record.tokens_after;
+                // Splice the compacted messages back into the assembled list.
+                let mut rebuilt: Vec<ChatMessage> = Vec::with_capacity(assembled.len());
+                rebuilt.extend_from_slice(&assembled[..range.start]);
+                rebuilt.extend(compacted);
+                rebuilt.extend_from_slice(&assembled[range.end..]);
+                assembled = rebuilt;
+
+                compaction_applied.push(record);
             }
-
-            // Splice the compacted messages back into the assembled list.
-            let mut rebuilt: Vec<ChatMessage> = Vec::with_capacity(assembled.len());
-            rebuilt.extend_from_slice(&assembled[..range.start]);
-            rebuilt.extend(compacted);
-            rebuilt.extend_from_slice(&assembled[range.end..]);
-            assembled = rebuilt;
-
-            compaction_applied.push(record);
         }
     }
 

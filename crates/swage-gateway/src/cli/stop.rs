@@ -151,6 +151,15 @@ fn is_pid_dead(pid: u32) -> bool {
             }
         }
     }
+    // TODO `is_pid_dead` always returns false on non-Linux — stop times out on macOS
+    // priority: high | tags: correctness, review:branch-era-02-delivery
+    // The non-Linux stub unconditionally returns `false` (process alive). When the
+    // gateway stops successfully on macOS, `wait_for_exit` never sees the process as
+    // dead and times out, causing `gateway stop` to report failure even though the
+    // gateway exited cleanly. Fix: use `kill -0 pid` (POSIX) or `sysctl kern.proc`
+    // on macOS to check process liveness, or convert to a `tokio::select!` that
+    // races the HTTP shutdown against a PID-file absence check.
+    // ---
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;

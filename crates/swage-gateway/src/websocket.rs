@@ -460,8 +460,19 @@ async fn dispatch_client_message(
                             Ok(SkillActivationResult::AlreadyActive) => {
                                 let _ = tx.send(ServerEvent::SkillAlreadyActive { name: skill_name.clone() });
                             }
+                            Err(SkillError::NotFound(n)) => {
+                                tracing::warn!(%session_id, skill = %skill_name, "slash command skill not found");
+                                let _ = tx.send(ServerEvent::Error {
+                                    code: error_codes::SKILL_NOT_FOUND.to_string(),
+                                    message: format!("skill '{n}' not found"),
+                                });
+                            }
                             Err(e) => {
                                 tracing::warn!(%session_id, skill = %skill_name, error = ?e, "slash command skill activation failed");
+                                let _ = tx.send(ServerEvent::Error {
+                                    code: error_codes::INTERNAL_ERROR.to_string(),
+                                    message: "skill activation failed".to_string(),
+                                });
                             }
                         }
 

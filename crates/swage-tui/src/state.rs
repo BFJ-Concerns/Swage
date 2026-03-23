@@ -59,6 +59,22 @@ pub struct ProjectInfo {
 // ConversationState
 // ---------------------------------------------------------------------------
 
+// TODO Restrict pub fields to those that are genuinely read-only for the renderer
+// tags: types, review:branch-era-02-delivery
+// The doc says "all state mutations flow through methods" but most fields are `pub`,
+// meaning callers can bypass method invariants:
+//   - `scroll_offset` can be set past content bounds, bypassing the clamping in
+//     scroll_up() and scroll_down().
+//   - `is_streaming` can be set to true without populating `streaming_buffer`,
+//     leaving the two fields inconsistent.
+//   - `active_tools` and `messages` can be mutated directly, bypassing the
+//     start_tool/end_tool/complete_turn protocol.
+// The private `completed_tools` field correctly hides the queue-flush semantics;
+// the same approach should be applied to the fields that have method invariants.
+// Fields that are genuinely read-only for the renderer (model_name, conversation_id,
+// context_report, active_project, input_tokens, output_tokens) could remain pub.
+// ---
+
 /// The single source of truth for everything the TUI displays.
 ///
 /// All state changes go through methods here — the rendering layer reads
@@ -207,6 +223,15 @@ impl ConversationState {
     /// `visible_height` is the number of lines the viewport can show; it is
     /// used to prevent scrolling past the last line of content.
     pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
+        // TODO Scroll limit underestimates content height — blocks reading long messages
+        // priority: high | tags: correctness, review:branch-era-02-delivery
+        // `content_lines` counts one line per message, but each message can span many
+        // rendered lines due to role labels, internal newlines, and word-wrap applied
+        // by the `Paragraph` widget. `max_offset` is clamped too low, preventing the
+        // user from scrolling to the end of any response that exceeds viewport height.
+        // Fix: sum the rendered line count for each message (accounting for wrapping and
+        // newlines) rather than using `messages.len()` as a proxy.
+        // ---
         // Estimate total content lines from message count plus the streaming
         // buffer (1 line if non-empty). Widget renderers may use a finer
         // measure, but this is sufficient to prevent runaway scrolling.

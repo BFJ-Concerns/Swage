@@ -127,15 +127,9 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
+        // Validate HTTP status; get the response back for body parsing.
+        let response = self.check_success(response, &url).await?;
         let status = response.status().as_u16();
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::UnexpectedResponse {
-                address: url,
-                status,
-                body,
-            });
-        }
 
         // Parse the response and verify the status field is "ok".
         let body: serde_json::Value = response.json().await.map_err(|e| {
@@ -170,16 +164,7 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::UnexpectedResponse {
-                address: url,
-                status,
-                body,
-            });
-        }
-
+        self.check_success(response, &url).await?;
         Ok(())
     }
 
@@ -277,17 +262,30 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
+        self.check_success(response, &url).await?;
+        Ok(())
+    }
+
+    /// Validates that a response has a 2xx status code.
+    ///
+    /// Returns the response unchanged on success so that callers that need the
+    /// body can continue parsing. On non-2xx, reads the body as text and
+    /// returns `ClientError::UnexpectedResponse`.
+    async fn check_success(
+        &self,
+        response: reqwest::Response,
+        url: &str,
+    ) -> Result<reqwest::Response, ClientError> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
             return Err(ClientError::UnexpectedResponse {
-                address: url,
+                address: url.to_string(),
                 status,
                 body,
             });
         }
-
-        Ok(())
+        Ok(response)
     }
 
     /// Maps a `reqwest::Error` to the appropriate `ClientError` variant.
@@ -494,16 +492,7 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::UnexpectedResponse {
-                address: url,
-                status,
-                body,
-            });
-        }
-
+        self.check_success(response, &url).await?;
         Ok(())
     }
 }
@@ -610,10 +599,9 @@ mod project_type_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialise env-touching tests so XDG_RUNTIME_DIR changes don't race.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Shared crate-wide lock — prevents races with runtime.rs tests that also
+    // manipulate XDG_RUNTIME_DIR during parallel test execution.
+    use crate::test_helpers::ENV_LOCK;
 
     #[test]
     fn new_strips_trailing_slash() {
