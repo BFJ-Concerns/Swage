@@ -4,15 +4,24 @@
 //! any configured token budget, runs truncation compaction on history when
 //! needed, and returns a structured `AssemblyOutput` with a full report.
 //!
-//! The fail-open `assemble()` orchestrator lives here too (see the `faup` mote).
+//! The fail-open `assemble()` orchestrator lives here too. For non-"default"
+//! assembly names it resolves the corresponding `.py` file in the config
+//! hierarchy, executes it via the `PythonAssemblyRunner` trait, drains any
+//! deferred compaction intents, and substitutes compacted content back into
+//! the assembled message list.
 
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use swage_config::model::ContextConfig;
+use swage_config::discovery::resolve_assembly;
+use swage_config::{HierarchyLevel, model::ContextConfig};
 use swage_core::ChatMessage;
+use swage_provider::LlmProvider;
+use uuid::Uuid;
 
-use crate::compaction::TruncationCompactor;
+use crate::compaction::{CompactionExecutor, CompactionResult, TruncationCompactor};
 use crate::element::ContextElement;
+use crate::python_runner::PythonAssemblyRunner;
 use crate::report::{AssemblyOutput, AssemblyReport, CompactionRecord, ElementReport};
 use crate::tokeniser::Tokeniser;
 
@@ -96,6 +105,9 @@ pub fn default_assembly(
             token_count,
             preview,
             priority: element.priority(),
+            // Named assembly provenance is populated by the Python assembly
+            // dispatcher rather than built-in element constructors.
+            named_assembly: None,
         });
 
         assembled.extend(content);
@@ -212,22 +224,204 @@ fn extract_skill_names_preview(source: &str) -> Option<String> {
 
 use crate::report::AssemblyError;
 
-/// Dispatch to a named assembly, returning `None` for unrecognised names.
+// ── DispatchError ─────────────────────────────────────────────────────────────
+
+/// Error from dispatching a named assembly, consumed by `assemble()` for
+/// fail-open handling.
+#[derive(Debug)]
+enum DispatchError {
+    /// The assembly file was not found in the search hierarchy.
+    NotFound,
+    /// Python execution failed — carries the error kind and message.
+    ExecutionFailed {
+        /// Error kind string, e.g. `"syntax"`, `"runtime"`, `"timeout"`.
+        error_kind: String,
+        /// Human-readable error message, possibly containing a Python traceback.
+        message: String,
+    },
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+/// Dispatch to a named assembly.
 ///
-/// Phase 01: only `"default"` is registered. Phase 04 will add dispatch to
-/// named assemblies (e.g. Python scripts) by extending this match.
-fn dispatch_assembly(
+/// - `"default"` / `""` — built-in default assembly (priority-ordered elements).
+/// - Any other name — locate `<name>.py` in the search hierarchy, execute via
+///   the Python runner, drain pending compaction intents, and substitute
+///   compacted content into the assembled message list.
+///
+/// Returns `Err(DispatchError::NotFound)` when the assembly file is absent or
+/// no runner is provided. Returns `Err(DispatchError::ExecutionFailed)` on
+/// Python syntax errors, runtime exceptions, or timeout.
+async fn dispatch_assembly(
     name: &str,
     elements: &[Box<dyn ContextElement>],
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
-) -> Option<AssemblyOutput> {
+    search_levels: &[(HierarchyLevel, &Path)],
+    provider: &dyn LlmProvider,
+    python_runner: Option<&dyn PythonAssemblyRunner>,
+) -> Result<AssemblyOutput, DispatchError> {
     match name {
-        "default" | "" => Some(default_assembly(elements, config, tokeniser)),
-        // Phase 04: add named assembly dispatch here.
-        _ => None,
+        "default" | "" => Ok(default_assembly(elements, config, tokeniser)),
+        _ => {
+            let start = Instant::now();
+
+            // Locate the Python file in the config hierarchy.
+            let resolved = resolve_assembly(name, search_levels)
+                .ok_or(DispatchError::NotFound)?;
+
+            // A runner is required for Python execution. When none is provided
+            // (e.g. in test contexts without the Python crate), treat as not-found
+            // and allow the fail-open fallback to take over.
+            let runner = python_runner.ok_or(DispatchError::NotFound)?;
+
+            let timeout = Duration::from_secs(config.timeout);
+            // When no budget is configured, pass usize::MAX so the Python side
+            // sees an effectively unlimited budget.
+            let budget = config.budget.unwrap_or(usize::MAX);
+            let model = provider.model_id().to_string();
+
+            // Convert borrowed paths to owned for the runner.
+            let owned_levels: Vec<(HierarchyLevel, PathBuf)> = search_levels
+                .iter()
+                .map(|(level, path)| (level.clone(), path.to_path_buf()))
+                .collect();
+
+            // Execute the Python assembly script.
+            let py_result = runner
+                .run(
+                    &resolved.path,
+                    timeout,
+                    budget,
+                    &model,
+                    "",  // agent_id: not available in this context
+                    elements,
+                    tokeniser,
+                    owned_levels,
+                )
+                .map_err(|err| DispatchError::ExecutionFailed {
+                    error_kind: err.kind.to_string(),
+                    message: err.message,
+                })?;
+
+            // Guard: an empty message list from Python is treated as an error
+            // (same as the default_assembly's panic guard).
+            if py_result.messages.is_empty() {
+                return Err(DispatchError::ExecutionFailed {
+                    error_kind: "invalid_output".to_string(),
+                    message: format!("assembly '{name}' produced an empty message list"),
+                });
+            }
+
+            // Execute pending compaction intents recorded by Python (e.g. from
+            // history_older() calls that specified a strategy).
+            let executor = CompactionExecutor::new();
+            let compaction_results = executor
+                .execute_pending(py_result.pending_compactions, provider)
+                .await;
+
+            // Substitute compacted message sequences back into the output.
+            let assembled = substitute_compacted(py_result.messages, &compaction_results);
+
+            let compaction_applied = build_compaction_records(compaction_results, tokeniser);
+            let total_tokens = tokeniser.count_messages(&assembled);
+            let budget_remaining =
+                config.budget.map(|b| b as isize - total_tokens as isize);
+
+            let report = AssemblyReport {
+                assembly_name: name.to_string(),
+                elements: py_result.element_reports,
+                total_tokens,
+                budget: config.budget,
+                budget_remaining,
+                compaction_applied,
+                warnings: py_result.warnings,
+                errors: Vec::new(),
+                duration: start.elapsed(),
+            };
+
+            Ok(AssemblyOutput::new_unchecked(assembled, report))
+        }
     }
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Substitute compacted message sequences into the assembled output.
+///
+/// For each compaction result, the original messages are located by UUID and
+/// replaced with the compacted equivalents. UUID comparison is used because
+/// `ChatMessage` does not implement `PartialEq` — UUIDs are preserved through
+/// cloning so the intent's messages share IDs with the Python-assembled output.
+fn substitute_compacted(
+    mut messages: Vec<ChatMessage>,
+    results: &[CompactionResult],
+) -> Vec<ChatMessage> {
+    for result in results {
+        let intent_ids: Vec<Uuid> = result.intent.messages.iter().map(|m| m.id).collect();
+        if intent_ids.is_empty() {
+            continue;
+        }
+        if let Some(range) = find_contiguous_by_id(&messages, &intent_ids) {
+            // Splice out the original messages and insert the compacted ones.
+            let tail: Vec<ChatMessage> = messages.drain(range.end..).collect();
+            messages.truncate(range.start);
+            messages.extend(result.compacted.clone());
+            messages.extend(tail);
+        }
+    }
+    messages
+}
+
+/// Find the start..end range in `messages` where a contiguous subsequence of
+/// the given `ids` appears, or `None` if no such subsequence exists.
+fn find_contiguous_by_id(
+    messages: &[ChatMessage],
+    ids: &[Uuid],
+) -> Option<std::ops::Range<usize>> {
+    if ids.is_empty() || messages.len() < ids.len() {
+        return None;
+    }
+    'outer: for start in 0..=messages.len() - ids.len() {
+        for (offset, id) in ids.iter().enumerate() {
+            if messages[start + offset].id != *id {
+                continue 'outer;
+            }
+        }
+        return Some(start..start + ids.len());
+    }
+    None
+}
+
+/// Convert [`CompactionResult`] items into [`CompactionRecord`]s for the
+/// assembly report.
+fn build_compaction_records(
+    results: Vec<CompactionResult>,
+    tokeniser: &dyn Tokeniser,
+) -> Vec<CompactionRecord> {
+    results
+        .into_iter()
+        .map(|r| {
+            let tokens_before = tokeniser.count_messages(&r.intent.messages);
+            let tokens_after = tokeniser.count_messages(&r.compacted);
+            let messages_removed = r.intent.messages.len().saturating_sub(r.compacted.len());
+            CompactionRecord {
+                element: r.intent.element_name,
+                requested_strategy: r.intent.strategy,
+                actual_strategy: r.actual_strategy,
+                messages_removed,
+                tokens_before,
+                tokens_after,
+                source_message_range: r.intent.source_range,
+                budget: Some(r.intent.budget),
+                failure_reason: r.failure_reason,
+            }
+        })
+        .collect()
+}
+
+// ── make_error ────────────────────────────────────────────────────────────────
 
 /// Construct an [`AssemblyError`] for the fail-open report.
 fn make_error(assembly_name: &str, error_kind: &str, message: &str) -> AssemblyError {
@@ -239,65 +433,89 @@ fn make_error(assembly_name: &str, error_kind: &str, message: &str) -> AssemblyE
     }
 }
 
+// ── assemble ──────────────────────────────────────────────────────────────────
+
 /// Assemble context with fail-open semantics.
 ///
-/// Runs the assembly named in `config.assembly` wrapped in a `config.timeout`
-/// second deadline. If the assembly succeeds and returns non-empty messages,
-/// the output is returned as-is. If it fails (timeout, unknown name, or empty
-/// output), the function falls back to [`default_assembly`] and records an
-/// [`AssemblyError`] in the report.
+/// Dispatches to the assembly named in `config.assembly` within a
+/// `config.timeout`-second deadline. On success, the output is returned
+/// as-is. On any failure — timeout, assembly not found, Python error, or
+/// empty output — the function falls back to [`default_assembly`] and records
+/// an [`AssemblyError`] in the report.
 ///
-/// The fail-open mechanism itself does not fail. If the default assembly
-/// panics (which indicates a programming error — no elements produced content),
-/// that panic propagates to the caller.
+/// The fail-open mechanism itself does not fail. If `default_assembly` panics
+/// (programming error — no element produced content), that panic propagates.
 ///
-/// # Phase 01 note
+/// ## Python assembly dispatch
 ///
-/// In Phase 01 only `"default"` assembly is available, so fail-open primarily
-/// enforces the timeout contract and establishes the dispatch surface for
-/// Phase 04 when Python assemblies are added. Custom assembly names cause an
-/// immediate `"invalid_output"` fallback rather than a timeout.
+/// When `config.assembly` is not `"default"`, `search_levels` is searched for
+/// a matching `.py` file. `python_runner` executes the script. Pass `None` for
+/// `python_runner` in contexts without the Python crate — the assembly will
+/// fall back to default with a `"not_found"` error in the report.
 pub async fn assemble(
     elements: &[Box<dyn ContextElement>],
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
+    search_levels: &[(HierarchyLevel, &Path)],
+    provider: &dyn LlmProvider,
+    python_runner: Option<&dyn PythonAssemblyRunner>,
 ) -> AssemblyOutput {
     let assembly_name = config.assembly.clone();
-    let timeout_duration = std::time::Duration::from_secs(config.timeout);
+    let timeout_duration = Duration::from_secs(config.timeout);
 
-    // Wrap dispatch in an async block so tokio's timeout mechanism applies.
-    // Phase 04 assemblies will be natively async; the timeout will then
-    // provide genuine cancellation for slow Python runners.
-    let run = async { dispatch_assembly(&assembly_name, elements, config, tokeniser) };
+    let run = dispatch_assembly(
+        &assembly_name,
+        elements,
+        config,
+        tokeniser,
+        search_levels,
+        provider,
+        python_runner,
+    );
 
     match tokio::time::timeout(timeout_duration, run).await {
-        // Normal success: non-empty output from the configured assembly.
-        Ok(Some(output)) if !output.messages.is_empty() => output,
+        // Normal success path.
+        Ok(Ok(output)) => output,
 
-        // Assembly ran but produced empty messages — invalid output.
-        // (default_assembly panics instead; this arm catches future assemblies.)
-        Ok(Some(_empty)) => {
+        // Python assembly produced an empty message list.
+        Ok(Err(DispatchError::ExecutionFailed { ref error_kind, ref message }))
+            if error_kind == "invalid_output" =>
+        {
             let mut fallback = default_assembly(elements, config, tokeniser);
             fallback.report.errors.push(make_error(
                 &assembly_name,
                 "invalid_output",
-                &format!("assembly '{assembly_name}' produced an empty message list"),
+                message,
             ));
             fallback
         }
 
-        // Assembly name not registered (Phase 01: any name other than "default").
-        Ok(None) => {
+        // Python execution failed (syntax error, runtime exception, timeout).
+        Ok(Err(DispatchError::ExecutionFailed { error_kind, message })) => {
             let mut fallback = default_assembly(elements, config, tokeniser);
             fallback.report.errors.push(make_error(
                 &assembly_name,
-                "invalid_output",
-                &format!("assembly '{assembly_name}' is not registered; falling back to default"),
+                &error_kind,
+                &message,
             ));
             fallback
         }
 
-        // Timeout elapsed before the assembly completed.
+        // Assembly file not found in the search hierarchy, or no runner provided.
+        Ok(Err(DispatchError::NotFound)) => {
+            let mut fallback = default_assembly(elements, config, tokeniser);
+            fallback.report.errors.push(make_error(
+                &assembly_name,
+                "not_found",
+                &format!(
+                    "assembly '{assembly_name}' was not found in the configured search hierarchy"
+                ),
+            ));
+            fallback
+        }
+
+        // Outer tokio timeout elapsed. Python execution has its own interior
+        // timeout (via mpsc + PyErr_SetInterrupt); this is a safety net.
         Err(_elapsed) => {
             let mut fallback = default_assembly(elements, config, tokeniser);
             fallback.report.errors.push(make_error(
@@ -317,6 +535,43 @@ pub async fn assemble(
 mod tests {
     use super::*;
     use swage_core::Role;
+    use swage_provider::LlmProvider;
+    use async_trait::async_trait;
+    use std::pin::Pin;
+    use futures::Stream;
+    use swage_core::{CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse};
+
+    // ── Stub provider (unit tests only need model_id; other methods never called) ──
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl LlmProvider for StubProvider {
+        fn model_id(&self) -> &str { "stub-model" }
+
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+            unimplemented!("StubProvider::complete — not used in unit tests")
+        }
+
+        async fn complete_with_tools(&self, _req: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("StubProvider::complete_with_tools — not used in unit tests")
+        }
+
+        fn stream(&self, _req: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unimplemented!("StubProvider::stream — not used in unit tests")
+        }
+    }
+
+    /// Convenience: call assemble with empty search levels and no Python runner,
+    /// suitable for tests that only exercise the default assembly path.
+    async fn assemble_default(
+        elements: &[Box<dyn ContextElement>],
+        config: &ContextConfig,
+        tokeniser: &dyn Tokeniser,
+    ) -> AssemblyOutput {
+        assemble(elements, config, tokeniser, &[], &StubProvider, None).await
+    }
 
     // ── Test fixtures ─────────────────────────────────────────────────────────
 
@@ -582,7 +837,7 @@ mod tests {
             "expected compaction to trigger"
         );
         let record = &output.report.compaction_applied[0];
-        assert_eq!(record.strategy, "truncation");
+        assert_eq!(record.actual_strategy, "truncation");
         assert!(record.messages_removed > 0);
     }
 
@@ -597,14 +852,14 @@ mod tests {
         let config = no_budget_config(); // config.assembly == "default"
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
-        let output = assemble(&elements, &config, &tokeniser).await;
+        let output = assemble_default(&elements, &config, &tokeniser).await;
 
         assert!(!output.messages.is_empty(), "should produce messages");
         assert!(output.report.errors.is_empty(), "no errors on success path");
         assert_eq!(output.report.assembly_name, "default");
     }
 
-    /// Unknown assembly name causes an immediate invalid_output fallback.
+    /// Unknown assembly name with no search levels → not_found fallback.
     #[tokio::test]
     async fn assemble_falls_back_on_unknown_assembly_name() {
         let elements: Vec<Box<dyn ContextElement>> = vec![
@@ -617,7 +872,8 @@ mod tests {
         };
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
-        let output = assemble(&elements, &config, &tokeniser).await;
+        // Empty search levels: no Python file will be found.
+        let output = assemble_default(&elements, &config, &tokeniser).await;
 
         // Fallback output is still valid.
         assert!(!output.messages.is_empty(), "fallback should produce messages");
@@ -626,7 +882,7 @@ mod tests {
         assert_eq!(output.report.errors.len(), 1);
         let error = &output.report.errors[0];
         assert_eq!(error.assembly_name, "nonexistent_python_assembly");
-        assert_eq!(error.error_kind, "invalid_output");
+        assert_eq!(error.error_kind, "not_found");
         assert_eq!(error.fallback_used, "default");
     }
 
@@ -644,7 +900,7 @@ mod tests {
         };
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
-        let fallback_output = assemble(&elements, &config, &tokeniser).await;
+        let fallback_output = assemble_default(&elements, &config, &tokeniser).await;
         let direct_output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
         // Both should produce the same messages.
@@ -691,7 +947,7 @@ mod tests {
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let config = no_budget_config();
 
-        let via_assemble = assemble(&elements, &config, &tokeniser).await;
+        let via_assemble = assemble_default(&elements, &config, &tokeniser).await;
         let via_direct = default_assembly(&elements, &config, &tokeniser);
 
         // Message sequence must be identical.
@@ -707,7 +963,7 @@ mod tests {
             vec![history_element(&[("Hi", "Hello")])];
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
-        let output = assemble(&elements, &no_budget_config(), &tokeniser).await;
+        let output = assemble_default(&elements, &no_budget_config(), &tokeniser).await;
 
         assert!(
             output.report.errors.is_empty(),
@@ -724,7 +980,7 @@ mod tests {
         ])];
         // 6 messages × 10 = 60 tokens. Budget 20 → only recent exchange fits.
         let tokeniser = FixedCostTokeniser { cost: 10 };
-        let output = assemble(&elements, &budget_config(20), &tokeniser).await;
+        let output = assemble_default(&elements, &budget_config(20), &tokeniser).await;
 
         assert!(
             !output.report.compaction_applied.is_empty(),
@@ -750,7 +1006,7 @@ mod tests {
             budget: None,
         };
 
-        let output = assemble(&elements, &config, &tokeniser).await;
+        let output = assemble_default(&elements, &config, &tokeniser).await;
 
         // Default assembly (synchronous) always completes before any real timeout.
         // Verify the success path: no errors recorded.

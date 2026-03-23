@@ -130,6 +130,31 @@ pub struct ElementReport {
 
     /// Ordering priority — higher values appear earlier in the assembled output.
     pub priority: i32,
+
+    /// When this element was produced by a named assembly (Python script),
+    /// this carries the assembly's name, hierarchy level, and nested element
+    /// reports from the child assembly execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub named_assembly: Option<NamedAssemblyReport>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Named assembly report
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Report for an element produced by a named (Python) assembly, carrying
+/// provenance and the child elements that the assembly assembled internally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedAssemblyReport {
+    /// Name of the assembly script, e.g. `"summarise"`.
+    pub assembly_name: String,
+
+    /// Hierarchy level where the assembly was resolved, serialised as a
+    /// string (e.g. `"project"`, `"agent"`, `"global"`).
+    pub resolved_level: String,
+
+    /// Per-element reports from the child assembly's execution.
+    pub child_elements: Vec<ElementReport>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,8 +167,12 @@ pub struct CompactionRecord {
     /// Name of the element that was compacted, e.g. `"history"`.
     pub element: String,
 
-    /// Compaction strategy applied, e.g. `"truncation"`.
-    pub strategy: String,
+    /// Strategy that was originally requested, e.g. `"structured_extraction"`.
+    pub requested_strategy: String,
+
+    /// Strategy actually applied — may differ from `requested_strategy` when
+    /// the requested strategy failed and truncation was used as fallback.
+    pub actual_strategy: String,
 
     /// Number of messages removed by this compaction pass.
     pub messages_removed: usize,
@@ -153,6 +182,17 @@ pub struct CompactionRecord {
 
     /// Estimated token count after compaction.
     pub tokens_after: usize,
+
+    /// Turn indices that the compaction drew from, e.g. `(2, 8)` meaning
+    /// messages at positions 2..8 were candidates.
+    pub source_message_range: Option<(usize, usize)>,
+
+    /// Token budget allocated for the compacted output.
+    pub budget: Option<usize>,
+
+    /// Why the requested strategy was not used — set when fallback to
+    /// truncation was triggered (e.g. LLM timeout, parse failure).
+    pub failure_reason: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,6 +286,7 @@ mod tests {
                 token_count: 42,
                 preview: Some("Hello…".to_string()),
                 priority: 0,
+                named_assembly: None,
             }],
             total_tokens: 42,
             budget: Some(1000),
@@ -275,15 +316,20 @@ mod tests {
     fn compaction_record_serialises_and_deserialises() {
         let record = CompactionRecord {
             element: "history".to_string(),
-            strategy: "truncation".to_string(),
+            requested_strategy: "truncation".to_string(),
+            actual_strategy: "truncation".to_string(),
             messages_removed: 5,
             tokens_before: 1200,
             tokens_after: 800,
+            source_message_range: None,
+            budget: None,
+            failure_reason: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.element, "history");
-        assert_eq!(decoded.strategy, "truncation");
+        assert_eq!(decoded.requested_strategy, "truncation");
+        assert_eq!(decoded.actual_strategy, "truncation");
         assert_eq!(decoded.messages_removed, 5);
         assert_eq!(decoded.tokens_before, 1200);
         assert_eq!(decoded.tokens_after, 800);
@@ -302,6 +348,139 @@ mod tests {
         assert_eq!(decoded.assembly_name, "custom");
         assert_eq!(decoded.error_kind, "timeout");
         assert_eq!(decoded.fallback_used, "default");
+    }
+
+    // ── CompactionRecord extended fields ─────────────────────────────────────
+
+    #[test]
+    fn compaction_record_requested_and_actual_strategy_round_trip() {
+        // Simulates a case where structured_extraction was requested but LLM
+        // was unavailable, so the actual strategy fell back to truncation.
+        let record = CompactionRecord {
+            element: "history".to_string(),
+            requested_strategy: "structured_extraction".to_string(),
+            actual_strategy: "truncation".to_string(),
+            messages_removed: 3,
+            tokens_before: 1000,
+            tokens_after: 600,
+            source_message_range: Some((2, 8)),
+            budget: Some(700),
+            failure_reason: Some("LLM timeout".to_string()),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.requested_strategy, "structured_extraction");
+        assert_eq!(decoded.actual_strategy, "truncation");
+        assert_eq!(decoded.source_message_range, Some((2, 8)));
+        assert_eq!(decoded.budget, Some(700));
+        assert_eq!(decoded.failure_reason.as_deref(), Some("LLM timeout"));
+    }
+
+    #[test]
+    fn compaction_record_none_fields_round_trip() {
+        // No fallback: requested and actual strategies are the same; optional
+        // fields not populated.
+        let record = CompactionRecord {
+            element: "history".to_string(),
+            requested_strategy: "truncation".to_string(),
+            actual_strategy: "truncation".to_string(),
+            messages_removed: 0,
+            tokens_before: 500,
+            tokens_after: 500,
+            source_message_range: None,
+            budget: None,
+            failure_reason: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
+        assert!(decoded.source_message_range.is_none());
+        assert!(decoded.budget.is_none());
+        assert!(decoded.failure_reason.is_none());
+    }
+
+    // ── NamedAssemblyReport in ElementReport ─────────────────────────────────
+
+    #[test]
+    fn element_report_with_named_assembly_round_trips() {
+        let report = ElementReport {
+            name: "custom-assembly".to_string(),
+            source: "named assembly".to_string(),
+            token_count: 150,
+            preview: None,
+            priority: 50,
+            named_assembly: Some(NamedAssemblyReport {
+                assembly_name: "summarise".to_string(),
+                resolved_level: "project".to_string(),
+                child_elements: vec![
+                    ElementReport {
+                        name: "history".to_string(),
+                        source: "thread-abc".to_string(),
+                        token_count: 100,
+                        preview: None,
+                        priority: 0,
+                        named_assembly: None,
+                    },
+                    ElementReport {
+                        name: "prompts".to_string(),
+                        source: "prompt rules".to_string(),
+                        token_count: 50,
+                        preview: None,
+                        priority: 100,
+                        named_assembly: None,
+                    },
+                ],
+            }),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: ElementReport = serde_json::from_str(&json).unwrap();
+
+        let named = decoded.named_assembly.expect("named_assembly should be Some");
+        assert_eq!(named.assembly_name, "summarise");
+        assert_eq!(named.resolved_level, "project");
+        assert_eq!(named.child_elements.len(), 2);
+        assert_eq!(named.child_elements[0].name, "history");
+        assert_eq!(named.child_elements[1].name, "prompts");
+    }
+
+    #[test]
+    fn element_report_without_named_assembly_round_trips() {
+        let report = ElementReport {
+            name: "history".to_string(),
+            source: "thread-123".to_string(),
+            token_count: 42,
+            preview: Some("Hello…".to_string()),
+            priority: 0,
+            named_assembly: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: ElementReport = serde_json::from_str(&json).unwrap();
+        assert!(decoded.named_assembly.is_none());
+        assert_eq!(decoded.name, "history");
+    }
+
+    #[test]
+    fn named_assembly_report_child_elements_are_independent() {
+        // Deeply nested ElementReports (children of a named assembly) can
+        // themselves carry no named_assembly — None serialises cleanly.
+        let nested = NamedAssemblyReport {
+            assembly_name: "agent-context".to_string(),
+            resolved_level: "agent".to_string(),
+            child_elements: vec![
+                ElementReport {
+                    name: "prompts".to_string(),
+                    source: "agent prompts".to_string(),
+                    token_count: 120,
+                    preview: Some("Be concise.".to_string()),
+                    priority: 100,
+                    named_assembly: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&nested).unwrap();
+        let decoded: NamedAssemblyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.assembly_name, "agent-context");
+        assert_eq!(decoded.resolved_level, "agent");
+        assert_eq!(decoded.child_elements[0].name, "prompts");
     }
 
     // ── Budget remaining can be negative ────────────────────────────────────

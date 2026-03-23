@@ -9,3 +9,8 @@ pub mod runtime;
 pub mod dispatch;
 pub mod execute;
 pub mod bindings;
+pub mod assembly_bindings;
+pub mod assembly;
+pub mod runner;
+
+pub use runner::ConcreteAssemblyRunner;

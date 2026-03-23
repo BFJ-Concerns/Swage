@@ -21,7 +21,11 @@ use crate::tokeniser::Tokeniser;
 /// The trait is intentionally object-safe so the engine can accept
 /// `&[Box<dyn ContextElement>]` — heterogeneous collections of elements
 /// without generics propagating through the engine API.
-pub trait ContextElement {
+///
+/// `Send + Sync` are required so that `Box<dyn ContextElement>` can be held
+/// across async await points inside `Send` futures (e.g. the gateway turn
+/// handler, which is spawned by axum and must satisfy the `Send` bound).
+pub trait ContextElement: Send + Sync {
     /// Short identifier for the element type (e.g. `"history"`, `"prompts"`, `"memory"`).
     ///
     /// Used in the assembly report to identify which element contributed

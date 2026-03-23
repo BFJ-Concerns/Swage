@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,10 +16,11 @@ use swage_storage::store::ContextSnapshotStore;
 
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
+use swage_context::memory::MemoryElement;
 use swage_context::prompts::PromptsElement;
 use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
-use swage_config::prompt_rule::PromptRule;
+use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 
 use crate::skill::SkillManager;
 
@@ -33,19 +35,23 @@ use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
 
 /// Build the context assembly elements for a turn.
 ///
-/// Constructs a `PromptsElement` from the resolved instruction string, a
-/// `SkillsElement` from the active skill set, and a `HistoryElement` from the
-/// thread's message history. Returns a boxed element vec suitable for passing
-/// to `swage_context::assembly::assemble()`.
+/// Constructs typed elements from the resolved turn inputs:
+/// - `PromptsElement` — from the merged instruction string
+/// - `SkillsElement`  — from the active skill set
+/// - `MemoryElement`  — from pre-loaded project memory content (may be empty)
+/// - `HistoryElement` — from the thread's message history
 ///
-/// When instructions are empty the `PromptsElement` produces no messages,
-/// matching era 0.1 behaviour where an empty instruction string produced no
-/// system message. When no skills are active the `SkillsElement` contributes
-/// zero tokens but still participates in assembly (provenance is reported).
+/// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
+///
+/// When instructions are empty the `PromptsElement` produces no messages.
+/// When `memory_content` is empty the `MemoryElement` produces no messages
+/// but is still present in the vec so custom assemblies can reference it.
 fn build_assembly_elements(
     instructions: &str,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
+    memory_content: String,
+    project_name: String,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -57,16 +63,52 @@ fn build_assembly_elements(
         vec![PromptRule {
             priority: 0,
             content: instructions.to_string(),
-            source_level: swage_config::HierarchyLevel::Global,
-            file_path: std::path::PathBuf::from("resolved-instructions"),
+            source_level: HierarchyLevel::Global,
+            file_path: PathBuf::from("resolved-instructions"),
         }]
     };
 
     vec![
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
+        Box::new(MemoryElement::new(memory_content, project_name)),
         Box::new(HistoryElement::new(history)),
     ]
+}
+
+/// Load project memory content by reading all `.md` files from the project's
+/// memory directory (`{swage_root}/projects/{project_slug}/memory/`).
+///
+/// Files are read in alphabetical filename order and joined with a blank line
+/// between entries. Returns an empty string when the directory is absent or
+/// contains no `.md` files, so callers receive a valid `String` in all cases.
+fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
+    let memory_dir = swage_root
+        .join("projects")
+        .join(project_slug)
+        .join("memory");
+
+    let entries = match std::fs::read_dir(&memory_dir) {
+        Ok(rd) => rd,
+        // Missing directory is the common case for new projects.
+        Err(_) => return String::new(),
+    };
+
+    // Collect .md paths and sort alphabetically so loading order is stable.
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect();
+    paths.sort();
+
+    let parts: Vec<String> = paths
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(&p).ok())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    parts.join("\n\n")
 }
 
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
@@ -145,75 +187,79 @@ pub async fn process_turn(
         }
     };
 
+    // Resolve the swage root once — skill discovery, project memory loading,
+    // and assembly search-path construction all depend on it.
+    //
+    // Fail-open: a warning is logged and each consumer falls back gracefully.
+    let swage_root_opt: Option<PathBuf> = match swage_config::discovery::resolve_root() {
+        Ok(root) => Some(root),
+        Err(e) => {
+            tracing::warn!(
+                error = %e.kind,
+                "failed to resolve swage root; proceeding without skills, memory, or custom assembly"
+            );
+            None
+        }
+    };
+
     // Discover available skills for this project+agent context, then build the
     // active skill set by matching stored activation records against definitions.
     //
-    // Fail-open: if root resolution or storage fails, we log a warning and
-    // proceed with an empty set — the turn is not aborted for a skill lookup
-    // error. Missing skill definitions for recorded activations are silently
-    // skipped by SkillManager::build_active_skills.
-    let active_skills: Vec<ActiveSkill> =
-        match swage_config::discovery::resolve_root() {
+    // Missing skill definitions for recorded activations are silently skipped
+    // by SkillManager::build_active_skills.
+    let active_skills: Vec<ActiveSkill> = if let Some(root) = &swage_root_opt {
+        let project_dir = root.join("projects").join(&project_slug);
+        // The session's agent_id (typically "gateway") maps to the agents
+        // subdirectory under the project.
+        let agent_dir = project_dir.join("agents").join(&session.agent_id);
+        let agent_dir_opt = if agent_dir.is_dir() { Some(agent_dir.as_path()) } else { None };
+        let (available, _warnings) =
+            SkillManager::discover_available(root, &project_dir, agent_dir_opt);
+
+        // Ensure agent-level skills are activated for this session.
+        // Idempotent — INSERT OR IGNORE in storage means repeated calls
+        // on subsequent turns are harmless.
+        if let Err(e) = SkillManager::auto_activate_agent_skills(
+            session_id,
+            &available,
+            state.storage.as_ref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                error = ?e,
+                "failed to auto-activate agent-level skills; proceeding"
+            );
+        }
+
+        match SkillManager::build_active_skills(
+            session_id,
+            &available,
+            state.storage.as_ref(),
+        )
+        .await
+        {
             Err(e) => {
                 tracing::warn!(
-                    error = %e.kind,
-                    "failed to resolve swage root for skill discovery; proceeding without skills"
+                    error = ?e,
+                    "failed to load active skills; proceeding without skills"
                 );
                 vec![]
             }
-            Ok(root) => {
-                let project_dir = root.join("projects").join(&project_slug);
-                // Resolve the agent directory for agent-level skill discovery.
-                // The session's agent_id (typically "gateway") maps to the agents
-                // subdirectory under the project.
-                let agent_dir = project_dir.join("agents").join(&session.agent_id);
-                let agent_dir_opt = if agent_dir.is_dir() { Some(agent_dir.as_path()) } else { None };
-                let (available, _warnings) =
-                    SkillManager::discover_available(&root, &project_dir, agent_dir_opt);
-
-                // Ensure agent-level skills are activated for this session.
-                // Idempotent — INSERT OR IGNORE in storage means repeated calls
-                // on subsequent turns are harmless.
-                if let Err(e) = SkillManager::auto_activate_agent_skills(
-                    session_id,
-                    &available,
-                    state.storage.as_ref(),
-                )
-                .await
-                {
-                    tracing::warn!(
-                        error = ?e,
-                        "failed to auto-activate agent-level skills; proceeding"
-                    );
-                }
-
-                match SkillManager::build_active_skills(
-                    session_id,
-                    &available,
-                    state.storage.as_ref(),
-                )
-                .await
-                {
-                    Err(e) => {
-                        tracing::warn!(
-                            error = ?e,
-                            "failed to load active skills; proceeding without skills"
-                        );
-                        vec![]
-                    }
-                    Ok(infos) => infos
-                        .into_iter()
-                        .map(|info| ActiveSkill {
-                            name: info.name,
-                            instructions: info.instructions,
-                            level: info.level,
-                            is_agent_level: info.is_agent_level,
-                            activation_order: info.activation_order as u32,
-                        })
-                        .collect(),
-                }
-            }
-        };
+            Ok(infos) => infos
+                .into_iter()
+                .map(|info| ActiveSkill {
+                    name: info.name,
+                    instructions: info.instructions,
+                    level: info.level,
+                    is_agent_level: info.is_agent_level,
+                    activation_order: info.activation_order as u32,
+                })
+                .collect(),
+        }
+    } else {
+        vec![]
+    };
 
     // Build the ToolContext passed to each tool invocation.
     let working_dir = crate::tool::workspace::resolve_workspace_root(&config);
@@ -278,8 +324,9 @@ pub async fn process_turn(
         .await?;
 
     // Steps 6–7: Assemble context via the swage-context assembly engine.
-    // Loads thread history, constructs typed elements (prompts + history),
-    // and runs the assembly with token budgeting and compaction support.
+    // Loads thread history, project memory, and constructs typed elements.
+    // Runs fail-open assembly: custom Python configs when configured, built-in
+    // default otherwise. The LLM provider is passed for two-phase compaction.
     let stored_history = state.storage.list_messages_by_thread(thread_id).await?;
     let history_messages: Vec<ChatMessage> = stored_history
         .into_iter()
@@ -293,22 +340,62 @@ pub async fn process_turn(
         })
         .collect();
 
-    // Run context assembly in a scoped block so the non-Send element and
-    // tokeniser values are dropped before the streaming loop's await points.
-    let (assembled_messages, assembly_report) = {
-        let elements = build_assembly_elements(&config.instructions, active_skills, history_messages);
-        let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+    // Load project memory from the filesystem. Returns an empty string when
+    // no memory directory or files exist — MemoryElement handles empty content.
+    let memory_content = swage_root_opt
+        .as_deref()
+        .map(|root| load_project_memory(root, &project_slug))
+        .unwrap_or_default();
 
-        // Use default_assembly directly — it's synchronous and avoids Send
-        // issues from holding trait object references across the async timeout
-        // boundary in assemble(). In era 0.1 only the "default" assembly is
-        // registered, so the fail-open wrapper would dispatch here anyway.
-        let output = swage_context::assembly::default_assembly(
-            &elements, &config.context, &tokeniser,
-        );
+    // Build the assembly search hierarchy for locating Python assembly files.
+    // Collected as owned PathBufs first so references can be formed safely
+    // after the Vec is complete.
+    let assembly_search_paths: Vec<(HierarchyLevel, PathBuf)> = swage_root_opt
+        .as_ref()
+        .map(|root| {
+            let project_dir = root.join("projects").join(&project_slug);
+            let agent_dir = project_dir.join("agents").join(&session.agent_id);
+            let mut levels = vec![
+                (HierarchyLevel::Global, root.clone()),
+                (HierarchyLevel::Project, project_dir),
+            ];
+            // Only include the agent level when the directory exists;
+            // a missing agent dir means no agent-specific assemblies.
+            if agent_dir.is_dir() {
+                levels.push((HierarchyLevel::Agent, agent_dir));
+            }
+            levels
+        })
+        .unwrap_or_default();
+    let search_level_refs: Vec<(HierarchyLevel, &Path)> = assembly_search_paths
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect();
 
-        (output.messages, output.report)
-    };
+    let elements = build_assembly_elements(
+        &config.instructions,
+        active_skills,
+        history_messages,
+        memory_content,
+        project.name.clone(),
+    );
+    let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+
+    // Run the fail-open assembly orchestrator. For "default" (or empty) assembly
+    // names this delegates to default_assembly() synchronously. For any other
+    // name it locates the corresponding .py file and executes it via PyO3.
+    // On timeout or execution failure it falls back to default_assembly() and
+    // records the error in the assembly report.
+    let output = swage_context::assembly::assemble(
+        &elements,
+        &config.context,
+        &tokeniser,
+        &search_level_refs,
+        state.provider.as_ref(),
+        Some(&swage_python::ConcreteAssemblyRunner),
+    )
+    .await;
+    let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -2729,37 +2816,125 @@ pub(crate) mod tests {
     /// the turn's context assembly. This function is tested directly to verify
     /// the wiring before it's used in process_turn.
     #[test]
-    fn build_assembly_elements_creates_prompts_skills_and_history() {
+    fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         let instructions = "Be helpful.";
         let history = vec![
             ChatMessage::new(Role::User, "Hi"),
             ChatMessage::new(Role::Assistant, "Hello!"),
         ];
 
-        let elements = build_assembly_elements(instructions, vec![], history);
+        let elements = build_assembly_elements(
+            instructions,
+            vec![],
+            history,
+            String::new(),
+            "My Project".to_string(),
+        );
 
-        // Should produce three elements: prompts, skills (empty), and history.
-        assert_eq!(elements.len(), 3);
+        // Should produce four elements: prompts, skills (empty), memory, and history.
+        assert_eq!(elements.len(), 4);
 
         let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
         assert!(names.contains(&"prompts"), "should include prompts element");
         assert!(names.contains(&"skills"), "should include skills element");
+        assert!(names.contains(&"memory"), "should include memory element");
         assert!(names.contains(&"history"), "should include history element");
     }
 
     /// When instructions are empty, build_assembly_elements still includes the
     /// prompts element (which will produce no system message), the skills
-    /// element, and the history.
+    /// element, memory, and history.
     #[test]
     fn build_assembly_elements_with_empty_instructions() {
-        let elements = build_assembly_elements("", vec![], vec![
-            ChatMessage::new(Role::User, "Hello"),
-        ]);
+        let elements = build_assembly_elements(
+            "",
+            vec![],
+            vec![ChatMessage::new(Role::User, "Hello")],
+            String::new(),
+            "My Project".to_string(),
+        );
 
-        assert_eq!(elements.len(), 3);
+        assert_eq!(elements.len(), 4);
         // PromptsElement with empty rules produces no messages.
         let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
         assert!(prompts.content().is_empty());
+    }
+
+    /// When memory_content is non-empty, the memory element produces a system
+    /// message containing that content.
+    #[test]
+    fn build_assembly_elements_memory_element_contains_provided_content() {
+        let elements = build_assembly_elements(
+            "Be helpful.",
+            vec![],
+            vec![],
+            "Important project context".to_string(),
+            "My Project".to_string(),
+        );
+
+        let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
+        let messages = memory.content();
+        assert_eq!(messages.len(), 1, "non-empty memory should produce one message");
+        // content is Vec<ContentPart> — extract the text to check the value.
+        let text = messages[0].content.iter().find_map(|p| {
+            if let swage_core::ContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+        });
+        assert!(
+            text.is_some_and(|t| t.contains("Important project context")),
+            "memory message should contain the provided content"
+        );
+    }
+
+    /// load_project_memory returns an empty string when the project has no
+    /// memory directory.
+    #[test]
+    fn load_project_memory_returns_empty_when_dir_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No memory directory created — the helper should not panic.
+        let result = load_project_memory(dir.path(), "no-such-project");
+        assert!(result.is_empty(), "should return empty string when memory dir is absent");
+    }
+
+    /// load_project_memory reads all .md files from the memory directory and
+    /// joins them in alphabetical filename order.
+    #[test]
+    fn load_project_memory_concatenates_md_files_alphabetically() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("projects").join("my-project").join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+
+        // b_notes sorts after a_context.
+        std::fs::write(memory_dir.join("b_notes.md"), "Second file content").unwrap();
+        std::fs::write(memory_dir.join("a_context.md"), "First file content").unwrap();
+        // Non-.md file must not be included.
+        std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
+
+        let result = load_project_memory(dir.path(), "my-project");
+
+        assert!(result.contains("First file content"), "should include first .md file");
+        assert!(result.contains("Second file content"), "should include second .md file");
+        assert!(!result.contains("Should be ignored"), "should not include non-.md files");
+
+        // a_context.md sorts before b_notes.md alphabetically.
+        let first_pos = result.find("First file content").unwrap();
+        let second_pos = result.find("Second file content").unwrap();
+        assert!(first_pos < second_pos, "files should appear in alphabetical order");
+    }
+
+    /// load_project_memory skips files with only whitespace content.
+    #[test]
+    fn load_project_memory_skips_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("projects").join("my-project").join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+
+        std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
+        std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
+
+        let result = load_project_memory(dir.path(), "my-project");
+
+        assert!(result.contains("Real content"));
+        assert!(!result.contains("   "), "whitespace-only files should be excluded");
     }
 
     // -----------------------------------------------------------------------

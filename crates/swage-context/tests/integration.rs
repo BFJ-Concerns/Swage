@@ -9,7 +9,40 @@
 //! rather than internal modules directly.
 
 use std::fs;
+use std::pin::Pin;
 use tempfile::TempDir;
+
+use async_trait::async_trait;
+use futures::Stream;
+use swage_core::{
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
+use swage_provider::LlmProvider;
+
+/// Minimal stub provider for tests that only use the default assembly path.
+/// model_id() is called by assemble(); the other methods are never invoked.
+struct StubProvider;
+
+#[async_trait]
+impl LlmProvider for StubProvider {
+    fn model_id(&self) -> &str { "stub-model" }
+
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("StubProvider::complete")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _req: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("StubProvider::complete_with_tools")
+    }
+
+    fn stream(&self, _req: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        unimplemented!("StubProvider::stream")
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Default assembly produces era 0.1-equivalent output
@@ -186,7 +219,7 @@ fn budget_triggers_truncation_preserving_recent_messages() {
     assert!(!output.report.compaction_applied.is_empty(),
         "compaction records should be present when truncation occurred");
     let record = &output.report.compaction_applied[0];
-    assert_eq!(record.strategy, "truncation");
+    assert_eq!(record.actual_strategy, "truncation");
     assert!(record.messages_removed > 0, "should report messages removed");
     assert!(record.tokens_before > record.tokens_after,
         "tokens should decrease after truncation");
@@ -219,12 +252,15 @@ async fn failopen_catches_invalid_assembly_and_falls_back() {
     ];
 
     // Use the top-level assemble() which wraps with fail-open.
-    // In Phase 01 only "default" assembly exists, so we test the contract:
-    // the assembly succeeds normally and the report contains no errors.
+    // Pass empty search levels and no Python runner — this test exercises the
+    // default assembly path only.
     let output = swage_context::assembly::assemble(
         &elements,
         &config,
         &tokeniser,
+        &[],
+        &StubProvider,
+        None,
     ).await;
 
     // Default assembly should succeed without errors
