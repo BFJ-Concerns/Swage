@@ -412,6 +412,26 @@ struct ConversationListEnvelope {
 // ---------------------------------------------------------------------------
 
 impl GatewayClient {
+    /// Creates a new conversation inside a specific project, returning its metadata.
+    ///
+    /// Calls `POST /api/projects/{project_id}/sessions`. Returns 404 if the
+    /// project does not exist.
+    pub async fn create_project_conversation(
+        &self,
+        project_id: Uuid,
+    ) -> Result<ConversationResponse, ClientError> {
+        let url = format!("{}/api/projects/{project_id}/sessions", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_response(response, &url).await
+    }
+
     /// Creates a new conversation, returning its metadata.
     ///
     /// Calls `POST /api/conversations`.

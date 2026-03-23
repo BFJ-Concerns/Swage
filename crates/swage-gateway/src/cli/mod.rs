@@ -9,6 +9,7 @@ pub mod completions;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod tui;
 
 use clap::Parser;
 
@@ -47,6 +48,8 @@ pub struct Cli {
 pub enum Command {
     /// Manage the Swage gateway process.
     Gateway(GatewayArgs),
+    /// Launch the terminal user interface.
+    Tui(TuiArgs),
     /// Generate shell autocompletion scripts.
     Completions(CompletionsArgs),
 }
@@ -105,6 +108,21 @@ pub struct StopArgs {
     /// Use when the gateway is unresponsive to HTTP requests.
     #[arg(long)]
     pub force: bool,
+}
+
+// ---------------------------------------------------------------------------
+// TUI argument struct
+// ---------------------------------------------------------------------------
+
+/// Arguments for `swage tui`.
+#[derive(Debug, clap::Args)]
+pub struct TuiArgs {
+    /// Gateway URL to connect to (overrides runtime metadata discovery).
+    ///
+    /// Defaults to the running gateway's address found via runtime metadata,
+    /// or `http://127.0.0.1:3000` if no gateway metadata is available.
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,9 @@ async fn main() {
                 swage_gateway::cli::status::run().await
             }
         },
+        Some(Command::Tui(tui_args)) => {
+            swage_gateway::cli::tui::run(&tui_args).await
+        }
         Some(Command::Completions(comp_args)) => {
             swage_gateway::cli::completions::run(&comp_args);
             Ok(())

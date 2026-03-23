@@ -15,6 +15,7 @@ members = [
     "crates/swage-gateway",
     "crates/swage-python",
     "crates/swage-client",
+    "crates/swage-tui",
 ]
 
 [workspace.package]
