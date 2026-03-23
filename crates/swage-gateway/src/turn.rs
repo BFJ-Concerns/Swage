@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -10,14 +11,56 @@ use swage_core::{
     ToolCall, ToolResult, build_tool_round_messages,
 };
 use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
+use swage_storage::store::ContextSnapshotStore;
+
+use swage_context::element::ContextElement;
+use swage_context::history::HistoryElement;
+use swage_context::prompts::PromptsElement;
+use swage_context::tokeniser::TiktokenTokeniser;
+use swage_config::prompt_rule::PromptRule;
 
 use swage_tool::context::MockToolContext;
 
 use crate::{
     state::AppState,
+    subscription::SubscriptionState,
     websocket::ServerEvent,
 };
 use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
+
+/// Build the context assembly elements for a turn.
+///
+/// Constructs a `PromptsElement` from the resolved instruction string and
+/// a `HistoryElement` from the thread's message history. Returns a boxed
+/// element vec suitable for passing to `swage_context::assembly::assemble()`.
+///
+/// When instructions are empty the `PromptsElement` produces no messages,
+/// matching era 0.1 behaviour where an empty instruction string produced no
+/// system message.
+fn build_assembly_elements(
+    instructions: &str,
+    history: Vec<ChatMessage>,
+) -> Vec<Box<dyn ContextElement>> {
+    // Construct a single PromptRule from the resolved instructions string.
+    // The config resolver has already merged hierarchy levels and assembled
+    // the text — we wrap it as a single Global-level rule so the PromptsElement
+    // produces the expected system message.
+    let rules = if instructions.is_empty() {
+        vec![]
+    } else {
+        vec![PromptRule {
+            priority: 0,
+            content: instructions.to_string(),
+            source_level: swage_config::HierarchyLevel::Global,
+            file_path: std::path::PathBuf::from("resolved-instructions"),
+        }]
+    };
+
+    vec![
+        Box::new(PromptsElement::new(rules)),
+        Box::new(HistoryElement::new(history)),
+    ]
+}
 
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
@@ -40,7 +83,7 @@ use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
 // Turn record exists.
 #[tracing::instrument(
     name = "turn",
-    skip(state, content, ws_tx),
+    skip(state, content, ws_tx, subscription),
     fields(turn_id = tracing::field::Empty),
 )]
 pub async fn process_turn(
@@ -48,6 +91,7 @@ pub async fn process_turn(
     session_id: Uuid,
     content: String,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the session's thread. The gateway creates one thread per
     // session in create_conversation / create_session_in_project.
@@ -156,9 +200,11 @@ pub async fn process_turn(
         })
         .await?;
 
-    // Step 6: Build message history for the provider request from the full thread.
-    let history = state.storage.list_messages_by_thread(thread_id).await?;
-    let messages: Vec<ChatMessage> = history
+    // Steps 6–7: Assemble context via the swage-context assembly engine.
+    // Loads thread history, constructs typed elements (prompts + history),
+    // and runs the assembly with token budgeting and compaction support.
+    let stored_history = state.storage.list_messages_by_thread(thread_id).await?;
+    let history_messages: Vec<ChatMessage> = stored_history
         .into_iter()
         .map(|m| {
             let role = match m.role.as_str() {
@@ -170,15 +216,58 @@ pub async fn process_turn(
         })
         .collect();
 
-    // Step 7: Build the completion request with system instructions and model.
-    let mut request_messages = Vec::with_capacity(messages.len() + 1);
-    if !config.instructions.is_empty() {
-        request_messages.push(ChatMessage::new(Role::System, &config.instructions));
+    // Run context assembly in a scoped block so the non-Send element and
+    // tokeniser values are dropped before the streaming loop's await points.
+    let (assembled_messages, assembly_report) = {
+        let elements = build_assembly_elements(&config.instructions, history_messages);
+        let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+
+        // Use default_assembly directly — it's synchronous and avoids Send
+        // issues from holding trait object references across the async timeout
+        // boundary in assemble(). In era 0.1 only the "default" assembly is
+        // registered, so the fail-open wrapper would dispatch here anyway.
+        let output = swage_context::assembly::default_assembly(
+            &elements, &config.context, &tokeniser,
+        );
+
+        (output.messages, output.report)
+    };
+
+    tracing::debug!(
+        total_tokens = assembly_report.total_tokens,
+        elements = assembly_report.elements.len(),
+        "context assembled"
+    );
+
+    // Serialise the assembly report and emit ContextAssembled before streaming.
+    // Persistence always happens; WebSocket delivery is gated by subscription
+    // (with an error-bypass: reports containing errors reach all clients).
+    let report_json = serde_json::to_value(&assembly_report)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to serialise assembly report");
+            serde_json::json!({ "error": "serialisation failed" })
+        });
+
+    // Persist the snapshot for the past-turn REST endpoint.
+    if let Err(e) = state
+        .storage
+        .store_snapshot(turn.id, &report_json.to_string())
+        .await
+    {
+        tracing::warn!(error = %e, "failed to persist context snapshot");
     }
-    request_messages.extend(messages);
+
+    // Deliver the ContextAssembled event (subscription-gated).
+    let assembled_event = ServerEvent::ContextAssembled {
+        turn_id: turn.id,
+        report: report_json,
+    };
+    if subscription.lock().await.should_deliver(&assembled_event) {
+        let _ = ws_tx.send(assembled_event);
+    }
 
     let mut request = CompletionRequest {
-        messages: request_messages,
+        messages: assembled_messages,
         model: Some(config.provider.model.clone()),
         max_tokens: Some(4096),
         temperature: None,
@@ -260,12 +349,18 @@ pub async fn process_turn(
                 break 'outer TurnOutcome::Cancelled;
             }
 
-            let _ = ws_tx.send(ServerEvent::ToolStart {
+            // Deliver ToolStart only to connections subscribed to the "tools"
+            // channel. Storage recording (create_tool_call below) is unconditional
+            // so the turn history is always complete regardless of subscription.
+            let tool_start = ServerEvent::ToolStart {
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
                 arguments: call.arguments.clone(),
                 parent_call_id: None,
-            });
+            };
+            if subscription.lock().await.should_deliver(&tool_start) {
+                let _ = ws_tx.send(tool_start);
+            }
 
             if let Err(e) = state.storage.create_tool_call(NewToolCall {
                 turn_id: turn.id,
@@ -348,7 +443,8 @@ pub async fn process_turn(
 
             let status = if is_error { "error" } else { "success" };
 
-            let _ = ws_tx.send(ServerEvent::ToolEnd {
+            // ToolEnd is gated the same way as ToolStart.
+            let tool_end = ServerEvent::ToolEnd {
                 call_id: call.call_id.clone(),
                 tool: call.name.clone(),
                 result: serde_json::json!(result_content),
@@ -357,7 +453,10 @@ pub async fn process_turn(
                 truncated: false,
                 total_bytes: None,
                 parent_call_id: None,
-            });
+            };
+            if subscription.lock().await.should_deliver(&tool_end) {
+                let _ = ws_tx.send(tool_end);
+            }
 
             if let Err(e) = state.storage.update_tool_call_result(
                 &call.call_id,
@@ -414,7 +513,40 @@ pub async fn process_turn(
                 })
                 .await?;
 
-            let _ = stored_usage;
+            // Persist token usage from the provider if available.
+            if let Some(usage) = &stored_usage {
+                if let Err(e) = state.storage.update_tokens(
+                    turn.id,
+                    usage.input_tokens as i64,
+                    usage.output_tokens as i64,
+                ).await {
+                    tracing::warn!(error = %e, "failed to persist token usage");
+                }
+            }
+
+            // Emit a structured log event with token usage and derived cost.
+            // These fields extend the turn span's correlation data for operators
+            // monitoring per-turn costs from JSON log output.
+            // input_tokens / output_tokens are None when the provider did not
+            // report usage (e.g. streamed without a Usage chunk). cost_microcents
+            // is None when no pricing entry is configured for the model.
+            {
+                let input_tokens = stored_usage.as_ref().map(|u| u.input_tokens as i64);
+                let output_tokens = stored_usage.as_ref().map(|u| u.output_tokens as i64);
+                let cost_microcents = stored_usage.as_ref().and_then(|u| {
+                    state.config.pricing.compute_cost(
+                        &config.provider.model,
+                        u.input_tokens,
+                        u.output_tokens,
+                    )
+                });
+                tracing::info!(
+                    input_tokens = ?input_tokens,
+                    output_tokens = ?output_tokens,
+                    cost_microcents = ?cost_microcents,
+                    "turn_complete",
+                );
+            }
 
             state
                 .storage
@@ -423,7 +555,26 @@ pub async fn process_turn(
 
             state.storage.update_activity(session_id).await?;
 
-            let _ = ws_tx.send(ServerEvent::TurnComplete { turn_id: turn.id });
+            // Populate usage fields only for context-subscribed connections.
+            let (input_tokens, output_tokens, cost_microcents) =
+                if subscription.lock().await.is_subscribed(
+                    crate::subscription::ObservabilityChannel::Context,
+                ) {
+                    (
+                        stored_usage.as_ref().map(|u| u.input_tokens),
+                        stored_usage.as_ref().map(|u| u.output_tokens),
+                        None, // Cost derivation deferred to pricing config integration.
+                    )
+                } else {
+                    (None, None, None)
+                };
+
+            let _ = ws_tx.send(ServerEvent::TurnComplete {
+                turn_id: turn.id,
+                input_tokens,
+                output_tokens,
+                cost_microcents,
+            });
         }
 
         TurnOutcome::Cancelled => {
@@ -536,11 +687,14 @@ pub(crate) mod tests {
             Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project,
             Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
         },
-        store::{MessageStore, ProjectStore, SessionStore, ThreadStore, ToolCallStore, TurnStore},
+        store::{
+            ContextSnapshotStore, MessageStore, ProjectStore, SessionStore, ThreadStore,
+            ToolCallStore, TurnStore,
+        },
     };
 
     use super::*;
-    use crate::{state::AppState, websocket::ServerEvent};
+    use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
 
     // -----------------------------------------------------------------------
     // Mock LLM providers
@@ -674,6 +828,7 @@ pub(crate) mod tests {
         pub(crate) turns: HashMap<Uuid, Turn>,
         pub(crate) messages: Vec<Message>,
         pub(crate) tool_calls: Vec<ToolCallRecord>,
+        pub(crate) snapshots: HashMap<Uuid, String>,
     }
 
     impl MockStorage {
@@ -915,6 +1070,7 @@ pub(crate) mod tests {
                 assistant_response: None,
                 input_tokens: None,
                 output_tokens: None,
+                cost_microcents: None,
                 created_at: chrono::Utc::now(),
                 completed_at: None,
             };
@@ -994,6 +1150,29 @@ pub(crate) mod tests {
                 t.output_tokens = Some(output);
             }
             Ok(())
+        }
+
+        async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError> {
+            if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+                t.cost_microcents = Some(cost);
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ContextSnapshotStore for MockStorage {
+        async fn store_snapshot(
+            &self,
+            turn_id: Uuid,
+            report_json: &str,
+        ) -> Result<(), StorageError> {
+            self.db.lock().await.snapshots.insert(turn_id, report_json.to_string());
+            Ok(())
+        }
+
+        async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError> {
+            Ok(self.db.lock().await.snapshots.get(&turn_id).cloned())
         }
     }
 
@@ -1136,6 +1315,7 @@ pub(crate) mod tests {
         }
     }
 
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -1184,6 +1364,8 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
         (state, session_id)
     }
@@ -1203,7 +1385,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx)
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete without error");
 
@@ -1277,13 +1459,15 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let state_clone = Arc::clone(&state);
         let handle = tokio::spawn(async move {
-            process_turn(&*state_clone, session_id, "Hi".to_string(), tx).await
+            process_turn(&*state_clone, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await
         });
 
         for _ in 0..50 {
@@ -1325,7 +1509,7 @@ pub(crate) mod tests {
         .await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx)
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("error is surfaced via event, not Err return");
 
@@ -1366,7 +1550,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result = process_turn(&state, session_id, "Another message".to_string(), tx).await;
+        let result = process_turn(&state, session_id, "Another message".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
 
         assert!(
             matches!(result, Err(GatewayError::TurnInProgress { .. })),
@@ -1442,6 +1626,8 @@ pub(crate) mod tests {
             ])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
         (state, session_id)
     }
@@ -1468,7 +1654,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx)
+        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -1521,7 +1707,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Store this".to_string(), tx)
+        process_turn(&state, session_id, "Store this".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -1554,7 +1740,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use unknown".to_string(), tx)
+        process_turn(&state, session_id, "Use unknown".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should still complete");
 
@@ -1603,7 +1789,7 @@ pub(crate) mod tests {
             make_state_with_tools(vec![round_1, round_2, round_3]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Multi-round".to_string(), tx)
+        process_turn(&state, session_id, "Multi-round".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -1738,10 +1924,12 @@ pub(crate) mod tests {
             ])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "capture".into(), tx).await.expect("turn ok");
+        process_turn(&state, session_id, "capture".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await.expect("turn ok");
 
         let working_dir = captured
             .lock()
@@ -1793,10 +1981,12 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "hi".into(), tx).await.expect("turn ok");
+        process_turn(&state, session_id, "hi".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await.expect("turn ok");
 
         let req = captured_request.lock().unwrap().take().expect("request captured");
         let model = req.model.as_deref().unwrap_or("");
@@ -1811,7 +2001,7 @@ pub(crate) mod tests {
         ]]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hello".to_string(), tx)
+        process_turn(&state, session_id, "Hello".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -1899,10 +2089,12 @@ pub(crate) mod tests {
             ])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "Check context".to_string(), tx)
+        process_turn(&state, session_id, "Check context".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -1990,6 +2182,8 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: Some(sandbox),
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
         (state, session_id)
     }
@@ -2015,7 +2209,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx)
+        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -2054,7 +2248,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use broken".to_string(), tx)
+        process_turn(&state, session_id, "Use broken".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -2100,7 +2294,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use fail_tool".to_string(), tx)
+        process_turn(&state, session_id, "Use fail_tool".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
             .await
             .expect("turn should complete");
 
@@ -2200,7 +2394,7 @@ pub(crate) mod tests {
                     // before the span would be created.
                     tracing::callsite::rebuild_interest_cache();
 
-                    process_turn(&state, session_id, "test".to_string(), tx)
+                    process_turn(&state, session_id, "test".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
                         .await
                         .expect("turn should complete");
                 });
@@ -2224,5 +2418,594 @@ pub(crate) mod tests {
             fields.contains(&"session_id".to_string()),
             "turn span should have 'session_id' field, got: {fields:?}",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Token usage structured log tests
+    // -----------------------------------------------------------------------
+
+    /// Verifies that process_turn emits an INFO-level tracing event at turn
+    /// completion that includes input_tokens, output_tokens, and
+    /// cost_microcents as structured fields. This event extends the turn span
+    /// with cost-visibility for operators reading JSON logs.
+    #[test]
+    fn process_turn_logs_token_usage_at_completion() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+        use swage_core::TokenUsage;
+        use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+        // Accumulates (level_str, [field_names]) for every event emitted
+        // during process_turn. Shared between the layer and the assertions.
+        let recorded: StdArc<StdMutex<Vec<(String, Vec<String>)>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+        let captured = StdArc::clone(&recorded);
+
+        struct EventFieldRecorder(StdArc<StdMutex<Vec<(String, Vec<String>)>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFieldRecorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let level = event.metadata().level().to_string();
+                let fields: Vec<String> = event
+                    .metadata()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_string())
+                    .collect();
+                self.0.lock().unwrap().push((level, fields));
+            }
+        }
+
+        let subscriber = Registry::default().with(EventFieldRecorder(captured));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let chunks = vec![
+                        StreamChunk::Delta { content: "ok".to_string() },
+                        StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
+                        StreamChunk::Done { finish_reason: None },
+                    ];
+                    let (state, session_id) = make_state_with_session(chunks).await;
+                    let (tx, _rx) = mpsc::unbounded_channel();
+
+                    tracing::callsite::rebuild_interest_cache();
+
+                    process_turn(
+                        &state,
+                        session_id,
+                        "test".to_string(),
+                        tx,
+                        Arc::new(Mutex::new(SubscriptionState::new(true))),
+                    )
+                    .await
+                    .expect("turn should complete");
+                });
+        });
+
+        let events = recorded.lock().unwrap();
+
+        // Find an INFO event that carries token usage fields.
+        let usage_events: Vec<_> = events
+            .iter()
+            .filter(|(level, fields)| {
+                level == "INFO" && fields.contains(&"input_tokens".to_string())
+            })
+            .collect();
+
+        assert!(
+            !usage_events.is_empty(),
+            "expected an INFO event with input_tokens field; got events: {events:?}",
+        );
+
+        let (_, fields) = &usage_events[0];
+        assert!(
+            fields.contains(&"output_tokens".to_string()),
+            "usage event should have output_tokens field, got: {fields:?}",
+        );
+        assert!(
+            fields.contains(&"cost_microcents".to_string()),
+            "usage event should have cost_microcents field, got: {fields:?}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Context assembly tests
+    // -----------------------------------------------------------------------
+
+    // Imports from super::* via `use super::*` — ContextElement, HistoryElement,
+    // PromptsElement, TiktokenTokeniser, PromptRule are all available.
+
+    /// Assembly from a PromptRule and HistoryElement produces a system message
+    /// first, followed by history, with a report showing non-zero token counts.
+    #[test]
+    fn assembly_with_instructions_produces_system_message_first() {
+        let rule = PromptRule {
+            priority: 0,
+            content: "You are a helpful coding assistant.".to_string(),
+            source_level: swage_config::HierarchyLevel::Global,
+            file_path: std::path::PathBuf::from("test.md"),
+        };
+        let prompts = PromptsElement::new(vec![rule]);
+        let history = HistoryElement::new(vec![
+            ChatMessage::new(Role::User, "Hello"),
+        ]);
+
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            Box::new(prompts),
+            Box::new(history),
+        ];
+
+        let config = swage_config::ContextConfig::default();
+        let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+
+        let output = swage_context::assembly::default_assembly(
+            &elements, &config, &tokeniser,
+        );
+
+        // System message from instructions appears first.
+        assert_eq!(
+            output.messages[0].role, Role::System,
+            "first message should be system instructions"
+        );
+        // User message from history follows.
+        assert_eq!(
+            output.messages[1].role, Role::User,
+            "second message should be user history"
+        );
+
+        // Report should have non-zero token counts for both elements.
+        let prompts_report = output.report.elements.iter()
+            .find(|e| e.name == "prompts")
+            .expect("report should include prompts element");
+        assert!(
+            prompts_report.token_count > 0,
+            "prompts element should have non-zero token count"
+        );
+
+        let history_report = output.report.elements.iter()
+            .find(|e| e.name == "history")
+            .expect("report should include history element");
+        assert!(
+            history_report.token_count > 0,
+            "history element should have non-zero token count"
+        );
+    }
+
+    /// Assembly with empty instructions produces no system message — only
+    /// history messages.
+    #[test]
+    fn assembly_without_instructions_omits_system_message() {
+        let prompts = PromptsElement::new(vec![]);
+        let history = HistoryElement::new(vec![
+            ChatMessage::new(Role::User, "Hello"),
+        ]);
+
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            Box::new(prompts),
+            Box::new(history),
+        ];
+
+        let config = swage_config::ContextConfig::default();
+        let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+
+        let output = swage_context::assembly::default_assembly(
+            &elements, &config, &tokeniser,
+        );
+
+        // No system message when instructions are empty.
+        assert!(
+            output.messages.iter().all(|m| m.role != Role::System),
+            "expected no system message when prompts are empty"
+        );
+        assert_eq!(output.messages.len(), 1, "should only contain the user message");
+    }
+
+    /// Constructing a PromptRule from the config.instructions string produces
+    /// a PromptsElement that generates equivalent output to the old flat prepend.
+    #[test]
+    fn prompt_rule_from_instructions_string_matches_flat_prepend() {
+        let instructions = "You are a helpful assistant.\n\nBe concise.";
+
+        // Old approach: flat system message prepend.
+        let flat_system = ChatMessage::new(Role::System, instructions);
+
+        // New approach: PromptRule → PromptsElement → assembly.
+        let rule = PromptRule {
+            priority: 0,
+            content: instructions.to_string(),
+            source_level: swage_config::HierarchyLevel::Global,
+            file_path: std::path::PathBuf::from("instructions"),
+        };
+        let prompts = PromptsElement::new(vec![rule]);
+        let content = prompts.content();
+
+        assert_eq!(content.len(), 1, "should produce exactly one system message");
+        assert_eq!(content[0].role, flat_system.role);
+        // Content should be identical — single rule, no joining needed.
+        assert_eq!(content[0].content, flat_system.content);
+    }
+
+    /// The build_assembly_elements helper constructs the correct elements for
+    /// the turn's context assembly. This function is tested directly to verify
+    /// the wiring before it's used in process_turn.
+    #[test]
+    fn build_assembly_elements_creates_prompts_and_history() {
+        let instructions = "Be helpful.";
+        let history = vec![
+            ChatMessage::new(Role::User, "Hi"),
+            ChatMessage::new(Role::Assistant, "Hello!"),
+        ];
+
+        let elements = build_assembly_elements(instructions, history);
+
+        // Should produce two elements: prompts (priority 100) and history (priority 0).
+        assert_eq!(elements.len(), 2);
+
+        let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
+        assert!(names.contains(&"prompts"), "should include prompts element");
+        assert!(names.contains(&"history"), "should include history element");
+    }
+
+    /// When instructions are empty, build_assembly_elements still includes the
+    /// prompts element (which will produce no system message) and the history.
+    #[test]
+    fn build_assembly_elements_with_empty_instructions() {
+        let elements = build_assembly_elements("", vec![
+            ChatMessage::new(Role::User, "Hello"),
+        ]);
+
+        assert_eq!(elements.len(), 2);
+        // PromptsElement with empty rules produces no messages.
+        let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
+        assert!(prompts.content().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Token usage persistence tests
+    // -----------------------------------------------------------------------
+
+    /// When the provider returns a Usage chunk, the turn record should have
+    /// non-null input_tokens and output_tokens in storage after completion.
+    #[tokio::test]
+    async fn token_usage_persisted_to_turn_record() {
+        use swage_core::TokenUsage;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hello".to_string() },
+            StreamChunk::Usage(TokenUsage { input_tokens: 42, output_tokens: 17 }),
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+            .await
+            .expect("turn should complete");
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+        assert_eq!(turns.len(), 1);
+
+        let turn = &turns[0];
+        assert_eq!(
+            turn.input_tokens, Some(42),
+            "input_tokens should be persisted from provider usage"
+        );
+        assert_eq!(
+            turn.output_tokens, Some(17),
+            "output_tokens should be persisted from provider usage"
+        );
+    }
+
+    /// When the provider does not return a Usage chunk, token fields should
+    /// remain NULL (None) in the turn record.
+    #[tokio::test]
+    async fn token_usage_remains_null_when_provider_sends_no_usage() {
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hello".to_string() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+            .await
+            .expect("turn should complete");
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+
+        let turn = &turns[0];
+        assert!(
+            turn.input_tokens.is_none(),
+            "input_tokens should remain NULL when no usage reported"
+        );
+        assert!(
+            turn.output_tokens.is_none(),
+            "output_tokens should remain NULL when no usage reported"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ContextAssembled event and snapshot persistence tests
+    // -----------------------------------------------------------------------
+
+    /// ContextAssembled must be the first event before any Token events.
+    #[tokio::test]
+    async fn context_assembled_precedes_first_token() {
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hello".to_string() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // Find positions of ContextAssembled and first Token.
+        let assembled_pos = events
+            .iter()
+            .position(|e| matches!(e, ServerEvent::ContextAssembled { .. }))
+            .expect("expected a ContextAssembled event");
+        let first_token_pos = events
+            .iter()
+            .position(|e| matches!(e, ServerEvent::Token { .. }))
+            .expect("expected at least one Token event");
+
+        assert!(
+            assembled_pos < first_token_pos,
+            "ContextAssembled (pos {assembled_pos}) must precede first Token (pos {first_token_pos})"
+        );
+
+        // Verify the event carries the correct turn_id.
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turns = state
+            .storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        let turn_id = turns[0].id;
+
+        match &events[assembled_pos] {
+            ServerEvent::ContextAssembled {
+                turn_id: event_turn_id,
+                report,
+            } => {
+                assert_eq!(*event_turn_id, turn_id, "turn_id should match");
+                // Report should have an "elements" array from the assembly engine.
+                assert!(
+                    report.get("elements").is_some(),
+                    "report should contain elements key"
+                );
+            }
+            other => panic!("expected ContextAssembled, got: {other:?}"),
+        }
+    }
+
+    /// The assembly report should be persisted as a context snapshot.
+    #[tokio::test]
+    async fn assembly_report_persisted_as_context_snapshot() {
+        use swage_storage::store::ContextSnapshotStore;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hi".to_string() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turns = state
+            .storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        let turn_id = turns[0].id;
+
+        let snapshot = state
+            .storage
+            .get_snapshot(turn_id)
+            .await
+            .expect("get_snapshot should succeed");
+
+        assert!(
+            snapshot.is_some(),
+            "context snapshot should be persisted for the turn"
+        );
+
+        // Verify it parses as valid JSON with the expected structure.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snapshot.unwrap()).expect("snapshot should be valid JSON");
+        assert!(
+            parsed.get("elements").is_some(),
+            "snapshot should contain elements key"
+        );
+    }
+
+    /// When subscription is off, ContextAssembled is not delivered but
+    /// snapshot persistence still happens.
+    #[tokio::test]
+    async fn context_assembled_not_sent_when_unsubscribed() {
+        use swage_storage::store::ContextSnapshotStore;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hi".to_string() },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // force_on = false, no channels subscribed.
+        process_turn(
+            &state,
+            session_id,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(false))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // No ContextAssembled in the event stream.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::ContextAssembled { .. })),
+            "ContextAssembled should not be sent when unsubscribed"
+        );
+
+        // But snapshot should still be persisted.
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turns = state
+            .storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        let snapshot = state
+            .storage
+            .get_snapshot(turns[0].id)
+            .await
+            .expect("get_snapshot should succeed");
+        assert!(
+            snapshot.is_some(),
+            "snapshot should still be persisted even without subscription"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TurnComplete usage field tests
+    // -----------------------------------------------------------------------
+
+    /// When subscribed to context channel, TurnComplete includes token usage.
+    #[tokio::test]
+    async fn turn_complete_includes_usage_when_context_subscribed() {
+        use swage_core::TokenUsage;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hi".to_string() },
+            StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // force_on = true means all channels are subscribed.
+        process_turn(
+            &state,
+            session_id,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let complete = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+            .expect("expected TurnComplete event");
+
+        match complete {
+            ServerEvent::TurnComplete {
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(*input_tokens, Some(100), "input_tokens should be populated");
+                assert_eq!(*output_tokens, Some(50), "output_tokens should be populated");
+            }
+            other => panic!("expected TurnComplete, got: {other:?}"),
+        }
+    }
+
+    /// When NOT subscribed to context channel, TurnComplete omits usage fields.
+    #[tokio::test]
+    async fn turn_complete_omits_usage_when_not_subscribed() {
+        use swage_core::TokenUsage;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: "Hi".to_string() },
+            StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // force_on = false, no subscriptions.
+        process_turn(
+            &state,
+            session_id,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(false))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let complete = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+            .expect("expected TurnComplete event");
+
+        match complete {
+            ServerEvent::TurnComplete {
+                input_tokens,
+                output_tokens,
+                cost_microcents,
+                ..
+            } => {
+                assert_eq!(*input_tokens, None, "input_tokens should be None when unsubscribed");
+                assert_eq!(*output_tokens, None, "output_tokens should be None when unsubscribed");
+                assert_eq!(*cost_microcents, None, "cost_microcents should be None when unsubscribed");
+            }
+            other => panic!("expected TurnComplete, got: {other:?}"),
+        }
     }
 }

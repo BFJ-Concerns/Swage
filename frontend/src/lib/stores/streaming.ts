@@ -206,6 +206,22 @@ export function createStreamingStore(
           isStreaming = false;
           // activeToolCalls preserved — same rationale as the error case.
           break;
+
+        case "shutdown":
+          // The gateway is shutting down. Preserve any partial content and
+          // surface the shutdown as a turn error so the UI can notify the user.
+          // The WebSocket will close shortly after this event arrives.
+          preservePartialResponse();
+          turnError = { code: "gateway_shutdown", message: event.reason };
+          isStreaming = false;
+          break;
+
+        case "context_assembled":
+          // Diagnostic event carrying the context assembly report for this turn.
+          // No action required in the streaming store — display is handled
+          // separately. The case is listed explicitly to avoid a fall-through
+          // and to make the handler exhaustive for future extensions.
+          break;
       }
     },
 

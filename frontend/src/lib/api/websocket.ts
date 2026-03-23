@@ -50,6 +50,8 @@ const KNOWN_EVENT_TYPES = new Set([
   "cancelled",
   "tool_start",
   "tool_end",
+  "context_assembled",
+  "shutdown",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,11 @@ export function createWebSocketClient(
       // open+drop cycles (e.g. a flapping connection) back off progressively
       // rather than hammering the server at the base rate on every recovery.
       emitStatus("connected");
+
+      // Subscribe to the "tools" channel so ToolStart/ToolEnd events are
+      // delivered. The gateway gates these events behind subscription state;
+      // without this the web UI would not receive tool activity events.
+      ws!.send(JSON.stringify({ type: "subscribe", channels: ["tools"] }));
     };
 
     ws.onmessage = (event: MessageEvent) => {

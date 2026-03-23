@@ -14,8 +14,28 @@ const CREATE_MIGRATIONS_TABLE: &str = "
 ///
 /// Order is significant — migrations are applied in array order and never re-run.
 fn migrations() -> Vec<(&'static str, &'static str)> {
-    vec![("001_complete_schema", COMPLETE_SCHEMA)]
+    vec![
+        ("001_complete_schema", COMPLETE_SCHEMA),
+        ("002_context_snapshots", CREATE_CONTEXT_SNAPSHOTS),
+        ("003_turn_cost", ADD_TURN_COST_COLUMN),
+    ]
 }
+
+/// Per-turn context assembly report, stored as raw JSON to avoid coupling the
+/// storage layer to the AssemblyReport type definition.
+const CREATE_CONTEXT_SNAPSHOTS: &str = "
+    CREATE TABLE IF NOT EXISTS context_snapshots (
+        turn_id     TEXT NOT NULL PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+        report_json TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+";
+
+/// Additive migration: cost in microcents derived from provider pricing data.
+/// NULL when pricing was not configured at the time of the turn.
+const ADD_TURN_COST_COLUMN: &str = "
+    ALTER TABLE turns ADD COLUMN cost_microcents INTEGER;
+";
 
 /// Full target schema produced in a single migration.
 ///
@@ -709,6 +729,90 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .expect("count after cascade");
         assert_eq!(remaining, 0, "messages should cascade-delete when thread is deleted");
+    }
+
+    // ---------------------------------------------------------------------------
+    // context_snapshots table (002_context_snapshots migration)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn context_snapshots_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM context_snapshots", [], |r| r.get(0))
+            .expect("context_snapshots table should exist after migration");
+        assert_eq!(count, 0, "fresh DB should have no snapshot rows");
+    }
+
+    #[test]
+    fn context_snapshots_cascade_delete_with_turn() {
+        let conn = open_migrated();
+        let project_id = default_project_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &project_id, &now);
+        let thread_id  = insert_thread(&conn, &session_id, &now);
+        let turn_id    = insert_turn(&conn, &thread_id, &now);
+
+        // Insert a snapshot for the turn.
+        conn.execute(
+            "INSERT INTO context_snapshots (turn_id, report_json, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![turn_id, r#"{"total_tokens":100}"#, now],
+        )
+        .expect("insert snapshot");
+
+        // Deleting the turn should cascade to context_snapshots.
+        conn.execute("DELETE FROM turns WHERE id=?1", rusqlite::params![turn_id])
+            .expect("delete turn");
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM context_snapshots", [], |r| r.get(0))
+            .expect("count after cascade");
+        assert_eq!(remaining, 0, "context_snapshots should be deleted via turn cascade");
+    }
+
+    // ---------------------------------------------------------------------------
+    // cost_microcents column (003_turn_cost migration)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn turns_cost_microcents_column_exists() {
+        let conn = open_migrated();
+        let col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('turns') WHERE name='cost_microcents'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("pragma_table_info query");
+        assert_eq!(col_count, 1, "turns.cost_microcents column should exist after migration");
+    }
+
+    #[test]
+    fn turns_cost_microcents_is_nullable() {
+        let conn = open_migrated();
+        let project_id = default_project_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &project_id, &now);
+        let thread_id  = insert_thread(&conn, &session_id, &now);
+
+        // Insert a turn without cost — should default to NULL.
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO turns (id, thread_id, agent_id, state, created_at)
+             VALUES (?1,?2,'agent-test','pending',?3)",
+            rusqlite::params![turn_id, thread_id, now],
+        )
+        .expect("insert turn");
+
+        let cost: Option<i64> = conn
+            .query_row(
+                "SELECT cost_microcents FROM turns WHERE id=?1",
+                rusqlite::params![turn_id],
+                |r| r.get(0),
+            )
+            .expect("select cost_microcents");
+        assert!(cost.is_none(), "cost_microcents should be NULL by default");
     }
 
     #[test]

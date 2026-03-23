@@ -238,7 +238,7 @@ mod tests {
     use swage_storage::{
         Message, MessageStore, NewMessage, NewSession, NewThread, NewToolCall, NewTurn, Session,
         SessionStore, Thread, ThreadState, ThreadStore, ToolCallRecord, ToolCallStore, Turn,
-        TurnState, TurnStore,
+        TurnState, TurnStore, ContextSnapshotStore,
     };
 
     use super::*;
@@ -397,6 +397,9 @@ mod tests {
         async fn update_tokens(&self, _: Uuid, _: i64, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -456,6 +459,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+
+    #[async_trait]
+    impl ContextSnapshotStore for StubStorage {
+        async fn store_snapshot(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn get_snapshot(&self, _: Uuid) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+    }
     // Helpers
     // -----------------------------------------------------------------------
 

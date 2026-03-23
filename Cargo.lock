@@ -2081,6 +2081,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-config",
+ "swage-context",
  "swage-core",
  "swage-provider",
  "swage-python",

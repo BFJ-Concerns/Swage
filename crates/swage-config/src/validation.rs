@@ -11,7 +11,7 @@ use crate::merge::PartialConfig;
 /// Top-level TOML sections recognised by the config schema.
 const KNOWN_SECTIONS: &[&str] = &[
     "server", "provider", "workspace", "sandbox", "lifecycle", "logging",
-    "tools", "context",
+    "tools", "context", "pricing", "observability",
 ];
 
 /// Valid field names for each known section.
@@ -25,6 +25,10 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "logging"   => &["level"],
         "tools"     => &["shell_timeout_secs", "max_output_bytes", "search"],
         "context"   => &["assembly", "timeout", "budget"],
+        // pricing.models is a dynamic table of model-name → pricing entry;
+        // field-level validation is skipped for the per-model sub-tables.
+        "pricing"        => &["models"],
+        "observability"  => &["force_on"],
         _           => &[],
     }
 }
@@ -88,9 +92,12 @@ fn check_field_type(
         ("tools",  "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools",  "max_output_bytes")   => ("integer", matches!(value, Value::Integer(_))),
         ("tools",  "search")             => ("table",   matches!(value, Value::Table(_))),
-        ("context", "assembly")          => ("string",  matches!(value, Value::String(_))),
-        ("context", "timeout")           => ("integer", matches!(value, Value::Integer(_))),
-        ("context", "budget")            => ("integer", matches!(value, Value::Integer(_))),
+        ("context",  "assembly")          => ("string",  matches!(value, Value::String(_))),
+        ("context",  "timeout")           => ("integer", matches!(value, Value::Integer(_))),
+        ("context",  "budget")            => ("integer", matches!(value, Value::Integer(_))),
+        // pricing.models is a dynamic map — validate only that it is a table.
+        ("pricing",        "models")    => ("table",   matches!(value, Value::Table(_))),
+        ("observability",  "force_on")  => ("boolean", matches!(value, Value::Boolean(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
     };

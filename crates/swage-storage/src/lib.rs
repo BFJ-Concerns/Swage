@@ -10,5 +10,6 @@ pub use model::{
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
-    MessageStore, ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+    ContextSnapshotStore, MessageStore, ProjectStore, SessionStore, Storage, ThreadStore,
+    ToolCallStore, TurnStore,
 };

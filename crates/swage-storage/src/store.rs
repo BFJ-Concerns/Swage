@@ -73,6 +73,11 @@ pub trait TurnStore: Send + Sync {
     async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError>;
     /// Persist token counts after the LLM call completes.
     async fn update_tokens(&self, id: Uuid, input: i64, output: i64) -> Result<(), StorageError>;
+    /// Persist the computed cost after pricing is applied.
+    ///
+    /// `cost` is in microcents (see `PricingConfig::compute_cost`). Only called
+    /// when pricing was configured for the model; absent turns remain NULL.
+    async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError>;
 }
 
 /// Store for message CRUD operations.
@@ -139,6 +144,20 @@ pub trait ToolCallStore: Send + Sync {
     ) -> Result<Vec<ToolCallRecord>, StorageError>;
 }
 
+/// Store for context assembly report snapshots.
+///
+/// One snapshot per turn — stores the serialised JSON of an `AssemblyReport`
+/// produced by the context assembly engine. Using raw JSON avoids coupling the
+/// storage layer to the `AssemblyReport` type.
+#[async_trait]
+pub trait ContextSnapshotStore: Send + Sync {
+    /// Persist an assembly report for `turn_id`. Replaces any existing entry.
+    async fn store_snapshot(&self, turn_id: Uuid, report_json: &str) -> Result<(), StorageError>;
+    /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
+    /// was stored for that turn.
+    async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
+}
+
 /// Store for thread CRUD operations.
 ///
 /// Threads scope a single agent's execution within a session. Each agent
@@ -178,13 +197,15 @@ pub trait ThreadStore: Send + Sync {
 /// `ProjectStore` is not included — it is independently available and consumers
 /// that need project operations import it separately.
 pub trait Storage:
-    SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + ContextSnapshotStore
+    + Send + Sync
 {
 }
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    T: SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + ContextSnapshotStore
+        + Send + Sync
 {
 }
 
@@ -196,6 +217,7 @@ impl<T> Storage for T where
 mod tests {
     use super::*;
     use crate::model::{NewToolCall, ToolCallRecord};
+    use crate::store::ContextSnapshotStore;
 
     /// Compile-time check: a type implementing all sub-traits satisfies Storage.
     ///
@@ -274,6 +296,19 @@ mod tests {
             unimplemented!()
         }
         async fn update_tokens(&self, _id: Uuid, _input: i64, _output: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ContextSnapshotStore for StubStorage {
+        async fn store_snapshot(&self, _turn_id: Uuid, _report_json: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
     }
@@ -434,5 +469,26 @@ mod tests {
         _assert_turn_store(&stub);
         // The existence of the impl above is enough — if the new methods are missing
         // from StubStorage, the trait impl won't compile.
+    }
+
+    /// Compile-time check: TurnStore has update_cost.
+    #[test]
+    fn turn_store_update_cost_compile_check() {
+        fn _assert<T: TurnStore>(t: &T) {
+            let _ = t.update_cost(Uuid::new_v4(), 42);
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: ContextSnapshotStore is accessible and has the expected methods.
+    #[test]
+    fn context_snapshot_store_compile_check() {
+        fn _assert<T: ContextSnapshotStore>(t: &T) {
+            let _ = t.store_snapshot(Uuid::new_v4(), "{\"total_tokens\":100}");
+            let _ = t.get_snapshot(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
     }
 }

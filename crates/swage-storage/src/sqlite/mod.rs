@@ -1,3 +1,4 @@
+pub mod context_snapshot;
 pub mod message;
 pub mod migrations;
 pub mod project;

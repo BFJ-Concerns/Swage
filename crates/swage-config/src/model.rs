@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,59 @@ impl Default for ContextConfig {
     }
 }
 
+/// Per-model token pricing in microcents per million tokens.
+///
+/// Prices are stored as integers to avoid floating-point rounding when
+/// computing costs across large token counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPricing {
+    /// Input (prompt) token price in microcents per million tokens.
+    pub input_price_per_mtok: i64,
+    /// Output (completion) token price in microcents per million tokens.
+    pub output_price_per_mtok: i64,
+}
+
+/// Model pricing configuration — optional per-model cost data for observability.
+///
+/// When a model is absent from the map, `compute_cost` returns `None`
+/// rather than zero so callers can distinguish "free/unknown" from "configured zero".
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PricingConfig {
+    /// Map of model identifier → pricing data.
+    pub models: HashMap<String, ModelPricing>,
+}
+
+impl PricingConfig {
+    /// Compute the cost of a call in microcents, given model and token counts.
+    ///
+    /// Returns `None` if no pricing is configured for `model`.
+    pub fn compute_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> Option<i64> {
+        let pricing = self.models.get(model)?;
+        let input_cost  = (input_tokens  as i64) * pricing.input_price_per_mtok  / 1_000_000;
+        let output_cost = (output_tokens as i64) * pricing.output_price_per_mtok / 1_000_000;
+        Some(input_cost + output_cost)
+    }
+}
+
+/// Observability settings for the gateway.
+///
+/// When `force_on` is true, all WebSocket connections are treated as
+/// subscribed to every observability channel — no explicit subscribe
+/// message is required from the client. Useful for development and
+/// single-user deployments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    /// When true, all observability events are delivered to every connected
+    /// client regardless of their subscription state.
+    pub force_on: bool,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self { force_on: false }
+    }
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -187,6 +241,11 @@ pub struct ResolvedConfig {
     pub logging: LoggingConfig,
     pub tools: ToolConfig,
     pub context: ContextConfig,
+    /// Per-model pricing data for cost derivation. Empty by default — cost
+    /// computation returns None for any model absent from the map.
+    pub pricing: PricingConfig,
+    /// Observability settings — controls channel delivery behaviour.
+    pub observability: ObservabilityConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
 }
@@ -340,5 +399,93 @@ mod tests {
         assert_eq!(cfg.context.assembly, "default");
         assert_eq!(cfg.context.timeout, 5);
         assert_eq!(cfg.context.budget, None);
+    }
+
+    // --- PricingConfig tests ---
+
+    #[test]
+    fn pricing_config_default_is_empty() {
+        let cfg = PricingConfig::default();
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn compute_cost_returns_none_for_unknown_model() {
+        let cfg = PricingConfig::default();
+        assert_eq!(cfg.compute_cost("unknown-model", 1000, 500), None);
+    }
+
+    #[test]
+    fn compute_cost_returns_correct_value() {
+        let mut cfg = PricingConfig::default();
+        cfg.models.insert(
+            "test-model".to_string(),
+            ModelPricing {
+                input_price_per_mtok: 300,
+                output_price_per_mtok: 1500,
+            },
+        );
+        // input:  1_000_000 * 300  / 1_000_000 = 300
+        // output:   500_000 * 1500 / 1_000_000 = 750
+        // total: 1050
+        assert_eq!(cfg.compute_cost("test-model", 1_000_000, 500_000), Some(1050));
+    }
+
+    #[test]
+    fn compute_cost_zero_tokens_is_zero() {
+        let mut cfg = PricingConfig::default();
+        cfg.models.insert(
+            "m".to_string(),
+            ModelPricing { input_price_per_mtok: 300, output_price_per_mtok: 1500 },
+        );
+        assert_eq!(cfg.compute_cost("m", 0, 0), Some(0));
+    }
+
+    #[test]
+    fn resolved_config_includes_empty_pricing() {
+        let cfg = ResolvedConfig::default();
+        assert!(cfg.pricing.models.is_empty());
+    }
+
+    // --- ObservabilityConfig tests ---
+
+    #[test]
+    fn observability_config_default_force_on_is_false() {
+        let cfg = ObservabilityConfig::default();
+        assert!(!cfg.force_on);
+    }
+
+    #[test]
+    fn resolved_config_includes_observability_default() {
+        let cfg = ResolvedConfig::default();
+        assert!(!cfg.observability.force_on);
+    }
+
+    #[test]
+    fn observability_config_toml_round_trip() {
+        let original = ObservabilityConfig { force_on: true };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ObservabilityConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert!(restored.force_on);
+    }
+
+    #[test]
+    fn pricing_config_toml_round_trip() {
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "my-model".to_string(),
+            ModelPricing { input_price_per_mtok: 100, output_price_per_mtok: 200 },
+        );
+        let original = PricingConfig { models };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: PricingConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(
+            restored.models["my-model"].input_price_per_mtok,
+            100,
+        );
+        assert_eq!(
+            restored.models["my-model"].output_price_per_mtok,
+            200,
+        );
     }
 }

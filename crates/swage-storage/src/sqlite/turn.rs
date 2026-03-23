@@ -41,7 +41,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 // ---------------------------------------------------------------------------
 
 /// Column order: id, thread_id, agent_id, user_input, assistant_response,
-/// input_tokens, output_tokens, state, created_at, completed_at
+/// input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -61,6 +61,7 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         assistant_response: row.get(4)?,
         input_tokens: row.get(5)?,
         output_tokens: row.get(6)?,
+        cost_microcents: row.get(10)?,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -100,6 +101,7 @@ impl TurnStore for SqliteStorage {
                 assistant_response: None,
                 input_tokens: None,
                 output_tokens: None,
+                cost_microcents: None,
                 created_at: now,
                 completed_at: None,
             })
@@ -111,7 +113,7 @@ impl TurnStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -128,7 +130,7 @@ impl TurnStore for SqliteStorage {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -179,7 +181,7 @@ impl TurnStore for SqliteStorage {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
                  FROM turns WHERE state IN ('pending', 'processing') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -205,6 +207,17 @@ impl TurnStore for SqliteStorage {
             conn.execute(
                 "UPDATE turns SET input_tokens = ?1, output_tokens = ?2 WHERE id = ?3",
                 params![input, output, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET cost_microcents = ?1 WHERE id = ?2",
+                params![cost, id.to_string()],
             )?;
             Ok(())
         })
@@ -384,5 +397,26 @@ mod tests {
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.input_tokens, Some(1024));
         assert_eq!(updated.output_tokens, Some(256));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cost_microcents_is_none_on_creation() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        assert!(turn.cost_microcents.is_none());
+
+        let fetched = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert!(fetched.cost_microcents.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_cost_persists_value() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+
+        storage.update_cost(turn.id, 1_050).await.unwrap();
+
+        let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(updated.cost_microcents, Some(1_050));
     }
 }

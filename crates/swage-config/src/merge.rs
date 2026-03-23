@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::model::{
-    ContextConfig, LogLevel, Protocol, ResolvedConfig, ServerConfig, ProviderConfig, ToolConfig,
-    WorkspaceConfig, SandboxConfig, LifecycleConfig, LoggingConfig,
+    ContextConfig, LogLevel, ModelPricing, ObservabilityConfig, PricingConfig, Protocol,
+    ResolvedConfig, ServerConfig, ProviderConfig, ToolConfig, WorkspaceConfig, SandboxConfig,
+    LifecycleConfig, LoggingConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,21 @@ pub struct PartialContextConfig {
     pub budget: Option<Option<usize>>,
 }
 
+/// Partial mirror of `PricingConfig`.
+///
+/// When present, model entries from the overlay are merged into the base map
+/// (overlay entry wins per model name). Absent base entries survive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialPricingConfig {
+    pub models: Option<HashMap<String, ModelPricing>>,
+}
+
+/// Partial mirror of `ObservabilityConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialObservabilityConfig {
+    pub force_on: Option<bool>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,6 +88,8 @@ pub struct PartialConfig {
     pub lifecycle: Option<PartialLifecycleConfig>,
     pub logging: Option<PartialLoggingConfig>,
     pub context: Option<PartialContextConfig>,
+    pub pricing: Option<PartialPricingConfig>,
+    pub observability: Option<PartialObservabilityConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +149,21 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             timeout: o.timeout.or(b.timeout),
             budget: o.budget.or(b.budget),
         }),
+        pricing: merge_section(base.pricing, overlay.pricing, |b, o| {
+            // Overlay model entries win; base entries absent from the overlay survive.
+            let mut merged = b.models.unwrap_or_default();
+            if let Some(overlay_models) = o.models {
+                merged.extend(overlay_models);
+            }
+            PartialPricingConfig { models: Some(merged) }
+        }),
+        observability: merge_section(
+            base.observability,
+            overlay.observability,
+            |b, o| PartialObservabilityConfig {
+                force_on: o.force_on.or(b.force_on),
+            },
+        ),
     }
 }
 
@@ -191,6 +225,19 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 timeout: c.timeout.unwrap_or(dc.timeout),
                 // Double-option: outer None → inherit default (None), Some(x) → use x.
                 budget: c.budget.unwrap_or(dc.budget),
+            }
+        },
+        pricing: {
+            let models = partial.pricing
+                .and_then(|p| p.models)
+                .unwrap_or_default();
+            PricingConfig { models }
+        },
+        observability: {
+            let do_ = ObservabilityConfig::default();
+            let o = partial.observability.unwrap_or_default();
+            ObservabilityConfig {
+                force_on: o.force_on.unwrap_or(do_.force_on),
             }
         },
         // Instructions are assembled separately by the instructions module

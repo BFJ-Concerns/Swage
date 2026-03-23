@@ -331,6 +331,13 @@ print(f"{result1.strip()} {result2.strip()}")
     let conv_id = body["id"].as_str().unwrap().to_string();
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
 
+    // Subscribe to tools channel so tool events are delivered.
+    ws_send(
+        &mut ws_write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+
     ws_send(
         &mut ws_write,
         json!({"type": "send_message", "content": "Run the chained task"}),
@@ -408,6 +415,13 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
     let body: Value = resp.json().await.unwrap();
     let conv_id = body["id"].as_str().unwrap().to_string();
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
+
+    // Subscribe to tools channel so tool events are delivered.
+    ws_send(
+        &mut ws_write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
 
     ws_send(
         &mut ws_write,
@@ -498,6 +512,13 @@ x = 1 / 0  # ZeroDivisionError
     let conv_id = body["id"].as_str().unwrap().to_string();
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
 
+    // Subscribe to tools channel so tool events are delivered.
+    ws_send(
+        &mut ws_write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+
     ws_send(
         &mut ws_write,
         json!({"type": "send_message", "content": "Run the bad code"}),
@@ -567,6 +588,13 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
     let body: Value = resp.json().await.unwrap();
     let conv_id = body["id"].as_str().unwrap().to_string();
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
+
+    // Subscribe to tools channel so tool events are delivered.
+    ws_send(
+        &mut ws_write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
 
     ws_send(
         &mut ws_write,

@@ -59,6 +59,7 @@ pub mod server;
 pub mod service;
 pub mod shutdown;
 pub mod state;
+pub mod subscription;
 pub mod tool;
 pub mod turn;
 pub mod websocket;

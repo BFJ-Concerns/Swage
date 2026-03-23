@@ -1,11 +1,15 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use serde::Serialize;
 use uuid::Uuid;
+
+use swage_core::GatewayError;
 
 use crate::{
     error::ApiError,
@@ -179,20 +183,124 @@ pub async fn delete_project(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/turns/:id/context` — fetch the context assembly report for a completed turn.
+///
+/// Returns 200 with `{ turn_id, report }` if a snapshot is found. The `report`
+/// field has the same shape as the `ContextAssembled` WebSocket event's report
+/// field (a serialised `AssemblyReport`).
+///
+/// Returns 404 when no snapshot exists for the given turn — either the turn ID
+/// is unknown or the turn completed before context assembly was enabled.
+pub async fn get_turn_context(
+    State(state): State<AppState>,
+    Path(turn_id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    use swage_storage::store::ContextSnapshotStore;
+
+    let snapshot = state
+        .storage
+        .get_snapshot(turn_id)
+        .await
+        .map_err(|e| ApiError(GatewayError::Storage(e)))?;
+
+    match snapshot {
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "code": "not_found",
+                "message": format!("no context snapshot found for turn {turn_id}"),
+            })),
+        )
+            .into_response()),
+        Some(report_json) => {
+            // Parse back to Value so the HTTP response is clean JSON, not a
+            // double-encoded string.
+            let report: serde_json::Value = serde_json::from_str(&report_json)
+                .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
+            Ok(Json(serde_json::json!({
+                "turn_id": turn_id,
+                "report": report,
+            }))
+            .into_response())
+        }
+    }
+}
+
+/// `POST /api/shutdown` — initiate a graceful server shutdown.
+///
+/// # Localhost restriction
+///
+/// Only requests from `127.0.0.1` or `::1` are accepted. All other source
+/// addresses receive `403 Forbidden`. When `ConnectInfo` is absent (e.g. in
+/// unit tests that use `Router::oneshot` without a real TCP connection) the
+/// restriction is bypassed — this is intentional test-environment behaviour.
+///
+/// # Behaviour
+///
+/// 1. Broadcasts `ServerEvent::Shutdown` to all connected WebSocket clients
+///    so they can close gracefully before the connection is dropped.
+/// 2. Cancels `AppState::shutdown_signal`, which the server's graceful-shutdown
+///    future awaits alongside SIGTERM and the idle monitor.
+/// 3. Returns `200 OK` with `{ status: "shutting_down", message }`.
+pub async fn shutdown(
+    State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+) -> impl IntoResponse {
+    use crate::websocket::ServerEvent;
+
+    // Enforce localhost-only access when a real TCP connection provides the
+    // peer address. Without ConnectInfo (unit tests / same-process calls),
+    // the restriction is not enforced.
+    if let Some(ConnectInfo(addr)) = connect_info {
+        if !addr.ip().is_loopback() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "code": "forbidden",
+                    "message": "shutdown is only accessible from localhost",
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let reason = "admin shutdown request".to_string();
+
+    // Notify all connected WebSocket clients. Errors here are non-fatal:
+    // if no clients are subscribed the send returns Err(SendError), which we
+    // discard — the server is shutting down anyway.
+    let _ = state.broadcast.send(ServerEvent::Shutdown { reason: reason.clone() });
+
+    // Signal the graceful-shutdown future so axum drains in-flight requests
+    // before the process exits.
+    state.shutdown_signal.cancel();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "shutting_down",
+            "message": format!("Gateway is shutting down: {reason}"),
+        })),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
     use axum::{
         body::to_bytes,
+        extract::ConnectInfo,
         http::Request,
         Router,
     };
-    use tokio::sync::Mutex;
+    use tokio::sync::{broadcast, Mutex};
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -203,6 +311,7 @@ mod tests {
         server::build_router,
         state::AppState,
         turn::tests::{MockProvider, MockStorage},
+        websocket::ServerEvent,
     };
 
     // -----------------------------------------------------------------------
@@ -215,6 +324,7 @@ mod tests {
     fn make_router() -> (Router, Arc<MockStorage>) {
         let storage = Arc::new(MockStorage::new());
         let provider = Arc::new(MockProvider::new(vec![]));
+        let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
             project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
@@ -225,6 +335,8 @@ mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
         };
         (build_router(state), storage)
     }
@@ -882,5 +994,189 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/turns/:id/context
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_turn_context_returns_404_for_unknown_turn() {
+        let (router, _) = make_router();
+        let unknown_id = Uuid::new_v4();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/turns/{unknown_id}/context"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers specific to shutdown tests
+    // -----------------------------------------------------------------------
+
+    /// Variant of `make_router` that also returns the shutdown signal and a
+    /// broadcast receiver so shutdown tests can observe both side-effects.
+    fn make_shutdown_router() -> (
+        Router,
+        Arc<MockStorage>,
+        CancellationToken,
+        broadcast::Receiver<ServerEvent>,
+    ) {
+        let storage = Arc::new(MockStorage::new());
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
+        let shutdown_signal = CancellationToken::new();
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn Storage>,
+            project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
+            provider: provider as Arc<dyn swage_provider::LlmProvider>,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: broadcast_tx,
+            shutdown_signal: shutdown_signal.clone(),
+        };
+        (build_router(state), storage, shutdown_signal, broadcast_rx)
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /api/shutdown
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn shutdown_from_localhost_returns_200() {
+        let (router, _, _, _) = make_shutdown_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shutdown")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 8080))))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "shutting_down");
+        assert!(body["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn shutdown_from_non_localhost_returns_403() {
+        let (router, _, _, _) = make_shutdown_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shutdown")
+                    // Simulate a request from a remote IP.
+                    .extension(ConnectInfo(SocketAddr::from(([192, 168, 1, 100], 54321))))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"].as_str().unwrap(), "forbidden");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_the_shutdown_signal() {
+        let (router, _, shutdown_signal, _) = make_shutdown_router();
+
+        assert!(
+            !shutdown_signal.is_cancelled(),
+            "signal should not be cancelled before the request"
+        );
+
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shutdown")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            shutdown_signal.is_cancelled(),
+            "signal should be cancelled after the shutdown request"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_broadcasts_shutdown_event() {
+        let (router, _, _, mut broadcast_rx) = make_shutdown_router();
+
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shutdown")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Handler should have sent exactly one Shutdown event to the channel.
+        let event = broadcast_rx
+            .try_recv()
+            .expect("broadcast channel should have received a Shutdown event");
+        assert!(
+            matches!(event, ServerEvent::Shutdown { .. }),
+            "expected a Shutdown event, got: {event:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_turn_context_returns_200_with_report() {
+        use swage_storage::store::ContextSnapshotStore;
+
+        let (router, storage) = make_router();
+        let turn_id = Uuid::new_v4();
+        let report_json = r#"{"total_tokens":1024,"elements":[]}"#;
+
+        // Store a snapshot directly — simulates what the context engine writes.
+        storage.store_snapshot(turn_id, report_json).await.unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/turns/{turn_id}/context"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["turn_id"].as_str().unwrap(), turn_id.to_string());
+        assert_eq!(body["report"]["total_tokens"].as_i64().unwrap(), 1024);
     }
 }

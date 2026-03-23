@@ -736,6 +736,13 @@ async fn tool_execution_round_trip_with_persistence() {
     let conv_id = body["id"].as_str().unwrap().to_string();
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
 
+    // Subscribe to the "tools" channel so tool events are delivered.
+    ws_send(
+        &mut ws_write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+
     ws_send(
         &mut ws_write,
         json!({"type": "send_message", "content": "Echo hello for me"}),

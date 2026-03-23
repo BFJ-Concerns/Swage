@@ -92,7 +92,11 @@ export interface ConversationResponse {
 /** Client → Server events. */
 export type ClientEvent =
   | { type: "send_message"; content: string }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  // Subscribe to one or more observability channels (e.g. "tools", "context").
+  | { type: "subscribe"; channels: string[] }
+  // Unsubscribe from previously subscribed channels.
+  | { type: "unsubscribe"; channels: string[] };
 
 /** Server → Client events. */
 export type ServerEvent =
@@ -121,6 +125,20 @@ export type ServerEvent =
       total_bytes: number | null;
       // Mirrors parent_call_id from the corresponding tool_start.
       parent_call_id?: string;
+    }
+  // Fires once per turn after context assembly completes, before streaming begins.
+  // Contains a diagnostic report that includes token budgets and any assembly errors.
+  // Always delivered when the report has errors; otherwise requires a "context" subscription.
+  | {
+      type: "context_assembled";
+      turn_id: string;
+      report: Record<string, unknown>;
+    }
+  // Fired by the gateway before it shuts down. Clients should surface this as
+  // a disconnection notice; the WebSocket will close shortly after.
+  | {
+      type: "shutdown";
+      reason: string;
     };
 
 // -------------------------------------------------------------------------

@@ -17,7 +17,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import type { ToolCallView, MessageView, ServerEvent } from "../types";
+import type { ToolCallView, MessageView, ServerEvent, ClientEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // ToolCallView
@@ -255,5 +255,61 @@ describe("ServerEvent tool variants", () => {
   it("still accepts cancelled", () => {
     const ev: ServerEvent = { type: "cancelled" };
     expect(ev.type).toBe("cancelled");
+  });
+
+  it("accepts context_assembled with turn_id and report", () => {
+    const ev: ServerEvent = {
+      type: "context_assembled",
+      turn_id: "t-99",
+      report: { elements: [], errors: [] },
+    };
+
+    expect(ev.type).toBe("context_assembled");
+    if (ev.type === "context_assembled") {
+      expect(ev.turn_id).toBe("t-99");
+      expect(ev.report).toEqual({ elements: [], errors: [] });
+    }
+  });
+
+  it("accepts shutdown with reason string", () => {
+    const ev: ServerEvent = {
+      type: "shutdown",
+      reason: "idle_timeout",
+    };
+
+    expect(ev.type).toBe("shutdown");
+    if (ev.type === "shutdown") {
+      expect(ev.reason).toBe("idle_timeout");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ClientEvent — subscribe / unsubscribe variants
+// ---------------------------------------------------------------------------
+
+describe("ClientEvent subscribe variants", () => {
+  it("accepts subscribe with a channels array", () => {
+    const ev: ClientEvent = {
+      type: "subscribe",
+      channels: ["tools", "context"],
+    };
+
+    expect(ev.type).toBe("subscribe");
+    if (ev.type === "subscribe") {
+      expect(ev.channels).toEqual(["tools", "context"]);
+    }
+  });
+
+  it("accepts unsubscribe with a channels array", () => {
+    const ev: ClientEvent = {
+      type: "unsubscribe",
+      channels: ["tools"],
+    };
+
+    expect(ev.type).toBe("unsubscribe");
+    if (ev.type === "unsubscribe") {
+      expect(ev.channels).toEqual(["tools"]);
+    }
   });
 });

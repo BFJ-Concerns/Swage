@@ -166,9 +166,11 @@ describe("send", () => {
 
     client.send({ type: "send_message", content: "Hello, Swage" });
 
+    // sentMessages[0] is the automatic tools subscribe sent on open;
+    // sentMessages[1] is the explicit send_message call.
     const sent = latestWs().sentMessages;
-    expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toEqual({
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1])).toEqual({
       type: "send_message",
       content: "Hello, Swage",
     });
@@ -181,7 +183,9 @@ describe("send", () => {
 
     client.send({ type: "cancel" });
 
-    expect(JSON.parse(latestWs().sentMessages[0])).toEqual({ type: "cancel" });
+    // sentMessages[0] is the automatic tools subscribe; sentMessages[1] is cancel.
+    const sent = latestWs().sentMessages;
+    expect(JSON.parse(sent[sent.length - 1])).toEqual({ type: "cancel" });
   });
 
   it("does not throw when called before the socket is open", () => {
@@ -351,6 +355,55 @@ describe("reconnection on unexpected close", () => {
     latestWs().simulateUnexpectedClose();
     vi.advanceTimersByTime(1_000);
     expect(MockWebSocket.instances).toHaveLength(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tools subscription on open
+// ---------------------------------------------------------------------------
+
+describe("tools channel subscription", () => {
+  it("sends a subscribe message for 'tools' immediately on open", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+
+    const sent = latestWs().sentMessages;
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: "subscribe",
+      channels: ["tools"],
+    });
+  });
+
+  it("dispatches context_assembled events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({
+      type: "context_assembled",
+      turn_id: "t-1",
+      report: { errors: [] },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("context_assembled");
+  });
+
+  it("dispatches shutdown events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("shutdown");
   });
 });
 

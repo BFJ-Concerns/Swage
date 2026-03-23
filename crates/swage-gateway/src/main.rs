@@ -123,18 +123,25 @@ async fn main() {
     info!("Swage gateway listening on {addr}");
     let state_for_shutdown = state.clone();
     let idle_timeout = config.lifecycle.idle_timeout;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = shutdown::graceful_shutdown() => {}
-                _ = shutdown::idle_monitor(state_for_shutdown.clone(), idle_timeout) => {
-                    info!("Idle timeout triggered shutdown");
-                }
+    // ConnectInfo is required for the /api/shutdown localhost restriction.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = shutdown::graceful_shutdown() => {}
+            _ = shutdown::idle_monitor(state_for_shutdown.clone(), idle_timeout) => {
+                info!("Idle timeout triggered shutdown");
             }
-            shutdown::shutdown_active_turns(&state_for_shutdown).await;
-        })
-        .await
-        .expect("server error");
+            _ = state_for_shutdown.shutdown_signal.cancelled() => {
+                info!("HTTP shutdown endpoint triggered graceful shutdown");
+            }
+        }
+        shutdown::shutdown_active_turns(&state_for_shutdown).await;
+    })
+    .await
+    .expect("server error");
 
     // Step 12: Shut down sandbox cleanly. After serve completes, all route
     // handler clones have been dropped, leaving `state` as the sole Arc holder.

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -12,7 +12,7 @@ use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
-use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher};
+use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -51,6 +51,21 @@ pub struct AppState {
     /// Used by the idle lifecycle monitor to trigger automatic shutdown when
     /// no activity has been seen for a configured duration.
     pub activity_tracker: Arc<ActivityTracker>,
+
+    /// Broadcast channel for server-wide event delivery.
+    ///
+    /// Used by the shutdown endpoint to push a `Shutdown` event to all
+    /// connected WebSocket clients before the gateway terminates. Each
+    /// WebSocket connection subscribes a receiver and merges it with its
+    /// per-turn `mpsc` channel in the forwarding task.
+    pub broadcast: broadcast::Sender<ServerEvent>,
+
+    /// Cancellation token that triggers graceful shutdown on demand.
+    ///
+    /// The HTTP shutdown endpoint signals this token; the server's shutdown
+    /// future awaits it alongside SIGTERM so either mechanism causes an
+    /// orderly drain.
+    pub shutdown_signal: CancellationToken,
 }
 
 impl AppState {
@@ -62,6 +77,7 @@ impl AppState {
         tool_dispatcher: ToolDispatcher,
         sandbox: Option<Arc<dyn Sandbox>>,
     ) -> Self {
+        let (broadcast, _) = broadcast::channel(16);
         Self {
             storage,
             project_store,
@@ -72,6 +88,8 @@ impl AppState {
             tool_dispatcher: Arc::new(tool_dispatcher),
             sandbox,
             activity_tracker: Arc::new(ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: CancellationToken::new(),
         }
     }
 }
@@ -118,6 +136,7 @@ mod tests {
 
     fn make_minimal_state(sandbox: Option<Arc<dyn Sandbox>>) -> AppState {
         let storage = Arc::new(MockStorage::new());
+        let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
@@ -128,6 +147,8 @@ mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: CancellationToken::new(),
         }
     }
 

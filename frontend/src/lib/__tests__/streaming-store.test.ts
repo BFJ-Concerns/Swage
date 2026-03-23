@@ -627,6 +627,82 @@ describe("cancelled preserves activeToolCalls", () => {
 // startTurn clears activeToolCalls from the previous turn
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// shutdown events
+// ---------------------------------------------------------------------------
+
+describe("shutdown events", () => {
+  it("sets isStreaming to false", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(store.isStreaming).toBe(false);
+  });
+
+  it("records a turnError with code 'gateway_shutdown' and the reason as the message", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(store.turnError).toEqual({
+      code: "gateway_shutdown",
+      message: "idle_timeout",
+    });
+  });
+
+  it("preserves partial response in the conversation store", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    const assistantMessages = conv
+      .getMessages()
+      .filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].content).toBe("partial");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// context_assembled events
+// ---------------------------------------------------------------------------
+
+describe("context_assembled events", () => {
+  it("does not throw or crash the streaming store", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    expect(() =>
+      store.handleServerEvent({
+        type: "context_assembled",
+        turn_id: "t-1",
+        report: { elements: [], errors: [] },
+      }),
+    ).not.toThrow();
+  });
+
+  it("does not change isStreaming state", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "context_assembled",
+      turn_id: "t-1",
+      report: { errors: [] },
+    });
+
+    // Assembly reporting does not affect the streaming lifecycle.
+    expect(store.isStreaming).toBe(true);
+  });
+});
+
 describe("startTurn clears activeToolCalls", () => {
   it("resets activeToolCalls when a new turn begins", () => {
     const store = createStreamingStore();
