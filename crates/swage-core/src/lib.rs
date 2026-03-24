@@ -29,4 +29,5 @@ pub use request::{
     CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse,
     StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse, ToolRound,
 };
+pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
 pub use tool::{ToolCall, ToolDefinition, ToolResult, build_tool_round_messages};
