@@ -436,7 +436,12 @@ pub async fn process_turn(
     let dispatcher = dispatcher.with_execution_strategy(Arc::new(gateway_strategy));
 
     // Step 8: Build the Agent that will execute the turn.
-    let agent_config = AgentConfig::new(session.agent_id.clone());
+    // Wire output schema from config: if a schema is configured, pass it to the
+    // agent so it validates the LLM response and retries on failure.
+    let mut agent_config = AgentConfig::new(session.agent_id.clone());
+    if let Some(schema) = config.output.schema.clone() {
+        agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
+    }
     let agent = match AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
@@ -480,11 +485,16 @@ pub async fn process_turn(
         agent.process_turn_streaming(turn_request, event_tx).await
     });
 
+    // Captures the turn_id emitted by TurnStarted so the agent result match
+    // can use it for persistence and logging after the event loop finishes.
+    let mut turn_id = Uuid::nil();
+
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
     while let Some(event) = event_rx.recv().await {
         match event {
-            AgentEvent::TurnStarted { turn_id } => {
+            AgentEvent::TurnStarted { turn_id: started_id } => {
+                turn_id = started_id;
                 // Record the turn_id in the tracing span now that the agent
                 // has created the Turn record.
                 tracing::Span::current().record("turn_id", turn_id.to_string());
@@ -539,7 +549,40 @@ pub async fn process_turn(
                     let _ = ws_tx.send(tool_end);
                 }
             }
-            AgentEvent::TurnCompleted { turn_id, input_tokens, output_tokens, .. } => {
+            AgentEvent::OutputSchemaRetry { turn_id, attempt, max_retries, errors } => {
+                // Retry progress is observability noise — only deliver to context subscribers.
+                let retry_event = ServerEvent::OutputSchemaRetry {
+                    turn_id,
+                    attempt,
+                    max_retries,
+                    errors: errors
+                        .into_iter()
+                        .map(|e| crate::websocket::SchemaValidationError {
+                            path: e.path,
+                            message: e.message,
+                        })
+                        .collect(),
+                };
+                if subscription.lock().await.should_deliver(&retry_event) {
+                    let _ = ws_tx.send(retry_event);
+                }
+            }
+            AgentEvent::OutputSchemaFailed { turn_id, attempts, errors } => {
+                // Schema exhaustion is an error condition — always deliver regardless
+                // of subscription state.
+                let _ = ws_tx.send(ServerEvent::OutputSchemaFailed {
+                    turn_id,
+                    attempts,
+                    errors: errors
+                        .into_iter()
+                        .map(|e| crate::websocket::SchemaValidationError {
+                            path: e.path,
+                            message: e.message,
+                        })
+                        .collect(),
+                });
+            }
+            AgentEvent::TurnCompleted { turn_id, input_tokens, output_tokens, structured_output, .. } => {
                 // Derive cost from the pricing config when available.
                 let cost_microcents = pricing_config.compute_cost(
                     &model_name,
@@ -574,6 +617,7 @@ pub async fn process_turn(
                     input_tokens: ws_input,
                     output_tokens: ws_output,
                     cost_microcents: ws_cost,
+                    structured_output: structured_output.clone(),
                 });
             }
             AgentEvent::Error { message } => {
@@ -587,13 +631,31 @@ pub async fn process_turn(
 
     // Wait for the agent task to finish and surface any panic or error.
     match agent_handle.await {
-        Ok(Ok(_outbound)) => {
-            // Agent completed successfully — all events were already forwarded.
+        Ok(Ok(outbound)) => {
+            // Agent completed successfully — persist structured_output if the
+            // turn produced validated schema output.
+            if let Some(ref output) = outbound.structured_output {
+                use swage_storage::store::TurnStore;
+                if let Err(e) = TurnStore::update_structured_output(
+                    &*state.storage,
+                    turn_id,
+                    output,
+                ).await {
+                    // Non-fatal: the turn completed; only the persisted record is affected.
+                    tracing::warn!(error = %e, %turn_id, "failed to persist structured_output");
+                }
+            }
         }
         Ok(Err(AgentError::Cancelled)) => {
             // Cancellation is cooperative — the agent already set
             // TurnState::Interrupted and ThreadState::Idle in storage.
             let _ = ws_tx.send(ServerEvent::Cancelled {});
+        }
+        Ok(Err(AgentError::OutputSchemaFailed { .. })) => {
+            // The agent already emitted AgentEvent::OutputSchemaFailed through
+            // the event channel (forwarded above). Log for server visibility but
+            // do not send an additional error to the client.
+            tracing::info!(%turn_id, "output schema validation exhausted all retries");
         }
         Ok(Err(agent_err)) => {
             // The agent already sent an Error event through the channel
@@ -671,6 +733,34 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
+
+    // -----------------------------------------------------------------------
+    // SWAGE_HOME isolation for config tests
+    // -----------------------------------------------------------------------
+
+    /// Serialise tests that mutate SWAGE_HOME — it's process-wide state.
+    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that points SWAGE_HOME at a non-existent path so the gateway
+    /// falls back to the injected `state.config` instead of loading from disk.
+    struct SwageHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SwageHomeGuard {
+        fn isolate() -> Self {
+            let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // Safety: test-only env mutation; set_var is unsafe in edition 2024.
+            unsafe { std::env::set_var("SWAGE_HOME", "/tmp/swage_nonexistent_test_root") };
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for SwageHomeGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("SWAGE_HOME") };
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Mock LLM providers
@@ -1047,11 +1137,23 @@ pub(crate) mod tests {
                 input_tokens: None,
                 output_tokens: None,
                 cost_microcents: None,
+                structured_output: None,
                 created_at: chrono::Utc::now(),
                 completed_at: None,
             };
             self.db.lock().await.turns.insert(t.id, t.clone());
             Ok(t)
+        }
+
+        async fn update_structured_output(
+            &self,
+            id: Uuid,
+            output: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+                t.structured_output = Some(output.clone());
+            }
+            Ok(())
         }
 
         async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
@@ -1351,6 +1453,53 @@ pub(crate) mod tests {
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
+        };
+        (state, session_id)
+    }
+
+    /// Like `make_state_with_session` but accepts an explicit `ResolvedConfig`.
+    ///
+    /// Used for tests that need non-default config (e.g. output schema configured).
+    pub(crate) async fn make_state_with_config(
+        provider_chunks: Vec<StreamChunk>,
+        config: swage_config::ResolvedConfig,
+    ) -> (AppState, Uuid) {
+        let storage = Arc::new(MockStorage::new());
+
+        let project = storage
+            .get_or_create_default()
+            .await
+            .expect("create default project");
+
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(&*storage, NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        })
+        .await
+        .expect("create default thread");
+
+        let provider = Arc::new(MockProvider::new(provider_chunks));
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            provider: provider as Arc<dyn LlmProvider>,
+            config,
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
@@ -3088,6 +3237,116 @@ pub(crate) mod tests {
             }
             other => panic!("expected TurnComplete, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Output schema wiring tests
+    // -----------------------------------------------------------------------
+
+    /// When the config has an output schema and the provider returns valid JSON,
+    /// TurnComplete carries structured_output and the turn record is persisted.
+    #[tokio::test]
+    async fn turn_complete_carries_structured_output_when_schema_passes() {
+        let _guard = SwageHomeGuard::isolate();
+        use swage_core::FinishReason;
+        use swage_config::OutputConfig;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: r#"{"result":"ok"}"#.to_string() },
+            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+        ];
+
+        // Build a config with an output schema requiring {"result": <string>}.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "result": { "type": "string" } },
+            "required": ["result"]
+        });
+        let mut config = swage_config::ResolvedConfig::default();
+        config.output = OutputConfig { schema: Some(schema), max_retries: 1 };
+
+        let (state, session_id) = make_state_with_config(chunks, config).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            "give me json".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+        )
+        .await
+        .expect("turn should complete");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let complete = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+            .expect("expected TurnComplete");
+
+        match complete {
+            ServerEvent::TurnComplete { structured_output, .. } => {
+                assert!(
+                    structured_output.is_some(),
+                    "TurnComplete should carry structured_output when schema passes"
+                );
+                assert_eq!(
+                    structured_output.as_ref().unwrap()["result"],
+                    "ok"
+                );
+            }
+            other => panic!("expected TurnComplete, got: {other:?}"),
+        }
+    }
+
+    /// After a valid schema turn, the turn record in storage has structured_output.
+    #[tokio::test]
+    async fn structured_output_persisted_on_turn_after_schema_validation() {
+        let _guard = SwageHomeGuard::isolate();
+        use swage_core::FinishReason;
+        use swage_config::OutputConfig;
+        use swage_storage::store::TurnStore;
+
+        let chunks = vec![
+            StreamChunk::Delta { content: r#"{"x":42}"#.to_string() },
+            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+        ];
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "x": { "type": "integer" } },
+            "required": ["x"]
+        });
+        let mut config = swage_config::ResolvedConfig::default();
+        config.output = OutputConfig { schema: Some(schema), max_retries: 1 };
+
+        let (state, session_id) = make_state_with_config(chunks, config).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            "give me x".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(false))),
+        )
+        .await
+        .expect("turn should complete");
+
+        // Drain events to let the turn finish.
+        while rx.try_recv().is_ok() {}
+
+        // Look up the turn in storage and verify structured_output was persisted.
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = TurnStore::list_turns_by_thread(&*state.storage, thread_id).await.unwrap();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            turns[0].structured_output.is_some(),
+            "turn record should have structured_output persisted"
+        );
+        assert_eq!(turns[0].structured_output.as_ref().unwrap()["x"], 42);
     }
 
     /// When NOT subscribed to context channel, TurnComplete omits usage fields.

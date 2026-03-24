@@ -252,6 +252,31 @@ impl Default for ObservabilityConfig {
     }
 }
 
+/// Output schema validation settings — controls structured-output enforcement
+/// for the agent's final response.
+///
+/// When `schema` is `Some`, the agent's response is validated against the
+/// provided JSON Schema. On failure, the agent retries up to `max_retries`
+/// times before giving up and surfacing an error event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// JSON Schema the agent response must conform to. `None` disables
+    /// schema validation entirely.
+    pub schema: Option<serde_json::Value>,
+    /// Maximum number of validation-retry attempts before the turn is
+    /// considered failed. Defaults to 3.
+    pub max_retries: u32,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            schema: None,
+            max_retries: 3,
+        }
+    }
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -273,6 +298,9 @@ pub struct ResolvedConfig {
     pub pricing: PricingConfig,
     /// Observability settings — controls channel delivery behaviour.
     pub observability: ObservabilityConfig,
+    /// Output schema validation settings — JSON Schema and retry limits.
+    /// Defaults to no schema (validation disabled) with 3 retries.
+    pub output: OutputConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
 }
@@ -574,6 +602,48 @@ mod tests {
         assert_eq!(cfg.permissions.allow, vec!["*".to_string()]);
         assert!(cfg.permissions.deny.is_empty());
         assert!(cfg.permissions.bundles.is_empty());
+    }
+
+    // --- OutputConfig tests ---
+
+    #[test]
+    fn output_config_default_schema_is_none() {
+        let cfg = OutputConfig::default();
+        assert!(cfg.schema.is_none());
+    }
+
+    #[test]
+    fn output_config_default_max_retries_is_three() {
+        let cfg = OutputConfig::default();
+        assert_eq!(cfg.max_retries, 3);
+    }
+
+    #[test]
+    fn output_config_toml_round_trip_defaults() {
+        let original = OutputConfig::default();
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: OutputConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn output_config_toml_round_trip_with_schema() {
+        let original = OutputConfig {
+            schema: Some(serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}})),
+            max_retries: 5,
+        };
+        // OutputConfig uses JSON for schema — round-trip through JSON (TOML can't
+        // represent arbitrary JSON natively, so we verify JSON serialisation).
+        let serialised = serde_json::to_string(&original).expect("serialise failed");
+        let restored: OutputConfig = serde_json::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn resolved_config_output_defaults() {
+        let cfg = ResolvedConfig::default();
+        assert_eq!(cfg.output.max_retries, 3);
+        assert!(cfg.output.schema.is_none());
     }
 
     #[test]

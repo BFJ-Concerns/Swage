@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::model::{
-    ContextConfig, LogLevel, ModelPricing, ObservabilityConfig, PricingConfig, Protocol,
-    ResolvedConfig, SearchProviderConfig, ServerConfig, ProviderConfig, ToolConfig,
+    ContextConfig, LogLevel, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
+    Protocol, ResolvedConfig, SearchProviderConfig, ServerConfig, ProviderConfig, ToolConfig,
     ToolPermissionConfig, WorkspaceConfig, SandboxConfig, LifecycleConfig, LoggingConfig,
 };
 
@@ -96,6 +96,22 @@ pub struct PartialToolConfig {
     pub bundles: Option<HashMap<String, Vec<String>>>,
 }
 
+/// Partial mirror of `OutputConfig`. Each field is independently overridable.
+///
+/// `schema` uses `Option<Option<serde_json::Value>>` so that a layer can
+/// explicitly set schema to `None` (disabling it) without being treated the
+/// same as "not configured". In practice most callers set it to `Some(value)`
+/// or leave it as `None` (absent), so the outer option behaves like all other
+/// fields: absent means "don't override the base".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialOutputConfig {
+    /// JSON Schema to validate agent output against. `None` means "not
+    /// configured at this level" — base value wins.
+    pub schema: Option<serde_json::Value>,
+    /// Override for the maximum number of validation-retry attempts.
+    pub max_retries: Option<u32>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -110,6 +126,7 @@ pub struct PartialConfig {
     pub pricing: Option<PartialPricingConfig>,
     pub observability: Option<PartialObservabilityConfig>,
     pub tools: Option<PartialToolConfig>,
+    pub output: Option<PartialOutputConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +221,12 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 bundles,
             }
         }),
+        output: merge_section(base.output, overlay.output, |b, o| PartialOutputConfig {
+            // Both fields use overlay-wins semantics: if the overlay has a value,
+            // it wins; otherwise the base value is kept.
+            schema: o.schema.or(b.schema),
+            max_retries: o.max_retries.or(b.max_retries),
+        }),
     }
 }
 
@@ -292,6 +315,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let o = partial.observability.unwrap_or_default();
             ObservabilityConfig {
                 force_on: o.force_on.unwrap_or(do_.force_on),
+            }
+        },
+        output: {
+            let do_ = OutputConfig::default();
+            let o = partial.output.unwrap_or_default();
+            OutputConfig {
+                schema: o.schema.or(do_.schema),
+                max_retries: o.max_retries.unwrap_or(do_.max_retries),
             }
         },
         // Instructions are assembled separately by the instructions module
@@ -680,5 +711,82 @@ mod tests {
         assert_eq!(resolved.tools.shell_timeout_secs, 30);
         assert_eq!(resolved.tools.max_output_bytes, 100_000);
         assert_eq!(resolved.tools.search, None);
+    }
+
+    // --- PartialOutputConfig / cascade merge tests ---
+
+    #[test]
+    fn output_config_absent_resolves_to_defaults() {
+        // Empty partial → defaults: schema=None, max_retries=3.
+        let resolved = resolve(PartialConfig::default());
+        assert!(resolved.output.schema.is_none());
+        assert_eq!(resolved.output.max_retries, 3);
+    }
+
+    #[test]
+    fn output_config_overlay_max_retries_overrides_base() {
+        let global = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: None,
+                max_retries: Some(5),
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: None,
+                max_retries: Some(1),
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge_chain(vec![global, agent]);
+        let resolved = resolve(merged);
+        // The mote success criterion.
+        assert_eq!(resolved.output.max_retries, 1);
+    }
+
+    #[test]
+    fn output_config_absent_schema_resolves_to_none() {
+        let global = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: None,
+                max_retries: Some(2),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(merge_chain(vec![global]));
+        assert!(resolved.output.schema.is_none());
+        assert_eq!(resolved.output.max_retries, 2);
+    }
+
+    #[test]
+    fn output_config_three_level_chain_agent_schema_wins() {
+        let global = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(serde_json::json!({"type": "string"})),
+                max_retries: Some(5),
+            }),
+            ..Default::default()
+        };
+        let project = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: None,
+                max_retries: Some(2),
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(serde_json::json!({"type": "object"})),
+                max_retries: Some(1),
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_chain(vec![global, project, agent]));
+        // Agent's values win at every level.
+        assert_eq!(resolved.output.schema, Some(serde_json::json!({"type": "object"})));
+        assert_eq!(resolved.output.max_retries, 1);
     }
 }

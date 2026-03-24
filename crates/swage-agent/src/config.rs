@@ -16,6 +16,12 @@ pub struct AgentConfig {
     pub compaction_threshold: CompactionThreshold,
     /// Arbitrary agent-level metadata.
     pub metadata: HashMap<String, Value>,
+    /// JSON Schema to validate agent output against. When present, the agent
+    /// validates its final response and retries on schema violations.
+    pub output_schema: Option<Value>,
+    /// Maximum number of validation retry attempts when output doesn't match
+    /// the schema. 0 means no retries — first failure is final.
+    pub max_output_retries: u32,
 }
 
 impl AgentConfig {
@@ -29,7 +35,20 @@ impl AgentConfig {
             max_tool_rounds: 10,
             compaction_threshold: CompactionThreshold::MessageCount(100),
             metadata: HashMap::new(),
+            output_schema: None,
+            max_output_retries: 3,
         }
+    }
+
+    /// Set the output schema and maximum retry count.
+    ///
+    /// When an output schema is configured, the agent validates its final
+    /// response text against it and retries up to `max_retries` times on
+    /// schema violations.
+    pub fn with_output_schema(mut self, schema: Value, max_retries: u32) -> Self {
+        self.output_schema = Some(schema);
+        self.max_output_retries = max_retries;
+        self
     }
 
     /// Validate the configuration.
@@ -37,6 +56,7 @@ impl AgentConfig {
     /// Returns `Err(AgentError::InvalidConfig(...))` if:
     /// - `agent_id` is empty
     /// - `max_tool_rounds` is zero
+    /// - `output_schema` is present but not a valid JSON Schema
     pub fn validate(&self) -> Result<(), crate::AgentError> {
         if self.agent_id.is_empty() {
             return Err(crate::AgentError::InvalidConfig(
@@ -47,6 +67,15 @@ impl AgentConfig {
             return Err(crate::AgentError::InvalidConfig(
                 "max_tool_rounds must be at least 1".into(),
             ));
+        }
+        // Compile the output schema eagerly to catch malformed schemas at
+        // construction time rather than at the first validation attempt.
+        if let Some(schema) = &self.output_schema {
+            jsonschema::validator_for(schema).map_err(|e| {
+                crate::AgentError::InvalidConfig(format!(
+                    "output schema compilation failed: {e}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -84,6 +113,64 @@ mod tests {
         config.max_tool_rounds = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::AgentError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn default_has_no_output_schema() {
+        let config = AgentConfig::new("test");
+        assert!(config.output_schema.is_none());
+        assert_eq!(config.max_output_retries, 3);
+    }
+
+    #[test]
+    fn with_output_schema_sets_both_fields() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } }
+        });
+        let config = AgentConfig::new("test").with_output_schema(schema.clone(), 2);
+        assert_eq!(config.output_schema, Some(schema));
+        assert_eq!(config.max_output_retries, 2);
+    }
+
+    #[test]
+    fn validate_accepts_valid_output_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "result": { "type": "string" },
+                "score": { "type": "number" }
+            },
+            "required": ["result"]
+        });
+        let config = AgentConfig::new("test").with_output_schema(schema, 2);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_malformed_output_schema() {
+        // A schema with an invalid type keyword should fail compilation.
+        let schema = serde_json::json!({
+            "type": "not-a-real-type"
+        });
+        let config = AgentConfig::new("test").with_output_schema(schema, 1);
+        let err = config.validate().unwrap_err();
+        match &err {
+            crate::AgentError::InvalidConfig(msg) => {
+                assert!(
+                    msg.contains("output schema"),
+                    "error should mention output schema, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidConfig, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_config_without_output_schema() {
+        // Backward compatibility — no schema means no schema validation.
+        let config = AgentConfig::new("test");
+        assert!(config.validate().is_ok());
     }
 }
 

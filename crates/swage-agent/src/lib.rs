@@ -10,6 +10,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod extraction;
 pub mod message;
 
 // Public re-exports — the primary surface for consumers.

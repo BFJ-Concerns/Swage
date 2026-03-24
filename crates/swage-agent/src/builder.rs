@@ -242,6 +242,9 @@ mod tests {
         async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_structured_output(&self, _: Uuid, _: &serde_json::Value) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -330,6 +333,8 @@ mod tests {
             max_tool_rounds: 10,
             compaction_threshold: CompactionThreshold::TokenCount(50_000),
             metadata: HashMap::new(),
+            output_schema: None,
+            max_output_retries: 3,
         }
     }
 

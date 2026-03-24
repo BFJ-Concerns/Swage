@@ -42,6 +42,10 @@ pub enum AgentError {
     #[error("context exceeds capacity even after compaction")]
     ContextTooLong,
 
+    /// Output schema validation failed after all retry attempts were exhausted.
+    #[error("output schema validation failed after {attempts} attempt(s)")]
+    OutputSchemaFailed { attempts: u32 },
+
     /// The turn was cancelled by the caller via the cancellation token.
     #[error("turn cancelled")]
     Cancelled,
@@ -68,6 +72,8 @@ impl AgentError {
             AgentError::ThreadNotFound(_) => false,
             AgentError::InvalidConfig(_) => false,
             AgentError::ContextTooLong => false,
+            // Schema validation exhausted all retries — not transient.
+            AgentError::OutputSchemaFailed { .. } => false,
             // Cancellation is not a transient failure — the caller chose to stop.
             AgentError::Cancelled => false,
         }
@@ -313,6 +319,21 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "context exceeds capacity even after compaction"
+        );
+    }
+
+    #[test]
+    fn output_schema_failed_not_retriable() {
+        let err = AgentError::OutputSchemaFailed { attempts: 3 };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn display_output_schema_failed() {
+        let err = AgentError::OutputSchemaFailed { attempts: 3 };
+        assert_eq!(
+            err.to_string(),
+            "output schema validation failed after 3 attempt(s)"
         );
     }
 }

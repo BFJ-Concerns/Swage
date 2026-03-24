@@ -42,6 +42,20 @@ pub enum ClientEvent {
 // Server → Client event types
 // ---------------------------------------------------------------------------
 
+/// A single JSON Schema validation error from output schema checking.
+///
+/// Wire-compatible with `swage_agent::event::SchemaValidationError` — defined
+/// here so the gateway wire format is not coupled to agent internals. The two
+/// structs must be kept structurally identical; deviations should be treated
+/// as a protocol mismatch and surfaced in review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaValidationError {
+    /// JSON pointer to the failing location (e.g. `"/properties/name"`).
+    pub path: String,
+    /// Human-readable description of the constraint that was violated.
+    pub message: String,
+}
+
 /// Events sent by the server to the client over the WebSocket connection.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -104,6 +118,37 @@ pub enum ServerEvent {
         output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_microcents: Option<i64>,
+        /// Validated, parsed JSON output when an output schema was configured and
+        /// validation passed. Absent (serialised as omitted) when no schema is
+        /// configured or when validation failed after retry exhaustion.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        structured_output: Option<serde_json::Value>,
+    },
+    /// A schema validation attempt failed and the agent will retry.
+    ///
+    /// Only delivered to connections subscribed to the `"context"` channel —
+    /// these are observability events that provide retry progress to developers
+    /// and diagnostic tooling. Normal clients that have not subscribed do not
+    /// receive intermediate retry noise.
+    OutputSchemaRetry {
+        turn_id: Uuid,
+        /// 1-indexed attempt number (first retry = 1).
+        attempt: u32,
+        /// Maximum configured retries for this turn.
+        max_retries: u32,
+        /// Validation errors from this attempt.
+        errors: Vec<SchemaValidationError>,
+    },
+    /// All schema validation retries were exhausted without a valid response.
+    ///
+    /// Always delivered regardless of subscription state — this is an error
+    /// condition that the client must surface to the user.
+    OutputSchemaFailed {
+        turn_id: Uuid,
+        /// Total number of attempts made (including the initial attempt).
+        attempts: u32,
+        /// Validation errors from the final attempt.
+        errors: Vec<SchemaValidationError>,
     },
     /// An error occurred during or before turn processing.
     Error { code: String, message: String },
@@ -644,6 +689,7 @@ mod tests {
             input_tokens: None,
             output_tokens: None,
             cost_microcents: None,
+            structured_output: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "turn_complete");
@@ -652,6 +698,7 @@ mod tests {
         assert!(json.get("input_tokens").is_none());
         assert!(json.get("output_tokens").is_none());
         assert!(json.get("cost_microcents").is_none());
+        assert!(json.get("structured_output").is_none());
     }
 
     #[test]
@@ -662,6 +709,7 @@ mod tests {
             input_tokens: Some(100),
             output_tokens: Some(50),
             cost_microcents: Some(1500),
+            structured_output: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "turn_complete");
@@ -1144,5 +1192,107 @@ mod tests {
 
         let result = check_upgrade_preconditions(&state, session_id).await;
         assert!(result.is_none(), "valid session should pass preconditions");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema validation events [z4ov]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schema_validation_error_serialises() {
+        let err = SchemaValidationError {
+            path: "/properties/name".to_string(),
+            message: "required property missing".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["path"], "/properties/name");
+        assert_eq!(json["message"], "required property missing");
+    }
+
+    #[test]
+    fn turn_complete_with_structured_output_serialises() {
+        let id = Uuid::new_v4();
+        let event = ServerEvent::TurnComplete {
+            turn_id: id,
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: Some(serde_json::json!({"x": 1})),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "turn_complete");
+        assert_eq!(json["structured_output"]["x"], 1);
+    }
+
+    #[test]
+    fn turn_complete_without_structured_output_omits_field() {
+        let id = Uuid::new_v4();
+        let event = ServerEvent::TurnComplete {
+            turn_id: id,
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("structured_output"),
+            "structured_output should be absent when None, got: {json}",
+        );
+    }
+
+    #[test]
+    fn output_schema_retry_serialises() {
+        let turn_id = Uuid::new_v4();
+        let event = ServerEvent::OutputSchemaRetry {
+            turn_id,
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![SchemaValidationError {
+                path: "/name".to_string(),
+                message: "required".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "output_schema_retry");
+        assert_eq!(json["turn_id"], turn_id.to_string());
+        assert_eq!(json["attempt"], 1);
+        assert_eq!(json["max_retries"], 3);
+        assert_eq!(json["errors"][0]["path"], "/name");
+        assert_eq!(json["errors"][0]["message"], "required");
+    }
+
+    #[test]
+    fn output_schema_failed_serialises() {
+        let turn_id = Uuid::new_v4();
+        let event = ServerEvent::OutputSchemaFailed {
+            turn_id,
+            attempts: 3,
+            errors: vec![SchemaValidationError {
+                path: "/name".to_string(),
+                message: "required".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "output_schema_failed");
+        assert_eq!(json["turn_id"], turn_id.to_string());
+        assert_eq!(json["attempts"], 3);
+        assert_eq!(json["errors"][0]["path"], "/name");
+        assert_eq!(json["errors"][0]["message"], "required");
+    }
+
+    #[test]
+    fn output_schema_retry_empty_errors_serialises() {
+        // Retry with no specific validation errors (e.g. parse failure).
+        let turn_id = Uuid::new_v4();
+        let event = ServerEvent::OutputSchemaRetry {
+            turn_id,
+            attempt: 2,
+            max_retries: 3,
+            errors: vec![],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "output_schema_retry");
+        assert_eq!(json["errors"], serde_json::json!([]));
     }
 }

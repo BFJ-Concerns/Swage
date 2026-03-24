@@ -392,6 +392,8 @@ fn test_config(agent_id: &str) -> AgentConfig {
         max_tool_rounds: 10,
         compaction_threshold: CompactionThreshold::MessageCount(100),
         metadata: HashMap::new(),
+        output_schema: None,
+        max_output_retries: 3,
     }
 }
 

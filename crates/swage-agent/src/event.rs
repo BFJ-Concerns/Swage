@@ -4,7 +4,21 @@
 //! and forwards them to connected clients. This decouples the agent's
 //! execution loop from transport concerns.
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// A single JSON Schema validation error reported during output schema checking.
+///
+/// Wire-compatible with `swage_gateway::websocket::SchemaValidationError` — the
+/// two structs must be kept structurally identical. Any deviation is a protocol
+/// mismatch and should be surfaced in review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaValidationError {
+    /// JSON pointer to the failing location (e.g. `"/properties/name"`).
+    pub path: String,
+    /// Human-readable description of the constraint that was violated.
+    pub message: String,
+}
 
 /// Events emitted by the agent over a channel during streaming turn execution.
 ///
@@ -42,6 +56,37 @@ pub enum AgentEvent {
         input_tokens: u32,
         output_tokens: u32,
         tool_calls_count: u32,
+        /// Parsed, validated JSON when the agent has an output schema and
+        /// validation passes. None when no schema is configured or when
+        /// validation failed after retry exhaustion.
+        structured_output: Option<serde_json::Value>,
+    },
+
+    /// A schema validation attempt failed; the agent will retry the LLM call.
+    ///
+    /// Emitted once per failed attempt before the retry. Consumers can display
+    /// retry progress or accumulate errors for diagnostics.
+    OutputSchemaRetry {
+        turn_id: Uuid,
+        /// 1-indexed attempt number (first retry = 1).
+        attempt: u32,
+        /// Maximum configured retries for this turn.
+        max_retries: u32,
+        /// Validation errors from this attempt.
+        errors: Vec<SchemaValidationError>,
+    },
+
+    /// All schema validation retries were exhausted without a valid response.
+    ///
+    /// Emitted once when the retry budget is spent. The turn still completes
+    /// (with `structured_output: None` on `TurnCompleted`), but the caller
+    /// should surface this to the user as a partial failure.
+    OutputSchemaFailed {
+        turn_id: Uuid,
+        /// Total number of attempts made (initial + retries).
+        attempts: u32,
+        /// Validation errors from the final attempt.
+        errors: Vec<SchemaValidationError>,
     },
 
     /// A non-recoverable error occurred during turn processing.
@@ -133,12 +178,21 @@ mod tests {
             input_tokens: 100,
             output_tokens: 200,
             tool_calls_count: 3,
+            structured_output: None,
         };
-        if let AgentEvent::TurnCompleted { turn_id: id, input_tokens, output_tokens, tool_calls_count } = event {
+        if let AgentEvent::TurnCompleted {
+            turn_id: id,
+            input_tokens,
+            output_tokens,
+            tool_calls_count,
+            structured_output,
+        } = event
+        {
             assert_eq!(id, turn_id);
             assert_eq!(input_tokens, 100);
             assert_eq!(output_tokens, 200);
             assert_eq!(tool_calls_count, 3);
+            assert!(structured_output.is_none());
         } else {
             panic!("unexpected variant");
         }
@@ -179,6 +233,7 @@ mod tests {
             input_tokens: 1,
             output_tokens: 2,
             tool_calls_count: 0,
+            structured_output: None,
         }).unwrap();
         tx.send(AgentEvent::Error { message: "err".to_string() }).unwrap();
 
@@ -191,11 +246,174 @@ mod tests {
         assert_eq!(received, 6);
     }
 
+    #[tokio::test]
+    async fn test_structured_output_round_trips_through_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let turn_id = Uuid::new_v4();
+        let payload = serde_json::json!({"x": 1});
+
+        tx.send(AgentEvent::TurnCompleted {
+            turn_id,
+            input_tokens: 10,
+            output_tokens: 20,
+            tool_calls_count: 0,
+            structured_output: Some(payload.clone()),
+        })
+        .unwrap();
+        drop(tx);
+
+        let event = rx.recv().await.expect("should receive event");
+        if let AgentEvent::TurnCompleted { structured_output, .. } = event {
+            assert_eq!(structured_output, Some(payload));
+        } else {
+            panic!("expected TurnCompleted");
+        }
+    }
+
     #[test]
     fn test_debug_and_clone() {
         let event = AgentEvent::Token { content: "x".to_string() };
         let cloned = event.clone();
         let debug_str = format!("{:?}", cloned);
         assert!(debug_str.contains("Token"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SchemaValidationError [vd37]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schema_validation_error_constructible() {
+        let err = SchemaValidationError {
+            path: "/properties/name".to_string(),
+            message: "required".to_string(),
+        };
+        assert_eq!(err.path, "/properties/name");
+        assert_eq!(err.message, "required");
+    }
+
+    #[test]
+    fn schema_validation_error_serialises() {
+        let err = SchemaValidationError {
+            path: "/count".to_string(),
+            message: "must be >= 0".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["path"], "/count");
+        assert_eq!(json["message"], "must be >= 0");
+    }
+
+    #[test]
+    fn schema_validation_error_debug_and_clone() {
+        let err = SchemaValidationError { path: "/x".to_string(), message: "bad".to_string() };
+        let cloned = err.clone();
+        let debug_str = format!("{:?}", cloned);
+        assert!(debug_str.contains("SchemaValidationError"));
+    }
+
+    // -----------------------------------------------------------------------
+    // OutputSchemaRetry [vd37]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn output_schema_retry_constructible() {
+        let turn_id = Uuid::new_v4();
+        let event = AgentEvent::OutputSchemaRetry {
+            turn_id,
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![SchemaValidationError {
+                path: "/name".to_string(),
+                message: "required".to_string(),
+            }],
+        };
+        if let AgentEvent::OutputSchemaRetry { turn_id: id, attempt, max_retries, errors } = event {
+            assert_eq!(id, turn_id);
+            assert_eq!(attempt, 1);
+            assert_eq!(max_retries, 3);
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].path, "/name");
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn output_schema_retry_debug_and_clone() {
+        let event = AgentEvent::OutputSchemaRetry {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![],
+        };
+        let cloned = event.clone();
+        let debug_str = format!("{:?}", cloned);
+        assert!(debug_str.contains("OutputSchemaRetry"));
+    }
+
+    // -----------------------------------------------------------------------
+    // OutputSchemaFailed [vd37]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn output_schema_failed_constructible() {
+        let turn_id = Uuid::new_v4();
+        let event = AgentEvent::OutputSchemaFailed {
+            turn_id,
+            attempts: 3,
+            errors: vec![SchemaValidationError {
+                path: "/name".to_string(),
+                message: "required".to_string(),
+            }],
+        };
+        if let AgentEvent::OutputSchemaFailed { turn_id: id, attempts, errors } = event {
+            assert_eq!(id, turn_id);
+            assert_eq!(attempts, 3);
+            assert_eq!(errors.len(), 1);
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn output_schema_failed_debug_and_clone() {
+        let event = AgentEvent::OutputSchemaFailed {
+            turn_id: Uuid::new_v4(),
+            attempts: 3,
+            errors: vec![],
+        };
+        let cloned = event.clone();
+        let debug_str = format!("{:?}", cloned);
+        assert!(debug_str.contains("OutputSchemaFailed"));
+    }
+
+    #[tokio::test]
+    async fn output_schema_events_channel_sendable() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let turn_id = Uuid::new_v4();
+
+        tx.send(AgentEvent::OutputSchemaRetry {
+            turn_id,
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![SchemaValidationError {
+                path: "/x".to_string(),
+                message: "bad".to_string(),
+            }],
+        })
+        .unwrap();
+        tx.send(AgentEvent::OutputSchemaFailed {
+            turn_id,
+            attempts: 3,
+            errors: vec![],
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut received = 0;
+        while rx.recv().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, 2);
     }
 }

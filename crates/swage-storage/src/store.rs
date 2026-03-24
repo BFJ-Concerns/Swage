@@ -78,6 +78,16 @@ pub trait TurnStore: Send + Sync {
     /// `cost` is in microcents (see `PricingConfig::compute_cost`). Only called
     /// when pricing was configured for the model; absent turns remain NULL.
     async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError>;
+    /// Persist the validated structured output for a completed turn.
+    ///
+    /// Called when output schema validation succeeds. The `output` value is
+    /// serialised as JSON text for storage. Subsequent `get_turn` calls will
+    /// return it deserialised in `Turn::structured_output`.
+    async fn update_structured_output(
+        &self,
+        id: Uuid,
+        output: &serde_json::Value,
+    ) -> Result<(), StorageError>;
 }
 
 /// Store for message CRUD operations.
@@ -347,6 +357,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_structured_output(
+            &self,
+            _id: Uuid,
+            _output: &serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }

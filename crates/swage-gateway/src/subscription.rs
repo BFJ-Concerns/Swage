@@ -111,8 +111,10 @@ impl SubscriptionState {
     /// | `ContextAssembled` | Requires `Context` subscription. Exception: if the
     /// |   | report contains errors, always delivered (client must surface failures). |
     /// | `ToolStart` / `ToolEnd` | Requires `Tools` subscription. |
+    /// | `OutputSchemaRetry` | Requires `Context` subscription (observability noise). |
     /// | `TurnComplete` | Always delivered. Usage fields (input_tokens, etc.)
     /// |   | are populated at construction time based on `Context` subscription. |
+    /// | `OutputSchemaFailed` | Always delivered — error condition the client must surface. |
     /// | `Token` / `Error` / `Cancelled` / `Shutdown` | Always delivered. |
     pub fn should_deliver(&self, event: &ServerEvent) -> bool {
         match event {
@@ -131,11 +133,20 @@ impl SubscriptionState {
                 self.is_subscribed(ObservabilityChannel::Tools)
             }
 
+            // Retry progress is observability noise — only deliver to subscribers.
+            ServerEvent::OutputSchemaRetry { .. } => {
+                self.is_subscribed(ObservabilityChannel::Context)
+            }
+
             // TurnComplete always delivers the base event. Usage fields
-            // (input_tokens, output_tokens, cost_microcents) are populated by
-            // the turn loop only when the connection is context-subscribed —
+            // (input_tokens, output_tokens, cost_microcents, structured_output) are
+            // populated by the turn loop only when the connection is context-subscribed —
             // the gating happens at construction time, not delivery time.
             ServerEvent::TurnComplete { .. } => true,
+
+            // OutputSchemaFailed is an error condition — always surface it so the
+            // client can inform the user that structured output could not be produced.
+            ServerEvent::OutputSchemaFailed { .. } => true,
 
             // Baseline events are always delivered — subscription cannot suppress them.
             ServerEvent::Token { .. }
@@ -319,6 +330,7 @@ mod tests {
             input_tokens: None,
             output_tokens: None,
             cost_microcents: None,
+            structured_output: None,
         };
         assert!(state.should_deliver(&event));
     }
@@ -455,5 +467,65 @@ mod tests {
             report: serde_json::json!({"errors": []}),
         };
         assert!(!state.should_deliver(&event));
+    }
+
+    // OutputSchemaRetry / OutputSchemaFailed gating [z4ov]
+
+    #[test]
+    fn output_schema_retry_gated_without_context_subscription() {
+        let state = unsubscribed();
+        let event = ServerEvent::OutputSchemaRetry {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![],
+        };
+        assert!(!state.should_deliver(&event));
+    }
+
+    #[test]
+    fn output_schema_retry_delivered_with_context_subscription() {
+        let state = subscribed_to(&["context"]);
+        let event = ServerEvent::OutputSchemaRetry {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![],
+        };
+        assert!(state.should_deliver(&event));
+    }
+
+    #[test]
+    fn output_schema_retry_delivered_with_force_on() {
+        let state = SubscriptionState::new(true);
+        let event = ServerEvent::OutputSchemaRetry {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            errors: vec![],
+        };
+        assert!(state.should_deliver(&event));
+    }
+
+    #[test]
+    fn output_schema_failed_always_delivered_unsubscribed() {
+        let state = unsubscribed();
+        let event = ServerEvent::OutputSchemaFailed {
+            turn_id: Uuid::new_v4(),
+            attempts: 3,
+            errors: vec![],
+        };
+        assert!(state.should_deliver(&event), "OutputSchemaFailed must always be delivered");
+    }
+
+    #[test]
+    fn output_schema_failed_always_delivered_subscribed() {
+        let state = subscribed_to(&["context"]);
+        let event = ServerEvent::OutputSchemaFailed {
+            turn_id: Uuid::new_v4(),
+            attempts: 3,
+            errors: vec![],
+        };
+        assert!(state.should_deliver(&event));
     }
 }

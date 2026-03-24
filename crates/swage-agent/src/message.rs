@@ -93,6 +93,11 @@ pub struct OutboundMessage {
     pub output_tokens: u32,
     /// Number of tool calls dispatched during the turn.
     pub tool_calls_count: u32,
+    /// Parsed, validated JSON when an output schema is configured and
+    /// validation passes. Omitted from serialised JSON when None so
+    /// existing consumers are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -106,6 +111,7 @@ mod outbound_message_tests {
             input_tokens: 128,
             output_tokens: 64,
             tool_calls_count: 3,
+            structured_output: None,
         }
     }
 
@@ -119,16 +125,23 @@ mod outbound_message_tests {
         assert_eq!(decoded.input_tokens, original.input_tokens);
         assert_eq!(decoded.output_tokens, original.output_tokens);
         assert_eq!(decoded.tool_calls_count, original.tool_calls_count);
+        assert_eq!(decoded.structured_output, None);
     }
 
     #[test]
     fn all_fields_present_in_json() {
-        let json = serde_json::to_string(&sample()).expect("serialise");
+        // structured_output is skip_serializing_if None, so use a sample with Some.
+        let msg = OutboundMessage {
+            structured_output: Some(serde_json::json!({"result": "ok"})),
+            ..sample()
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
         assert!(json.contains("\"response\""), "missing response field");
         assert!(json.contains("\"turn_id\""), "missing turn_id field");
         assert!(json.contains("\"input_tokens\""), "missing input_tokens field");
         assert!(json.contains("\"output_tokens\""), "missing output_tokens field");
         assert!(json.contains("\"tool_calls_count\""), "missing tool_calls_count field");
+        assert!(json.contains("\"structured_output\""), "missing structured_output field");
     }
 
     #[test]
@@ -140,12 +153,37 @@ mod outbound_message_tests {
             input_tokens: 0,
             output_tokens: 0,
             tool_calls_count: 0,
+            structured_output: None,
         };
         let json = serde_json::to_string(&msg).expect("serialise");
         let decoded: OutboundMessage = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(decoded.input_tokens, 0);
         assert_eq!(decoded.output_tokens, 0);
         assert_eq!(decoded.tool_calls_count, 0);
+    }
+
+    #[test]
+    fn structured_output_serialises_when_present() {
+        let payload = serde_json::json!({"x": 1});
+        let msg = OutboundMessage {
+            structured_output: Some(payload.clone()),
+            ..sample()
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("\"structured_output\""), "field should be present");
+
+        let decoded: OutboundMessage = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(decoded.structured_output, Some(payload));
+    }
+
+    #[test]
+    fn structured_output_absent_from_json_when_none() {
+        let msg = sample(); // structured_output is None
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(
+            !json.contains("\"structured_output\""),
+            "field should be absent when None, got: {json}"
+        );
     }
 }
 

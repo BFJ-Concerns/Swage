@@ -22,6 +22,7 @@ pub use model::{
     LifecycleConfig,
     LogLevel,
     LoggingConfig,
+    OutputConfig,
     Protocol,
     ProviderConfig,
     ResolvedConfig,

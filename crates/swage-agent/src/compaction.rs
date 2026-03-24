@@ -400,6 +400,9 @@ mod tests {
         async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_structured_output(&self, _: Uuid, _: &serde_json::Value) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]

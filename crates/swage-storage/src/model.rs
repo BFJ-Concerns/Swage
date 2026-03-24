@@ -104,6 +104,10 @@ pub struct Turn {
     /// Computed cost in microcents, derived from provider pricing data.
     /// `None` when pricing was not configured for the model at call time.
     pub cost_microcents: Option<i64>,
+    /// Parsed, validated JSON from the agent's response when output schema
+    /// validation succeeded. `None` when no schema is configured, or when
+    /// validation failed after retry exhaustion.
+    pub structured_output: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -775,6 +779,7 @@ mod tests {
             input_tokens: Some(10),
             output_tokens: Some(20),
             cost_microcents: None,
+            structured_output: None,
             created_at: now,
             completed_at: None,
         };
@@ -823,6 +828,7 @@ mod tests {
             input_tokens: Some(100),
             output_tokens: Some(50),
             cost_microcents: Some(42),
+            structured_output: None,
             created_at: now,
             completed_at: Some(now),
         };
@@ -847,6 +853,7 @@ mod tests {
             input_tokens: Some(100),
             output_tokens: Some(50),
             cost_microcents: Some(999),
+            structured_output: None,
             created_at: Utc::now(),
             completed_at: None,
         };
@@ -854,5 +861,53 @@ mod tests {
         assert!(json.contains("cost_microcents"), "cost_microcents field should appear in JSON");
         let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
         assert_eq!(back.cost_microcents, Some(999));
+    }
+
+    // --- Turn.structured_output ---
+
+    #[test]
+    fn turn_serialises_with_structured_output_present() {
+        let schema_result = serde_json::json!({"answer": "Paris", "confidence": 0.97});
+        let turn = Turn {
+            id: Uuid::new_v4(),
+            thread_id: Uuid::new_v4(),
+            agent_id: "agent-1".to_string(),
+            state: TurnState::Completed,
+            user_input: None,
+            assistant_response: Some("the answer is Paris".to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: Some(schema_result.clone()),
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+
+        let json = serde_json::to_string(&turn).expect("serialisation should succeed");
+        assert!(json.contains("structured_output"), "structured_output should appear in JSON");
+        let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
+        assert_eq!(back.structured_output, Some(schema_result));
+    }
+
+    #[test]
+    fn turn_serialises_with_structured_output_absent() {
+        let turn = Turn {
+            id: Uuid::new_v4(),
+            thread_id: Uuid::new_v4(),
+            agent_id: "agent-1".to_string(),
+            state: TurnState::Pending,
+            user_input: None,
+            assistant_response: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+
+        let json = serde_json::to_string(&turn).expect("serialisation should succeed");
+        let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
+        assert!(back.structured_output.is_none());
     }
 }

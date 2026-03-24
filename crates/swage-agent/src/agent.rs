@@ -24,7 +24,8 @@ use swage_tool::dispatch::ToolDispatcher;
 
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, SchemaValidationError};
+use crate::extraction::extract_json;
 use crate::message::{InboundMessage, OutboundMessage, TurnRequest};
 
 // ---------------------------------------------------------------------------
@@ -318,6 +319,162 @@ impl Agent {
             };
         }
 
+        // 7b. Output schema validation — retry loop.
+        //
+        // When an output schema is configured, extract JSON from the accumulated
+        // response, validate it, and retry the LLM call if validation fails. Each
+        // retry streams tokens independently. Without a schema, this block is skipped.
+        let structured_output = if let Some(ref schema_value) = self.config.output_schema {
+            // Compile once — AgentConfig::validate() already proved this succeeds.
+            let validator = jsonschema::validator_for(schema_value)
+                .expect("schema was validated at config time");
+
+            let max_retries = self.config.max_output_retries;
+            let mut attempt: u32 = 0;
+
+            loop {
+                attempt += 1;
+
+                // Step 1: extract JSON from the response text.
+                let validation_errors = match extract_json(&accumulated) {
+                    Some(extracted) => {
+                        // Step 2: validate against the schema.
+                        let errors: Vec<SchemaValidationError> = validator
+                            .iter_errors(&extracted)
+                            .map(|e| SchemaValidationError {
+                                path: e.instance_path.to_string(),
+                                message: e.to_string(),
+                            })
+                            .collect();
+
+                        if errors.is_empty() {
+                            // Step 3: validation passed — carry the structured output.
+                            break Some(extracted);
+                        }
+                        errors
+                    }
+                    None => {
+                        // No JSON found — treat as a single validation error.
+                        vec![SchemaValidationError {
+                            path: String::new(),
+                            message: "no JSON found in response".into(),
+                        }]
+                    }
+                };
+
+                // Step 4/5: validation failed.
+                if attempt > max_retries {
+                    // Step 5: all retries exhausted.
+                    let _ = event_tx.send(AgentEvent::OutputSchemaFailed {
+                        turn_id: turn.id,
+                        attempts: attempt,
+                        errors: validation_errors,
+                    });
+
+                    // Persist the failed response for debugging.
+                    let position = self
+                        .storage
+                        .list_messages_by_thread(thread_id)
+                        .await
+                        .map(|msgs| msgs.len() as i32)
+                        .unwrap_or(1);
+                    let _ = self
+                        .storage
+                        .create_message(NewMessage {
+                            thread_id,
+                            role: "assistant".into(),
+                            content: accumulated.clone(),
+                            position,
+                            agent_id: self.config.agent_id.clone(),
+                        })
+                        .await;
+
+                    // Mark turn Failed, thread Idle.
+                    self.fail_turn_and_idle(turn.id, thread_id).await;
+
+                    return Err(AgentError::OutputSchemaFailed { attempts: attempt });
+                }
+
+                // Step 4: retries remain — emit retry event and loop.
+                let _ = event_tx.send(AgentEvent::OutputSchemaRetry {
+                    turn_id: turn.id,
+                    attempt,
+                    max_retries,
+                    errors: validation_errors.clone(),
+                });
+
+                // Build ephemeral feedback: the assistant's failed response followed by
+                // a user message describing the validation errors. Neither is persisted.
+                let error_description = validation_errors
+                    .iter()
+                    .map(|e| {
+                        if e.path.is_empty() {
+                            format!("- {}", e.message)
+                        } else {
+                            format!("- {}: {}", e.path, e.message)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let feedback = format!(
+                    "Your response did not match the required JSON schema. \
+                     Please try again, producing ONLY valid JSON that conforms \
+                     to the schema.\n\nValidation errors:\n{error_description}"
+                );
+
+                let assistant_msg = ChatMessage::new(Role::Assistant, &accumulated);
+                let feedback_msg = ChatMessage::new(Role::User, feedback);
+                let mut updated_messages = llm_request.messages.clone();
+                updated_messages.push(assistant_msg);
+                updated_messages.push(feedback_msg);
+                llm_request = CompletionRequest {
+                    messages: updated_messages,
+                    ..llm_request.clone()
+                };
+
+                // Clear accumulated text and re-enter the streaming loop for a fresh response.
+                accumulated.clear();
+
+                let mut stream = self.provider.stream(llm_request.clone());
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
+                            let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                            return Err(AgentError::Cancelled);
+                        }
+                        chunk = stream.next() => {
+                            match chunk {
+                                None | Some(StreamChunk::Done { .. }) => break,
+                                Some(StreamChunk::Delta { content }) => {
+                                    accumulated.push_str(&content);
+                                    let _ = event_tx.send(AgentEvent::Token { content });
+                                }
+                                Some(StreamChunk::Usage(usage)) => {
+                                    total_input_tokens += usage.input_tokens;
+                                    total_output_tokens += usage.output_tokens;
+                                }
+                                Some(StreamChunk::Error { message }) => {
+                                    self.fail_turn_and_idle(turn.id, thread_id).await;
+                                    let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                                    return Err(AgentError::ProviderFailed(
+                                        swage_core::ProviderError::StreamError(message),
+                                    ));
+                                }
+                                // Tool calls during a validation retry are unexpected —
+                                // the model should only produce text. Ignore them.
+                                Some(StreamChunk::ToolUse { .. }) => {}
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // No output schema configured — skip validation entirely.
+            None
+        };
+
         // 8. AfterResponse hook — may modify or block the final accumulated response.
         let response_content = match self.dispatch_after_response(&accumulated).await {
             Ok(content) => content,
@@ -372,6 +529,7 @@ impl Agent {
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
             tool_calls_count: total_tool_calls,
+            structured_output: structured_output.clone(),
         });
 
         // 14. Return outbound message.
@@ -381,6 +539,7 @@ impl Agent {
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
             tool_calls_count: total_tool_calls,
+            structured_output,
         })
     }
 }
@@ -725,6 +884,8 @@ impl Agent {
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
             tool_calls_count: total_tool_calls,
+            // Output schema validation not yet wired — populated by the retry loop.
+            structured_output: None,
         })
     }
 
@@ -1770,6 +1931,8 @@ mod session_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(Arc::new(StubProvider))
             .storage(storage)
@@ -1969,6 +2132,8 @@ mod session_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(Arc::new(StubProvider))
             .storage(storage)
@@ -2018,6 +2183,8 @@ mod session_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(Arc::new(StubProvider))
             .storage(storage)
@@ -2107,6 +2274,8 @@ mod session_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(provider)
             .storage(storage)
@@ -2477,6 +2646,8 @@ mod lifecycle_hook_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(Arc::new(StubProvider))
             .storage(storage)
@@ -2917,6 +3088,8 @@ mod tool_dispatch_cycle_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(provider)
             .storage(storage)
@@ -3278,6 +3451,8 @@ mod multi_round_tests {
                 max_tool_rounds,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(provider)
             .storage(storage)
@@ -3463,6 +3638,8 @@ mod process_turn_streaming_tests {
                 max_tool_rounds: 10,
                 compaction_threshold: CompactionThreshold::MessageCount(100),
                 metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
             })
             .provider(provider)
             .storage(storage)
@@ -3625,5 +3802,252 @@ mod process_turn_streaming_tests {
         assert_eq!(result.input_tokens, 10);
         assert_eq!(result.output_tokens, 5);
         assert_eq!(result.tool_calls_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Output schema validation tests
+    // -----------------------------------------------------------------------
+
+    /// A provider that yields different responses on successive stream() calls.
+    /// Used for testing validation retry — first call returns invalid, second valid.
+    struct SequentialProvider {
+        responses: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
+    }
+
+    impl SequentialProvider {
+        fn new(responses: Vec<Vec<StreamChunk>>) -> Self {
+            // Reverse so we can pop from the back.
+            let mut reversed = responses;
+            reversed.reverse();
+            Self { responses: std::sync::Mutex::new(reversed) }
+        }
+
+        fn text_chunks(text: &str) -> Vec<StreamChunk> {
+            vec![
+                StreamChunk::Delta { content: text.to_string() },
+                StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 10, output_tokens: 5 }),
+                StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            ]
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequentialProvider {
+        fn model_id(&self) -> &str { "sequential-mock" }
+
+        async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+            unimplemented!()
+        }
+
+        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!()
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            let chunks = self.responses.lock().unwrap().pop()
+                .expect("SequentialProvider ran out of responses");
+            Box::pin(futures::stream::iter(chunks))
+        }
+    }
+
+    fn make_schema_agent(
+        storage: Arc<SqliteStorage>,
+        provider: Arc<dyn LlmProvider>,
+        schema: serde_json::Value,
+        max_retries: u32,
+    ) -> Agent {
+        AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: Some(schema),
+                max_output_retries: max_retries,
+            })
+            .provider(provider)
+            .storage(storage)
+            .build()
+            .expect("build agent")
+    }
+
+    fn test_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "score": { "type": "number" }
+            },
+            "required": ["name", "score"]
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_schema_skips_validation() {
+        let (storage, project_id) = setup_storage().await;
+        // Plain text that isn't JSON — should succeed because no schema.
+        let provider = Arc::new(ChunkProvider::text("just plain text"));
+        let mut agent = make_agent(storage, provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+
+        assert_eq!(result.response, "just plain text");
+        assert!(result.structured_output.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn valid_output_on_first_attempt() {
+        let (storage, project_id) = setup_storage().await;
+        let valid_json = r#"{"name": "Alice", "score": 95}"#;
+        let provider = Arc::new(ChunkProvider::text(valid_json));
+        let mut agent = make_schema_agent(storage, provider, test_schema(), 3);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"name": "Alice", "score": 95}))
+        );
+
+        // No retry or failure events should have been emitted.
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_then_valid_retries_and_succeeds() {
+        let (storage, project_id) = setup_storage().await;
+        // First response is invalid (missing "score"), second is valid.
+        let provider = Arc::new(SequentialProvider::new(vec![
+            SequentialProvider::text_chunks(r#"{"name": "Bob"}"#),
+            SequentialProvider::text_chunks(r#"{"name": "Bob", "score": 42}"#),
+        ]));
+        let mut agent = make_schema_agent(storage, provider, test_schema(), 3);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed after retry");
+
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"name": "Bob", "score": 42}))
+        );
+
+        // Should have emitted exactly one OutputSchemaRetry event.
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        let retry_events: Vec<_> = events.iter()
+            .filter(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. }))
+            .collect();
+        assert_eq!(retry_events.len(), 1, "expected exactly 1 retry event");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn all_retries_exhausted_returns_error() {
+        let (storage, project_id) = setup_storage().await;
+        // Two attempts (initial + 1 retry), both invalid.
+        let provider = Arc::new(SequentialProvider::new(vec![
+            SequentialProvider::text_chunks(r#"{"name": "X"}"#),
+            SequentialProvider::text_chunks(r#"{"name": "Y"}"#),
+        ]));
+        let mut agent = make_schema_agent(storage.clone(), provider, test_schema(), 1);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+
+        assert!(
+            matches!(err, AgentError::OutputSchemaFailed { attempts: 2 }),
+            "expected OutputSchemaFailed with 2 attempts, got: {err:?}"
+        );
+
+        // Should have emitted OutputSchemaRetry (attempt 1) then OutputSchemaFailed.
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+
+        // Turn should be Failed.
+        let turn_id = events.iter().find_map(|e| match e {
+            AgentEvent::TurnStarted { turn_id } => Some(*turn_id),
+            _ => None,
+        }).expect("TurnStarted event must exist");
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await.expect("get_turn").expect("turn exists");
+        assert_eq!(turn.state, TurnState::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zero_retries_fails_immediately() {
+        let (storage, project_id) = setup_storage().await;
+        // Only one response — invalid, and zero retries configured.
+        let provider = Arc::new(ChunkProvider::text(r#"{"name": "X"}"#));
+        let mut agent = make_schema_agent(storage, provider, test_schema(), 0);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+
+        assert!(
+            matches!(err, AgentError::OutputSchemaFailed { attempts: 1 }),
+            "expected immediate failure with 1 attempt, got: {err:?}"
+        );
+
+        // No retry events — only OutputSchemaFailed.
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_json_in_response_triggers_validation_failure() {
+        let (storage, project_id) = setup_storage().await;
+        // Plain text with no extractable JSON.
+        let provider = Arc::new(ChunkProvider::text("I don't know what to say"));
+        let mut agent = make_schema_agent(storage, provider, test_schema(), 0);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+
+        assert!(matches!(err, AgentError::OutputSchemaFailed { .. }));
+
+        // The failure errors should mention "no JSON found".
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        let failed = events.iter().find(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }));
+        if let Some(AgentEvent::OutputSchemaFailed { errors, .. }) = failed {
+            assert!(
+                errors.iter().any(|e| e.message.contains("no JSON")),
+                "expected 'no JSON' error, got: {errors:?}"
+            );
+        } else {
+            panic!("OutputSchemaFailed event missing");
+        }
     }
 }

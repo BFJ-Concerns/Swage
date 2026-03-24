@@ -41,7 +41,8 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 // ---------------------------------------------------------------------------
 
 /// Column order: id, thread_id, agent_id, user_input, assistant_response,
-/// input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
+/// input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+/// structured_output
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -49,6 +50,17 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let state_str: String = row.get(7)?;
     let created: String = row.get(8)?;
     let completed: Option<String> = row.get(9)?;
+    // structured_output is stored as a JSON text string; deserialise on read.
+    let structured_output_text: Option<String> = row.get(11)?;
+    let structured_output = structured_output_text
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+            11,
+            rusqlite::types::Type::Text,
+            Box::new(ParseError(e.to_string())),
+        ))?;
 
     Ok(Turn {
         id: parse_uuid(&id)?,
@@ -62,6 +74,7 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         input_tokens: row.get(5)?,
         output_tokens: row.get(6)?,
         cost_microcents: row.get(10)?,
+        structured_output,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -102,6 +115,7 @@ impl TurnStore for SqliteStorage {
                 input_tokens: None,
                 output_tokens: None,
                 cost_microcents: None,
+                structured_output: None,
                 created_at: now,
                 completed_at: None,
             })
@@ -113,7 +127,8 @@ impl TurnStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+                        structured_output
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -130,7 +145,8 @@ impl TurnStore for SqliteStorage {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+                        structured_output
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -181,7 +197,8 @@ impl TurnStore for SqliteStorage {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
-                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+                        structured_output
                  FROM turns WHERE state IN ('pending', 'processing') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -218,6 +235,26 @@ impl TurnStore for SqliteStorage {
             conn.execute(
                 "UPDATE turns SET cost_microcents = ?1 WHERE id = ?2",
                 params![cost, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_structured_output(
+        &self,
+        id: Uuid,
+        output: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        // Serialise the JSON value to a text string for storage. This mirrors
+        // how cost_microcents stores a scalar — we store structured_output as
+        // a TEXT column containing compact JSON.
+        let json_text = serde_json::to_string(output)
+            .map_err(|e| StorageError::Serialisation { message: e.to_string() })?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET structured_output = ?1 WHERE id = ?2",
+                params![json_text, id.to_string()],
             )?;
             Ok(())
         })
@@ -418,5 +455,28 @@ mod tests {
 
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.cost_microcents, Some(1_050));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn structured_output_is_none_on_creation() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        // Freshly created turns have no structured output.
+        assert!(turn.structured_output.is_none());
+
+        let fetched = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert!(fetched.structured_output.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_structured_output_persists_and_is_retrievable() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+
+        let output = serde_json::json!({"x": 1, "label": "ok"});
+        storage.update_structured_output(turn.id, &output).await.unwrap();
+
+        let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(updated.structured_output, Some(output));
     }
 }

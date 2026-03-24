@@ -19,6 +19,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("002_context_snapshots", CREATE_CONTEXT_SNAPSHOTS),
         ("003_turn_cost", ADD_TURN_COST_COLUMN),
         ("004_active_skills", CREATE_ACTIVE_SKILLS),
+        ("005_turn_structured_output", ADD_TURN_STRUCTURED_OUTPUT_COLUMN),
     ]
 }
 
@@ -156,6 +157,12 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_tool_calls_turn_id  ON tool_calls(turn_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id  ON tool_calls(call_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_agent_id ON tool_calls(agent_id);
+";
+
+/// Additive migration: validated structured output from schema validation.
+/// JSON text column, nullable — only present when schema validation passed.
+const ADD_TURN_STRUCTURED_OUTPUT_COLUMN: &str = "
+    ALTER TABLE turns ADD COLUMN structured_output TEXT;
 ";
 
 /// Apply all pending migrations to `conn`.

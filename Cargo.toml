@@ -76,5 +76,8 @@ mime_guess = "2"
 # System interfaces
 libc = "0.2"
 
+# JSON Schema validation
+jsonschema = "0.29"
+
 # Testing
 tempfile = "3"
