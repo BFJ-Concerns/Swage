@@ -2620,6 +2620,7 @@ version = "0.2603.2200"
 dependencies = [
  "serde",
  "serde_json",
+ "swage-core",
  "tempfile",
  "thiserror 2.0.18",
  "toml",

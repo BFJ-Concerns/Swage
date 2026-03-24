@@ -4,8 +4,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
-    Project, Session, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, ApprovalRequest, ApprovalState, Message, NewApprovalRequest, NewMessage,
+    NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session, Thread, ThreadState,
+    Turn, ToolCallRecord, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,75 @@ pub trait SkillActivationStore: Send + Sync {
     async fn clear_active_skills(&self, session_id: Uuid) -> Result<(), StorageError>;
 }
 
+/// Store for human-in-the-loop approval requests.
+///
+/// Each approval request is created when an agent turn hits an approval gate
+/// (tool dispatch or hook). The turn is suspended in
+/// `TurnState::AwaitingApproval` until the request reaches a terminal state
+/// (Approved / Rejected / Expired).
+#[async_trait]
+pub trait ApprovalStore: Send + Sync {
+    /// Persist a new approval request. Assigns `id`, sets `state = Pending`,
+    /// and leaves `decided_at` as `None`. Returns the stored record.
+    async fn create_approval(
+        &self,
+        approval: NewApprovalRequest,
+    ) -> Result<ApprovalRequest, StorageError>;
+
+    /// Fetch a single approval request by id. Returns `None` if not found.
+    async fn get_approval(&self, id: Uuid) -> Result<Option<ApprovalRequest>, StorageError>;
+
+    /// List all pending approval requests for a specific agent.
+    ///
+    /// Used by the agent runtime to check which of its own turns are
+    /// suspended. Ordered by `created_at` ascending.
+    async fn list_pending_by_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<ApprovalRequest>, StorageError>;
+
+    /// List all pending approval requests across all agents.
+    ///
+    /// Used during startup recovery and by the gateway to re-emit pending
+    /// approvals to newly connected clients.
+    async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError>;
+
+    /// Transition an approval request from Pending to `state`.
+    ///
+    /// Sets `decision_reason` and `decided_at` atomically. Returns `true` if
+    /// the update succeeded (the request was in Pending state), or `false` if
+    /// the request was already in a terminal state (concurrent decision). Only
+    /// non-Pending → terminal transitions are valid.
+    async fn update_approval_state(
+        &self,
+        id: Uuid,
+        state: ApprovalState,
+        reason: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
+    /// Mark as Expired any pending approval whose parent turn no longer exists.
+    ///
+    /// Called during startup recovery to handle the case where an agent was
+    /// killed with approvals in flight. Returns the number of rows updated.
+    async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError>;
+}
+
+// TODO AgentMessageStore trait — storage sub-trait for inter-agent messages
+// tags: forge:inter-agent-communication
+// Define AgentMessageStore with async methods:
+//   create_message(NewAgentMessage) → AgentMessage
+//   get_message(Uuid) → Option<AgentMessage>
+//   list_pending_for_agent(agent_id: &str) → Vec<AgentMessage>
+//   update_message_status(id: Uuid, status: MessageStatus, failure_reason: Option<&str>) → bool
+//   list_by_correlation(correlation_id: Uuid) → Vec<AgentMessage>
+//   expire_stale_messages(max_age: Duration) → u64
+// Follow the pattern of ApprovalStore above (async_trait, StorageError return).
+// Add to the Storage supertrait and blanket impl below.
+// Add a StubStorage impl in the tests module (unimplemented!() stubs).
+// Add compile-time check tests following the existing pattern.
+// Success: trait compiles, Storage requires it, StubStorage satisfies it.
+// ---
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -248,6 +318,7 @@ pub trait Storage:
     + ToolCallStore
     + ContextSnapshotStore
     + SkillActivationStore
+    + ApprovalStore
     + Send
     + Sync
 {
@@ -262,6 +333,7 @@ impl<T> Storage for T where
         + ToolCallStore
         + ContextSnapshotStore
         + SkillActivationStore
+        + ApprovalStore
         + Send
         + Sync
 {
@@ -469,6 +541,39 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: NewApprovalRequest,
+        ) -> Result<ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(&self, _: Uuid) -> Result<Option<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // --- MessageStore: thread-ownership API compile checks ---
 
     /// list_messages_by_thread exists on MessageStore and is callable via T: MessageStore.
@@ -591,6 +696,32 @@ mod tests {
     fn storage_supertrait_includes_skill_activation_store() {
         fn _assert<T: Storage>(t: &T) {
             let _ = t.activate_skill(Uuid::new_v4(), "forge");
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: ApprovalStore has the expected methods.
+    #[test]
+    fn approval_store_compile_check() {
+        fn _assert<T: ApprovalStore>(t: &T) {
+            let _ = t.get_approval(Uuid::new_v4());
+            let _ = t.list_pending_by_agent("agent-1");
+            let _ = t.list_all_pending();
+            let _ = t.cleanup_orphaned_approvals();
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies ApprovalStore.
+    ///
+    /// `list_all_pending` is unique to ApprovalStore. Calling it via a
+    /// `T: Storage` bound only compiles when Storage ⊇ ApprovalStore.
+    #[test]
+    fn storage_supertrait_includes_approval_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.list_all_pending();
         }
         let stub = StubStorage;
         _assert(&stub);

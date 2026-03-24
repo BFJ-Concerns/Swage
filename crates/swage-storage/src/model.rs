@@ -25,6 +25,17 @@ pub enum TurnState {
     Failed,
     /// Turn was cut short (e.g. by a stop signal).
     Interrupted,
+    /// Turn is suspended, waiting for human review of a tool call or
+    /// hook-triggered approval request.
+    ///
+    /// State transitions:
+    ///   Processing → AwaitingApproval (approval gate suspends the turn)
+    ///   AwaitingApproval → Processing  (approved or rejected — turn resumes)
+    ///   AwaitingApproval → Interrupted (timeout with interrupt policy)
+    ///
+    /// Stored as "awaiting_approval" in the SQLite text column — no ALTER TABLE
+    /// needed to introduce this state.
+    AwaitingApproval,
 }
 
 impl std::fmt::Display for TurnState {
@@ -35,6 +46,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Completed => "completed",
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
+            TurnState::AwaitingApproval => "awaiting_approval",
         };
         write!(f, "{s}")
     }
@@ -50,6 +62,7 @@ impl FromStr for TurnState {
             "completed" => Ok(TurnState::Completed),
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),
+            "awaiting_approval" => Ok(TurnState::AwaitingApproval),
             other => Err(format!("unknown turn state: {other}")),
         }
     }
@@ -108,6 +121,16 @@ pub struct Turn {
     /// validation succeeded. `None` when no schema is configured, or when
     /// validation failed after retry exhaustion.
     pub structured_output: Option<serde_json::Value>,
+    // TODO Turn parent_turn_id field for delegation chain tracking
+    // tags: forge:inter-agent-communication
+    // Add `parent_turn_id: Option<Uuid>` — references the delegating agent's
+    // turn. Null for direct (user-initiated) turns, populated for delegated
+    // turns. Enables multi-hop chain traversal (A → B → C) by following the
+    // parent references. Must also be added to NewTurn below.
+    // Update all existing Turn construction sites (tests, SQLite row mapping)
+    // to include the new field with None as default.
+    // Success: existing tests pass unchanged, new field serialises correctly.
+    // ---
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -283,6 +306,155 @@ pub struct ActiveSkillRecord {
     pub skill_name: String,
     pub activated_at: DateTime<Utc>,
 }
+
+/// Lifecycle state of an approval request.
+///
+/// Transitions: Pending → Approved | Rejected (human decision) or Expired
+/// (timeout fired). Stored as snake_case text in SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    /// Waiting for a human decision.
+    Pending,
+    /// The human approved the request.
+    Approved,
+    /// The human rejected the request.
+    Rejected,
+    /// The timeout elapsed before a decision was made.
+    Expired,
+}
+
+impl std::fmt::Display for ApprovalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ApprovalState::Pending => "pending",
+            ApprovalState::Approved => "approved",
+            ApprovalState::Rejected => "rejected",
+            ApprovalState::Expired => "expired",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ApprovalState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(ApprovalState::Pending),
+            "approved" => Ok(ApprovalState::Approved),
+            "rejected" => Ok(ApprovalState::Rejected),
+            "expired" => Ok(ApprovalState::Expired),
+            other => Err(format!("unknown approval state: {other}")),
+        }
+    }
+}
+
+/// The category of gate that triggered the approval request.
+///
+/// Determines which of the optional `tool_*` / `hook_name` fields on
+/// `ApprovalRequest` are populated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalKind {
+    /// Approval was triggered by a tool dispatch gate.
+    Tool,
+    /// Approval was triggered by a hook outcome.
+    Hook,
+}
+
+impl std::fmt::Display for ApprovalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ApprovalKind::Tool => "tool",
+            ApprovalKind::Hook => "hook",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ApprovalKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tool" => Ok(ApprovalKind::Tool),
+            "hook" => Ok(ApprovalKind::Hook),
+            other => Err(format!("unknown approval kind: {other}")),
+        }
+    }
+}
+
+/// A persisted approval request — one row in the `approval_requests` table.
+///
+/// Created when an agent turn hits an approval gate (tool dispatch or hook).
+/// The turn is suspended in `TurnState::AwaitingApproval` until this record
+/// reaches a terminal state (Approved / Rejected / Expired).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub id: Uuid,
+    /// The turn that is suspended awaiting this approval.
+    pub turn_id: Uuid,
+    /// Agent that triggered the gate.
+    pub agent_id: String,
+    /// Whether this is a tool-dispatch gate or a hook gate.
+    pub kind: ApprovalKind,
+    /// Populated when `kind == Tool`.
+    pub tool_name: Option<String>,
+    /// Tool call arguments, if available, for display in the approval UI.
+    pub tool_arguments: Option<serde_json::Value>,
+    /// Populated when `kind == Hook`.
+    pub hook_name: Option<String>,
+    /// Human-readable description of what is being approved.
+    pub prompt: String,
+    /// Additional structured context for the approval UI (e.g. environment).
+    pub context: Option<serde_json::Value>,
+    pub state: ApprovalState,
+    /// Wall-clock time at which this request expires.
+    pub timeout_at: DateTime<Utc>,
+    /// What happens when the timeout fires without a decision.
+    pub timeout_policy: swage_core::ApprovalTimeoutPolicy,
+    /// Free-text reason provided by the approver (or by the timeout handler).
+    pub decision_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// Set when the request reaches a terminal state.
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a new approval request.
+///
+/// `id`, `state` (`Pending`), and `decided_at` are assigned by the storage
+/// layer — callers supply only the fields they control.
+#[derive(Debug, Clone)]
+pub struct NewApprovalRequest {
+    pub turn_id: Uuid,
+    pub agent_id: String,
+    pub kind: ApprovalKind,
+    pub tool_name: Option<String>,
+    pub tool_arguments: Option<serde_json::Value>,
+    pub hook_name: Option<String>,
+    pub prompt: String,
+    pub context: Option<serde_json::Value>,
+    pub timeout_at: DateTime<Utc>,
+    pub timeout_policy: swage_core::ApprovalTimeoutPolicy,
+}
+
+// ---------------------------------------------------------------------------
+// Agent messages — inter-agent communication
+// ---------------------------------------------------------------------------
+
+// TODO AgentMessage model struct
+// tags: forge:inter-agent-communication
+// Define AgentMessage struct with fields: id (Uuid), sender_agent_id (String),
+// recipient_agent_id (String), kind (MessageKind from swage-core), correlation_id
+// (Option<Uuid>), payload (serde_json::Value), status (MessageStatus from
+// swage-core), failure_reason (Option<String>), created_at (DateTime<Utc>),
+// delivered_at (Option<DateTime<Utc>>).
+// Also define NewAgentMessage (creation input, no id/created_at/delivered_at).
+// Follow the pattern of ApprovalRequest/NewApprovalRequest above.
+// Derive Debug, Clone, Serialize, Deserialize on both.
+// Success: both structs compile and can be constructed in unit tests.
+// ---
 
 // ---------------------------------------------------------------------------
 // Creation types — inputs for insert operations (no auto-generated fields)
@@ -521,6 +693,103 @@ mod tests {
         assert_eq!(np.slug, "test");
     }
 
+    // --- ApprovalState round-trips ---
+
+    #[test]
+    fn approval_state_pending_displays_as_pending() {
+        assert_eq!(ApprovalState::Pending.to_string(), "pending");
+    }
+
+    #[test]
+    fn approval_state_display_from_str_round_trip() {
+        let states = [
+            ApprovalState::Pending,
+            ApprovalState::Approved,
+            ApprovalState::Rejected,
+            ApprovalState::Expired,
+        ];
+        for state in &states {
+            let s = state.to_string();
+            let parsed: ApprovalState = s.parse().expect("round-trip should succeed");
+            assert_eq!(state, &parsed, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn approval_state_from_str_unknown_errors() {
+        assert!("bogus".parse::<ApprovalState>().is_err());
+    }
+
+    // --- ApprovalKind round-trips ---
+
+    #[test]
+    fn approval_kind_display_from_str_round_trip() {
+        let kinds = [ApprovalKind::Tool, ApprovalKind::Hook];
+        for kind in &kinds {
+            let s = kind.to_string();
+            let parsed: ApprovalKind = s.parse().expect("round-trip should succeed");
+            assert_eq!(kind, &parsed, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn approval_kind_from_str_unknown_errors() {
+        assert!("bogus".parse::<ApprovalKind>().is_err());
+    }
+
+    // --- ApprovalRequest struct constructibility ---
+
+    #[test]
+    fn approval_request_is_constructible() {
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let now = Utc::now();
+        let req = ApprovalRequest {
+            id,
+            turn_id,
+            agent_id: "agent-1".to_string(),
+            kind: ApprovalKind::Tool,
+            tool_name: Some("shell".to_string()),
+            tool_arguments: Some(serde_json::json!({"cmd": "ls"})),
+            hook_name: None,
+            prompt: "Approve shell?".to_string(),
+            context: None,
+            state: ApprovalState::Pending,
+            timeout_at: now,
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
+            decision_reason: None,
+            created_at: now,
+            decided_at: None,
+        };
+        assert_eq!(req.id, id);
+        assert_eq!(req.kind, ApprovalKind::Tool);
+        assert_eq!(req.state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn new_approval_request_is_constructible() {
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let turn_id = Uuid::new_v4();
+        let now = Utc::now();
+        let req = NewApprovalRequest {
+            turn_id,
+            agent_id: "agent-2".to_string(),
+            kind: ApprovalKind::Hook,
+            tool_name: None,
+            tool_arguments: None,
+            hook_name: Some("pre_exec".to_string()),
+            prompt: "Approve hook?".to_string(),
+            context: Some(serde_json::json!({"step": "init"})),
+            timeout_at: now,
+            timeout_policy: ApprovalTimeoutPolicy::Interrupt,
+        };
+        assert_eq!(req.turn_id, turn_id);
+        assert_eq!(req.kind, ApprovalKind::Hook);
+    }
+
     #[test]
     fn turn_state_pending_displays_as_pending() {
         assert_eq!(TurnState::Pending.to_string(), "pending");
@@ -533,19 +802,33 @@ mod tests {
 
     #[test]
     fn turn_state_display_from_str_round_trip() {
-        // All five variants must survive a Display→FromStr round-trip.
+        // All variants must survive a Display→FromStr round-trip.
         let states = [
             TurnState::Pending,
             TurnState::Processing,
             TurnState::Completed,
             TurnState::Failed,
             TurnState::Interrupted,
+            TurnState::AwaitingApproval,
         ];
         for state in &states {
             let s = state.to_string();
             let parsed: TurnState = s.parse().expect("round-trip should succeed");
             assert_eq!(state, &parsed);
         }
+    }
+
+    #[test]
+    fn turn_state_awaiting_approval_displays_as_awaiting_approval() {
+        assert_eq!(TurnState::AwaitingApproval.to_string(), "awaiting_approval");
+    }
+
+    #[test]
+    fn turn_state_awaiting_approval_parses_from_str() {
+        let parsed: TurnState = "awaiting_approval"
+            .parse()
+            .expect("awaiting_approval should parse");
+        assert_eq!(parsed, TurnState::AwaitingApproval);
     }
 
     #[test]

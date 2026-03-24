@@ -16,7 +16,7 @@ use swage_safety::LeakDetector;
 use crate::context::ToolContext;
 use crate::output::ToolOutput;
 use crate::params::redact_params;
-use crate::permission::{PermissionConfig, check_permission};
+use crate::permission::{PermissionCheckResult, PermissionConfig, check_permission};
 use crate::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
 use crate::registry::ToolRegistry;
 use crate::tool::Tool;
@@ -136,6 +136,7 @@ impl ToolDispatcher {
                 allow: vec!["*".into()],
                 deny: vec![],
                 bundles: Default::default(),
+                require_approval: vec![],
             },
             rate_limiter: Arc::new(RateLimiter::new()),
             rate_config: RateLimitConfig::default(),
@@ -197,7 +198,20 @@ impl ToolDispatcher {
 
         // Step 2: Permission check — before rate limiting so denied calls
         // never consume a rate-limit slot.
-        check_permission(&self.permissions, tool_name)?;
+        // The dispatcher's role is narrow: signal that approval is required.
+        // The agent loop owns the approval lifecycle — suspending the turn,
+        // creating the approval request record, and re-dispatching once the
+        // human approves. PermissionDenied short-circuits via the ? operator.
+        match check_permission(&self.permissions, tool_name)? {
+            PermissionCheckResult::Allowed => {}
+            PermissionCheckResult::RequiresApproval { timeout_secs, timeout_policy } => {
+                return Err(ToolError::RequiresApproval {
+                    name: tool_name.to_owned(),
+                    timeout_secs,
+                    timeout_policy,
+                });
+            }
+        }
 
         // Step 3: Rate limit check — checked and recorded atomically.
         match self.rate_limiter.check(agent_id, tool_name, &self.rate_config) {
@@ -257,6 +271,73 @@ impl ToolDispatcher {
             raw: if self.debug_mode { Some(raw_output) } else { None },
         })
     }
+
+    /// Execute a tool that has already been approved by a human reviewer.
+    ///
+    /// Identical to [`dispatch`] but skips step 2 (permission check). The
+    /// agent loop calls this after receiving an `Approved` decision for a
+    /// tool that returned `ToolError::RequiresApproval` from `dispatch`.
+    pub async fn dispatch_approved(
+        &self,
+        tool_name: &str,
+        params: Value,
+        ctx: &dyn ToolContext,
+        agent_id: &str,
+    ) -> Result<ToolOutput, ToolError> {
+        // Step 1: Registry lookup.
+        let tool = self
+            .registry
+            .get(tool_name)
+            .ok_or_else(|| ToolError::NotFound {
+                name: tool_name.to_owned(),
+            })?;
+
+        // Step 2 (permission check) intentionally skipped — human approved.
+
+        // Step 3: Rate limit check.
+        match self.rate_limiter.check(agent_id, tool_name, &self.rate_config) {
+            RateLimitDecision::Allowed => {}
+            RateLimitDecision::Limited { retry_after } => {
+                return Err(ToolError::ExecutionFailed {
+                    name: tool_name.to_owned(),
+                    message: format!(
+                        "rate limit exceeded; retry after {:.1}s",
+                        retry_after.as_secs_f64()
+                    ),
+                });
+            }
+        }
+
+        // Step 4: Schema validation.
+        let schema = tool.parameters();
+        validate_tool_schema(tool_name, &schema, &params)?;
+
+        // Step 5: Parameter redaction.
+        let _redacted_params = redact_params(&params, tool.sensitive_keys());
+
+        // Step 6: Execute with timing.
+        let start = Instant::now();
+        let raw_output = match &self.execution_strategy {
+            Some(strategy) => strategy.execute(tool.as_ref(), tool_name, &params, ctx).await?,
+            None => tool.execute(params, ctx).await?,
+        };
+        let duration = start.elapsed();
+
+        // Step 7: Leak detection.
+        let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
+        let scanned_str = self.leak_detector.scan(&raw_str);
+        let result: Value = serde_json::from_str(&scanned_str).unwrap_or_else(|_| {
+            Value::String(scanned_str)
+        });
+
+        // Step 8: Assemble output.
+        Ok(ToolOutput {
+            result,
+            cost: None,
+            duration,
+            raw: if self.debug_mode { Some(raw_output) } else { None },
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +356,7 @@ mod tests {
 
     use super::ToolDispatcher;
     use crate::context::{MockToolContext, ToolContext};
-    use crate::permission::PermissionConfig;
+    use crate::permission::{PermissionConfig, RequireApprovalEntry};
     use crate::rate_limit::{RateLimitConfig, RateLimiter};
     use crate::registry::ToolRegistry;
     use crate::tool::Tool;
@@ -319,6 +400,7 @@ mod tests {
             allow: if allow { vec![tool_name.to_owned()] } else { vec![] },
             deny: vec![],
             bundles: HashMap::new(),
+            require_approval: vec![],
         };
 
         ToolDispatcher::new(
@@ -372,6 +454,88 @@ mod tests {
     }
 
     // -- Permission gate -----------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatch_require_approval_tool_returns_requires_approval() {
+        // When a tool is in require_approval, dispatch signals the agent via
+        // RequiresApproval — the agent loop owns the approval lifecycle.
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let err = dispatcher
+            .dispatch("echo", json!({"text": "needs approval"}), &ctx(), "agent-test")
+            .await
+            .expect_err("should fail with RequiresApproval for require_approval tool");
+
+        assert!(
+            matches!(err, ToolError::RequiresApproval { .. }),
+            "expected RequiresApproval, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_require_approval_carries_timeout_and_policy() {
+        // The approval error carries the per-entry timeout and policy so the
+        // agent can wire them into the approval request.
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: Some(300),
+                timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let err = dispatcher
+            .dispatch("echo", json!({"text": "hi"}), &ctx(), "agent-test")
+            .await
+            .expect_err("should return RequiresApproval");
+
+        match err {
+            ToolError::RequiresApproval { name, timeout_secs, timeout_policy } => {
+                assert_eq!(name, "echo");
+                assert_eq!(timeout_secs, Some(300));
+                assert_eq!(timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
+            }
+            other => panic!("expected RequiresApproval, got: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn dispatch_denied_tool_returns_permission_error() {
@@ -520,6 +684,7 @@ mod tests {
             allow: vec!["echo".into()],
             deny: vec![],
             bundles: HashMap::new(),
+            require_approval: vec![],
         };
 
         let dispatcher = ToolDispatcher::new(
@@ -553,6 +718,87 @@ mod tests {
         assert!(
             err.to_string().contains("rate limit"),
             "error message should mention rate limit: {err}"
+        );
+    }
+
+    // -- dispatch_approved (post-approval re-dispatch) -----------------------
+
+    #[tokio::test]
+    async fn dispatch_approved_skips_permission_check() {
+        // Tool is in require_approval — dispatch() returns RequiresApproval,
+        // but dispatch_approved() should execute it successfully.
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).expect("register");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        // Normal dispatch should require approval.
+        let err = dispatcher
+            .dispatch("echo", json!({"text": "hi"}), &ctx(), "agent-test")
+            .await
+            .expect_err("should require approval");
+        assert!(matches!(err, ToolError::RequiresApproval { .. }));
+
+        // dispatch_approved should bypass the permission check and succeed.
+        let output = dispatcher
+            .dispatch_approved("echo", json!({"text": "hi"}), &ctx(), "agent-test")
+            .await
+            .expect("dispatch_approved should succeed");
+        assert_eq!(output.result["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn dispatch_approved_still_validates_schema() {
+        // Even though permission is bypassed, schema validation still runs.
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).expect("register");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        // Invalid params (missing required "text" field).
+        let err = dispatcher
+            .dispatch_approved("echo", json!({}), &ctx(), "agent-test")
+            .await
+            .expect_err("should fail schema validation");
+        assert!(
+            matches!(err, ToolError::InvalidParameters { .. }),
+            "expected InvalidParameters, got: {err:?}"
         );
     }
 }

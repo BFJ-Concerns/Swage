@@ -89,6 +89,49 @@ pub enum AgentEvent {
         errors: Vec<SchemaValidationError>,
     },
 
+    /// A tool or hook execution requires human approval before proceeding.
+    ///
+    /// The agent pauses the turn and waits for an external decision (approve,
+    /// reject, or timeout). Consumers forward this to the UI so a human can
+    /// review and decide.
+    ApprovalRequired {
+        approval_id: Uuid,
+        turn_id: Uuid,
+        agent_id: String,
+        /// "tool" or "hook" — what triggered the approval gate.
+        kind: String,
+        /// Present when `kind` is "tool".
+        tool_name: Option<String>,
+        /// Present when `kind` is "tool".
+        tool_arguments: Option<serde_json::Value>,
+        /// Present when `kind` is "hook".
+        hook_name: Option<String>,
+        /// Human-readable description of what is being requested.
+        prompt: String,
+        /// Arbitrary metadata for the UI (e.g. environment, risk level).
+        context: Option<serde_json::Value>,
+        /// ISO 8601 timestamp after which the request expires.
+        timeout_at: String,
+        /// What happens on expiry: "reject" or "interrupt".
+        timeout_policy: String,
+    },
+
+    /// A pending approval was resolved by a human decision.
+    ApprovalConfirmed {
+        approval_id: Uuid,
+        /// "approve" or "reject".
+        decision: String,
+        /// Optional explanation from the reviewer.
+        reason: Option<String>,
+    },
+
+    /// A pending approval expired without a decision.
+    ApprovalExpired {
+        approval_id: Uuid,
+        /// The policy that was applied: "reject" or "interrupt".
+        timeout_policy: String,
+    },
+
     /// A non-recoverable error occurred during turn processing.
     Error { message: String },
 }
@@ -235,15 +278,37 @@ mod tests {
             tool_calls_count: 0,
             structured_output: None,
         }).unwrap();
+        tx.send(AgentEvent::ApprovalRequired {
+            approval_id: Uuid::new_v4(),
+            turn_id,
+            agent_id: "a".to_string(),
+            kind: "tool".to_string(),
+            tool_name: Some("bash".to_string()),
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "ok?".to_string(),
+            context: None,
+            timeout_at: "2026-01-01T00:00:00Z".to_string(),
+            timeout_policy: "reject".to_string(),
+        }).unwrap();
+        tx.send(AgentEvent::ApprovalConfirmed {
+            approval_id: Uuid::new_v4(),
+            decision: "approve".to_string(),
+            reason: None,
+        }).unwrap();
+        tx.send(AgentEvent::ApprovalExpired {
+            approval_id: Uuid::new_v4(),
+            timeout_policy: "interrupt".to_string(),
+        }).unwrap();
         tx.send(AgentEvent::Error { message: "err".to_string() }).unwrap();
 
-        // Drain the channel — all 6 events must arrive.
+        // Drain the channel — all 9 events must arrive.
         let mut received = 0;
         drop(tx);
         while rx.recv().await.is_some() {
             received += 1;
         }
-        assert_eq!(received, 6);
+        assert_eq!(received, 9);
     }
 
     #[tokio::test]
@@ -385,6 +450,203 @@ mod tests {
         let cloned = event.clone();
         let debug_str = format!("{:?}", cloned);
         assert!(debug_str.contains("OutputSchemaFailed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Approval lifecycle variants [bm2t]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn approval_required_constructible() {
+        let approval_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let event = AgentEvent::ApprovalRequired {
+            approval_id,
+            turn_id,
+            agent_id: "agent-1".to_string(),
+            kind: "tool".to_string(),
+            tool_name: Some("bash".to_string()),
+            tool_arguments: Some(serde_json::json!({"cmd": "rm -rf /"})),
+            hook_name: None,
+            prompt: "Allow destructive command?".to_string(),
+            context: None,
+            timeout_at: "2026-03-24T12:00:00Z".to_string(),
+            timeout_policy: "reject".to_string(),
+        };
+        if let AgentEvent::ApprovalRequired {
+            approval_id: aid,
+            turn_id: tid,
+            agent_id,
+            kind,
+            tool_name,
+            tool_arguments,
+            hook_name,
+            prompt,
+            context,
+            timeout_at,
+            timeout_policy,
+        } = event
+        {
+            assert_eq!(aid, approval_id);
+            assert_eq!(tid, turn_id);
+            assert_eq!(agent_id, "agent-1");
+            assert_eq!(kind, "tool");
+            assert_eq!(tool_name.as_deref(), Some("bash"));
+            assert!(tool_arguments.is_some());
+            assert!(hook_name.is_none());
+            assert_eq!(prompt, "Allow destructive command?");
+            assert!(context.is_none());
+            assert_eq!(timeout_at, "2026-03-24T12:00:00Z");
+            assert_eq!(timeout_policy, "reject");
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn approval_required_hook_kind() {
+        // Verify the hook-triggered flavour with hook_name populated.
+        let event = AgentEvent::ApprovalRequired {
+            approval_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            agent_id: "agent-2".to_string(),
+            kind: "hook".to_string(),
+            tool_name: None,
+            tool_arguments: None,
+            hook_name: Some("pre_deploy".to_string()),
+            prompt: "Deploy to production?".to_string(),
+            context: Some(serde_json::json!({"env": "prod"})),
+            timeout_at: "2026-03-24T13:00:00Z".to_string(),
+            timeout_policy: "interrupt".to_string(),
+        };
+        if let AgentEvent::ApprovalRequired { kind, hook_name, context, timeout_policy, .. } = event
+        {
+            assert_eq!(kind, "hook");
+            assert_eq!(hook_name.as_deref(), Some("pre_deploy"));
+            assert!(context.is_some());
+            assert_eq!(timeout_policy, "interrupt");
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn approval_confirmed_constructible() {
+        let approval_id = Uuid::new_v4();
+        let event = AgentEvent::ApprovalConfirmed {
+            approval_id,
+            decision: "approve".to_string(),
+            reason: Some("Looks safe".to_string()),
+        };
+        if let AgentEvent::ApprovalConfirmed { approval_id: aid, decision, reason } = event {
+            assert_eq!(aid, approval_id);
+            assert_eq!(decision, "approve");
+            assert_eq!(reason.as_deref(), Some("Looks safe"));
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn approval_confirmed_no_reason() {
+        let event = AgentEvent::ApprovalConfirmed {
+            approval_id: Uuid::new_v4(),
+            decision: "reject".to_string(),
+            reason: None,
+        };
+        if let AgentEvent::ApprovalConfirmed { reason, .. } = event {
+            assert!(reason.is_none());
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn approval_expired_constructible() {
+        let approval_id = Uuid::new_v4();
+        let event = AgentEvent::ApprovalExpired {
+            approval_id,
+            timeout_policy: "reject".to_string(),
+        };
+        if let AgentEvent::ApprovalExpired { approval_id: aid, timeout_policy } = event {
+            assert_eq!(aid, approval_id);
+            assert_eq!(timeout_policy, "reject");
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn approval_events_debug_and_clone() {
+        let required = AgentEvent::ApprovalRequired {
+            approval_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            agent_id: "a".to_string(),
+            kind: "tool".to_string(),
+            tool_name: None,
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "ok?".to_string(),
+            context: None,
+            timeout_at: "2026-01-01T00:00:00Z".to_string(),
+            timeout_policy: "reject".to_string(),
+        };
+        let debug_str = format!("{:?}", required.clone());
+        assert!(debug_str.contains("ApprovalRequired"));
+
+        let confirmed = AgentEvent::ApprovalConfirmed {
+            approval_id: Uuid::new_v4(),
+            decision: "approve".to_string(),
+            reason: None,
+        };
+        let debug_str = format!("{:?}", confirmed.clone());
+        assert!(debug_str.contains("ApprovalConfirmed"));
+
+        let expired = AgentEvent::ApprovalExpired {
+            approval_id: Uuid::new_v4(),
+            timeout_policy: "interrupt".to_string(),
+        };
+        let debug_str = format!("{:?}", expired.clone());
+        assert!(debug_str.contains("ApprovalExpired"));
+    }
+
+    #[tokio::test]
+    async fn approval_events_channel_sendable() {
+        // Verify all three approval variants traverse a tokio unbounded channel.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+        tx.send(AgentEvent::ApprovalRequired {
+            approval_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            agent_id: "a".to_string(),
+            kind: "tool".to_string(),
+            tool_name: Some("bash".to_string()),
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "allow?".to_string(),
+            context: None,
+            timeout_at: "2026-01-01T00:00:00Z".to_string(),
+            timeout_policy: "reject".to_string(),
+        })
+        .unwrap();
+        tx.send(AgentEvent::ApprovalConfirmed {
+            approval_id: Uuid::new_v4(),
+            decision: "approve".to_string(),
+            reason: Some("ok".to_string()),
+        })
+        .unwrap();
+        tx.send(AgentEvent::ApprovalExpired {
+            approval_id: Uuid::new_v4(),
+            timeout_policy: "interrupt".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut received = 0;
+        while rx.recv().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, 3);
     }
 
     #[tokio::test]

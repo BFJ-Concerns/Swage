@@ -18,6 +18,7 @@ use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 
 use swage_agent::{AgentBuilder, AgentConfig, AgentError, AgentEvent, TurnRequest};
 use swage_tool::dispatch::ToolDispatcher;
+use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_safety::LeakDetector;
@@ -31,6 +32,24 @@ use crate::{
     websocket::ServerEvent,
 };
 
+
+// TODO Gateway messaging integration
+// tags: forge:inter-agent-communication
+// Wire the inter-agent messaging subsystem into the gateway:
+// 1. Add MessageRouter to AppState (constructed during gateway startup)
+// 2. Add DelegationExecutor to AppState (needs config resolver, provider, etc.)
+// 3. In process_turn: after constructing the Agent, provide the
+//    DelegationExecutor so the agent can delegate during its turn
+// 4. On gateway startup: run delivery expiry check for stale pending messages
+// 5. Start periodic expiry task (from swage-agent/src/expiry.rs)
+// 6. When a delegation completes, the Result message is delivered back
+//    to the sender agent's turn — the turn loop resumes with the result
+// The gateway does NOT expose any REST endpoints for messaging in this phase
+// (deferred to Phase 05). All messaging happens within the agent execution.
+// No new WebSocket events in this phase (deferred to Phase 05).
+// Success: delegation works end-to-end through the gateway, expired messages
+// are cleaned up, single-agent conversations are unaffected.
+// ---
 
 /// Build the context assembly elements for a turn.
 ///
@@ -409,6 +428,25 @@ pub async fn process_turn(
         allow: config.tools.permissions.allow.clone(),
         deny,
         bundles: config.tools.permissions.bundles.clone(),
+        require_approval: config.tools.permissions.require_approval
+            .iter()
+            .map(|entry| match entry {
+                swage_config::model::RequireApprovalEntry::Simple(tool_name) => {
+                    ToolRequireApprovalEntry {
+                        tool_name: tool_name.clone(),
+                        timeout_secs: None,
+                        timeout_policy: None,
+                    }
+                }
+                swage_config::model::RequireApprovalEntry::WithOptions { tool, timeout, timeout_policy } => {
+                    ToolRequireApprovalEntry {
+                        tool_name: tool.clone(),
+                        timeout_secs: *timeout,
+                        timeout_policy: timeout_policy.clone(),
+                    }
+                }
+            })
+            .collect(),
     };
 
     // Clone the existing registry from the startup dispatcher — the tools
@@ -626,6 +664,13 @@ pub async fn process_turn(
                     message,
                 });
             }
+            // Approval lifecycle events — route to the session-scoped ws_tx
+            // so only the client connected to this agent sees the event.
+            event @ (AgentEvent::ApprovalRequired { .. }
+                | AgentEvent::ApprovalConfirmed { .. }
+                | AgentEvent::ApprovalExpired { .. }) => {
+                route_approval_agent_event(event, &ws_tx);
+            }
         }
     }
 
@@ -699,6 +744,71 @@ pub async fn cancel_turn(state: &AppState, session_id: Uuid) -> Result<(), Gatew
 }
 
 // ---------------------------------------------------------------------------
+// Approval event routing
+// ---------------------------------------------------------------------------
+
+/// Forward an approval lifecycle `AgentEvent` to the WebSocket sender for
+/// this session.
+///
+/// Approval events are session-scoped: they go only to the client connected
+/// to the agent that raised the gate. Calling `state.broadcast.send` instead
+/// would deliver to every connected client — this function deliberately uses
+/// the per-turn `ws_tx` channel to preserve that isolation.
+///
+/// Returns `true` when the event was an approval variant and was forwarded;
+/// `false` for all other event types.
+pub(crate) fn route_approval_agent_event(
+    event: AgentEvent,
+    ws_tx: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+) -> bool {
+    match event {
+        AgentEvent::ApprovalRequired {
+            approval_id,
+            turn_id,
+            agent_id,
+            kind,
+            tool_name,
+            tool_arguments,
+            hook_name: _, // hook identity is internal — the approval UI doesn't need it
+            prompt,
+            context,
+            timeout_at,
+            timeout_policy,
+        } => {
+            let _ = ws_tx.send(ServerEvent::ApprovalRequired {
+                approval_id: approval_id.to_string(),
+                turn_id: turn_id.to_string(),
+                agent_id,
+                kind,
+                tool_name,
+                tool_arguments,
+                prompt,
+                context,
+                timeout_at,
+                timeout_policy,
+            });
+            true
+        }
+        AgentEvent::ApprovalConfirmed { approval_id, decision, reason } => {
+            let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
+                approval_id: approval_id.to_string(),
+                decision,
+                reason,
+            });
+            true
+        }
+        AgentEvent::ApprovalExpired { approval_id, timeout_policy } => {
+            let _ = ws_tx.send(ServerEvent::ApprovalExpired {
+                approval_id: approval_id.to_string(),
+                timeout_policy,
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -722,14 +832,18 @@ pub(crate) mod tests {
     use swage_core::StorageError;
     use swage_storage::{
         model::{
-            ActiveSkillRecord, Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall,
-            NewTurn, Project, Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
+            ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, Message,
+            NewApprovalRequest, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
+            Project, Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
         },
         store::{
-            ContextSnapshotStore, MessageStore, ProjectStore, SessionStore, SkillActivationStore,
-            ThreadStore, ToolCallStore, TurnStore,
+            ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, SessionStore,
+            SkillActivationStore, ThreadStore, ToolCallStore, TurnStore,
         },
     };
+
+
+    use swage_agent::AgentEvent;
 
     use super::*;
     use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
@@ -895,6 +1009,7 @@ pub(crate) mod tests {
         pub(crate) messages: Vec<Message>,
         pub(crate) tool_calls: Vec<ToolCallRecord>,
         pub(crate) snapshots: HashMap<Uuid, String>,
+        pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
     }
 
     impl MockStorage {
@@ -1410,6 +1525,106 @@ pub(crate) mod tests {
         }
     }
 
+    #[async_trait]
+    impl ApprovalStore for MockStorage {
+        async fn create_approval(
+            &self,
+            approval: NewApprovalRequest,
+        ) -> Result<ApprovalRequest, StorageError> {
+            let approval_req = ApprovalRequest {
+                id: Uuid::new_v4(),
+                turn_id: approval.turn_id,
+                agent_id: approval.agent_id,
+                kind: approval.kind,
+                tool_name: approval.tool_name,
+                tool_arguments: approval.tool_arguments,
+                hook_name: approval.hook_name,
+                prompt: approval.prompt,
+                context: approval.context,
+                timeout_at: approval.timeout_at,
+                timeout_policy: approval.timeout_policy,
+                state: ApprovalState::Pending,
+                decision_reason: None,
+                decided_at: None,
+                created_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.approvals.insert(approval_req.id, approval_req.clone());
+            Ok(approval_req)
+        }
+
+        async fn get_approval(&self, id: Uuid) -> Result<Option<ApprovalRequest>, StorageError> {
+            Ok(self.db.lock().await.approvals.get(&id).cloned())
+        }
+
+        async fn list_pending_by_agent(
+            &self,
+            agent_id: &str,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            let db = self.db.lock().await;
+            let mut result: Vec<_> = db
+                .approvals
+                .values()
+                .filter(|a| a.agent_id == agent_id && a.state == ApprovalState::Pending)
+                .cloned()
+                .collect();
+            result.sort_by_key(|a| a.created_at);
+            Ok(result)
+        }
+
+        async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+            let db = self.db.lock().await;
+            let mut result: Vec<_> = db
+                .approvals
+                .values()
+                .filter(|a| a.state == ApprovalState::Pending)
+                .cloned()
+                .collect();
+            result.sort_by_key(|a| a.created_at);
+            Ok(result)
+        }
+
+        async fn update_approval_state(
+            &self,
+            id: Uuid,
+            state: ApprovalState,
+            reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            let mut db = self.db.lock().await;
+            match db.approvals.get_mut(&id) {
+                None => Ok(false),
+                Some(approval) => {
+                    if approval.state != ApprovalState::Pending {
+                        return Ok(false);
+                    }
+                    approval.state = state;
+                    approval.decision_reason = reason.map(|s| s.to_string());
+                    approval.decided_at = Some(chrono::Utc::now());
+                    Ok(true)
+                }
+            }
+        }
+
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            let mut db = self.db.lock().await;
+            let expired_ids: Vec<_> = db
+                .approvals
+                .iter()
+                .filter(|(_, a)| !db.turns.contains_key(&a.turn_id))
+                .map(|(id, _)| *id)
+                .collect();
+            let count = expired_ids.len() as u64;
+            for id in expired_ids {
+                if let Some(approval) = db.approvals.get_mut(&id) {
+                    if approval.state == ApprovalState::Pending {
+                        approval.state = ApprovalState::Expired;
+                        approval.decided_at = Some(chrono::Utc::now());
+                    }
+                }
+            }
+            Ok(count)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -1460,6 +1675,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -1507,6 +1723,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -1602,6 +1819,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1770,6 +1988,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -2069,6 +2288,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2126,6 +2346,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2235,6 +2456,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2359,6 +2581,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -3396,5 +3619,129 @@ pub(crate) mod tests {
             }
             other => panic!("expected TurnComplete, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Approval event routing tests [byi8]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn approval_required_routes_to_ws_tx() {
+        // When the agent emits ApprovalRequired, the session-scoped ws_tx
+        // should receive the corresponding ServerEvent — not the broadcast channel.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let approval_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+
+        route_approval_agent_event(
+            AgentEvent::ApprovalRequired {
+                approval_id,
+                turn_id,
+                agent_id: "agent-1".to_string(),
+                kind: "tool".to_string(),
+                tool_name: Some("shell".to_string()),
+                tool_arguments: Some(serde_json::json!({"cmd": "ls"})),
+                hook_name: None,
+                prompt: "Allow shell?".to_string(),
+                context: None,
+                timeout_at: "2026-01-01T00:00:00Z".to_string(),
+                timeout_policy: "deny".to_string(),
+            },
+            &tx,
+        );
+
+        match rx.try_recv().expect("ws_tx must receive the event") {
+            ServerEvent::ApprovalRequired { approval_id: aid, turn_id: tid, agent_id, kind, tool_name, .. } => {
+                assert_eq!(aid, approval_id.to_string());
+                assert_eq!(tid, turn_id.to_string());
+                assert_eq!(agent_id, "agent-1");
+                assert_eq!(kind, "tool");
+                assert_eq!(tool_name, Some("shell".to_string()));
+            }
+            other => panic!("expected ApprovalRequired, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approval_confirmed_routes_to_ws_tx() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let approval_id = Uuid::new_v4();
+
+        route_approval_agent_event(
+            AgentEvent::ApprovalConfirmed {
+                approval_id,
+                decision: "approved".to_string(),
+                reason: Some("looks safe".to_string()),
+            },
+            &tx,
+        );
+
+        match rx.try_recv().expect("ws_tx must receive the event") {
+            ServerEvent::ApprovalConfirmed { approval_id: aid, decision, reason } => {
+                assert_eq!(aid, approval_id.to_string());
+                assert_eq!(decision, "approved");
+                assert_eq!(reason, Some("looks safe".to_string()));
+            }
+            other => panic!("expected ApprovalConfirmed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approval_expired_routes_to_ws_tx() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let approval_id = Uuid::new_v4();
+
+        route_approval_agent_event(
+            AgentEvent::ApprovalExpired {
+                approval_id,
+                timeout_policy: "deny".to_string(),
+            },
+            &tx,
+        );
+
+        match rx.try_recv().expect("ws_tx must receive the event") {
+            ServerEvent::ApprovalExpired { approval_id: aid, timeout_policy } => {
+                assert_eq!(aid, approval_id.to_string());
+                assert_eq!(timeout_policy, "deny");
+            }
+            other => panic!("expected ApprovalExpired, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approval_events_routed_to_ws_tx_not_broadcast() {
+        // Two separate mpsc channels simulating two different sessions.
+        // Only the channel passed to route_approval_agent_event should receive
+        // the event — the other remains empty, proving session-scoped routing.
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<ServerEvent>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<ServerEvent>();
+
+        route_approval_agent_event(
+            AgentEvent::ApprovalRequired {
+                approval_id: Uuid::new_v4(),
+                turn_id: Uuid::new_v4(),
+                agent_id: "agent-a".to_string(),
+                kind: "tool".to_string(),
+                tool_name: None,
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow?".to_string(),
+                context: None,
+                timeout_at: "2026-01-01T00:00:00Z".to_string(),
+                timeout_policy: "deny".to_string(),
+            },
+            &tx_a, // only agent-a's channel
+        );
+
+        // agent-a's client should receive the event.
+        assert!(
+            rx_a.try_recv().is_ok(),
+            "agent-a's ws_tx must receive the ApprovalRequired event"
+        );
+        // agent-b's client must NOT receive it — routing is session-scoped.
+        assert!(
+            rx_b.try_recv().is_err(),
+            "agent-b's ws_tx must not receive agent-a's approval event"
+        );
     }
 }

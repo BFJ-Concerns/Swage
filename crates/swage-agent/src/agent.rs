@@ -22,6 +22,7 @@ use swage_storage::{
 };
 use swage_tool::dispatch::ToolDispatcher;
 
+use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome};
 use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, SchemaValidationError};
@@ -40,6 +41,10 @@ pub struct Agent {
     pub(crate) tool_dispatcher: Option<ToolDispatcher>,
     pub(crate) hook_registry: Option<Arc<HookRegistry>>,
     pub(crate) leak_detector: Option<Arc<LeakDetector>>,
+
+    /// Callback to register a oneshot channel for HITL approval decisions.
+    /// When set, the agent can pause tool execution and wait for human review.
+    pub(crate) approval_registrar: Option<ApprovalChannelRegistrar>,
 
     /// The currently active session, if any.
     pub(crate) active_session_id: Option<Uuid>,
@@ -210,7 +215,7 @@ impl Agent {
 
                 let start = std::time::Instant::now();
 
-                // PreToolUse hook — may block the call; block reason becomes the result.
+                // PreToolUse hook — may block, request approval, or proceed.
                 let (result_content, is_error, status) =
                     match self.dispatch_pre_tool_use(&call.name, &call.arguments).await {
                         Err(AgentError::HookBlocked { reason, .. }) => {
@@ -219,44 +224,37 @@ impl Agent {
                         Err(e) => {
                             (format!("hook error: {e}"), true, "error".to_string())
                         }
-                        Ok(()) => {
-                            // Emit ToolStart — client can render a "running…" indicator.
-                            let _ = event_tx.send(AgentEvent::ToolStart {
-                                call_id: call.call_id.clone(),
-                                tool_name: call.name.clone(),
-                                arguments: call.arguments.clone(),
-                            });
-
-                            if let Some(ref dispatcher) = self.tool_dispatcher {
-                                use crate::context::AgentToolContext;
-                                let ctx = AgentToolContext::new(
-                                    &self.config.agent_id,
-                                    session_id.to_string(),
-                                    std::env::current_dir().unwrap_or_default(),
-                                )
-                                .with_call_id(call.call_id.clone())
-                                .with_turn_id(turn.id);
-                                match dispatcher
-                                    .dispatch(
-                                        &call.name,
-                                        call.arguments.clone(),
-                                        &ctx,
-                                        &self.config.agent_id,
-                                    )
-                                    .await
-                                {
-                                    Ok(output) => {
-                                        let result_str =
-                                            serde_json::to_string(&output.result).unwrap_or_default();
-                                        (result_str, false, "success".to_string())
-                                    }
-                                    Err(e) => (e.to_string(), true, "error".to_string()),
+                        Ok(PreToolUseOutcome::RequestApproval { prompt, context, timeout }) => {
+                            // Hook-driven approval gate.
+                            use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+                            let gate_timeout = timeout.unwrap_or(
+                                std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS)
+                            );
+                            match self.handle_approval_gate(
+                                turn.id, thread_id,
+                                swage_storage::model::ApprovalKind::Hook,
+                                Some(call.name.clone()),
+                                Some(call.arguments.clone()),
+                                None,
+                                prompt, context,
+                                gate_timeout,
+                                swage_core::ApprovalTimeoutPolicy::default(),
+                                &event_tx,
+                            ).await? {
+                                ApprovalGateOutcome::Approved => {
+                                    // Approved — proceed with normal dispatch.
+                                    self.dispatch_tool_call(call, turn.id, session_id, &event_tx).await?
                                 }
-                            } else {
-                                // No dispatcher — this shouldn't occur in practice since the
-                                // gateway only calls streaming if tools are configured.
-                                ("no tool dispatcher configured".to_string(), true, "error".to_string())
+                                ApprovalGateOutcome::Rejected { feedback } => {
+                                    (feedback, true, "rejected".to_string())
+                                }
+                                ApprovalGateOutcome::Interrupted => {
+                                    return Err(AgentError::Cancelled);
+                                }
                             }
+                        }
+                        Ok(PreToolUseOutcome::Proceed) => {
+                            self.dispatch_tool_call(call, turn.id, session_id, &event_tx).await?
                         }
                     };
 
@@ -623,16 +621,17 @@ impl Agent {
 impl Agent {
     /// Dispatch `PreToolUse` to the hook registry.
     ///
-    /// If a hook blocks, the returned error should be converted by the caller
-    /// into a tool result string — this is not a turn-level failure.
-    /// Returns `Ok(())` immediately when no registry is configured.
+    /// Returns [`PreToolUseOutcome::Proceed`] when no hook intervenes (or no
+    /// registry is configured), [`PreToolUseOutcome::RequestApproval`] when a
+    /// hook requests human review, or `Err(HookBlocked)` when a hook blocks
+    /// the tool call outright.
     pub(crate) async fn dispatch_pre_tool_use(
         &self,
         tool_name: &str,
         params: &serde_json::Value,
-    ) -> Result<(), AgentError> {
+    ) -> Result<PreToolUseOutcome, AgentError> {
         let Some(registry) = &self.hook_registry else {
-            return Ok(());
+            return Ok(PreToolUseOutcome::Proceed);
         };
         let event = swage_hook::HookEvent::PreToolUse {
             tool_name: tool_name.to_owned(),
@@ -643,8 +642,11 @@ impl Agent {
                 hook: "PreToolUse".into(),
                 reason,
             }),
+            swage_hook::HookOutcome::RequestApproval { prompt, context, timeout } => {
+                Ok(PreToolUseOutcome::RequestApproval { prompt, context, timeout })
+            }
             // Continue and ContinueModified both mean "proceed".
-            _ => Ok(()),
+            _ => Ok(PreToolUseOutcome::Proceed),
         }
     }
 
@@ -668,6 +670,279 @@ impl Agent {
         };
         // Fire and discard — PostToolUse cannot block execution.
         registry.dispatch(event).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool dispatch helper — used by process_turn_streaming
+// ---------------------------------------------------------------------------
+
+impl Agent {
+    /// Dispatch a single tool call through the dispatcher, handling the
+    /// config-driven approval gate when `RequiresApproval` is returned.
+    ///
+    /// Returns `Ok((result_content, is_error, status))` on normal completion
+    /// (including rejections), or `Err` when the turn must be interrupted
+    /// (timeout with interrupt policy, or storage errors).
+    async fn dispatch_tool_call(
+        &self,
+        call: &ToolCall,
+        turn_id: Uuid,
+        session_id: Uuid,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<(String, bool, String), AgentError> {
+        // Emit ToolStart — client can render a "running…" indicator.
+        let _ = event_tx.send(AgentEvent::ToolStart {
+            call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        });
+
+        let Some(ref dispatcher) = self.tool_dispatcher else {
+            return Ok(("no tool dispatcher configured".to_string(), true, "error".to_string()));
+        };
+
+        use crate::context::AgentToolContext;
+        let thread_id = self.active_thread_id.unwrap_or(Uuid::nil());
+        let ctx = AgentToolContext::new(
+            &self.config.agent_id,
+            session_id.to_string(),
+            std::env::current_dir().unwrap_or_default(),
+        )
+        .with_call_id(call.call_id.clone())
+        .with_turn_id(turn_id);
+
+        match dispatcher
+            .dispatch(&call.name, call.arguments.clone(), &ctx, &self.config.agent_id)
+            .await
+        {
+            Ok(output) => {
+                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
+                Ok((result_str, false, "success".to_string()))
+            }
+            Err(swage_core::ToolError::RequiresApproval {
+                name: _,
+                timeout_secs,
+                timeout_policy,
+            }) => {
+                // Config-driven approval gate.
+                use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+                let gate_timeout = std::time::Duration::from_secs(
+                    timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                );
+                let policy = timeout_policy.unwrap_or_default();
+                let prompt = format!("Approval required to execute tool: {}", call.name);
+
+                match self
+                    .handle_approval_gate(
+                        turn_id,
+                        thread_id,
+                        swage_storage::model::ApprovalKind::Tool,
+                        Some(call.name.clone()),
+                        Some(call.arguments.clone()),
+                        None,
+                        prompt,
+                        None,
+                        gate_timeout,
+                        policy,
+                        event_tx,
+                    )
+                    .await?
+                {
+                    ApprovalGateOutcome::Approved => {
+                        // Re-dispatch skipping the permission check.
+                        match dispatcher
+                            .dispatch_approved(
+                                &call.name,
+                                call.arguments.clone(),
+                                &ctx,
+                                &self.config.agent_id,
+                            )
+                            .await
+                        {
+                            Ok(output) => {
+                                let result_str =
+                                    serde_json::to_string(&output.result).unwrap_or_default();
+                                Ok((result_str, false, "success".to_string()))
+                            }
+                            Err(e) => Ok((e.to_string(), true, "error".to_string())),
+                        }
+                    }
+                    ApprovalGateOutcome::Rejected { feedback } => {
+                        Ok((feedback, true, "rejected".to_string()))
+                    }
+                    ApprovalGateOutcome::Interrupted => {
+                        // State transitions already done by handle_approval_gate.
+                        Err(AgentError::Cancelled)
+                    }
+                }
+            }
+            Err(e) => Ok((e.to_string(), true, "error".to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approval gate — human-in-the-loop tool approval
+// ---------------------------------------------------------------------------
+
+impl Agent {
+    /// Execute the approval gate: create an approval request, transition the
+    /// turn to `AwaitingApproval`, emit an `ApprovalRequired` event, then wait
+    /// for a human decision on a oneshot channel (racing against a timeout).
+    ///
+    /// Both approval sources (config-driven `RequiresApproval` and hook-driven
+    /// `RequestApproval`) funnel through this single method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn handle_approval_gate(
+        &self,
+        turn_id: Uuid,
+        thread_id: Uuid,
+        kind: swage_storage::model::ApprovalKind,
+        tool_name: Option<String>,
+        tool_arguments: Option<serde_json::Value>,
+        hook_name: Option<String>,
+        prompt: String,
+        context: Option<serde_json::Value>,
+        timeout: std::time::Duration,
+        timeout_policy: swage_core::ApprovalTimeoutPolicy,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
+        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+        use swage_storage::model::{ApprovalState, NewApprovalRequest};
+
+        let timeout_at = chrono::Utc::now() + chrono::Duration::from_std(timeout)
+            .unwrap_or_else(|_| chrono::Duration::seconds(DEFAULT_APPROVAL_TIMEOUT_SECS as i64));
+
+        // 1. Create the approval request record in storage.
+        let approval = self
+            .storage
+            .create_approval(NewApprovalRequest {
+                turn_id,
+                agent_id: self.config.agent_id.clone(),
+                kind: kind.clone(),
+                tool_name: tool_name.clone(),
+                tool_arguments: tool_arguments.clone(),
+                hook_name: hook_name.clone(),
+                prompt: prompt.clone(),
+                context: context.clone(),
+                timeout_at,
+                timeout_policy: timeout_policy.clone(),
+            })
+            .await?;
+
+        // 2. Transition turn to AwaitingApproval.
+        self.storage
+            .update_turn_state(turn_id, TurnState::AwaitingApproval)
+            .await?;
+
+        // 3. Emit ApprovalRequired event for downstream consumers (gateway → WebSocket).
+        let _ = event_tx.send(AgentEvent::ApprovalRequired {
+            approval_id: approval.id,
+            turn_id,
+            agent_id: self.config.agent_id.clone(),
+            kind: kind.to_string(),
+            tool_name: tool_name.clone(),
+            tool_arguments: tool_arguments.clone(),
+            hook_name: hook_name.clone(),
+            prompt: prompt.clone(),
+            context: context.clone(),
+            timeout_at: timeout_at.to_rfc3339(),
+            timeout_policy: timeout_policy.to_string(),
+        });
+
+        // 4. Register the oneshot channel for the decision.
+        let Some(ref registrar) = self.approval_registrar else {
+            // No approval channel infrastructure — treat as rejection.
+            let _ = self.storage.update_approval_state(
+                approval.id,
+                ApprovalState::Rejected,
+                Some("no approval channel configured"),
+            ).await;
+            let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+            return Ok(ApprovalGateOutcome::Rejected {
+                feedback: "Tool requires approval but no approval channel is configured".into(),
+            });
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
+        registrar(approval.id, tx);
+
+        // 5. Race the oneshot receiver against the timeout.
+        let decision = tokio::select! {
+            result = rx => {
+                match result {
+                    Ok(d) => Some(d),
+                    // Sender dropped — treat as if the request was abandoned.
+                    Err(_) => None,
+                }
+            }
+            _ = tokio::time::sleep(timeout) => None,
+        };
+
+        match decision {
+            Some(d) if d.is_approved() => {
+                // Approved — update storage and resume.
+                let _ = self.storage.update_approval_state(
+                    approval.id,
+                    ApprovalState::Approved,
+                    d.reason.as_deref(),
+                ).await;
+                let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
+                    approval_id: approval.id,
+                    decision: "approved".into(),
+                    reason: d.reason,
+                });
+                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+                Ok(ApprovalGateOutcome::Approved)
+            }
+            Some(d) => {
+                // Rejected by human.
+                let reason_text = d.reason.clone().unwrap_or_else(|| "rejected by reviewer".into());
+                let _ = self.storage.update_approval_state(
+                    approval.id,
+                    ApprovalState::Rejected,
+                    d.reason.as_deref(),
+                ).await;
+                let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
+                    approval_id: approval.id,
+                    decision: "rejected".into(),
+                    reason: d.reason,
+                });
+                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+                Ok(ApprovalGateOutcome::Rejected {
+                    feedback: format!("Tool call rejected: {reason_text}"),
+                })
+            }
+            None => {
+                // Timeout or channel dropped — apply policy.
+                let _ = self.storage.update_approval_state(
+                    approval.id,
+                    ApprovalState::Expired,
+                    Some("approval timed out"),
+                ).await;
+                let _ = event_tx.send(AgentEvent::ApprovalExpired {
+                    approval_id: approval.id,
+                    timeout_policy: timeout_policy.to_string(),
+                });
+
+                match timeout_policy {
+                    swage_core::ApprovalTimeoutPolicy::Reject => {
+                        // Treat timeout as rejection — turn continues.
+                        let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+                        Ok(ApprovalGateOutcome::Rejected {
+                            feedback: "Tool call rejected: approval timed out".into(),
+                        })
+                    }
+                    swage_core::ApprovalTimeoutPolicy::Interrupt => {
+                        // Turn is interrupted — no further processing.
+                        let _ = self.storage.update_turn_state(turn_id, TurnState::Interrupted).await;
+                        let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                        Ok(ApprovalGateOutcome::Interrupted)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -960,7 +1235,7 @@ impl Agent {
         let mut results = Vec::with_capacity(tool_calls.len());
 
         for (i, tc) in tool_calls.iter().enumerate() {
-            // 1. PreToolUse hook — may block the tool call.
+            // 1. PreToolUse hook — may block or request approval.
             let (result_content, is_error, status, duration_ms) =
                 match self.dispatch_pre_tool_use(&tc.name, &tc.arguments).await {
                     Err(AgentError::HookBlocked { reason, .. }) => {
@@ -971,7 +1246,12 @@ impl Agent {
                         // Unexpected hook error — treat as tool error.
                         (format!("hook error: {e}"), true, "error".to_string(), None)
                     }
-                    Ok(()) => {
+                    Ok(PreToolUseOutcome::RequestApproval { .. }) => {
+                        // Non-streaming path has no approval infrastructure.
+                        ("Tool requires approval (not available in non-streaming mode)".to_string(),
+                         true, "error".to_string(), None)
+                    }
+                    Ok(PreToolUseOutcome::Proceed) => {
                         // 2. Dispatch through tool_dispatcher.
                         match dispatcher
                             .dispatch(&tc.name, tc.arguments.clone(), &ctx, &self.config.agent_id)
@@ -1310,6 +1590,12 @@ impl Agent {
                 hook: "BeforeInbound".into(),
                 reason,
             }),
+            // RequestApproval is only meaningful on PreToolUse hooks.
+            // Silently continue for hook contexts where approval has no effect.
+            HookOutcome::RequestApproval { .. } => {
+                tracing::warn!("RequestApproval returned from BeforeInbound hook — not applicable; continuing");
+                Ok(content.to_owned())
+            }
         }
     }
 
@@ -1343,6 +1629,12 @@ impl Agent {
                 hook: "AfterResponse".into(),
                 reason,
             }),
+            // RequestApproval is only meaningful on PreToolUse hooks.
+            // Silently continue for hook contexts where approval has no effect.
+            HookOutcome::RequestApproval { .. } => {
+                tracing::warn!("RequestApproval returned from AfterResponse hook — not applicable; continuing");
+                Ok(content.to_owned())
+            }
         }
     }
 
@@ -1460,6 +1752,7 @@ mod hook_inbound_response_tests {
             tool_dispatcher: None,
             hook_registry,
             leak_detector: None,
+            approval_registrar: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -1644,6 +1937,7 @@ mod hook_inbound_response_tests {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: Some(Arc::new(detector)),
+            approval_registrar: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -1768,6 +2062,7 @@ mod hook_dispatch_tests {
             tool_dispatcher: None,
             hook_registry: registry.map(|r| Arc::new(r)),
             leak_detector: None,
+            approval_registrar: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -1807,12 +2102,15 @@ mod hook_dispatch_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pre_tool_use_no_registry_returns_ok() {
+    async fn pre_tool_use_no_registry_returns_proceed() {
         let agent = agent_with_registry(None);
         let result = agent
             .dispatch_pre_tool_use("my_tool", &json!({"x": 1}))
             .await;
-        assert!(result.is_ok(), "no registry should be a no-op returning Ok");
+        assert!(
+            matches!(result, Ok(crate::approval::PreToolUseOutcome::Proceed)),
+            "no registry should produce Proceed, got: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2457,6 +2755,7 @@ mod resume_session_tests {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: None,
+            approval_registrar: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2830,6 +3129,7 @@ mod create_thread_tests {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: None,
+            approval_registrar: None,
             active_session_id: Some(session.id),
             active_thread_id: None,
         };
@@ -2881,6 +3181,7 @@ mod create_thread_tests {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: None,
+            approval_registrar: None,
             active_session_id: None, // intentionally absent
             active_thread_id: None,
         };
@@ -4048,6 +4349,615 @@ mod process_turn_streaming_tests {
             );
         } else {
             panic!("OutputSchemaFailed event missing");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approval gate tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod approval_gate_tests {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
+    use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::{
+        TurnState, ThreadState, TurnStore, ThreadStore, SessionStore,
+        model::NewProject,
+        store::ProjectStore,
+    };
+
+    use crate::approval::{ApprovalChannelRegistrar, ApprovalDecision, ApprovalGateOutcome};
+    use crate::builder::AgentBuilder;
+    use crate::config::{AgentConfig, CompactionThreshold};
+    use crate::event::AgentEvent;
+
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // Test infrastructure
+    // -----------------------------------------------------------------------
+
+    async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "test".into(),
+                slug: "test".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .expect("project");
+
+        let session = SessionStore::create_session(
+            storage.as_ref(),
+            swage_storage::NewSession {
+                project_id: project.id,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .expect("session");
+
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            swage_storage::NewThread {
+                session_id: session.id,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .expect("thread");
+
+        let turn = TurnStore::create_turn(
+            storage.as_ref(),
+            swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "test-agent".into(),
+                state: TurnState::Processing,
+            },
+        )
+        .await
+        .expect("turn");
+
+        (storage, session.id, thread.id, turn.id)
+    }
+
+    /// Build a minimal NullProvider — never called in gate tests.
+    fn null_provider() -> Arc<dyn swage_provider::LlmProvider> {
+        use std::pin::Pin;
+        use async_trait::async_trait;
+        use futures::Stream;
+        use swage_core::{
+            CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+
+        struct NullProvider;
+        #[async_trait]
+        impl swage_provider::LlmProvider for NullProvider {
+            fn model_id(&self) -> &str { "null" }
+            async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+                Ok(CompletionResponse {
+                    content: String::new(),
+                    input_tokens: 0, output_tokens: 0,
+                    finish_reason: FinishReason::Stop, cost: None,
+                })
+            }
+            async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+                Ok(ToolCompletionResponse {
+                    content: String::new(),
+                    input_tokens: 0, output_tokens: 0,
+                    finish_reason: FinishReason::Stop, cost: None,
+                    tool_calls: vec![],
+                })
+            }
+            fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+                Box::pin(futures::stream::empty())
+            }
+        }
+        Arc::new(NullProvider)
+    }
+
+    /// Create an ApprovalChannelRegistrar that stores senders in the provided map.
+    fn make_registrar(
+        map: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
+    ) -> ApprovalChannelRegistrar {
+        Arc::new(move |id, tx| {
+            map.lock().unwrap().insert(id, tx);
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approved_returns_approved_outcome() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Spawn gate, wait for channel registration, then send decision.
+        let channels_clone = channels.clone();
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id,
+                    thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("write_file".into()),
+                    Some(serde_json::json!({"path": "/tmp/foo"})),
+                    None,
+                    "Approval required".into(),
+                    None,
+                    std::time::Duration::from_secs(30),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        // Wait for the registrar to be called.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send approval.
+        let mut locked = channels_clone.lock().unwrap();
+        assert_eq!(locked.len(), 1, "expected exactly one registered channel");
+        let (_approval_id, sender) = locked.drain().next().unwrap();
+        drop(locked);
+
+        sender
+            .send(ApprovalDecision {
+                decision: "approved".into(),
+                reason: Some("looks safe".into()),
+            })
+            .expect("send decision");
+
+        let outcome = gate.await.expect("gate task").expect("gate result");
+        assert!(
+            matches!(outcome, ApprovalGateOutcome::Approved),
+            "expected Approved, got: {outcome:?}"
+        );
+
+        // Verify turn state was restored to Processing.
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await
+            .expect("get_turn")
+            .expect("turn exists");
+        assert_eq!(turn.state, TurnState::Processing);
+
+        // Verify events emitted.
+        let mut events = vec![];
+        while let Ok(e) = event_rx.try_recv() { events.push(e); }
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalConfirmed { decision, .. } if decision == "approved")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_returns_rejected_outcome_with_feedback() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let channels_clone = channels.clone();
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("deploy".into()), None, None,
+                    "Approve deploy?".into(), None,
+                    std::time::Duration::from_secs(30),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut locked = channels_clone.lock().unwrap();
+        let (_id, sender) = locked.drain().next().unwrap();
+        drop(locked);
+
+        sender
+            .send(ApprovalDecision {
+                decision: "rejected".into(),
+                reason: Some("too risky".into()),
+            })
+            .expect("send");
+
+        let outcome = gate.await.expect("task").expect("gate");
+        match outcome {
+            ApprovalGateOutcome::Rejected { feedback } => {
+                assert!(
+                    feedback.contains("too risky"),
+                    "expected rejection reason in feedback: {feedback}"
+                );
+            }
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
+
+        // Turn should be back to Processing (not stuck in AwaitingApproval).
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Processing);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_with_reject_policy_returns_rejected() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Very short timeout — will expire before any decision.
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("deploy".into()), None, None,
+                    "Approve?".into(), None,
+                    std::time::Duration::from_millis(50),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        let outcome = gate.await.expect("task").expect("gate");
+        match outcome {
+            ApprovalGateOutcome::Rejected { feedback } => {
+                assert!(
+                    feedback.contains("timed out"),
+                    "expected timeout in feedback: {feedback}"
+                );
+            }
+            other => panic!("expected Rejected (timeout), got: {other:?}"),
+        }
+
+        // Turn should be back to Processing.
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Processing);
+
+        // ApprovalExpired event emitted.
+        let mut events = vec![];
+        while let Ok(e) = event_rx.try_recv() { events.push(e); }
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ApprovalExpired { .. })),
+            "ApprovalExpired event missing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_with_interrupt_policy_returns_interrupted() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("deploy".into()), None, None,
+                    "Approve?".into(), None,
+                    std::time::Duration::from_millis(50),
+                    swage_core::ApprovalTimeoutPolicy::Interrupt,
+                    &event_tx,
+                )
+                .await
+        });
+
+        let outcome = gate.await.expect("task").expect("gate");
+        assert!(
+            matches!(outcome, ApprovalGateOutcome::Interrupted),
+            "expected Interrupted, got: {outcome:?}"
+        );
+
+        // Turn should be Interrupted, thread Idle.
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Interrupted);
+
+        let thread = ThreadStore::get(storage.as_ref(), thread_id).await.unwrap().unwrap();
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_registrar_returns_rejected() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+
+        // Agent without approval_registrar.
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = agent
+            .handle_approval_gate(
+                turn_id, thread_id,
+                swage_storage::model::ApprovalKind::Tool,
+                Some("write_file".into()), None, None,
+                "Approve?".into(), None,
+                std::time::Duration::from_secs(30),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &event_tx,
+            )
+            .await
+            .expect("gate should not error");
+
+        match outcome {
+            ApprovalGateOutcome::Rejected { feedback } => {
+                assert!(
+                    feedback.contains("no approval channel"),
+                    "expected channel-missing feedback: {feedback}"
+                );
+            }
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_request_persisted_in_storage() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let channels_clone = channels.clone();
+        let storage_clone = storage.clone();
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("execute_command".into()),
+                    Some(serde_json::json!({"cmd": "rm -rf /"})),
+                    None,
+                    "Approve dangerous command?".into(),
+                    Some(serde_json::json!({"risk": "high"})),
+                    std::time::Duration::from_secs(30),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the approval request was created in storage.
+        use swage_storage::store::ApprovalStore;
+        let pending = storage_clone
+            .list_pending_by_agent("test-agent")
+            .await
+            .expect("list pending");
+        assert_eq!(pending.len(), 1, "expected one pending approval");
+        assert_eq!(pending[0].tool_name.as_deref(), Some("execute_command"));
+        assert_eq!(pending[0].prompt, "Approve dangerous command?");
+
+        // Clean up — send approval to let the gate finish.
+        let mut locked = channels_clone.lock().unwrap();
+        let (_id, sender) = locked.drain().next().unwrap();
+        drop(locked);
+        let _ = sender.send(ApprovalDecision {
+            decision: "approved".into(),
+            reason: None,
+        });
+        let _ = gate.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_driven_approval_uses_hook_kind() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let channels_clone = channels.clone();
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Hook,
+                    Some("deploy".into()), None, None,
+                    "Hook says: confirm deploy".into(), None,
+                    std::time::Duration::from_secs(30),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut locked = channels_clone.lock().unwrap();
+        let (_id, sender) = locked.drain().next().unwrap();
+        drop(locked);
+        let _ = sender.send(ApprovalDecision { decision: "approved".into(), reason: None });
+        let _ = gate.await;
+
+        // Verify the emitted event has kind = "hook".
+        let mut events = vec![];
+        while let Ok(e) = event_rx.try_recv() { events.push(e); }
+        let required = events.iter().find(|e| matches!(e, AgentEvent::ApprovalRequired { .. }));
+        if let Some(AgentEvent::ApprovalRequired { kind, .. }) = required {
+            assert_eq!(kind, "hook");
+        } else {
+            panic!("ApprovalRequired event missing");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sender_dropped_treated_as_timeout() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let channels_clone = channels.clone();
+        let gate = tokio::spawn(async move {
+            agent
+                .handle_approval_gate(
+                    turn_id, thread_id,
+                    swage_storage::model::ApprovalKind::Tool,
+                    Some("write_file".into()), None, None,
+                    "Approve?".into(), None,
+                    std::time::Duration::from_secs(30),
+                    swage_core::ApprovalTimeoutPolicy::Reject,
+                    &event_tx,
+                )
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Drop the sender — simulates gateway disconnecting.
+        let mut locked = channels_clone.lock().unwrap();
+        let (_id, sender) = locked.drain().next().unwrap();
+        drop(sender);
+        drop(locked);
+
+        let outcome = gate.await.expect("task").expect("gate");
+        // Dropped sender completes the receiver immediately with Err,
+        // which handle_approval_gate treats as None → timeout path.
+        match outcome {
+            ApprovalGateOutcome::Rejected { feedback } => {
+                assert!(
+                    feedback.contains("timed out") || feedback.contains("rejected"),
+                    "expected timeout/rejection feedback: {feedback}"
+                );
+            }
+            other => panic!("expected Rejected on sender drop, got: {other:?}"),
         }
     }
 }

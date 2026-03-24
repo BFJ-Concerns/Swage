@@ -78,6 +78,37 @@ pub async fn run_gateway(
         }
     }
 
+    // Step 5b: Apply timeout policy to any approval requests that expired
+    // while the gateway was offline. Approvals still within their window are
+    // left as-is and will be re-emitted to clients on WebSocket connect.
+    match crate::shutdown::recover_expired_approvals(&*raw_storage).await {
+        Ok(counts) => {
+            if counts.rejected_by_timeout > 0 {
+                info!(
+                    "Applied reject-policy timeout to {} expired approval(s)",
+                    counts.rejected_by_timeout
+                );
+            }
+            if counts.interrupted_by_timeout > 0 {
+                info!(
+                    "Applied interrupt-policy timeout to {} expired approval(s)",
+                    counts.interrupted_by_timeout
+                );
+            }
+            if counts.orphaned_cleaned > 0 {
+                info!(
+                    "Cleaned up {} orphaned approval(s) with deleted turns",
+                    counts.orphaned_cleaned
+                );
+            }
+        }
+        Err(e) => {
+            // Non-fatal: log a warning and continue. The gateway can still
+            // serve — the affected approvals will remain stale in storage.
+            warn!("Approval startup recovery failed: {e}");
+        }
+    }
+
     // Step 6: Create the LLM provider from configuration.
     let provider = create_provider(&config);
 

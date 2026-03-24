@@ -9,6 +9,7 @@ use swage_storage::Storage;
 use swage_tool::dispatch::ToolDispatcher;
 
 use crate::agent::Agent;
+use crate::approval::ApprovalChannelRegistrar;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
 
@@ -21,6 +22,7 @@ pub struct AgentBuilder {
     tool_dispatcher: Option<ToolDispatcher>,
     hook_registry: Option<Arc<HookRegistry>>,
     leak_detector: Option<Arc<LeakDetector>>,
+    approval_registrar: Option<ApprovalChannelRegistrar>,
 }
 
 impl AgentBuilder {
@@ -32,6 +34,7 @@ impl AgentBuilder {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: None,
+            approval_registrar: None,
         }
     }
 
@@ -62,6 +65,11 @@ impl AgentBuilder {
 
     pub fn leak_detector(mut self, detector: Arc<LeakDetector>) -> Self {
         self.leak_detector = Some(detector);
+        self
+    }
+
+    pub fn approval_registrar(mut self, registrar: ApprovalChannelRegistrar) -> Self {
+        self.approval_registrar = Some(registrar);
         self
     }
 
@@ -97,6 +105,7 @@ impl AgentBuilder {
             tool_dispatcher: self.tool_dispatcher,
             hook_registry: self.hook_registry,
             leak_detector: self.leak_detector,
+            approval_registrar: self.approval_registrar,
             active_session_id: None,
             active_thread_id: None,
         })
@@ -324,6 +333,44 @@ mod tests {
             unimplemented!()
         }
     }
+    #[async_trait]
+    impl swage_storage::store::ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: swage_storage::model::NewApprovalRequest,
+        ) -> Result<swage_storage::model::ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(
+            &self,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::model::ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 

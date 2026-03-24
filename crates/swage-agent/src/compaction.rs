@@ -488,6 +488,45 @@ mod tests {
             unimplemented!()
         }
     }
+
+    #[async_trait]
+    impl swage_storage::store::ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: swage_storage::model::NewApprovalRequest,
+        ) -> Result<swage_storage::model::ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(
+            &self,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::model::ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 

@@ -71,6 +71,27 @@ impl Hook for ModifyHook {
     }
 }
 
+/// Always returns RequestApproval with a configurable prompt.
+struct ApprovalHook {
+    hook_name: String,
+    prompt: String,
+}
+
+#[async_trait]
+impl Hook for ApprovalHook {
+    fn name(&self) -> &str {
+        &self.hook_name
+    }
+
+    async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+        HookOutcome::RequestApproval {
+            prompt: self.prompt.clone(),
+            context: None,
+            timeout: None,
+        }
+    }
+}
+
 /// Sleeps for a given duration before returning. Used for timeout tests.
 struct SlowHook {
     hook_name: String,
@@ -439,4 +460,136 @@ fn hook_registry_default_creates_empty_registry() {
     let registry = HookRegistry::default();
     // Just verify it compiles and creates without panic
     drop(registry);
+}
+
+// -- RequestApproval dispatch priority --------------------------------------
+
+#[tokio::test]
+async fn approval_returned_when_single_hook_requests_it() {
+    // A single hook requesting approval produces RequestApproval from dispatch.
+    let mut registry = HookRegistry::new();
+    registry.register(registration(
+        Arc::new(ApprovalHook {
+            hook_name: "approver".into(),
+            prompt: "please review".into(),
+        }),
+        0,
+    ));
+
+    let event = HookEvent::PreToolUse {
+        tool_name: "Bash".into(),
+        params: json!(null),
+    };
+    let outcome = registry.dispatch(event).await;
+
+    match outcome {
+        HookOutcome::RequestApproval { prompt, .. } => {
+            assert_eq!(prompt, "please review");
+        }
+        _ => panic!("expected RequestApproval, got {:?}", outcome),
+    }
+}
+
+#[tokio::test]
+async fn approval_with_continue_hooks_returns_approval() {
+    // Approval hook + continue hook → approval wins over continue.
+    let mut registry = HookRegistry::new();
+
+    registry.register(registration(
+        Arc::new(ApprovalHook {
+            hook_name: "approver".into(),
+            prompt: "needs review".into(),
+        }),
+        10,
+    ));
+    registry.register(registration(
+        Arc::new(RecordingHook {
+            hook_name: "continuer".into(),
+            log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }),
+        20,
+    ));
+
+    let event = HookEvent::SessionStart {
+        session_id: "s".into(),
+    };
+    let outcome = registry.dispatch(event).await;
+
+    match outcome {
+        HookOutcome::RequestApproval { prompt, .. } => {
+            assert_eq!(prompt, "needs review");
+        }
+        _ => panic!("expected RequestApproval, got {:?}", outcome),
+    }
+}
+
+#[tokio::test]
+async fn block_overrides_approval_regardless_of_order() {
+    // Block always takes precedence over RequestApproval, even when approval
+    // runs first (higher priority = lower number).
+    let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mut registry = HookRegistry::new();
+
+    // Approval hook runs first (priority 10)
+    registry.register(registration(
+        Arc::new(ApprovalHook {
+            hook_name: "approver".into(),
+            prompt: "should be ignored".into(),
+        }),
+        10,
+    ));
+    // Block hook runs second (priority 20) — Block should still win
+    registry.register(registration(
+        Arc::new(BlockHook {
+            hook_name: "blocker".into(),
+            reason: "hard block".into(),
+            log: log.clone(),
+        }),
+        20,
+    ));
+
+    let event = HookEvent::PreToolUse {
+        tool_name: "Bash".into(),
+        params: json!(null),
+    };
+    let outcome = registry.dispatch(event).await;
+
+    match outcome {
+        HookOutcome::Block(reason) => assert_eq!(reason, "hard block"),
+        _ => panic!("expected Block, got {:?}", outcome),
+    }
+}
+
+#[tokio::test]
+async fn first_approval_wins_among_multiple_approvals() {
+    // When multiple hooks request approval, the highest-priority one (lowest
+    // priority number, runs first) owns the resulting outcome.
+    let mut registry = HookRegistry::new();
+
+    registry.register(registration(
+        Arc::new(ApprovalHook {
+            hook_name: "first-approver".into(),
+            prompt: "first prompt".into(),
+        }),
+        10,
+    ));
+    registry.register(registration(
+        Arc::new(ApprovalHook {
+            hook_name: "second-approver".into(),
+            prompt: "second prompt".into(),
+        }),
+        20,
+    ));
+
+    let event = HookEvent::SessionStart {
+        session_id: "s".into(),
+    };
+    let outcome = registry.dispatch(event).await;
+
+    match outcome {
+        HookOutcome::RequestApproval { prompt, .. } => {
+            assert_eq!(prompt, "first prompt", "first (highest-priority) approval should win");
+        }
+        _ => panic!("expected RequestApproval, got {:?}", outcome),
+    }
 }

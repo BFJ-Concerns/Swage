@@ -562,6 +562,7 @@ mod tests {
                 allow: vec![],
                 deny: vec!["echo".to_string()],
                 bundles: HashMap::new(),
+                require_approval: vec![],
             },
             Arc::new(RateLimiter::new()),
             RateLimitConfig::default(),

@@ -234,6 +234,90 @@ fn failure_mode_is_debug() {
     assert!(debug_str.contains("FailClosed"));
 }
 
+// -- HookOutcome::RequestApproval variant -----------------------------------
+
+#[test]
+fn hook_outcome_request_approval_minimal() {
+    // Construct with just a prompt, no context or timeout override.
+    let outcome = HookOutcome::RequestApproval {
+        prompt: "Please review this tool call".into(),
+        context: None,
+        timeout: None,
+    };
+    match outcome {
+        HookOutcome::RequestApproval { prompt, context, timeout } => {
+            assert_eq!(prompt, "Please review this tool call");
+            assert!(context.is_none());
+            assert!(timeout.is_none());
+        }
+        _ => panic!("expected RequestApproval"),
+    }
+}
+
+#[test]
+fn hook_outcome_request_approval_with_context() {
+    // Context carries structured data for the human reviewer.
+    let ctx = serde_json::json!({ "tool": "Bash", "command": "rm -rf /tmp/scratch" });
+    let outcome = HookOutcome::RequestApproval {
+        prompt: "Destructive command requires approval".into(),
+        context: Some(ctx.clone()),
+        timeout: None,
+    };
+    match outcome {
+        HookOutcome::RequestApproval { context: Some(c), .. } => {
+            assert_eq!(c["tool"], "Bash");
+        }
+        _ => panic!("expected RequestApproval with context"),
+    }
+}
+
+#[test]
+fn hook_outcome_request_approval_with_timeout() {
+    // Timeout overrides the config-level HITL timeout for this specific request.
+    let deadline = std::time::Duration::from_secs(300);
+    let outcome = HookOutcome::RequestApproval {
+        prompt: "Sensitive operation".into(),
+        context: None,
+        timeout: Some(deadline),
+    };
+    match outcome {
+        HookOutcome::RequestApproval { timeout: Some(d), .. } => {
+            assert_eq!(d.as_secs(), 300);
+        }
+        _ => panic!("expected RequestApproval with timeout"),
+    }
+}
+
+#[test]
+fn hook_outcome_request_approval_is_debug() {
+    let outcome = HookOutcome::RequestApproval {
+        prompt: "needs review".into(),
+        context: None,
+        timeout: None,
+    };
+    let debug_str = format!("{:?}", outcome);
+    assert!(debug_str.contains("RequestApproval"));
+    assert!(debug_str.contains("needs review"));
+}
+
+#[test]
+fn hook_outcome_request_approval_is_clone() {
+    let original = HookOutcome::RequestApproval {
+        prompt: "clone me".into(),
+        context: Some(serde_json::json!({"key": "value"})),
+        timeout: Some(std::time::Duration::from_secs(60)),
+    };
+    let cloned = original.clone();
+    match cloned {
+        HookOutcome::RequestApproval { prompt, context, timeout } => {
+            assert_eq!(prompt, "clone me");
+            assert!(context.is_some());
+            assert_eq!(timeout.unwrap().as_secs(), 60);
+        }
+        _ => panic!("expected RequestApproval after clone"),
+    }
+}
+
 // -- Hook trait is object-safe and Send + Sync ------------------------------
 
 #[tokio::test]

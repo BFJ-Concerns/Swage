@@ -148,6 +148,13 @@ impl SubscriptionState {
             // client can inform the user that structured output could not be produced.
             ServerEvent::OutputSchemaFailed { .. } => true,
 
+            // Approval events are always delivered — the client must present the
+            // approval UI or surface the outcome regardless of subscription state.
+            ServerEvent::ApprovalRequired { .. }
+            | ServerEvent::ApprovalConfirmed { .. }
+            | ServerEvent::ApprovalExpired { .. }
+            | ServerEvent::ApprovalDecisionError { .. } => true,
+
             // Baseline events are always delivered — subscription cannot suppress them.
             ServerEvent::Token { .. }
             | ServerEvent::Error { .. }

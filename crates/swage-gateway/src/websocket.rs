@@ -23,6 +23,20 @@ use crate::{state::AppState, subscription::SubscriptionState, turn};
 pub enum ClientEvent {
     /// Send a message to the conversation, triggering a provider turn.
     SendMessage { content: String },
+    /// Human responds to a pending approval request.
+    ///
+    /// The client sends this event when the user approves or rejects an action
+    /// that was held for review by the agent's approval gate. The server
+    /// resolves the pending `ApprovalRequired` event and unblocks (or cancels)
+    /// the agent turn accordingly.
+    ApprovalDecision {
+        /// Identifies the approval request being resolved.
+        approval_id: String,
+        /// The human's verdict: `"approved"` or `"rejected"`.
+        decision: String,
+        /// Optional explanation from the human reviewer.
+        reason: Option<String>,
+    },
     /// Cancel the currently active turn.
     Cancel {},
     /// Subscribe to one or more observability channels by name.
@@ -175,6 +189,76 @@ pub enum ServerEvent {
     SkillAlreadyActive { name: String },
     /// A skill was successfully deactivated for the current session.
     SkillDeactivated { name: String },
+
+    /// A tool call (or other action) requires human approval before proceeding.
+    ///
+    /// Delivered when the agent's dispatch pipeline raises an approval gate.
+    /// The client should present the approval UI and respond with a
+    /// `ClientEvent::ApprovalDecision` before `timeout_at` elapses.
+    ApprovalRequired {
+        /// Unique identifier for this approval request.
+        approval_id: String,
+        /// Turn that triggered the approval gate.
+        turn_id: String,
+        /// Agent that raised the gate.
+        agent_id: String,
+        /// Category of the action requiring approval (e.g. `"tool_call"`).
+        kind: String,
+        /// Name of the tool involved, if the approval is for a tool call.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        /// Parsed arguments of the tool call, for display in the approval UI.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_arguments: Option<serde_json::Value>,
+        /// Human-readable description of the action to be approved.
+        prompt: String,
+        /// Additional context the client may render to assist the decision.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<serde_json::Value>,
+        /// ISO 8601 timestamp after which the approval is considered expired.
+        timeout_at: String,
+        /// Policy applied on expiry: `"allow"` or `"deny"`.
+        timeout_policy: String,
+    },
+    /// The approval decision has been recorded and forwarded to the agent.
+    ///
+    /// Sent to the client that submitted the decision as an acknowledgement,
+    /// and broadcast to other clients on the same session for consistency.
+    ApprovalConfirmed {
+        /// Identifier of the resolved approval request.
+        approval_id: String,
+        /// The recorded decision: `"approved"` or `"rejected"`.
+        decision: String,
+        /// Optional explanation provided by the human reviewer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// An approval request timed out before a decision was submitted.
+    ///
+    /// The `timeout_policy` field indicates the action that was taken
+    /// automatically as a result of the expiry.
+    ApprovalExpired {
+        /// Identifier of the expired approval request.
+        approval_id: String,
+        /// Policy that was applied: `"allow"` or `"deny"`.
+        timeout_policy: String,
+    },
+    /// A submitted approval decision was rejected by the server.
+    ///
+    /// Possible causes include attempting to decide an already-resolved request
+    /// or submitting an unknown `approval_id`. The `error` field carries a
+    /// machine-readable code; `message` gives a human-readable explanation.
+    ApprovalDecisionError {
+        /// Identifier of the approval request that could not be decided.
+        approval_id: String,
+        /// Machine-readable error code (e.g. `"already_decided"`, `"not_found"`).
+        error: String,
+        /// Human-readable description of the error.
+        message: String,
+        /// Current state of the request, if known (e.g. `"approved"`, `"expired"`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_state: Option<String>,
+    },
 }
 
 /// Well-known error codes for the `Error` event.
@@ -354,6 +438,55 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
         let _ = ws_sink.send(Message::Close(None)).await;
     });
 
+    // Re-emit any pending approvals for this session's agent. A client may
+    // connect (or reconnect) after an approval was raised, so we catch them
+    // up immediately rather than leaving them blind until the next turn.
+    // Fail-open: storage errors are logged and the connection continues.
+    match state.storage.get_session(session_id).await {
+        Ok(Some(session)) => {
+            match state.storage.list_pending_by_agent(&session.agent_id).await {
+                Ok(pending) => {
+                    for approval in pending {
+                        let event = ServerEvent::ApprovalRequired {
+                            approval_id: approval.id.to_string(),
+                            turn_id: approval.turn_id.to_string(),
+                            agent_id: approval.agent_id.clone(),
+                            kind: approval.kind.to_string(),
+                            tool_name: approval.tool_name.clone(),
+                            tool_arguments: approval.tool_arguments.clone(),
+                            prompt: approval.prompt.clone(),
+                            context: approval.context.clone(),
+                            timeout_at: approval.timeout_at.to_rfc3339(),
+                            timeout_policy: approval.timeout_policy.to_string(),
+                        };
+                        // Ignore send errors: if the forward task has already
+                        // exited there is no client to receive the event.
+                        let _ = tx.send(event);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %e,
+                        "failed to list pending approvals for re-emission on connect"
+                    );
+                }
+            }
+        }
+        Ok(None) => {
+            // Race condition: session was valid at upgrade time but gone now.
+            // Extremely unlikely; log and let the connection proceed.
+            tracing::warn!(%session_id, "session not found during approval re-emission");
+        }
+        Err(e) => {
+            tracing::warn!(
+                %session_id,
+                error = %e,
+                "storage error fetching session for approval re-emission"
+            );
+        }
+    }
+
     // Main receive loop: read client messages and dispatch.
     loop {
         tokio::select! {
@@ -451,6 +584,7 @@ async fn discover_available_for_session(
     );
     skills
 }
+
 
 /// Parse and dispatch a raw text frame from the client.
 ///
@@ -617,6 +751,113 @@ async fn dispatch_client_message(
                     });
                 }
             }
+        }
+
+        ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+            use swage_storage::store::ApprovalStore;
+
+            // Step 1: Parse the approval_id as a UUID.
+            let approval_uuid = match approval_id.parse::<Uuid>() {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                        approval_id,
+                        error: "invalid_decision".to_string(),
+                        message: "approval_id is not a valid UUID.".to_string(),
+                        current_state: None,
+                    });
+                    return;
+                }
+            };
+
+            // Step 2: Validate that the decision string is one of the two legal values.
+            if decision != "approved" && decision != "rejected" {
+                let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                    approval_id: approval_uuid.to_string(),
+                    error: "invalid_decision".to_string(),
+                    message: format!(
+                        "decision must be \"approved\" or \"rejected\", got \"{decision}\"."
+                    ),
+                    current_state: None,
+                });
+                return;
+            }
+
+            // Step 3: Look up the approval record in storage.
+            let approval = match state.storage.get_approval(approval_uuid).await {
+                Ok(Some(a)) => a,
+                Ok(None) => {
+                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                        approval_id: approval_uuid.to_string(),
+                        error: "not_found".to_string(),
+                        message: "No approval request found with that ID.".to_string(),
+                        current_state: None,
+                    });
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(%session_id, %approval_uuid, err = %e, "storage error looking up approval");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message: "Failed to look up approval request.".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            // Step 4: Atomically transition state from Pending → decided.
+            //
+            // `update_approval_state` uses an optimistic WHERE state='pending'
+            // guard and returns false if the record was already resolved —
+            // either by a concurrent client or by the timeout mechanism.
+            let new_state = if decision == "approved" {
+                swage_storage::ApprovalState::Approved
+            } else {
+                swage_storage::ApprovalState::Rejected
+            };
+            match state.storage.update_approval_state(approval_uuid, new_state, reason.as_deref()).await {
+                Ok(true) => {} // Recorded successfully.
+                Ok(false) => {
+                    // Concurrent decision or expiry beat us to it.
+                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                        approval_id: approval_uuid.to_string(),
+                        error: "already_decided".to_string(),
+                        message: "This approval request has already been resolved.".to_string(),
+                        current_state: Some(approval.state.to_string()),
+                    });
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(%session_id, %approval_uuid, err = %e, "storage error updating approval state");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message: "Failed to record approval decision.".to_string(),
+                    });
+                    return;
+                }
+            }
+
+            // Step 5: Notify the waiting agent task via the in-process oneshot.
+            //
+            // Remove (not just read) the sender so only one decision fires through.
+            // If no sender is present the agent either timed out or never registered —
+            // proceed to emit the confirmed event anyway for UI consistency.
+            {
+                let mut channels = state.approval_channels.lock().await;
+                if let Some(sender) = channels.remove(&approval_uuid) {
+                    let _ = sender.send(crate::state::ApprovalDecision {
+                        decision: decision.clone(),
+                        reason: reason.clone(),
+                    });
+                }
+            }
+
+            // Step 6: Broadcast confirmation to the client.
+            let _ = tx.send(ServerEvent::ApprovalConfirmed {
+                approval_id: approval_uuid.to_string(),
+                decision,
+                reason,
+            });
         }
     }
 }
@@ -1113,6 +1354,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1155,6 +1397,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
 
         (state, session_id)
@@ -1294,5 +1537,374 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "output_schema_retry");
         assert_eq!(json["errors"], serde_json::json!([]));
+    }
+
+    // -----------------------------------------------------------------------
+    // ApprovalDecision client event deserialisation [viuf]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_event_approval_decision_approved_deserialises() {
+        let json = r#"{"type": "approval_decision", "approval_id": "apr_01", "decision": "approved"}"#;
+        let event: ClientEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+                assert_eq!(approval_id, "apr_01");
+                assert_eq!(decision, "approved");
+                assert!(reason.is_none(), "reason should be None when absent");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_event_approval_decision_rejected_with_reason_deserialises() {
+        let json = r#"{"type": "approval_decision", "approval_id": "apr_02", "decision": "rejected", "reason": "too risky"}"#;
+        let event: ClientEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+                assert_eq!(approval_id, "apr_02");
+                assert_eq!(decision, "rejected");
+                assert_eq!(reason.as_deref(), Some("too risky"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Approval event serialisation [c79w]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn server_event_approval_required_serialises() {
+        let event = ServerEvent::ApprovalRequired {
+            approval_id: "apr_01".to_string(),
+            turn_id: "tur_01".to_string(),
+            agent_id: "gateway".to_string(),
+            kind: "tool_call".to_string(),
+            tool_name: Some("shell".to_string()),
+            tool_arguments: Some(serde_json::json!({"command": "rm -rf /"})),
+            prompt: "Allow shell execution?".to_string(),
+            context: Some(serde_json::json!({"risk": "high"})),
+            timeout_at: "2026-01-01T00:00:00Z".to_string(),
+            timeout_policy: "deny".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_required");
+        assert_eq!(json["approval_id"], "apr_01");
+        assert_eq!(json["turn_id"], "tur_01");
+        assert_eq!(json["agent_id"], "gateway");
+        assert_eq!(json["kind"], "tool_call");
+        assert_eq!(json["tool_name"], "shell");
+        assert_eq!(json["tool_arguments"]["command"], "rm -rf /");
+        assert_eq!(json["prompt"], "Allow shell execution?");
+        assert_eq!(json["context"]["risk"], "high");
+        assert_eq!(json["timeout_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(json["timeout_policy"], "deny");
+    }
+
+    #[test]
+    fn server_event_approval_required_omits_optional_fields_when_none() {
+        let event = ServerEvent::ApprovalRequired {
+            approval_id: "apr_02".to_string(),
+            turn_id: "tur_02".to_string(),
+            agent_id: "gateway".to_string(),
+            kind: "generic".to_string(),
+            tool_name: None,
+            tool_arguments: None,
+            prompt: "Proceed?".to_string(),
+            context: None,
+            timeout_at: "2026-01-01T00:00:00Z".to_string(),
+            timeout_policy: "allow".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_required");
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("tool_name"), "tool_name should be absent when None");
+        assert!(!obj.contains_key("tool_arguments"), "tool_arguments should be absent when None");
+        assert!(!obj.contains_key("context"), "context should be absent when None");
+    }
+
+    #[test]
+    fn server_event_approval_confirmed_serialises() {
+        let event = ServerEvent::ApprovalConfirmed {
+            approval_id: "apr_03".to_string(),
+            decision: "approved".to_string(),
+            reason: Some("looks safe".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_confirmed");
+        assert_eq!(json["approval_id"], "apr_03");
+        assert_eq!(json["decision"], "approved");
+        assert_eq!(json["reason"], "looks safe");
+    }
+
+    #[test]
+    fn server_event_approval_confirmed_omits_reason_when_none() {
+        let event = ServerEvent::ApprovalConfirmed {
+            approval_id: "apr_04".to_string(),
+            decision: "rejected".to_string(),
+            reason: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_confirmed");
+        assert!(!json.as_object().unwrap().contains_key("reason"),
+            "reason should be absent when None");
+    }
+
+    #[test]
+    fn server_event_approval_expired_serialises() {
+        let event = ServerEvent::ApprovalExpired {
+            approval_id: "apr_05".to_string(),
+            timeout_policy: "deny".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_expired");
+        assert_eq!(json["approval_id"], "apr_05");
+        assert_eq!(json["timeout_policy"], "deny");
+    }
+
+    #[test]
+    fn server_event_approval_decision_error_serialises() {
+        let event = ServerEvent::ApprovalDecisionError {
+            approval_id: "apr_06".to_string(),
+            error: "already_decided".to_string(),
+            message: "Approval was already resolved.".to_string(),
+            current_state: Some("approved".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_decision_error");
+        assert_eq!(json["approval_id"], "apr_06");
+        assert_eq!(json["error"], "already_decided");
+        assert_eq!(json["message"], "Approval was already resolved.");
+        assert_eq!(json["current_state"], "approved");
+    }
+
+    #[test]
+    fn server_event_approval_decision_error_omits_current_state_when_none() {
+        let event = ServerEvent::ApprovalDecisionError {
+            approval_id: "apr_07".to_string(),
+            error: "not_found".to_string(),
+            message: "Approval request not found.".to_string(),
+            current_state: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "approval_decision_error");
+        assert!(!json.as_object().unwrap().contains_key("current_state"),
+            "current_state should be absent when None");
+    }
+
+    // -----------------------------------------------------------------------
+    // dispatch_client_message — ApprovalDecision handler
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn approval_decision_invalid_uuid_sends_error() {
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let json = r#"{"type":"approval_decision","approval_id":"not-a-uuid","decision":"approved"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an error event");
+        match event {
+            ServerEvent::ApprovalDecisionError { error, approval_id, .. } => {
+                assert_eq!(error, "invalid_decision");
+                assert_eq!(approval_id, "not-a-uuid");
+            }
+            other => panic!("expected ApprovalDecisionError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_invalid_value_sends_error() {
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"approval_decision","approval_id":"{id}","decision":"maybe"}}"#
+        );
+        dispatch_client_message(&json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an error event");
+        match event {
+            ServerEvent::ApprovalDecisionError { error, .. } => {
+                assert_eq!(error, "invalid_decision");
+            }
+            other => panic!("expected ApprovalDecisionError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_not_found_sends_error() {
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+
+        let id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"approval_decision","approval_id":"{id}","decision":"approved"}}"#
+        );
+        dispatch_client_message(&json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an error event");
+        match event {
+            ServerEvent::ApprovalDecisionError { error, approval_id, .. } => {
+                assert_eq!(error, "not_found");
+                assert_eq!(approval_id, id.to_string());
+            }
+            other => panic!("expected ApprovalDecisionError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_already_decided_sends_error() {
+        use swage_storage::store::ApprovalStore;
+        use swage_storage::{ApprovalKind, ApprovalState, NewApprovalRequest};
+
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+
+        // Create a pending approval and immediately mark it approved.
+        let approval = state
+            .storage
+            .create_approval(NewApprovalRequest {
+                turn_id: Uuid::new_v4(),
+                agent_id: "gateway".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("shell".to_string()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow shell?".to_string(),
+                context: None,
+                timeout_at: chrono::Utc::now(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .expect("create approval");
+
+        // Pre-decide the approval so the handler sees it as already resolved.
+        state
+            .storage
+            .update_approval_state(approval.id, ApprovalState::Approved, None)
+            .await
+            .expect("update state");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let json = format!(
+            r#"{{"type":"approval_decision","approval_id":"{}","decision":"rejected"}}"#,
+            approval.id
+        );
+        dispatch_client_message(&json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive error event");
+        match event {
+            ServerEvent::ApprovalDecisionError { error, current_state, .. } => {
+                assert_eq!(error, "already_decided");
+                assert!(current_state.is_some(), "current_state should reflect the existing state");
+            }
+            other => panic!("expected ApprovalDecisionError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_success_sends_confirmed() {
+        use swage_storage::store::ApprovalStore;
+        use swage_storage::{ApprovalKind, NewApprovalRequest};
+
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+
+        // Create a pending approval.
+        let approval = state
+            .storage
+            .create_approval(NewApprovalRequest {
+                turn_id: Uuid::new_v4(),
+                agent_id: "gateway".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("write_file".to_string()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Write to /tmp?".to_string(),
+                context: None,
+                timeout_at: chrono::Utc::now(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .expect("create approval");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let json = format!(
+            r#"{{"type":"approval_decision","approval_id":"{}","decision":"approved","reason":"Looks safe"}}"#,
+            approval.id
+        );
+        dispatch_client_message(&json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive ApprovalConfirmed");
+        match event {
+            ServerEvent::ApprovalConfirmed { approval_id, decision, reason } => {
+                assert_eq!(approval_id, approval.id.to_string());
+                assert_eq!(decision, "approved");
+                assert_eq!(reason, Some("Looks safe".to_string()));
+            }
+            other => panic!("expected ApprovalConfirmed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_fires_oneshot_channel() {
+        use swage_storage::store::ApprovalStore;
+        use swage_storage::{ApprovalKind, NewApprovalRequest};
+
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+
+        // Create a pending approval.
+        let approval = state
+            .storage
+            .create_approval(NewApprovalRequest {
+                turn_id: Uuid::new_v4(),
+                agent_id: "gateway".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("deploy".to_string()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Deploy to prod?".to_string(),
+                context: None,
+                timeout_at: chrono::Utc::now(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .expect("create approval");
+
+        // Register a oneshot channel so the handler can notify a waiting agent.
+        let (oneshot_tx, oneshot_rx) =
+            tokio::sync::oneshot::channel::<crate::state::ApprovalDecision>();
+        state
+            .approval_channels
+            .lock()
+            .await
+            .insert(approval.id, oneshot_tx);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let json = format!(
+            r#"{{"type":"approval_decision","approval_id":"{}","decision":"rejected","reason":"Too risky"}}"#,
+            approval.id
+        );
+        dispatch_client_message(&json, &state, session_id, tx, sub).await;
+
+        // The oneshot should have fired with the rejection.
+        let decision = oneshot_rx.await.expect("oneshot should have fired");
+        assert_eq!(decision.decision, "rejected");
+        assert_eq!(decision.reason, Some("Too risky".to_string()));
     }
 }

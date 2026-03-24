@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -13,6 +13,19 @@ use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
 use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
+
+/// Carries the outcome of a human approval decision back to the waiting agent task.
+///
+/// Sent through a oneshot channel stored in `AppState::approval_channels`
+/// keyed by `approval_id`. The WebSocket handler fires it when the client
+/// sends an `ApprovalDecision` message.
+#[derive(Debug, Clone)]
+pub struct ApprovalDecision {
+    /// "approved" or "rejected" — mirrors the ClientEvent field.
+    pub decision: String,
+    /// Optional human-readable rationale supplied by the approver.
+    pub reason: Option<String>,
+}
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -66,6 +79,15 @@ pub struct AppState {
     /// future awaits it alongside SIGTERM so either mechanism causes an
     /// orderly drain.
     pub shutdown_signal: CancellationToken,
+
+    /// Routes approval decisions from WebSocket handlers to waiting agent tasks.
+    ///
+    /// When an agent suspends on a tool awaiting human approval it inserts a
+    /// `oneshot::Sender<ApprovalDecision>` keyed by `approval_id`. The WebSocket
+    /// handler removes the sender and fires it when the client sends an
+    /// `ApprovalDecision` message. Absent key means the approval has already been
+    /// resolved or was never registered (stale/duplicate client message).
+    pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
 }
 
 impl AppState {
@@ -90,6 +112,7 @@ impl AppState {
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -149,6 +172,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -163,6 +187,31 @@ mod tests {
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
         let state = make_minimal_state(Some(sandbox));
         assert!(state.sandbox.is_some(), "sandbox should be Some when provided");
+    }
+
+    #[test]
+    fn approval_channels_starts_empty() {
+        // Newly constructed state must have an empty approval_channels map —
+        // no leftover entries from a previous session.
+        let state = make_minimal_state(None);
+        let guard = state.approval_channels.blocking_lock();
+        assert!(guard.is_empty(), "approval_channels should be empty on construction");
+    }
+
+    #[tokio::test]
+    async fn approval_decision_roundtrip() {
+        // An agent inserts a oneshot sender keyed by approval_id;
+        // the WebSocket handler removes it and fires the decision.
+        let state = make_minimal_state(None);
+        let approval_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
+        state.approval_channels.lock().await.insert(approval_id, tx);
+        let sender = state.approval_channels.lock().await.remove(&approval_id)
+            .expect("sender should be present");
+        sender.send(ApprovalDecision { decision: "approved".to_string(), reason: None }).unwrap();
+        let decision = rx.await.expect("receiver should get decision");
+        assert_eq!(decision.decision, "approved");
+        assert_eq!(decision.reason, None);
     }
 
     #[test]

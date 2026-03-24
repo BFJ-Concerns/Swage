@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use swage_core::ApprovalTimeoutPolicy;
 use crate::model::{
-    ContextConfig, LogLevel, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
-    Protocol, ResolvedConfig, SearchProviderConfig, ServerConfig, ProviderConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig, SandboxConfig, LifecycleConfig, LoggingConfig,
+    ContextConfig, HitlConfig, LogLevel, ModelPricing, ObservabilityConfig, OutputConfig,
+    PricingConfig, Protocol, RequireApprovalEntry, ResolvedConfig, SearchProviderConfig,
+    ServerConfig, ProviderConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig, SandboxConfig,
+    LifecycleConfig, LoggingConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,10 @@ pub struct PartialObservabilityConfig {
 ///
 /// `search` uses a double-option to distinguish "not set" (outer `None`) from
 /// "explicitly disabled" (`Some(None)`).
+///
+/// `require_approval` uses replacement semantics: an overlay that specifies the
+/// field replaces the base list entirely (same as allow/deny). This prevents
+/// partial overrides that would silently inherit unexpected approval gates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialToolConfig {
     pub shell_timeout_secs: Option<u64>,
@@ -94,6 +100,7 @@ pub struct PartialToolConfig {
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
     pub bundles: Option<HashMap<String, Vec<String>>>,
+    pub require_approval: Option<Vec<RequireApprovalEntry>>,
 }
 
 /// Partial mirror of `OutputConfig`. Each field is independently overridable.
@@ -112,6 +119,31 @@ pub struct PartialOutputConfig {
     pub max_retries: Option<u32>,
 }
 
+/// Partial mirror of `HitlConfig`. Each field is independently overridable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialHitlConfig {
+    /// Override for the approval timeout in seconds.
+    pub timeout: Option<u64>,
+    /// Override for the action taken when an approval request times out.
+    pub timeout_policy: Option<ApprovalTimeoutPolicy>,
+}
+
+// TODO Communication config partial + cascade resolution
+// tags: forge:inter-agent-communication
+// Define PartialContextTransferTargetConfig (all fields Option).
+// Define PartialContextTransferConfig { mode, allowed_fields, summary_budget,
+//   targets: Option<HashMap<String, PartialContextTransferTargetConfig>> }.
+// Define PartialCommunicationConfig { context_transfer: Option<PartialContextTransferConfig> }.
+// Add `communication: Option<PartialCommunicationConfig>` to PartialConfig.
+// Implement merge: mode uses overlay-or-base, allowed_fields uses replacement
+// semantics, summary_budget uses overlay-or-base, targets merge map-style
+// (per-target entry from overlay replaces base entry for same key).
+// Wire into merge_partial() and resolve() functions below.
+// Add integration test: agent-level target policy overrides project-level default.
+// Success: cascade resolution follows standard semantics, unconfigured targets
+// use the default mode, built-in default is None.
+// ---
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -127,6 +159,7 @@ pub struct PartialConfig {
     pub observability: Option<PartialObservabilityConfig>,
     pub tools: Option<PartialToolConfig>,
     pub output: Option<PartialOutputConfig>,
+    pub hitl: Option<PartialHitlConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +252,8 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 allow: o.allow.or(b.allow),
                 deny: o.deny.or(b.deny),
                 bundles,
+                // Replacement semantics: overlay replaces base list entirely.
+                require_approval: o.require_approval.or(b.require_approval),
             }
         }),
         output: merge_section(base.output, overlay.output, |b, o| PartialOutputConfig {
@@ -226,6 +261,10 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             // it wins; otherwise the base value is kept.
             schema: o.schema.or(b.schema),
             max_retries: o.max_retries.or(b.max_retries),
+        }),
+        hitl: merge_section(base.hitl, overlay.hitl, |b, o| PartialHitlConfig {
+            timeout: o.timeout.or(b.timeout),
+            timeout_policy: o.timeout_policy.or(b.timeout_policy),
         }),
     }
 }
@@ -261,6 +300,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             host: s.host.unwrap_or(ds.host),
             port: s.port.unwrap_or(ds.port),
         },
+        hitl: {
+            let dh = HitlConfig::default();
+            let h = partial.hitl.unwrap_or_default();
+            HitlConfig {
+                timeout: h.timeout.unwrap_or(dh.timeout),
+                timeout_policy: h.timeout_policy.unwrap_or(dh.timeout_policy),
+            }
+        },
         provider: ProviderConfig {
             protocol: p.protocol.unwrap_or(dp.protocol),
             model: p.model.unwrap_or(dp.model),
@@ -291,6 +338,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     allow: t.allow.unwrap_or(dp.allow),
                     deny: t.deny.unwrap_or(dp.deny),
                     bundles: t.bundles.unwrap_or(dp.bundles),
+                    // Replacement semantics: if the partial config specifies
+                    // require_approval, it replaces the default entirely.
+                    require_approval: t.require_approval.unwrap_or(dp.require_approval),
                 },
             }
         },
@@ -788,5 +838,137 @@ mod tests {
         // Agent's values win at every level.
         assert_eq!(resolved.output.schema, Some(serde_json::json!({"type": "object"})));
         assert_eq!(resolved.output.max_retries, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // HITL config merge tests [tz3w]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hitl_overlay_timeout_wins_over_base() {
+        use swage_core::ApprovalTimeoutPolicy;
+        let base = PartialConfig {
+            hitl: Some(PartialHitlConfig {
+                timeout: Some(60),
+                timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            hitl: Some(PartialHitlConfig {
+                timeout: Some(120),
+                timeout_policy: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_partial(base, overlay);
+        let hitl = merged.hitl.unwrap();
+        assert_eq!(hitl.timeout, Some(120), "overlay timeout should win");
+        assert_eq!(hitl.timeout_policy, Some(ApprovalTimeoutPolicy::Reject), "base policy should survive");
+    }
+
+    #[test]
+    fn hitl_three_level_chain() {
+        use swage_core::ApprovalTimeoutPolicy;
+        let global = PartialConfig {
+            hitl: Some(PartialHitlConfig {
+                timeout: Some(300),
+                timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
+            }),
+            ..Default::default()
+        };
+        let project = PartialConfig {
+            hitl: Some(PartialHitlConfig {
+                timeout: Some(600),
+                timeout_policy: None,
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            hitl: Some(PartialHitlConfig {
+                timeout: None,
+                timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(merge_chain(vec![global, project, agent]));
+        assert_eq!(resolved.hitl.timeout, 600, "project timeout wins over global");
+        assert_eq!(resolved.hitl.timeout_policy, ApprovalTimeoutPolicy::Interrupt, "agent policy wins");
+    }
+
+    #[test]
+    fn hitl_resolve_defaults_when_absent() {
+        use swage_core::ApprovalTimeoutPolicy;
+        let resolved = resolve(PartialConfig::default());
+        assert_eq!(resolved.hitl.timeout, 300, "default HITL timeout is 300");
+        assert_eq!(resolved.hitl.timeout_policy, ApprovalTimeoutPolicy::Reject, "default policy is Reject");
+    }
+
+    #[test]
+    fn require_approval_overlay_replaces_base() {
+        use crate::model::RequireApprovalEntry;
+        let base = PartialConfig {
+            tools: Some(PartialToolConfig {
+                require_approval: Some(vec![RequireApprovalEntry::Simple("write_file".into())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            tools: Some(PartialToolConfig {
+                require_approval: Some(vec![
+                    RequireApprovalEntry::Simple("shell_exec".into()),
+                    RequireApprovalEntry::Simple("execute_command".into()),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge_partial(base, overlay);
+        let ra = merged.tools.unwrap().require_approval.unwrap();
+        // Overlay replaces base entirely — only overlay entries present.
+        assert_eq!(ra.len(), 2);
+        assert_eq!(ra[0].tool_name(), "shell_exec");
+        assert_eq!(ra[1].tool_name(), "execute_command");
+    }
+
+    #[test]
+    fn require_approval_base_survives_when_overlay_absent() {
+        use crate::model::RequireApprovalEntry;
+        let base = PartialConfig {
+            tools: Some(PartialToolConfig {
+                require_approval: Some(vec![RequireApprovalEntry::Simple("write_file".into())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Overlay has tools section but no require_approval field.
+        let overlay = PartialConfig {
+            tools: Some(PartialToolConfig {
+                shell_timeout_secs: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge_partial(base, overlay);
+        let tools = merged.tools.unwrap();
+        assert_eq!(tools.shell_timeout_secs, Some(60), "overlay scalar wins");
+        let ra = tools.require_approval.unwrap();
+        assert_eq!(ra[0].tool_name(), "write_file", "base require_approval survives");
+    }
+
+    #[test]
+    fn require_approval_resolved_from_partial() {
+        use crate::model::RequireApprovalEntry;
+        let partial = PartialConfig {
+            tools: Some(PartialToolConfig {
+                require_approval: Some(vec![RequireApprovalEntry::Simple("shell_exec".into())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(partial);
+        assert_eq!(resolved.tools.permissions.require_approval.len(), 1);
+        assert_eq!(resolved.tools.permissions.require_approval[0].tool_name(), "shell_exec");
     }
 }

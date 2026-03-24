@@ -173,6 +173,7 @@ async fn dispatch_pipeline_end_to_end_with_leak_detection() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let rate_limiter = RateLimiter::new();
@@ -252,6 +253,7 @@ async fn dispatch_pipeline_debug_mode_preserves_raw_output() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -314,6 +316,7 @@ async fn dispatch_denies_explicitly_denied_tool() {
         allow: vec!["*".into()],
         deny: vec!["counter".into()],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -360,6 +363,7 @@ async fn dispatch_denies_unlisted_tool() {
         allow: vec![],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -411,6 +415,7 @@ async fn dispatch_rate_limits_after_threshold() {
         allow: vec!["counter".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let rate_limiter = Arc::new(RateLimiter::new());
@@ -477,6 +482,7 @@ async fn dispatch_rejects_invalid_parameters() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -528,6 +534,7 @@ async fn dispatch_returns_not_found_for_unknown_tool() {
         allow: vec!["*".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(

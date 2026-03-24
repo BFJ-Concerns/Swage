@@ -20,6 +20,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("003_turn_cost", ADD_TURN_COST_COLUMN),
         ("004_active_skills", CREATE_ACTIVE_SKILLS),
         ("005_turn_structured_output", ADD_TURN_STRUCTURED_OUTPUT_COLUMN),
+        ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
     ]
 }
 
@@ -164,6 +165,57 @@ const COMPLETE_SCHEMA: &str = "
 const ADD_TURN_STRUCTURED_OUTPUT_COLUMN: &str = "
     ALTER TABLE turns ADD COLUMN structured_output TEXT;
 ";
+
+/// Approval requests — one row per HITL approval gate triggered during a turn.
+///
+/// `kind` is "tool" or "hook", selecting which of the optional `tool_*` /
+/// `hook_name` fields are populated. `state` tracks the lifecycle: pending →
+/// approved | rejected | expired. `timeout_policy` records the configured
+/// behaviour for timeout: "interrupt" or "allow".
+///
+/// Cascades on turn delete so that incomplete approvals are cleaned up
+/// automatically when the owning turn is purged.
+const CREATE_APPROVAL_REQUESTS: &str = "
+    CREATE TABLE IF NOT EXISTS approval_requests (
+        id              TEXT NOT NULL PRIMARY KEY,
+        turn_id         TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        agent_id        TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        tool_name       TEXT,
+        tool_arguments  TEXT,
+        hook_name       TEXT,
+        prompt          TEXT NOT NULL,
+        context         TEXT,
+        state           TEXT NOT NULL DEFAULT 'pending',
+        timeout_at      TEXT NOT NULL,
+        timeout_policy  TEXT NOT NULL,
+        decision_reason TEXT,
+        created_at      TEXT NOT NULL,
+        decided_at      TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_turn_id  ON approval_requests(turn_id);
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_agent_id ON approval_requests(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_state    ON approval_requests(state);
+";
+
+// TODO SQLite migration for agent_messages table and parent_turn_id column
+// tags: forge:inter-agent-communication
+// Add migration "007_agent_messages" with:
+//   CREATE TABLE agent_messages (id TEXT PK, sender_agent_id TEXT NOT NULL,
+//     recipient_agent_id TEXT NOT NULL, kind TEXT NOT NULL,
+//     correlation_id TEXT, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+//     failure_reason TEXT, created_at TEXT NOT NULL, delivered_at TEXT);
+//   CREATE INDEX idx_agent_messages_recipient_status ON agent_messages(recipient_agent_id, status);
+//   CREATE INDEX idx_agent_messages_correlation ON agent_messages(correlation_id);
+//   CREATE INDEX idx_agent_messages_sender ON agent_messages(sender_agent_id);
+// Add migration "008_turn_parent_turn_id" with:
+//   ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
+//   CREATE INDEX idx_turns_parent_turn_id ON turns(parent_turn_id);
+// Register both in the migrations() vec. Follow existing patterns.
+// Success: migrations run, tables/columns exist, idempotent on re-run,
+// existing data untouched.
+// ---
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -835,6 +887,67 @@ mod tests {
             )
             .expect("select cost_microcents");
         assert!(cost.is_none(), "cost_microcents should be NULL by default");
+    }
+
+    // ---------------------------------------------------------------------------
+    // approval_requests table (006_approval_requests migration)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn approval_requests_table_created() {
+        let conn = open_migrated();
+        // SELECT COUNT(*) is the mote's stated success criterion.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_requests", [], |r| r.get(0))
+            .expect("approval_requests table should exist after migration");
+        assert_eq!(count, 0, "fresh DB should have no approval request rows");
+    }
+
+    #[test]
+    fn approval_requests_cascade_delete_on_turn_delete() {
+        let conn = open_migrated();
+        let project_id = default_project_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &project_id, &now);
+        let thread_id  = insert_thread(&conn, &session_id, &now);
+        let turn_id    = insert_turn(&conn, &thread_id, &now);
+
+        // Insert a minimal approval request referencing the turn.
+        conn.execute(
+            "INSERT INTO approval_requests
+             (id, turn_id, agent_id, kind, prompt, state, timeout_at, timeout_policy, created_at)
+             VALUES (?1,?2,'agent-test','tool','Approve shell?','pending',?3,'interrupt',?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), turn_id, now],
+        )
+        .expect("insert approval request");
+
+        // Deleting the turn should cascade to approval_requests.
+        conn.execute("DELETE FROM turns WHERE id=?1", rusqlite::params![turn_id])
+            .expect("delete turn");
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_requests", [], |r| r.get(0))
+            .expect("count after cascade");
+        assert_eq!(remaining, 0, "approval_requests should cascade-delete with the turn");
+    }
+
+    #[test]
+    fn approval_requests_indices_exist() {
+        let conn = open_migrated();
+        for idx in &[
+            "idx_approval_requests_turn_id",
+            "idx_approval_requests_agent_id",
+            "idx_approval_requests_state",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .expect("schema query");
+            assert_eq!(count, 1, "{idx} should exist after migration");
+        }
     }
 
     #[test]

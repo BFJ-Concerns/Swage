@@ -34,8 +34,8 @@ use tokio::time;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
-use swage_core::StorageError;
-use swage_storage::model::TurnState;
+use swage_core::{ApprovalTimeoutPolicy, StorageError};
+use swage_storage::model::{ApprovalState, TurnState};
 use swage_storage::store::Storage;
 
 use crate::state::AppState;
@@ -194,6 +194,123 @@ pub async fn recover_orphaned_turns(storage: &dyn Storage) -> Result<usize, Stor
     Ok(count)
 }
 
+/// Counts returned by [`recover_expired_approvals`].
+#[derive(Debug, Default)]
+pub struct ApprovalRecoveryCounts {
+    /// Approvals that timed out and had the Reject policy applied (turn reset
+    /// to Processing so the agent can continue with rejection feedback).
+    pub rejected_by_timeout: u64,
+    /// Approvals that timed out and had the Interrupt policy applied (turn
+    /// set to Interrupted — no further agent execution).
+    pub interrupted_by_timeout: u64,
+    /// Approvals cleaned up because their parent turn no longer exists
+    /// (deleted during downtime).
+    pub orphaned_cleaned: u64,
+}
+
+/// Apply the timeout policy to any approval requests that expired during downtime.
+///
+/// Called during startup — before the server begins accepting connections.
+/// Three categories of pending approvals are handled:
+///
+/// 1. **Timeout elapsed + Reject policy**: mark the approval Expired and
+///    transition the turn back to `Processing` so the agent can resume with
+///    rejection feedback on the next turn.
+/// 2. **Timeout elapsed + Interrupt policy**: mark the approval Expired and
+///    transition the turn to `Interrupted`.
+/// 3. **Still within timeout**: leave as-is — they will be re-emitted to
+///    clients that connect later.
+///
+/// Also calls `cleanup_orphaned_approvals` to handle approvals whose turns
+/// were deleted while the gateway was offline.
+///
+/// Errors during individual approval/turn updates are logged and skipped
+/// (fail-open) — a single storage problem should not prevent the rest of
+/// recovery from proceeding. The function returns `Err` only if the initial
+/// `list_all_pending` or `cleanup_orphaned_approvals` query fails.
+pub async fn recover_expired_approvals(
+    storage: &dyn Storage,
+) -> Result<ApprovalRecoveryCounts, StorageError> {
+    let mut counts = ApprovalRecoveryCounts::default();
+
+    let pending = storage.list_all_pending().await?;
+    let now = chrono::Utc::now();
+
+    for approval in pending {
+        if approval.timeout_at > now {
+            // Still within the timeout window — leave for re-emission on connect.
+            continue;
+        }
+
+        // Attempt to mark the approval as Expired. Returns false if it was
+        // already in a terminal state (e.g., decided just before shutdown).
+        let updated = match storage
+            .update_approval_state(
+                approval.id,
+                ApprovalState::Expired,
+                Some("approval timed out during gateway downtime"),
+            )
+            .await
+        {
+            Ok(did_update) => did_update,
+            Err(e) => {
+                warn!(
+                    approval_id = %approval.id,
+                    error = %e,
+                    "failed to update approval state during startup recovery"
+                );
+                continue;
+            }
+        };
+
+        if !updated {
+            // Already in a terminal state — no turn state change needed.
+            continue;
+        }
+
+        match approval.timeout_policy {
+            ApprovalTimeoutPolicy::Reject => {
+                // Return the turn to Processing so the agent can continue
+                // with "approval timed out" rejection feedback.
+                if let Err(e) = storage
+                    .update_turn_state(approval.turn_id, TurnState::Processing)
+                    .await
+                {
+                    warn!(
+                        approval_id = %approval.id,
+                        turn_id = %approval.turn_id,
+                        error = %e,
+                        "failed to reset turn to Processing after approval timeout"
+                    );
+                } else {
+                    counts.rejected_by_timeout += 1;
+                }
+            }
+            ApprovalTimeoutPolicy::Interrupt => {
+                // Interrupt: the turn ends here without further completions.
+                if let Err(e) = storage
+                    .update_turn_state(approval.turn_id, TurnState::Interrupted)
+                    .await
+                {
+                    warn!(
+                        approval_id = %approval.id,
+                        turn_id = %approval.turn_id,
+                        error = %e,
+                        "failed to set turn to Interrupted after approval timeout"
+                    );
+                } else {
+                    counts.interrupted_by_timeout += 1;
+                }
+            }
+        }
+    }
+
+    // Clean up any approvals whose turns were deleted during downtime.
+    counts.orphaned_cleaned = storage.cleanup_orphaned_approvals().await?;
+
+    Ok(counts)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -303,5 +420,191 @@ mod tests {
             .expect("recovery should not fail on empty storage");
 
         assert_eq!(count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Approval startup recovery tests [sfb5]
+    //
+    // These tests use SqliteStorage::in_memory() because MockStorage does not
+    // implement ApprovalStore (it panics on unimplemented!()).
+    // -----------------------------------------------------------------------
+
+    /// Helper: create an in-memory SqliteStorage with a single session and
+    /// thread, returning `(storage, thread_id)`.
+    async fn make_sqlite_with_thread() -> (
+        Arc<swage_storage::SqliteStorage>,
+        uuid::Uuid,
+    ) {
+        use swage_storage::model::{NewSession, NewThread};
+        use swage_storage::store::{ProjectStore, SessionStore};
+
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let project = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .unwrap();
+        let thread = swage_storage::store::ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        (storage, thread.id)
+    }
+
+    /// Helper: create a turn in AwaitingApproval state, then create an approval
+    /// for it with the given `timeout_at` and policy.
+    async fn seed_approval(
+        storage: &swage_storage::SqliteStorage,
+        thread_id: uuid::Uuid,
+        timeout_at: chrono::DateTime<chrono::Utc>,
+        timeout_policy: swage_core::ApprovalTimeoutPolicy,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        // Returns (turn_id, approval_id).
+        use swage_storage::model::{ApprovalKind, NewApprovalRequest, NewTurn, TurnState};
+        use swage_storage::store::{ApprovalStore, TurnStore};
+
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::AwaitingApproval,
+            })
+            .await
+            .unwrap();
+
+        let approval = storage
+            .create_approval(NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: "gateway".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("write_file".to_string()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Approve?".to_string(),
+                context: None,
+                timeout_at,
+                timeout_policy,
+            })
+            .await
+            .unwrap();
+
+        (turn.id, approval.id)
+    }
+
+    /// An expired approval with the Reject policy should become Expired and the
+    /// turn should transition back to Processing for continued agent execution.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expired_reject_policy_resets_turn_to_processing() {
+        use swage_storage::model::{ApprovalState, TurnState};
+        use swage_storage::store::{ApprovalStore, TurnStore};
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let (storage, thread_id) = make_sqlite_with_thread().await;
+
+        // Approval whose deadline was one hour ago.
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let (turn_id, approval_id) =
+            seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Reject).await;
+
+        let counts = recover_expired_approvals(&*storage)
+            .await
+            .expect("recovery should not fail");
+
+        // Approval must be Expired.
+        let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
+        assert_eq!(approval.state, ApprovalState::Expired);
+
+        // Turn must be Processing so the agent can resume with timeout feedback.
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Processing);
+
+        assert_eq!(counts.rejected_by_timeout, 1);
+        assert_eq!(counts.interrupted_by_timeout, 0);
+    }
+
+    /// An expired approval with the Interrupt policy should become Expired and
+    /// the turn should become Interrupted (no further agent execution).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expired_interrupt_policy_sets_turn_to_interrupted() {
+        use swage_storage::model::{ApprovalState, TurnState};
+        use swage_storage::store::{ApprovalStore, TurnStore};
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let (storage, thread_id) = make_sqlite_with_thread().await;
+
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let (turn_id, approval_id) =
+            seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Interrupt).await;
+
+        let counts = recover_expired_approvals(&*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
+        assert_eq!(approval.state, ApprovalState::Expired);
+
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Interrupted);
+
+        assert_eq!(counts.rejected_by_timeout, 0);
+        assert_eq!(counts.interrupted_by_timeout, 1);
+    }
+
+    /// An approval still within its timeout window must be left untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_expired_approval_is_left_pending() {
+        use swage_storage::model::{ApprovalState, TurnState};
+        use swage_storage::store::{ApprovalStore, TurnStore};
+        use swage_core::ApprovalTimeoutPolicy;
+
+        let (storage, thread_id) = make_sqlite_with_thread().await;
+
+        // Approval whose deadline is one hour in the future.
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let (turn_id, approval_id) =
+            seed_approval(&storage, thread_id, future, ApprovalTimeoutPolicy::Reject).await;
+
+        let counts = recover_expired_approvals(&*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
+        assert_eq!(
+            approval.state,
+            ApprovalState::Pending,
+            "non-expired approval must remain Pending"
+        );
+
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(
+            turn.state,
+            TurnState::AwaitingApproval,
+            "turn must remain in AwaitingApproval"
+        );
+
+        assert_eq!(counts.rejected_by_timeout, 0);
+        assert_eq!(counts.interrupted_by_timeout, 0);
+    }
+
+    /// Empty storage: recovery should succeed and return zero counts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_pending_approvals_returns_zero_counts() {
+        let storage = swage_storage::SqliteStorage::in_memory().unwrap();
+
+        let counts = recover_expired_approvals(&storage)
+            .await
+            .expect("recovery on empty storage should not fail");
+
+        assert_eq!(counts.rejected_by_timeout, 0);
+        assert_eq!(counts.interrupted_by_timeout, 0);
+        assert_eq!(counts.orphaned_cleaned, 0);
     }
 }

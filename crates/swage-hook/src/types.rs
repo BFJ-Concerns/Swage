@@ -53,6 +53,24 @@ pub enum HookEvent {
 
     /// An agent has stopped execution.
     AgentStop { agent_id: String },
+
+    // TODO Message lifecycle hook events
+    // tags: forge:inter-agent-communication
+    // Add three new variants:
+    //   MessageSend { sender_agent_id, recipient_agent_id, kind, payload }
+    //   MessageDeliver { message_id, sender_agent_id, recipient_agent_id, kind, payload }
+    //   MessageReceive { message_id, sender_agent_id, recipient_agent_id, kind, payload }
+    // All fields are String/Value types matching the message envelope.
+    // `kind` is the message kind string (e.g. "Delegate", "Notify").
+    // Update event_name() to return "MessageSend", "MessageDeliver", "MessageReceive".
+    // MessageSend can block (prevents message creation).
+    // MessageDeliver can block (transitions message to failed).
+    // MessageReceive can block (transitions message to failed).
+    // All three fire for durable messages; MessageDeliver does not fire for Notify.
+    // Follow existing dispatch semantics: priority, timeout, fail-open.
+    // Success: variants compile, event_name() returns correct strings,
+    // hooks can be registered for these events.
+    // ---
 }
 
 impl HookEvent {
@@ -81,6 +99,22 @@ pub enum HookOutcome {
     ContinueModified(Box<HookEvent>),
     /// Block execution with a reason.
     Block(String),
+    /// Pause execution and request human approval before proceeding.
+    ///
+    /// Priority in the dispatch chain sits between `Block` (higher) and
+    /// `Continue` (lower): if any hook blocks, approval requests from
+    /// lower-priority hooks are never surfaced. If one hook requests approval
+    /// and another continues, the approval request takes effect.
+    RequestApproval {
+        /// Human-readable explanation of why this action needs review.
+        prompt: String,
+        /// Structured data the reviewer may inspect (tool name, parameters,
+        /// risk level, etc.). `None` when the prompt alone is sufficient.
+        context: Option<Value>,
+        /// Per-request timeout override. When `None`, the agent's configured
+        /// HITL timeout applies.
+        timeout: Option<std::time::Duration>,
+    },
 }
 
 /// Async trait for lifecycle hook implementations.

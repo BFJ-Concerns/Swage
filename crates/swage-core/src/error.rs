@@ -214,6 +214,45 @@ impl StorageError {
 // Tool errors
 // ---------------------------------------------------------------------------
 
+/// Policy applied when an approval request times out.
+///
+/// Determines what happens to the pending tool call (and the turn) when the
+/// human reviewer does not respond within the configured timeout window.
+// Serialise as lowercase strings ("reject", "interrupt") to match the Display
+// and FromStr implementations used for storage and TOML config round-trips.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalTimeoutPolicy {
+    /// Treat the timeout as a rejection: the agent receives feedback that the
+    /// approval was not granted, and the turn continues normally.
+    #[default]
+    Reject,
+    /// Mark the turn as Interrupted: no further tool calls or completions are
+    /// issued, and the turn ends with an Interrupted state.
+    Interrupt,
+}
+
+impl std::fmt::Display for ApprovalTimeoutPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApprovalTimeoutPolicy::Reject => write!(f, "reject"),
+            ApprovalTimeoutPolicy::Interrupt => write!(f, "interrupt"),
+        }
+    }
+}
+
+impl std::str::FromStr for ApprovalTimeoutPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "reject" => Ok(ApprovalTimeoutPolicy::Reject),
+            "interrupt" => Ok(ApprovalTimeoutPolicy::Interrupt),
+            other => Err(format!("unknown approval timeout policy: {other:?}")),
+        }
+    }
+}
+
 /// The reason a tool was denied by the permission resolver.
 ///
 /// Distinguishes between two denial modes so callers can construct
@@ -255,6 +294,20 @@ pub enum ToolError {
         name: String,
         reason: PermissionDeniedReason,
     },
+
+    /// Tool requires human approval before it may execute.
+    ///
+    /// Returned by the permission check when the tool appears in `require_approval`
+    /// rather than the allow list. This is not a retriable error — approval is a
+    /// distinct control flow handled by the HITL subsystem.
+    #[error("tool {name} requires approval before execution")]
+    RequiresApproval {
+        name: String,
+        /// Optional timeout in seconds; `None` means wait indefinitely.
+        timeout_secs: Option<u64>,
+        /// Policy applied if the timeout elapses without a decision.
+        timeout_policy: Option<ApprovalTimeoutPolicy>,
+    },
 }
 
 impl std::fmt::Display for PermissionDeniedReason {
@@ -280,6 +333,8 @@ impl ToolError {
             ToolError::InvalidParameters { .. } => false,
             ToolError::Timeout { .. } => true,
             ToolError::PermissionDenied { .. } => false,
+            // Approval is a distinct control flow — not a transient failure.
+            ToolError::RequiresApproval { .. } => false,
         }
     }
 }
@@ -754,6 +809,64 @@ mod tests {
         );
     }
 
+    // -- RequiresApproval [a4p4] -----------------------------------------------
+
+    #[test]
+    fn requires_approval_constructible() {
+        let err = ToolError::RequiresApproval {
+            name: "deploy".to_string(),
+            timeout_secs: Some(300),
+            timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
+        };
+        if let ToolError::RequiresApproval { name, timeout_secs, timeout_policy } = &err {
+            assert_eq!(name, "deploy");
+            assert_eq!(*timeout_secs, Some(300));
+            assert_eq!(*timeout_policy, Some(ApprovalTimeoutPolicy::Reject));
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn requires_approval_optional_fields_none() {
+        let err = ToolError::RequiresApproval {
+            name: "bash".to_string(),
+            timeout_secs: None,
+            timeout_policy: None,
+        };
+        if let ToolError::RequiresApproval { timeout_secs, timeout_policy, .. } = &err {
+            assert!(timeout_secs.is_none());
+            assert!(timeout_policy.is_none());
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn requires_approval_is_not_retriable() {
+        let err = ToolError::RequiresApproval {
+            name: "deploy".to_string(),
+            timeout_secs: Some(60),
+            timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
+        };
+        assert!(!err.is_retriable(), "approval is distinct control flow, not retriable");
+    }
+
+    #[test]
+    fn requires_approval_display_includes_tool_name() {
+        let err = ToolError::RequiresApproval {
+            name: "deploy".to_string(),
+            timeout_secs: Some(300),
+            timeout_policy: None,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("deploy"), "display must include tool name");
+        assert!(
+            msg.to_lowercase().contains("approval"),
+            "display must mention approval; got: {msg}"
+        );
+    }
+
     #[test]
     fn permission_denied_reason_serde_round_trip() {
         let reason = PermissionDeniedReason::NotAllowed;
@@ -1026,5 +1139,116 @@ mod tests {
         let decoded: ProviderError = serde_json::from_str(&json).unwrap();
         // Compare display strings since PartialEq isn't derived for Duration-containing types.
         assert_eq!(err.to_string(), decoded.to_string());
+    }
+
+    // -- RequiresApproval ToolError variant -----------------------------------
+
+    #[test]
+    fn tool_requires_approval_is_not_retriable() {
+        let err = ToolError::RequiresApproval {
+            name: "shell".to_string(),
+            timeout_secs: None,
+            timeout_policy: None,
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn tool_requires_approval_with_timeout_is_not_retriable() {
+        let err = ToolError::RequiresApproval {
+            name: "shell".to_string(),
+            timeout_secs: Some(30),
+            timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn tool_requires_approval_display_includes_name() {
+        let err = ToolError::RequiresApproval {
+            name: "shell".to_string(),
+            timeout_secs: None,
+            timeout_policy: None,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("shell"), "display must include tool name; got: {msg}");
+    }
+
+    #[test]
+    fn tool_requires_approval_constructible_with_interrupt_policy() {
+        // Verify all optional field combinations compile and are constructible.
+        let err = ToolError::RequiresApproval {
+            name: "write_file".to_string(),
+            timeout_secs: Some(60),
+            timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("write_file"));
+    }
+
+    // -- ApprovalTimeoutPolicy ------------------------------------------------
+
+    #[test]
+    fn approval_timeout_policy_default_is_reject() {
+        let policy = ApprovalTimeoutPolicy::default();
+        assert_eq!(policy, ApprovalTimeoutPolicy::Reject);
+    }
+
+    #[test]
+    fn approval_timeout_policy_variants_are_distinct() {
+        assert_ne!(ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt);
+    }
+
+    #[test]
+    fn approval_timeout_policy_display_reject() {
+        assert_eq!(ApprovalTimeoutPolicy::Reject.to_string(), "reject");
+    }
+
+    #[test]
+    fn approval_timeout_policy_display_interrupt() {
+        assert_eq!(ApprovalTimeoutPolicy::Interrupt.to_string(), "interrupt");
+    }
+
+    #[test]
+    fn approval_timeout_policy_from_str_reject() {
+        let policy: ApprovalTimeoutPolicy = "reject".parse().unwrap();
+        assert_eq!(policy, ApprovalTimeoutPolicy::Reject);
+    }
+
+    #[test]
+    fn approval_timeout_policy_from_str_interrupt() {
+        let policy: ApprovalTimeoutPolicy = "interrupt".parse().unwrap();
+        assert_eq!(policy, ApprovalTimeoutPolicy::Interrupt);
+    }
+
+    #[test]
+    fn approval_timeout_policy_from_str_unknown_fails() {
+        let result: Result<ApprovalTimeoutPolicy, _> = "unknown".parse();
+        assert!(result.is_err(), "unknown policy string should fail to parse");
+    }
+
+    #[test]
+    fn approval_timeout_policy_display_from_str_round_trip() {
+        for variant in [ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt] {
+            let s = variant.to_string();
+            let parsed: ApprovalTimeoutPolicy = s.parse().unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn approval_timeout_policy_serde_round_trip() {
+        for variant in [ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: ApprovalTimeoutPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
+    fn approval_timeout_policy_clone() {
+        let original = ApprovalTimeoutPolicy::Interrupt;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
     }
 }

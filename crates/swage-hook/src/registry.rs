@@ -149,6 +149,11 @@ impl HookRegistry {
         let mut current_event = event;
         let mut was_modified = false;
 
+        // Tracks the first RequestApproval seen. Block takes precedence over this
+        // and exits the loop immediately. Among multiple approvals, the
+        // highest-priority hook (which runs first) wins.
+        let mut pending_approval: Option<HookOutcome> = None;
+
         for &idx in &indices {
             let reg = &self.hooks[idx];
 
@@ -172,10 +177,27 @@ impl HookRegistry {
                     was_modified = true;
                 }
                 HookOutcome::Block(reason) => {
+                    // Block is the highest-priority outcome — exit immediately,
+                    // discarding any pending approval request.
                     debug!(hook = %hook_name, reason = %reason, "hook blocked execution");
                     return HookOutcome::Block(reason);
                 }
+                approval @ HookOutcome::RequestApproval { .. } => {
+                    // Only record the first approval: hooks run in priority order
+                    // so the first one seen is the highest-priority requester.
+                    if pending_approval.is_none() {
+                        debug!(hook = %hook_name, "hook requested approval");
+                        pending_approval = Some(approval);
+                    } else {
+                        debug!(hook = %hook_name, "hook requested approval (ignored — higher-priority approval already pending)");
+                    }
+                }
             }
+        }
+
+        // Approval outranks Continue/ContinueModified — surface it if present.
+        if let Some(approval) = pending_approval {
+            return approval;
         }
 
         // Propagate the final event state to the caller so they can

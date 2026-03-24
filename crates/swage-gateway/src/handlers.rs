@@ -461,6 +461,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage)
     }
@@ -1173,6 +1174,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }
