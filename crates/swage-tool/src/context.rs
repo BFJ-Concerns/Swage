@@ -30,6 +30,19 @@ pub trait ToolContext: Send + Sync {
     // allocating on every call, but this is fine because &UserInfo is a reference
     // into the concrete type's storage.
     fn user_info(&self) -> Option<&UserInfo>;
+
+    /// The LLM's call_id for the current tool invocation.
+    ///
+    /// Available when the tool is dispatched as part of an LLM tool-use round.
+    /// Tools that spawn sub-tool calls (e.g. python_execute) use this as the
+    /// parent_call_id for nesting.
+    fn call_id(&self) -> Option<&str> { None }
+
+    /// The turn_id for the currently executing turn.
+    ///
+    /// Available when the dispatcher is invoked from within an agent turn.
+    /// Used by tools that need to persist auxiliary records against the turn.
+    fn turn_id(&self) -> Option<uuid::Uuid> { None }
 }
 
 /// A serialisable snapshot of a ToolContext.

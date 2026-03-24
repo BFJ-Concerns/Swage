@@ -64,5 +64,6 @@ pub mod startup;
 pub mod state;
 pub mod subscription;
 pub mod tool;
+pub mod tool_executor;
 pub mod turn;
 pub mod websocket;

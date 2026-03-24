@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use serde_json::Value;
 use swage_core::ToolError;
 use swage_safety::LeakDetector;
@@ -18,7 +19,45 @@ use crate::params::redact_params;
 use crate::permission::{PermissionConfig, check_permission};
 use crate::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
 use crate::registry::ToolRegistry;
+use crate::tool::Tool;
 use crate::validation::validate_tool_schema;
+
+// ---------------------------------------------------------------------------
+// ToolExecutionStrategy
+// ---------------------------------------------------------------------------
+
+/// Abstracts the tool execution step (step 6 in the dispatch pipeline).
+///
+/// The default behaviour calls `tool.execute()` directly. Injecting a custom
+/// strategy lets the gateway layer interpose sandbox-aware execution, logging,
+/// or other cross-cutting concerns without the ToolDispatcher knowing about them.
+#[async_trait]
+pub trait ToolExecutionStrategy: Send + Sync {
+    /// Execute the tool with the given parameters and context.
+    async fn execute(
+        &self,
+        tool: &dyn Tool,
+        tool_name: &str,
+        params: &Value,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError>;
+}
+
+/// Calls `tool.execute(params, ctx)` directly — the baseline behaviour.
+pub struct DefaultExecutionStrategy;
+
+#[async_trait]
+impl ToolExecutionStrategy for DefaultExecutionStrategy {
+    async fn execute(
+        &self,
+        tool: &dyn Tool,
+        _tool_name: &str,
+        params: &Value,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
+        tool.execute(params.clone(), ctx).await
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ToolDispatcher
@@ -53,6 +92,9 @@ pub struct ToolDispatcher {
     /// When true, `ToolOutput.raw` is set to the pre-redaction output value.
     /// In normal operation this is false — raw output is never persisted.
     debug_mode: bool,
+    /// Optional strategy for executing tools at step 6.
+    /// When `None`, tools are executed directly via `tool.execute()`.
+    execution_strategy: Option<Arc<dyn ToolExecutionStrategy>>,
 }
 
 impl ToolDispatcher {
@@ -72,6 +114,7 @@ impl ToolDispatcher {
             rate_config,
             leak_detector,
             debug_mode,
+            execution_strategy: None,
         }
     }
 
@@ -98,7 +141,30 @@ impl ToolDispatcher {
             rate_config: RateLimitConfig::default(),
             leak_detector: Arc::new(LeakDetector::default()),
             debug_mode: false,
+            execution_strategy: None,
         }
+    }
+
+    /// Returns a reference to the underlying tool registry.
+    ///
+    /// Useful for sharing the same registry across multiple dispatchers with
+    /// different permission configurations (e.g., the gateway builds a per-turn
+    /// dispatcher with project-specific permissions but the same tool set).
+    pub fn registry(&self) -> &Arc<ToolRegistry> {
+        &self.registry
+    }
+
+    /// Set a custom execution strategy for step 6 of the pipeline.
+    ///
+    /// When set, `dispatch()` delegates to `strategy.execute()` instead of
+    /// calling `tool.execute()` directly. This is the injection point for
+    /// sandbox-aware execution in the gateway layer.
+    pub fn with_execution_strategy(
+        mut self,
+        strategy: Arc<dyn ToolExecutionStrategy>,
+    ) -> Self {
+        self.execution_strategy = Some(strategy);
+        self
     }
 
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
@@ -163,8 +229,13 @@ impl ToolDispatcher {
         let _redacted_params = redact_params(&params, tool.sensitive_keys());
 
         // Step 6: Execute with wall-clock timing.
+        // If an execution strategy is set, delegate to it; otherwise call the
+        // tool directly (the default, backward-compatible path).
         let start = Instant::now();
-        let raw_output = tool.execute(params, ctx).await?;
+        let raw_output = match &self.execution_strategy {
+            Some(strategy) => strategy.execute(tool.as_ref(), tool_name, &params, ctx).await?,
+            None => tool.execute(params, ctx).await?,
+        };
         let duration = start.elapsed();
 
         // Step 7: Leak detection — serialise, scan, parse back.
@@ -344,6 +415,98 @@ mod tests {
             matches!(err, ToolError::InvalidParameters { .. }),
             "expected InvalidParameters, got: {err:?}"
         );
+    }
+
+    // -- Rate limit gate ------------------------------------------------------
+
+    // -- Execution strategy ---------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatch_uses_custom_strategy_when_set() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use super::ToolExecutionStrategy;
+
+        // Strategy that records it was called and delegates to the tool.
+        struct TrackingStrategy {
+            called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl ToolExecutionStrategy for TrackingStrategy {
+            async fn execute(
+                &self,
+                tool: &dyn Tool,
+                _tool_name: &str,
+                params: &Value,
+                ctx: &dyn ToolContext,
+            ) -> Result<Value, ToolError> {
+                self.called.store(true, Ordering::SeqCst);
+                tool.execute(params.clone(), ctx).await
+            }
+        }
+
+        let called = Arc::new(AtomicBool::new(false));
+        let strategy = Arc::new(TrackingStrategy { called: called.clone() });
+
+        let dispatcher = make_dispatcher("echo", true, false)
+            .with_execution_strategy(strategy);
+
+        let output = dispatcher
+            .dispatch("echo", json!({"text": "via strategy"}), &ctx(), "agent-test")
+            .await
+            .expect("should succeed via strategy");
+
+        assert!(called.load(Ordering::SeqCst), "strategy.execute() should have been called");
+        assert_eq!(output.result["text"], "via strategy");
+    }
+
+    #[tokio::test]
+    async fn dispatch_without_strategy_uses_direct_execution() {
+        // Ensure the default (no strategy) path still works unchanged.
+        let dispatcher = make_dispatcher("echo", true, false);
+        let output = dispatcher
+            .dispatch("echo", json!({"text": "direct"}), &ctx(), "agent-test")
+            .await
+            .expect("should succeed with direct execution");
+        assert_eq!(output.result["text"], "direct");
+    }
+
+    #[tokio::test]
+    async fn dispatch_strategy_error_propagates() {
+        use super::ToolExecutionStrategy;
+
+        // Strategy that always fails — verifies errors propagate through the pipeline.
+        struct FailingStrategy;
+
+        #[async_trait]
+        impl ToolExecutionStrategy for FailingStrategy {
+            async fn execute(
+                &self,
+                _tool: &dyn Tool,
+                tool_name: &str,
+                _params: &Value,
+                _ctx: &dyn ToolContext,
+            ) -> Result<Value, ToolError> {
+                Err(ToolError::ExecutionFailed {
+                    name: tool_name.to_owned(),
+                    message: "strategy rejected execution".to_owned(),
+                })
+            }
+        }
+
+        let dispatcher = make_dispatcher("echo", true, false)
+            .with_execution_strategy(Arc::new(FailingStrategy));
+
+        let err = dispatcher
+            .dispatch("echo", json!({"text": "x"}), &ctx(), "agent-test")
+            .await
+            .expect_err("strategy error should propagate");
+
+        assert!(
+            matches!(err, ToolError::ExecutionFailed { .. }),
+            "expected ExecutionFailed from strategy, got: {err:?}"
+        );
+        assert!(err.to_string().contains("strategy rejected"));
     }
 
     // -- Rate limit gate ------------------------------------------------------

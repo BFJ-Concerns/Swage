@@ -365,7 +365,11 @@ print(f"{result1.strip()} {result2.strip()}")
     );
 
     // The Python output should contain the chained result.
-    let output = result["result"].as_str().unwrap_or("");
+    // Under agent delegation, the result is a structured object with an
+    // "output" key from PythonExecuteTool, not a flat string.
+    let output = result["result"]["output"]
+        .as_str()
+        .unwrap_or_else(|| result["result"].as_str().unwrap_or(""));
     assert!(
         output.contains("hello") && output.contains("world"),
         "Python output should contain chained tool results; got: {output}"
@@ -538,9 +542,14 @@ x = 1 / 0  # ZeroDivisionError
         events.iter().map(|e| e["type"].as_str()).collect::<Vec<_>>()
     );
 
-    let result_text = ptc_tool_end.unwrap()["result"]
+    // Under agent delegation, the result is a structured object with an
+    // "output" key. For errors, PythonExecuteTool returns the traceback
+    // in the output field. Fall back to checking the result as a flat
+    // string for backwards compatibility.
+    let result_val = &ptc_tool_end.unwrap()["result"];
+    let result_text = result_val["output"]
         .as_str()
-        .unwrap_or("");
+        .unwrap_or_else(|| result_val.as_str().unwrap_or(""));
     assert!(
         result_text.contains("ZeroDivisionError"),
         "Python runtime errors should produce a traceback containing the \

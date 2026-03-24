@@ -1,18 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
-use futures::StreamExt;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use swage_core::{
-    ChatMessage, CompletionRequest, GatewayError, Role, SandboxError, StreamChunk,
-    ToolCall, ToolResult, build_tool_round_messages,
-};
-use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
-use swage_storage::store::ContextSnapshotStore;
+use swage_core::{ChatMessage, GatewayError, Role};
+use swage_storage::model::{NewMessage, TurnState};
 
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
@@ -22,16 +16,21 @@ use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 
-use crate::skill::SkillManager;
+use swage_agent::{AgentBuilder, AgentConfig, AgentError, AgentEvent, TurnRequest};
+use swage_tool::dispatch::ToolDispatcher;
+use swage_tool::permission::PermissionConfig;
+use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
+use swage_safety::LeakDetector;
 
-use swage_tool::context::MockToolContext;
+use crate::skill::SkillManager;
+use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
 use crate::{
     state::AppState,
     subscription::SubscriptionState,
     websocket::ServerEvent,
 };
-use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
+
 
 /// Build the context assembly elements for a turn.
 ///
@@ -270,33 +269,7 @@ pub async fn process_turn(
         vec![]
     };
 
-    // Build the ToolContext passed to each tool invocation.
-    let working_dir = crate::tool::workspace::resolve_workspace_root(&config);
-    let tool_ctx = MockToolContext {
-        agent_id: "gateway".to_string(),
-        session_id: session_id.to_string(),
-        working_directory: working_dir,
-        allowed_paths: vec![],
-        user_info: None,
-    };
-
-    // Step 4: Create the turn record (Pending), then advance to Processing.
-    let turn = state
-        .storage
-        .create_turn(NewTurn {
-            thread_id,
-            agent_id: "gateway".to_string(),
-            state: TurnState::Pending,
-        })
-        .await?;
-
-    state.storage.update_turn_state(turn.id, TurnState::Processing).await?;
-
-    // Record the turn_id now that we have the Turn record. session_id was
-    // already recorded by the #[instrument] macro from the function parameter.
-    tracing::Span::current().record("turn_id", turn.id.to_string());
-    tracing::debug!("processing turn");
-
+    // Step 4: Set up the cancellation token before any turn processing begins.
     let cancel_token = CancellationToken::new();
     {
         let mut turns = state.active_turns.lock().await;
@@ -406,388 +379,234 @@ pub async fn process_turn(
         "context assembled"
     );
 
-    // Serialise the assembly report and emit ContextAssembled before streaming.
-    // Persistence always happens; WebSocket delivery is gated by subscription
-    // (with an error-bypass: reports containing errors reach all clients).
+    // Serialise the assembly report for deferred emission.
+    // The ContextAssembled event and snapshot persistence require a turn_id,
+    // which is not available until the agent creates the Turn record and emits
+    // TurnStarted. We prepare the report now and emit it in the event loop.
     let report_json = serde_json::to_value(&assembly_report)
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to serialise assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
 
-    // Persist the snapshot for the past-turn REST endpoint.
-    if let Err(e) = state
-        .storage
-        .store_snapshot(turn.id, &report_json.to_string())
-        .await
+    // Step 7: Resolve tool permissions from config cascade and build the
+    // ToolDispatcher with the resolved permission set. When a sandbox is
+    // available, inject SandboxedExecutor as the execution strategy so
+    // tool calls are routed through bubblewrap transparently.
+    //
+    // Merge deny entries from the startup config (state.config) into the
+    // per-turn permissions. The startup config represents the operator's
+    // global constraints and may not exist in disk-loaded project configs.
+    // Deny entries are additive — a tool denied by the startup config stays
+    // denied regardless of what the project config allows.
+    let mut deny = config.tools.permissions.deny.clone();
+    for entry in &state.config.tools.permissions.deny {
+        if !deny.contains(entry) {
+            deny.push(entry.clone());
+        }
+    }
+    let permissions = PermissionConfig {
+        allow: config.tools.permissions.allow.clone(),
+        deny,
+        bundles: config.tools.permissions.bundles.clone(),
+    };
+
+    // Clone the existing registry from the startup dispatcher — the tools
+    // themselves don't change, only the permission rules.
+    let dispatcher = ToolDispatcher::new(
+        state.tool_dispatcher.registry().clone(),
+        permissions,
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    );
+    // Build the composite execution strategy. GatewayExecutionStrategy scopes
+    // PYTHON_CONTEXT for python_execute calls, and optionally wraps the
+    // SandboxedExecutor for sandboxed tool execution.
+    let inner_strategy: Option<Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>> =
+        state.sandbox.as_ref().map(|sandbox| {
+            Arc::new(SandboxedExecutor::new(sandbox.clone()))
+                as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
+        });
+    let gateway_strategy = GatewayExecutionStrategy::new(
+        inner_strategy,
+        ws_tx.clone(),
+    );
+    let dispatcher = dispatcher.with_execution_strategy(Arc::new(gateway_strategy));
+
+    // Step 8: Build the Agent that will execute the turn.
+    let agent_config = AgentConfig::new(session.agent_id.clone());
+    let agent = match AgentBuilder::new()
+        .config(agent_config)
+        .provider(state.provider.clone())
+        .storage(state.storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
     {
-        tracing::warn!(error = %e, "failed to persist context snapshot");
-    }
-
-    // Deliver the ContextAssembled event (subscription-gated).
-    let assembled_event = ServerEvent::ContextAssembled {
-        turn_id: turn.id,
-        report: report_json,
-    };
-    if subscription.lock().await.should_deliver(&assembled_event) {
-        let _ = ws_tx.send(assembled_event);
-    }
-
-    let mut request = CompletionRequest {
-        messages: assembled_messages,
-        model: Some(config.provider.model.clone()),
-        max_tokens: Some(4096),
-        temperature: None,
-        stop_sequences: None,
-        metadata: None,
-    };
-
-    // Step 8-10: Tool-aware streaming loop.
-    let mut accumulated = String::new();
-    let mut stored_usage = None;
-    let mut tool_position: i32 = 0;
-
-    // Hard cap on tool-call rounds to prevent infinite loops driven by a
-    // misbehaving model or circular tool dependencies.
-    const MAX_TOOL_ROUNDS: usize = 25;
-    let mut round = 0usize;
-
-    let outcome = 'outer: loop {
-        if round >= MAX_TOOL_ROUNDS {
-            let msg = format!(
-                "\n\n[Tool-call round limit ({MAX_TOOL_ROUNDS}) reached — stopping to prevent an infinite loop.]"
-            );
-            accumulated.push_str(&msg);
-            let _ = ws_tx.send(ServerEvent::Token { content: msg });
-            break TurnOutcome::Done;
-        }
-        round += 1;
-
-        let mut stream = state.provider.stream(request.clone());
-        let mut round_text = String::new();
-        let mut round_tool_calls: Vec<ToolCall> = Vec::new();
-
-        let _round_outcome = loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    break 'outer TurnOutcome::Cancelled;
-                }
-                chunk = stream.next() => {
-                    match chunk {
-                        None => break RoundOutcome::Done,
-                        Some(StreamChunk::Done { .. }) => break RoundOutcome::Done,
-                        Some(StreamChunk::Delta { content }) => {
-                            // Each streaming token counts as activity so a long response
-                            // doesn't trigger the idle monitor mid-stream.
-                            state.activity_tracker.record_activity();
-                            round_text.push_str(&content);
-                            accumulated.push_str(&content);
-                            let _ = ws_tx.send(ServerEvent::Token { content });
-                        }
-                        Some(StreamChunk::Usage(usage)) => {
-                            stored_usage = Some(usage);
-                        }
-                        Some(StreamChunk::Error { message }) => {
-                            break 'outer TurnOutcome::ProviderError(message);
-                        }
-                        Some(StreamChunk::ToolUse { call_id, name, arguments }) => {
-                            round_tool_calls.push(ToolCall {
-                                call_id,
-                                name,
-                                arguments,
-                            });
-                        }
-                    }
-                }
-            }
-        };
-
-        if round_tool_calls.is_empty() {
-            break 'outer TurnOutcome::Done;
-        }
-
-        let mut tool_results: Vec<ToolResult> = Vec::new();
-
-        for call in &round_tool_calls {
-            if cancel_token.is_cancelled() {
-                break 'outer TurnOutcome::Cancelled;
-            }
-
-            // Deliver ToolStart only to connections subscribed to the "tools"
-            // channel. Storage recording (create_tool_call below) is unconditional
-            // so the turn history is always complete regardless of subscription.
-            let tool_start = ServerEvent::ToolStart {
-                call_id: call.call_id.clone(),
-                tool: call.name.clone(),
-                arguments: call.arguments.clone(),
-                parent_call_id: None,
-            };
-            if subscription.lock().await.should_deliver(&tool_start) {
-                let _ = ws_tx.send(tool_start);
-            }
-
-            if let Err(e) = state.storage.create_tool_call(NewToolCall {
-                turn_id: turn.id,
-                agent_id: "gateway".to_string(),
-                call_id: call.call_id.clone(),
-                tool: call.name.clone(),
-                arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|e| {
-                    tracing::warn!(call_id = %call.call_id, "failed to serialise tool call arguments, storing empty: {e}");
-                    String::new()
-                }),
-                result: None,
-                status: None,
-                duration_ms: None,
-                truncated: false,
-                total_bytes: None,
-                position: tool_position,
-                parent_call_id: None,
-            }).await {
-                tracing::warn!("failed to record tool call {}: {e}", call.call_id);
-            }
-            tool_position += 1;
-
-            // A running tool is a form of activity — reset the idle timer so
-            // long-running tool calls don't trigger an idle shutdown mid-turn.
-            state.activity_tracker.record_activity();
-            let start = Instant::now();
-            let (result_content, is_error) = if let Some(sandbox) = state.sandbox.as_ref() {
-                // Route through the sandboxed agent process — credentials and
-                // filesystem access are mediated by the sandbox; tool code never
-                // runs directly in the gateway process.
-                match sandbox.execute_tool(&call.name, call.arguments.clone()).await {
-                    Ok(result) => match result.error {
-                        // The sandboxed tool itself reported a failure.
-                        Some(err_msg) => (err_msg, true),
-                        None => {
-                            // Prefer a plain string output; fall back to JSON serialisation.
-                            let content = result.output.as_str()
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| result.output.to_string());
-                            (content, false)
-                        }
-                    },
-                    Err(SandboxError::IpcError { message }) => {
-                        (format!("sandbox communication error: {message}"), true)
-                    }
-                    Err(e) => (e.to_string(), true),
-                }
-            } else {
-                // Direct dispatch: sandbox is disabled or unavailable.
-                let dispatch_result = if call.name == "python_execute" {
-                    let py_ctx = PythonExecuteContext {
-                        ws_tx: ws_tx.clone(),
-                        turn_id: turn.id,
-                        call_id: call.call_id.clone(),
-                    };
-                    PYTHON_CONTEXT
-                        .scope(
-                            py_ctx,
-                            state.tool_dispatcher.dispatch(
-                                &call.name,
-                                call.arguments.clone(),
-                                &tool_ctx,
-                                "gateway",
-                            ),
-                        )
-                        .await
-                } else {
-                    state
-                        .tool_dispatcher
-                        .dispatch(&call.name, call.arguments.clone(), &tool_ctx, "gateway")
-                        .await
-                };
-                match dispatch_result {
-                    Ok(output) => (
-                        output.result["output"].as_str().unwrap_or("").to_string(),
-                        false,
-                    ),
-                    Err(e) => (e.to_string(), true),
-                }
-            };
-            let duration = start.elapsed();
-            let duration_ms = duration.as_millis() as u64;
-
-            let status = if is_error { "error" } else { "success" };
-
-            // ToolEnd is gated the same way as ToolStart.
-            let tool_end = ServerEvent::ToolEnd {
-                call_id: call.call_id.clone(),
-                tool: call.name.clone(),
-                result: serde_json::json!(result_content),
-                status: status.to_string(),
-                duration_ms,
-                truncated: false,
-                total_bytes: None,
-                parent_call_id: None,
-            };
-            if subscription.lock().await.should_deliver(&tool_end) {
-                let _ = ws_tx.send(tool_end);
-            }
-
-            if let Err(e) = state.storage.update_tool_call_result(
-                &call.call_id,
-                turn.id,
-                &result_content,
-                status,
-                duration_ms as i64,
-                false,
-                None,
-            ).await {
-                tracing::warn!("failed to update tool call result {}: {e}", call.call_id);
-            }
-
-            tool_results.push(ToolResult {
-                call_id: call.call_id.clone(),
-                content: result_content,
-                is_error,
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build agent for turn");
+            let _ = ws_tx.send(ServerEvent::Error {
+                code: "agent_construction_error".to_string(),
+                message: e.to_string(),
             });
+            // Cleanup cancellation token before returning.
+            let mut turns = state.active_turns.lock().await;
+            turns.remove(&session_id);
+            return Err(GatewayError::WebSocketError(format!("agent construction failed: {e}")));
         }
-
-        let tool_messages = build_tool_round_messages(
-            &round_tool_calls,
-            &tool_results,
-            &round_text,
-        );
-
-        let mut updated_messages = request.messages.clone();
-        updated_messages.extend(tool_messages);
-        request = CompletionRequest {
-            messages: updated_messages,
-            ..request.clone()
-        };
     };
 
-    // Step 11: Finalise based on outcome, then clean up.
-    match outcome {
-        TurnOutcome::Done => {
-            // Position = current message count in thread.
-            let position = state
-                .storage
-                .list_messages_by_thread(thread_id)
-                .await
-                .map(|msgs| msgs.len() as i32)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(%thread_id, "failed to read message count for position (Done), defaulting to 1: {e}");
-                    1
-                });
+    // Step 9: Create the TurnRequest with assembled context and cancellation.
+    let turn_request = TurnRequest {
+        session_id,
+        thread_id,
+        user_message: content,
+        assembled_context: assembled_messages,
+        cancellation_token: cancel_token,
+    };
 
-            state
-                .storage
-                .create_message(NewMessage {
-                    thread_id,
-                    role: Role::Assistant.to_string(),
-                    content: accumulated,
-                    position,
-                    agent_id: "gateway".to_string(),
-                })
-                .await?;
+    // Step 10: Create the event channel and spawn the agent's streaming loop.
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
-            // Persist token usage from the provider if available.
-            if let Some(usage) = &stored_usage {
-                if let Err(e) = state.storage.update_tokens(
-                    turn.id,
-                    usage.input_tokens as i64,
-                    usage.output_tokens as i64,
-                ).await {
-                    tracing::warn!(error = %e, "failed to persist token usage");
+    // Spawn the agent on a tokio task — it manages turn creation, state
+    // transitions, tool dispatch, and message storage internally.
+    let activity_tracker = state.activity_tracker.clone();
+    let pricing_config = state.config.pricing.clone();
+    let model_name = config.provider.model.clone();
+
+    let agent_handle = tokio::spawn(async move {
+        agent.process_turn_streaming(turn_request, event_tx).await
+    });
+
+    // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
+    // agent drops event_tx (channel closes) or the agent task completes.
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            AgentEvent::TurnStarted { turn_id } => {
+                // Record the turn_id in the tracing span now that the agent
+                // has created the Turn record.
+                tracing::Span::current().record("turn_id", turn_id.to_string());
+                tracing::debug!("processing turn (agent-delegated)");
+
+                // Persist the context snapshot now that we have a turn_id.
+                if let Err(e) = state
+                    .storage
+                    .store_snapshot(turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to persist context snapshot");
+                }
+
+                // Deliver the ContextAssembled event (subscription-gated).
+                let assembled_event = ServerEvent::ContextAssembled {
+                    turn_id,
+                    report: report_json.clone(),
+                };
+                if subscription.lock().await.should_deliver(&assembled_event) {
+                    let _ = ws_tx.send(assembled_event);
                 }
             }
+            AgentEvent::Token { content } => {
+                activity_tracker.record_activity();
+                let _ = ws_tx.send(ServerEvent::Token { content });
+            }
+            AgentEvent::ToolStart { call_id, tool_name, arguments } => {
+                activity_tracker.record_activity();
+                let tool_start = ServerEvent::ToolStart {
+                    call_id,
+                    tool: tool_name,
+                    arguments,
+                    parent_call_id: None,
+                };
+                if subscription.lock().await.should_deliver(&tool_start) {
+                    let _ = ws_tx.send(tool_start);
+                }
+            }
+            AgentEvent::ToolEnd { call_id, tool_name, result, status, duration_ms } => {
+                let tool_end = ServerEvent::ToolEnd {
+                    call_id,
+                    tool: tool_name,
+                    result,
+                    status,
+                    duration_ms: duration_ms.unwrap_or(0),
+                    truncated: false,
+                    total_bytes: None,
+                    parent_call_id: None,
+                };
+                if subscription.lock().await.should_deliver(&tool_end) {
+                    let _ = ws_tx.send(tool_end);
+                }
+            }
+            AgentEvent::TurnCompleted { turn_id, input_tokens, output_tokens, .. } => {
+                // Derive cost from the pricing config when available.
+                let cost_microcents = pricing_config.compute_cost(
+                    &model_name,
+                    input_tokens,
+                    output_tokens,
+                );
 
-            // Emit a structured log event with token usage and derived cost.
-            // These fields extend the turn span's correlation data for operators
-            // monitoring per-turn costs from JSON log output.
-            // input_tokens / output_tokens are None when the provider did not
-            // report usage (e.g. streamed without a Usage chunk). cost_microcents
-            // is None when no pricing entry is configured for the model.
-            {
-                let input_tokens = stored_usage.as_ref().map(|u| u.input_tokens as i64);
-                let output_tokens = stored_usage.as_ref().map(|u| u.output_tokens as i64);
-                let cost_microcents = stored_usage.as_ref().and_then(|u| {
-                    state.config.pricing.compute_cost(
-                        &config.provider.model,
-                        u.input_tokens,
-                        u.output_tokens,
-                    )
-                });
                 tracing::info!(
-                    input_tokens = ?input_tokens,
-                    output_tokens = ?output_tokens,
+                    input_tokens = input_tokens,
+                    output_tokens = output_tokens,
                     cost_microcents = ?cost_microcents,
                     "turn_complete",
                 );
+
+                // Update session activity timestamp.
+                if let Err(e) = state.storage.update_activity(session_id).await {
+                    tracing::warn!(error = %e, "failed to update session activity");
+                }
+
+                // Populate usage fields only for context-subscribed connections.
+                let (ws_input, ws_output, ws_cost) =
+                    if subscription.lock().await.is_subscribed(
+                        crate::subscription::ObservabilityChannel::Context,
+                    ) {
+                        (Some(input_tokens), Some(output_tokens), cost_microcents)
+                    } else {
+                        (None, None, None)
+                    };
+
+                let _ = ws_tx.send(ServerEvent::TurnComplete {
+                    turn_id,
+                    input_tokens: ws_input,
+                    output_tokens: ws_output,
+                    cost_microcents: ws_cost,
+                });
             }
-
-            state
-                .storage
-                .update_turn_state(turn.id, TurnState::Completed)
-                .await?;
-
-            state.storage.update_activity(session_id).await?;
-
-            // Populate usage fields only for context-subscribed connections.
-            let (input_tokens, output_tokens, cost_microcents) =
-                if subscription.lock().await.is_subscribed(
-                    crate::subscription::ObservabilityChannel::Context,
-                ) {
-                    (
-                        stored_usage.as_ref().map(|u| u.input_tokens),
-                        stored_usage.as_ref().map(|u| u.output_tokens),
-                        None, // Cost derivation deferred to pricing config integration.
-                    )
-                } else {
-                    (None, None, None)
-                };
-
-            let _ = ws_tx.send(ServerEvent::TurnComplete {
-                turn_id: turn.id,
-                input_tokens,
-                output_tokens,
-                cost_microcents,
-            });
+            AgentEvent::Error { message } => {
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "agent_error".to_string(),
+                    message,
+                });
+            }
         }
+    }
 
-        TurnOutcome::Cancelled => {
-            if !accumulated.is_empty() {
-                let position = state
-                    .storage
-                    .list_messages_by_thread(thread_id)
-                    .await
-                    .map(|msgs| msgs.len() as i32)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(%thread_id, "failed to read message count for position (Cancelled), defaulting to 1: {e}");
-                        1
-                    });
-
-                state
-                    .storage
-                    .create_message(NewMessage {
-                        thread_id,
-                        role: Role::Assistant.to_string(),
-                        content: accumulated,
-                        position,
-                        agent_id: "gateway".to_string(),
-                    })
-                    .await?;
-            }
-
-            state
-                .storage
-                .update_turn_state(turn.id, TurnState::Interrupted)
-                .await?;
-
+    // Wait for the agent task to finish and surface any panic or error.
+    match agent_handle.await {
+        Ok(Ok(_outbound)) => {
+            // Agent completed successfully — all events were already forwarded.
+        }
+        Ok(Err(AgentError::Cancelled)) => {
+            // Cancellation is cooperative — the agent already set
+            // TurnState::Interrupted and ThreadState::Idle in storage.
             let _ = ws_tx.send(ServerEvent::Cancelled {});
         }
-
-        TurnOutcome::ProviderError(message) => {
-            state
-                .storage
-                .update_turn_state(turn.id, TurnState::Failed)
-                .await?;
-
+        Ok(Err(agent_err)) => {
+            // The agent already sent an Error event through the channel
+            // for most failure paths. Log for server-side visibility but
+            // avoid double-sending to the client — the event loop already
+            // forwarded the AgentEvent::Error.
+            tracing::error!(error = %agent_err, "agent turn failed");
+        }
+        Err(join_err) => {
+            tracing::error!(error = %join_err, "agent task panicked");
             let _ = ws_tx.send(ServerEvent::Error {
-                code: "provider_error".to_string(),
-                message,
+                code: "internal_error".to_string(),
+                message: "agent task panicked".to_string(),
             });
         }
     }
@@ -815,22 +634,6 @@ pub async fn cancel_turn(state: &AppState, session_id: Uuid) -> Result<(), Gatew
             "no active turn for session {session_id}"
         ))),
     }
-}
-
-/// Internal outcome of a streaming turn, used to drive post-stream finalisation.
-enum TurnOutcome {
-    /// Stream finished normally (possibly after multiple tool rounds).
-    Done,
-    /// Client or shutdown requested cancellation.
-    Cancelled,
-    /// The provider sent an error chunk.
-    ProviderError(String),
-}
-
-/// Outcome of a single streaming round within the tool loop.
-enum RoundOutcome {
-    /// Stream for this round finished (may or may not have tool calls).
-    Done,
 }
 
 // ---------------------------------------------------------------------------
@@ -1703,9 +1506,10 @@ pub(crate) mod tests {
             .expect("error is surfaced via event, not Err return");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        // Agent delegates error categorisation — provider errors surface as agent_error.
         assert!(events.iter().any(|e| matches!(
             e,
-            ServerEvent::Error { code, .. } if code == "provider_error"
+            ServerEvent::Error { code, .. } if code == "agent_error"
         )));
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
@@ -1908,7 +1712,8 @@ pub(crate) mod tests {
         assert_eq!(tool_calls[0].call_id, "call_store");
         assert_eq!(tool_calls[0].tool, "echo");
         assert!(tool_calls[0].result.is_some(), "tool call should have a result");
-        assert_eq!(tool_calls[0].result.as_deref(), Some("stored"));
+        // The agent serialises the full ToolOutput.result JSON as the stored string.
+        assert_eq!(tool_calls[0].result.as_deref(), Some("{\"output\":\"stored\"}"));
     }
 
     #[tokio::test]
@@ -2177,9 +1982,10 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(&state, session_id, "hi".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await.expect("turn ok");
 
-        let req = captured_request.lock().unwrap().take().expect("request captured");
-        let model = req.model.as_deref().unwrap_or("");
-        assert!(!model.is_empty(), "model must be non-empty regardless of config source");
+        // Verify the provider was invoked — the agent delegates model selection
+        // to the provider via model_id() rather than setting CompletionRequest.model.
+        let req = captured_request.lock().unwrap().take();
+        assert!(req.is_some(), "provider should have been invoked for config-resolved turn");
     }
 
     #[tokio::test]
@@ -2292,10 +2098,15 @@ pub(crate) mod tests {
         let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
         let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
         assert_eq!(tool_calls.len(), 1);
+        // The agent stores the full JSON-serialised tool output.
         let result = tool_calls[0].result.as_deref().unwrap_or("");
+        let result_json: serde_json::Value = serde_json::from_str(result)
+            .expect("tool result should be valid JSON");
+        let path_str = result_json["output"].as_str()
+            .expect("output field should be a string");
         assert!(
-            std::path::Path::new(result).is_absolute(),
-            "working_directory should be an absolute path, got: {result}"
+            std::path::Path::new(path_str).is_absolute(),
+            "working_directory should be an absolute path, got: {path_str}"
         );
     }
 
@@ -2338,13 +2149,40 @@ pub(crate) mod tests {
         }
     }
 
-    /// Build an AppState with an active sandbox and no tools in the direct dispatcher.
+    /// Minimal tool stub for sandbox tests — registered so dispatch can find
+    /// the tool, but execution is intercepted by SandboxedExecutor before
+    /// reaching this implementation.
+    struct StubTool { tool_name: &'static str }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for StubTool {
+        fn name(&self) -> &str { self.tool_name }
+        fn description(&self) -> &str { "stub for sandbox routing tests" }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "additionalProperties": true})
+        }
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            // Should never be reached when SandboxedExecutor is the strategy.
+            Err(swage_core::ToolError::ExecutionFailed {
+                name: self.tool_name.to_string(),
+                message: "direct execution not supported in sandbox mode".into(),
+            })
+        }
+    }
+
+    /// Build an AppState with an active sandbox and specified tools registered.
     ///
-    /// With no tools registered, direct dispatch would always fail — this lets
-    /// us verify sandbox routing by checking whether the tool call succeeds.
+    /// Tools are registered in the dispatcher so the dispatch pipeline can find
+    /// them (step 1). The SandboxedExecutor strategy intercepts execution at
+    /// step 6, routing calls through the sandbox instead of executing locally.
     async fn make_state_with_sandbox(
         rounds: Vec<Vec<StreamChunk>>,
         sandbox: Arc<dyn swage_sandbox::Sandbox>,
+        tools: Vec<Arc<dyn crate::tool::Tool>>,
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
@@ -2367,8 +2205,7 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            // Intentionally empty: direct dispatch would fail for any tool name.
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(tools)),
             sandbox: Some(sandbox),
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
@@ -2395,7 +2232,12 @@ pub(crate) mod tests {
         let sandbox = Arc::new(MockSandbox::returning(Ok(
             swage_sandbox::ToolCallResult::success(serde_json::json!("sandbox_output"), 5),
         )));
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        // Register the tool so dispatch step 1 (lookup) succeeds; execution
+        // is intercepted at step 6 by SandboxedExecutor.
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+        ];
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
@@ -2434,7 +2276,10 @@ pub(crate) mod tests {
         let sandbox = Arc::new(MockSandbox::returning(Err(
             swage_core::SandboxError::IpcError { message: "pipe broken".to_string() },
         )));
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
+            Arc::new(StubTool { tool_name: "broken" }) as Arc<dyn crate::tool::Tool>,
+        ];
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         process_turn(&state, session_id, "Use broken".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
@@ -2480,7 +2325,10 @@ pub(crate) mod tests {
         let sandbox = Arc::new(MockSandbox::returning(Ok(
             swage_sandbox::ToolCallResult::failed("tool execution failed inside sandbox", 10),
         )));
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox).await;
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
+            Arc::new(StubTool { tool_name: "fail_tool" }) as Arc<dyn crate::tool::Tool>,
+        ];
+        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         process_turn(&state, session_id, "Use fail_tool".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
@@ -3003,14 +2851,17 @@ pub(crate) mod tests {
         let thread_id = threads[0].id;
         let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
 
+        // The agent always persists token counts — zero when the provider
+        // sends no Usage chunk (the old gateway left them NULL, the agent
+        // stores the accumulated total which starts at 0).
         let turn = &turns[0];
-        assert!(
-            turn.input_tokens.is_none(),
-            "input_tokens should remain NULL when no usage reported"
+        assert_eq!(
+            turn.input_tokens, Some(0),
+            "input_tokens should be zero when no usage reported"
         );
-        assert!(
-            turn.output_tokens.is_none(),
-            "output_tokens should remain NULL when no usage reported"
+        assert_eq!(
+            turn.output_tokens, Some(0),
+            "output_tokens should be zero when no usage reported"
         );
     }
 

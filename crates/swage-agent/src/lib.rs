@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod event;
 pub mod message;
 
 // Public re-exports — the primary surface for consumers.
@@ -16,4 +17,5 @@ pub use agent::Agent;
 pub use builder::AgentBuilder;
 pub use config::{AgentConfig, CompactionThreshold};
 pub use error::AgentError;
-pub use message::{ErrorResponse, InboundMessage, OutboundMessage};
+pub use event::AgentEvent;
+pub use message::{ErrorResponse, InboundMessage, OutboundMessage, TurnRequest};

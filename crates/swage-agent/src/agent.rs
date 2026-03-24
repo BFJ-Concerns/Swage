@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use serde_json::Value;
 use swage_core::{
-    ChatMessage, CompletionRequest, ContentPart, FinishReason, Role, ToolCompletionRequest,
-    ToolResult, build_tool_round_messages,
+    ChatMessage, CompletionRequest, ContentPart, FinishReason, Role, StreamChunk, ToolCall,
+    ToolCompletionRequest, ToolResult, build_tool_round_messages,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_provider::LlmProvider;
@@ -24,7 +24,8 @@ use swage_tool::dispatch::ToolDispatcher;
 
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-use crate::message::{InboundMessage, OutboundMessage};
+use crate::event::AgentEvent;
+use crate::message::{InboundMessage, OutboundMessage, TurnRequest};
 
 // ---------------------------------------------------------------------------
 // Agent struct
@@ -53,6 +54,336 @@ pub struct Agent {
 // ---------------------------------------------------------------------------
 // Message processing — the core execution loop
 // ---------------------------------------------------------------------------
+
+impl Agent {
+    /// Process a turn through the streaming execution path.
+    ///
+    /// Unlike [`process_message`], this method:
+    /// - Takes pre-assembled context rather than building it from thread history
+    /// - Uses `provider.stream()` for real-time token emission
+    /// - Emits [`AgentEvent`]s over `event_tx` for gateway/client forwarding
+    /// - Supports cooperative cancellation via `request.cancellation_token`
+    ///
+    /// Turn state transitions: Pending → Processing → Completed (or Interrupted on
+    /// cancellation, Failed on error).
+    pub async fn process_turn_streaming(
+        &self,
+        request: TurnRequest,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<OutboundMessage, AgentError> {
+        use futures::StreamExt;
+
+        let session_id = request.session_id;
+        let thread_id = request.thread_id;
+        let user_message = request.user_message;
+        let cancel_token = request.cancellation_token;
+
+        // 1. Create turn in Pending state — records intent before any work begins.
+        let turn = self
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: self.config.agent_id.clone(),
+                state: TurnState::Pending,
+            })
+            .await?;
+
+        // 2. Emit TurnStarted — gateway can show "processing…" to the client.
+        let _ = event_tx.send(AgentEvent::TurnStarted { turn_id: turn.id });
+
+        // 3. BeforeInbound hook — may modify or block the user message.
+        match self.dispatch_before_inbound(&user_message).await {
+            Ok(_processed) => {}
+            Err(e) => {
+                let _ = self.storage.update_turn_state(turn.id, TurnState::Failed).await;
+                let _ = event_tx.send(AgentEvent::Error { message: e.to_string() });
+                return Err(e);
+            }
+        }
+
+        // 4. Transition turn → Processing, thread → Processing.
+        self.storage
+            .update_turn_state(turn.id, TurnState::Processing)
+            .await?;
+        self.storage
+            .update_state(thread_id, ThreadState::Processing)
+            .await?;
+
+        // 5. Build initial CompletionRequest from the pre-assembled context.
+        let mut llm_request = CompletionRequest {
+            messages: request.assembled_context,
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        // 6–7. Streaming LLM loop with tool dispatch.
+        let mut accumulated = String::new();
+        let mut total_input_tokens: u32 = 0;
+        let mut total_output_tokens: u32 = 0;
+        let mut total_tool_calls: u32 = 0;
+        let mut tool_position: i32 = 0;
+        let mut round = 0usize;
+
+        // Hard cap matching process_message — prevents runaway tool loops.
+        let max_tool_rounds = self.config.max_tool_rounds as usize;
+
+        'outer: loop {
+            // Check cancellation eagerly before starting each round. This
+            // catches pre-cancelled tokens reliably — tokio::select! inside
+            // the stream loop is non-deterministic when both branches are
+            // immediately ready.
+            if cancel_token.is_cancelled() {
+                let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
+                let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                return Err(AgentError::Cancelled);
+            }
+
+            if round >= max_tool_rounds {
+                let msg = format!(
+                    "\n\n[Tool-call round limit ({max_tool_rounds}) reached — stopping.]"
+                );
+                accumulated.push_str(&msg);
+                let _ = event_tx.send(AgentEvent::Token { content: msg });
+                break 'outer;
+            }
+            round += 1;
+
+            let mut stream = self.provider.stream(llm_request.clone());
+            let mut round_text = String::new();
+            let mut round_tool_calls: Vec<ToolCall> = Vec::new();
+
+            // Inner loop: consume chunks until Done, error, or cancellation.
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        // Cooperative cancellation — Interrupted is more precise than Failed.
+                        let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
+                        let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                        return Err(AgentError::Cancelled);
+                    }
+                    chunk = stream.next() => {
+                        match chunk {
+                            None | Some(StreamChunk::Done { .. }) => break,
+                            Some(StreamChunk::Delta { content }) => {
+                                round_text.push_str(&content);
+                                accumulated.push_str(&content);
+                                let _ = event_tx.send(AgentEvent::Token { content });
+                            }
+                            Some(StreamChunk::Usage(usage)) => {
+                                total_input_tokens += usage.input_tokens;
+                                total_output_tokens += usage.output_tokens;
+                            }
+                            Some(StreamChunk::Error { message }) => {
+                                self.fail_turn_and_idle(turn.id, thread_id).await;
+                                let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                                return Err(AgentError::ProviderFailed(
+                                    swage_core::ProviderError::StreamError(message),
+                                ));
+                            }
+                            Some(StreamChunk::ToolUse { call_id, name, arguments }) => {
+                                round_tool_calls.push(ToolCall { call_id, name, arguments });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // No tool calls → LLM produced a final text response for this round.
+            if round_tool_calls.is_empty() {
+                break 'outer;
+            }
+
+            // --- Tool dispatch cycle ---
+            let mut tool_results = Vec::with_capacity(round_tool_calls.len());
+
+            for call in &round_tool_calls {
+                // Re-check cancellation before each tool execution.
+                if cancel_token.is_cancelled() {
+                    let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
+                    let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                    return Err(AgentError::Cancelled);
+                }
+
+                let start = std::time::Instant::now();
+
+                // PreToolUse hook — may block the call; block reason becomes the result.
+                let (result_content, is_error, status) =
+                    match self.dispatch_pre_tool_use(&call.name, &call.arguments).await {
+                        Err(AgentError::HookBlocked { reason, .. }) => {
+                            (reason, true, "blocked".to_string())
+                        }
+                        Err(e) => {
+                            (format!("hook error: {e}"), true, "error".to_string())
+                        }
+                        Ok(()) => {
+                            // Emit ToolStart — client can render a "running…" indicator.
+                            let _ = event_tx.send(AgentEvent::ToolStart {
+                                call_id: call.call_id.clone(),
+                                tool_name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                            });
+
+                            if let Some(ref dispatcher) = self.tool_dispatcher {
+                                use crate::context::AgentToolContext;
+                                let ctx = AgentToolContext::new(
+                                    &self.config.agent_id,
+                                    session_id.to_string(),
+                                    std::env::current_dir().unwrap_or_default(),
+                                )
+                                .with_call_id(call.call_id.clone())
+                                .with_turn_id(turn.id);
+                                match dispatcher
+                                    .dispatch(
+                                        &call.name,
+                                        call.arguments.clone(),
+                                        &ctx,
+                                        &self.config.agent_id,
+                                    )
+                                    .await
+                                {
+                                    Ok(output) => {
+                                        let result_str =
+                                            serde_json::to_string(&output.result).unwrap_or_default();
+                                        (result_str, false, "success".to_string())
+                                    }
+                                    Err(e) => (e.to_string(), true, "error".to_string()),
+                                }
+                            } else {
+                                // No dispatcher — this shouldn't occur in practice since the
+                                // gateway only calls streaming if tools are configured.
+                                ("no tool dispatcher configured".to_string(), true, "error".to_string())
+                            }
+                        }
+                    };
+
+                let duration_ms = start.elapsed().as_millis() as u64;
+
+                // Emit ToolEnd — final status and result.
+                let result_value: Value = serde_json::from_str(&result_content)
+                    .unwrap_or(Value::String(result_content.clone()));
+                let _ = event_tx.send(AgentEvent::ToolEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    result: result_value.clone(),
+                    status: status.clone(),
+                    duration_ms: Some(duration_ms),
+                });
+
+                // PostToolUse hook — informational, fire-and-forget.
+                self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
+                    .await;
+
+                // Persist tool call record — always, regardless of result.
+                let _ = self
+                    .storage
+                    .create_tool_call(NewToolCall {
+                        turn_id: turn.id,
+                        agent_id: self.config.agent_id.clone(),
+                        call_id: call.call_id.clone(),
+                        tool: call.name.clone(),
+                        arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                        result: Some(result_content.clone()),
+                        status: Some(status),
+                        duration_ms: Some(duration_ms as i64),
+                        truncated: false,
+                        total_bytes: None,
+                        position: tool_position,
+                        parent_call_id: None,
+                    })
+                    .await;
+                tool_position += 1;
+                total_tool_calls += 1;
+
+                // Leak detection on tool result before feeding back to the model.
+                let safe_result = self.scan_output(&result_content);
+
+                tool_results.push(ToolResult {
+                    call_id: call.call_id.clone(),
+                    content: safe_result,
+                    is_error,
+                });
+            }
+
+            // Build tool round messages and extend context for the next LLM call.
+            let tool_messages =
+                build_tool_round_messages(&round_tool_calls, &tool_results, &round_text);
+            let mut updated_messages = llm_request.messages.clone();
+            updated_messages.extend(tool_messages);
+            llm_request = CompletionRequest {
+                messages: updated_messages,
+                ..llm_request
+            };
+        }
+
+        // 8. AfterResponse hook — may modify or block the final accumulated response.
+        let response_content = match self.dispatch_after_response(&accumulated).await {
+            Ok(content) => content,
+            Err(e) => {
+                self.fail_turn_and_idle(turn.id, thread_id).await;
+                let _ = event_tx.send(AgentEvent::Error { message: e.to_string() });
+                return Err(e);
+            }
+        };
+
+        // 9. Leak detection — redact credentials from the assistant response.
+        let safe_content = self.scan_output(&response_content);
+
+        // 10. Persist assistant message.
+        let position = self
+            .storage
+            .list_messages_by_thread(thread_id)
+            .await
+            .map(|msgs| msgs.len() as i32)
+            .unwrap_or(1);
+        self.storage
+            .create_message(NewMessage {
+                thread_id,
+                role: "assistant".into(),
+                content: safe_content.clone(),
+                position,
+                agent_id: self.config.agent_id.clone(),
+            })
+            .await?;
+
+        // 11. Update turn: response text, token counts, state → Completed.
+        self.storage.update_response(turn.id, &safe_content).await?;
+        self.storage
+            .update_tokens(
+                turn.id,
+                total_input_tokens.into(),
+                total_output_tokens.into(),
+            )
+            .await?;
+        self.storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await?;
+
+        // 12. Thread → Idle.
+        self.storage
+            .update_state(thread_id, ThreadState::Idle)
+            .await?;
+
+        // 13. Emit TurnCompleted — final event, signals the turn is done.
+        let _ = event_tx.send(AgentEvent::TurnCompleted {
+            turn_id: turn.id,
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            tool_calls_count: total_tool_calls,
+        });
+
+        // 14. Return outbound message.
+        Ok(OutboundMessage {
+            response: safe_content,
+            turn_id: turn.id,
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            tool_calls_count: total_tool_calls,
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Hook lifecycle
@@ -3024,5 +3355,275 @@ mod multi_round_tests {
             .expect("process_message should recover after compaction");
 
         assert_eq!(result.response, "compacted response");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// process_turn_streaming tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod process_turn_streaming_tests {
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures::Stream;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use swage_core::{
+        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use swage_provider::LlmProvider;
+    use swage_storage::{
+        TurnStore, ThreadStore,
+        model::NewProject,
+        sqlite::SqliteStorage,
+        store::ProjectStore,
+        TurnState, ThreadState,
+    };
+
+    use super::*;
+    use crate::builder::AgentBuilder;
+    use crate::config::{AgentConfig, CompactionThreshold};
+    use crate::event::AgentEvent;
+    use crate::message::TurnRequest;
+
+    // -----------------------------------------------------------------------
+    // Test infrastructure
+    // -----------------------------------------------------------------------
+
+    /// A provider that yields the given chunks in order.
+    struct ChunkProvider {
+        chunks: Vec<StreamChunk>,
+    }
+
+    impl ChunkProvider {
+        fn new(chunks: Vec<StreamChunk>) -> Self {
+            Self { chunks }
+        }
+
+        /// Convenience: single text response.
+        fn text(text: &str) -> Self {
+            Self::new(vec![
+                StreamChunk::Delta { content: text.to_string() },
+                StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 10, output_tokens: 5 }),
+                StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            ])
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ChunkProvider {
+        fn model_id(&self) -> &str {
+            "chunk-mock"
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unimplemented!("ChunkProvider only supports streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("ChunkProvider only supports streaming")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            Box::pin(futures::stream::iter(self.chunks.clone()))
+        }
+    }
+
+    async fn setup_storage() -> (Arc<SqliteStorage>, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "test-project".into(),
+                slug: "test-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .expect("create test project");
+        (storage, project.id)
+    }
+
+    fn make_agent(storage: Arc<SqliteStorage>, provider: Arc<dyn LlmProvider>) -> Agent {
+        AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+            })
+            .provider(provider)
+            .storage(storage)
+            .build()
+            .expect("build agent")
+    }
+
+    fn make_turn_request(session_id: Uuid, thread_id: Uuid) -> TurnRequest {
+        TurnRequest {
+            session_id,
+            thread_id,
+            user_message: "Hello, agent!".into(),
+            assembled_context: vec![],
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emits_turn_started_and_completed_events() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("Hello!"));
+        let mut agent = make_agent(storage.clone(), provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        agent.process_turn_streaming(req, tx).await.expect("streaming should succeed");
+
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+
+        let has_turn_started = events.iter().any(|e| matches!(e, AgentEvent::TurnStarted { .. }));
+        let has_turn_completed = events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { .. }));
+        assert!(has_turn_started, "TurnStarted event missing");
+        assert!(has_turn_completed, "TurnCompleted event missing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emits_token_events_from_provider() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("word1 word2 word3"));
+        let mut agent = make_agent(storage, provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        agent.process_turn_streaming(req, tx).await.expect("streaming should succeed");
+
+        let token_contents: Vec<String> = {
+            let mut out = vec![];
+            while let Ok(e) = rx.try_recv() {
+                if let AgentEvent::Token { content } = e {
+                    out.push(content);
+                }
+            }
+            out
+        };
+
+        assert!(!token_contents.is_empty(), "should have emitted at least one Token event");
+        let combined = token_contents.join("");
+        assert_eq!(combined, "word1 word2 word3");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_state_is_completed_on_success() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("ok"));
+        let mut agent = make_agent(storage.clone(), provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+
+        let turn = TurnStore::get_turn(storage.as_ref(), result.turn_id)
+            .await
+            .expect("get_turn")
+            .expect("turn should exist");
+        assert_eq!(turn.state, TurnState::Completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn thread_returns_to_idle_after_success() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("ok"));
+        let mut agent = make_agent(storage.clone(), provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        agent.process_turn_streaming(req, tx).await.expect("should succeed");
+
+        let thread = ThreadStore::get(storage.as_ref(), thread_id)
+            .await
+            .expect("get thread")
+            .expect("thread exists");
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_stops_streaming_and_returns_error() {
+        let (storage, project_id) = setup_storage().await;
+        // A provider that streams infinitely — cancellation must stop it.
+        let provider = Arc::new(ChunkProvider::text("this would normally complete"));
+        let mut agent = make_agent(storage, provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Pre-cancel so the loop exits immediately.
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = TurnRequest {
+            session_id,
+            thread_id,
+            user_message: "cancelled".into(),
+            assembled_context: vec![],
+            cancellation_token: cancel,
+        };
+
+        let err = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect_err("should fail with Cancelled");
+        assert!(
+            matches!(err, AgentError::Cancelled),
+            "expected Cancelled, got: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn return_value_contains_response_and_token_counts() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("the answer is 42"));
+        let mut agent = make_agent(storage, provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = make_turn_request(session_id, thread_id);
+        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+
+        assert_eq!(result.response, "the answer is 42");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert_eq!(result.tool_calls_count, 0);
     }
 }

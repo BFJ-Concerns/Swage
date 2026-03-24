@@ -127,6 +127,28 @@ pub struct SearchProviderConfig {
     pub api_key: Option<String>,
 }
 
+/// Tool permission configuration — controls which tools an agent may invoke.
+///
+/// Follows the same allow/deny/bundle model as `swage_tool::PermissionConfig`.
+/// When no permissions are configured at any level, the default is allow-all
+/// to preserve backward compatibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolPermissionConfig {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub bundles: HashMap<String, Vec<String>>,
+}
+
+impl Default for ToolPermissionConfig {
+    fn default() -> Self {
+        Self {
+            allow: vec!["*".into()],
+            deny: vec![],
+            bundles: HashMap::new(),
+        }
+    }
+}
+
 /// Tool execution settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolConfig {
@@ -136,6 +158,10 @@ pub struct ToolConfig {
     pub max_output_bytes: usize,
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
+    /// Tool permission rules — controls which tools an agent may invoke.
+    /// Defaults to allow-all when unconfigured (backward compatibility).
+    #[serde(default)]
+    pub permissions: ToolPermissionConfig,
 }
 
 impl Default for ToolConfig {
@@ -144,6 +170,7 @@ impl Default for ToolConfig {
             shell_timeout_secs: 30,
             max_output_bytes: 100_000,
             search: None,
+            permissions: ToolPermissionConfig::default(),
         }
     }
 }
@@ -467,6 +494,86 @@ mod tests {
         let serialised = toml::to_string(&original).expect("serialise failed");
         let restored: ObservabilityConfig = toml::from_str(&serialised).expect("deserialise failed");
         assert!(restored.force_on);
+    }
+
+    // --- ToolPermissionConfig tests ---
+
+    #[test]
+    fn tool_permission_config_default_is_allow_all() {
+        let cfg = ToolPermissionConfig::default();
+        assert_eq!(cfg.allow, vec!["*".to_string()]);
+        assert!(cfg.deny.is_empty());
+        assert!(cfg.bundles.is_empty());
+    }
+
+    #[test]
+    fn tool_permission_config_default_round_trips_toml() {
+        let original = ToolPermissionConfig::default();
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ToolPermissionConfig =
+            toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn tool_permission_config_custom_deny_round_trips_toml() {
+        let original = ToolPermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec!["shell_exec".into(), "file_write".into()],
+            bundles: HashMap::new(),
+        };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ToolPermissionConfig =
+            toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn tool_permission_config_custom_allow_and_bundles_round_trips_toml() {
+        let mut bundles = HashMap::new();
+        bundles.insert(
+            "read_only".to_string(),
+            vec!["file_read".into(), "web_search".into()],
+        );
+        bundles.insert("write".to_string(), vec!["file_write".into()]);
+
+        let original = ToolPermissionConfig {
+            allow: vec!["file_read".into(), "web_search".into()],
+            deny: vec![],
+            bundles,
+        };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ToolPermissionConfig =
+            toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn tool_config_with_permissions_serialises_correctly() {
+        let mut bundles = HashMap::new();
+        bundles.insert("safe".to_string(), vec!["echo".into()]);
+
+        let original = ToolConfig {
+            shell_timeout_secs: 60,
+            max_output_bytes: 50_000,
+            search: None,
+            permissions: ToolPermissionConfig {
+                allow: vec!["echo".into()],
+                deny: vec!["shell_exec".into()],
+                bundles,
+            },
+        };
+        let serialised = toml::to_string(&original).expect("serialise failed");
+        let restored: ToolConfig = toml::from_str(&serialised).expect("deserialise failed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn tool_config_defaults_include_permissions() {
+        let cfg = ToolConfig::default();
+        assert_eq!(cfg.permissions.allow, vec!["*".to_string()]);
+        assert!(cfg.permissions.deny.is_empty());
+        assert!(cfg.permissions.bundles.is_empty());
     }
 
     #[test]

@@ -163,6 +163,7 @@ impl Tool for PythonExecuteTool {
                     Arc::new(FallbackDispatcher {
                         sub_dispatcher: Arc::clone(&self.sub_dispatcher),
                         working_directory: working_dir,
+                        handle: tokio::runtime::Handle::current(),
                     }) as Arc<dyn swage_python::dispatch::ToolDispatcher>
                 }
             };
@@ -198,11 +199,17 @@ impl Tool for PythonExecuteTool {
 /// Minimal dispatcher used when the task-local context is missing.
 ///
 /// Routes tool calls through the sub-dispatcher but cannot emit WebSocket
-/// events or persist call records. Only used as a safety fallback.
+/// events or persist call records. Used as a fallback when `PYTHON_CONTEXT`
+/// is not set — notably under agent delegation where the agent manages turn
+/// state and event emission directly.
 struct FallbackDispatcher {
     sub_dispatcher: Arc<ToolDispatcher>,
     /// Working directory forwarded to tools that derive paths from context.
     working_directory: PathBuf,
+    /// Captured eagerly at construction time (on a tokio worker thread).
+    /// `execute_code` spawns a plain OS thread for the GIL, so
+    /// `Handle::current()` is not available at dispatch time.
+    handle: tokio::runtime::Handle,
 }
 
 impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
@@ -215,9 +222,9 @@ impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
         let sub_dispatcher = Arc::clone(&self.sub_dispatcher);
         let tool_name_owned = tool_name.to_string();
 
-        // Bridge async → sync. Use handle.spawn() since this runs on a
-        // plain OS thread (from execute_code) without a tokio context.
-        let handle = tokio::runtime::Handle::current();
+        // Bridge async → sync. Use the pre-captured handle since this runs
+        // on a plain OS thread (from execute_code) without a tokio context.
+        let handle = self.handle.clone();
         let exec = handle
             .block_on(handle.spawn(async move {
                 let ctx = swage_tool::context::MockToolContext {

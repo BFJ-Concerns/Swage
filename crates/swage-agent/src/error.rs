@@ -41,6 +41,10 @@ pub enum AgentError {
 
     #[error("context exceeds capacity even after compaction")]
     ContextTooLong,
+
+    /// The turn was cancelled by the caller via the cancellation token.
+    #[error("turn cancelled")]
+    Cancelled,
 }
 
 impl AgentError {
@@ -64,6 +68,8 @@ impl AgentError {
             AgentError::ThreadNotFound(_) => false,
             AgentError::InvalidConfig(_) => false,
             AgentError::ContextTooLong => false,
+            // Cancellation is not a transient failure — the caller chose to stop.
+            AgentError::Cancelled => false,
         }
     }
 }

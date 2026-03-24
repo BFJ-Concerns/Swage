@@ -17,13 +17,17 @@ pub struct AgentToolContext {
     pub working_directory: PathBuf,
     pub allowed_paths: Vec<PathBuf>,
     pub user_info: Option<UserInfo>,
+    /// The LLM's call_id for the current tool invocation.
+    pub call_id: Option<String>,
+    /// The turn_id for the currently executing turn.
+    pub turn_id: Option<uuid::Uuid>,
 }
 
 impl AgentToolContext {
     /// Create a new context from agent identity, session, and working directory.
     ///
-    /// Starts with no path restrictions and no user info — callers add those
-    /// via the public fields after construction.
+    /// Starts with no path restrictions, no user info, and no turn/call context.
+    /// Callers set turn-specific fields via the builder methods.
     pub fn new(
         agent_id: impl Into<String>,
         session_id: impl Into<String>,
@@ -35,7 +39,21 @@ impl AgentToolContext {
             working_directory: working_directory.into(),
             allowed_paths: Vec::new(),
             user_info: None,
+            call_id: None,
+            turn_id: None,
         }
+    }
+
+    /// Set the call_id for the current tool invocation.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
+
+    /// Set the turn_id for the currently executing turn.
+    pub fn with_turn_id(mut self, turn_id: uuid::Uuid) -> Self {
+        self.turn_id = Some(turn_id);
+        self
     }
 }
 
@@ -58,6 +76,14 @@ impl ToolContext for AgentToolContext {
 
     fn user_info(&self) -> Option<&UserInfo> {
         self.user_info.as_ref()
+    }
+
+    fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
+    }
+
+    fn turn_id(&self) -> Option<uuid::Uuid> {
+        self.turn_id
     }
 }
 

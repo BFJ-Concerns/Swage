@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::model::{
     ContextConfig, LogLevel, ModelPricing, ObservabilityConfig, PricingConfig, Protocol,
-    ResolvedConfig, ServerConfig, ProviderConfig, ToolConfig, WorkspaceConfig, SandboxConfig,
-    LifecycleConfig, LoggingConfig,
+    ResolvedConfig, SearchProviderConfig, ServerConfig, ProviderConfig, ToolConfig,
+    ToolPermissionConfig, WorkspaceConfig, SandboxConfig, LifecycleConfig, LoggingConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,25 @@ pub struct PartialObservabilityConfig {
     pub force_on: Option<bool>,
 }
 
+/// Partial mirror of `ToolConfig` + `ToolPermissionConfig`.
+///
+/// Scalar fields use overlay-or-base semantics. Permission fields (allow, deny)
+/// use replacement semantics: if an overlay specifies `allow`, it replaces the
+/// base `allow` entirely rather than appending. Bundles merge map-style (overlay
+/// entry wins per key, base entries absent from overlay survive).
+///
+/// `search` uses a double-option to distinguish "not set" (outer `None`) from
+/// "explicitly disabled" (`Some(None)`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialToolConfig {
+    pub shell_timeout_secs: Option<u64>,
+    pub max_output_bytes: Option<usize>,
+    pub search: Option<Option<SearchProviderConfig>>,
+    pub allow: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
+    pub bundles: Option<HashMap<String, Vec<String>>>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,6 +109,7 @@ pub struct PartialConfig {
     pub context: Option<PartialContextConfig>,
     pub pricing: Option<PartialPricingConfig>,
     pub observability: Option<PartialObservabilityConfig>,
+    pub tools: Option<PartialToolConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +184,26 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 force_on: o.force_on.or(b.force_on),
             },
         ),
+        tools: merge_section(base.tools, overlay.tools, |b, o| {
+            // Scalar fields: overlay wins when present, otherwise base.
+            // Permission fields (allow, deny): overlay REPLACES base entirely.
+            // Bundles: map-style merge — overlay entry wins per key, base entries survive.
+            let bundles = match (b.bundles, o.bundles) {
+                (Some(mut base_b), Some(overlay_b)) => {
+                    base_b.extend(overlay_b);
+                    Some(base_b)
+                }
+                (base_b, overlay_b) => overlay_b.or(base_b),
+            };
+            PartialToolConfig {
+                shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
+                max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
+                search: o.search.or(b.search),
+                allow: o.allow.or(b.allow),
+                deny: o.deny.or(b.deny),
+                bundles,
+            }
+        }),
     }
 }
 
@@ -215,8 +255,22 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         logging: LoggingConfig {
             level: lg.level.unwrap_or(dlg.level),
         },
-        // ToolConfig is not yet merged from partial layers — defaults only for now.
-        tools: ToolConfig::default(),
+        tools: {
+            let dt = ToolConfig::default();
+            let t = partial.tools.unwrap_or_default();
+            let dp = ToolPermissionConfig::default();
+            ToolConfig {
+                shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
+                max_output_bytes: t.max_output_bytes.unwrap_or(dt.max_output_bytes),
+                // Double-option: outer None → default (None), Some(x) → use x.
+                search: t.search.unwrap_or(dt.search),
+                permissions: ToolPermissionConfig {
+                    allow: t.allow.unwrap_or(dp.allow),
+                    deny: t.deny.unwrap_or(dp.deny),
+                    bundles: t.bundles.unwrap_or(dp.bundles),
+                },
+            }
+        },
         context: {
             let dc = ContextConfig::default();
             let c = partial.context.unwrap_or_default();
@@ -497,5 +551,134 @@ mod tests {
         };
         let resolved = resolve(partial);
         assert_eq!(resolved.context.budget, None);
+    }
+
+    // --- PartialToolConfig / permission cascade tests ---
+
+    fn partial_with_tool_deny(deny: Vec<&str>) -> PartialConfig {
+        PartialConfig {
+            tools: Some(PartialToolConfig {
+                deny: Some(deny.into_iter().map(String::from).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn partial_with_tool_allow(allow: Vec<&str>) -> PartialConfig {
+        PartialConfig {
+            tools: Some(PartialToolConfig {
+                allow: Some(allow.into_iter().map(String::from).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tool_permission_default_resolves_to_allow_all() {
+        let resolved = resolve(PartialConfig::default());
+        assert_eq!(resolved.tools.permissions.allow, vec!["*".to_string()]);
+        assert!(resolved.tools.permissions.deny.is_empty());
+        assert!(resolved.tools.permissions.bundles.is_empty());
+    }
+
+    #[test]
+    fn tool_permission_agent_allow_overrides_global_deny() {
+        // Global denies "shell", agent allows "read_file" — agent's allow replaces.
+        let global = partial_with_tool_deny(vec!["shell"]);
+        let agent = partial_with_tool_allow(vec!["read_file"]);
+
+        let merged = merge_chain(vec![global, agent]);
+        let resolved = resolve(merged);
+
+        assert_eq!(resolved.tools.permissions.allow, vec!["read_file".to_string()]);
+        // Deny from global survives because agent didn't specify deny.
+        assert_eq!(resolved.tools.permissions.deny, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn tool_permission_overlay_deny_replaces_base_deny() {
+        let global = partial_with_tool_deny(vec!["shell", "file_write"]);
+        let agent = partial_with_tool_deny(vec!["web_search"]);
+
+        let merged = merge_chain(vec![global, agent]);
+        let resolved = resolve(merged);
+
+        // Agent's deny completely replaces global's deny.
+        assert_eq!(resolved.tools.permissions.deny, vec!["web_search".to_string()]);
+    }
+
+    #[test]
+    fn tool_permission_bundles_merge_map_style() {
+        let mut global_bundles = HashMap::new();
+        global_bundles.insert("read_only".to_string(), vec!["file_read".into()]);
+        global_bundles.insert("write".to_string(), vec!["file_write".into()]);
+
+        let mut agent_bundles = HashMap::new();
+        // Override the "read_only" bundle, leave "write" from global.
+        agent_bundles.insert("read_only".to_string(), vec!["file_read".into(), "web_search".into()]);
+
+        let global = PartialConfig {
+            tools: Some(PartialToolConfig {
+                bundles: Some(global_bundles),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            tools: Some(PartialToolConfig {
+                bundles: Some(agent_bundles),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge_chain(vec![global, agent]);
+        let resolved = resolve(merged);
+
+        // "read_only" overridden by agent.
+        assert_eq!(
+            resolved.tools.permissions.bundles["read_only"],
+            vec!["file_read".to_string(), "web_search".to_string()],
+        );
+        // "write" survives from global.
+        assert_eq!(
+            resolved.tools.permissions.bundles["write"],
+            vec!["file_write".to_string()],
+        );
+    }
+
+    #[test]
+    fn tool_config_scalar_fields_merge_overlay_wins() {
+        let global = PartialConfig {
+            tools: Some(PartialToolConfig {
+                shell_timeout_secs: Some(60),
+                max_output_bytes: Some(200_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            tools: Some(PartialToolConfig {
+                shell_timeout_secs: Some(120),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge_chain(vec![global, agent]);
+        let resolved = resolve(merged);
+
+        assert_eq!(resolved.tools.shell_timeout_secs, 120, "agent overrides global");
+        assert_eq!(resolved.tools.max_output_bytes, 200_000, "global survives when agent absent");
+    }
+
+    #[test]
+    fn tool_config_absent_resolves_to_defaults() {
+        let resolved = resolve(PartialConfig::default());
+        assert_eq!(resolved.tools.shell_timeout_secs, 30);
+        assert_eq!(resolved.tools.max_output_bytes, 100_000);
+        assert_eq!(resolved.tools.search, None);
     }
 }

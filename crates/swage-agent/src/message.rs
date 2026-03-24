@@ -4,8 +4,10 @@
 //! to JSON and carry no references into agent internals.
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use swage_core::ChatMessage;
 use swage_storage::TurnState;
 
 /// A message from the caller into the agent.
@@ -144,6 +146,104 @@ mod outbound_message_tests {
         assert_eq!(decoded.input_tokens, 0);
         assert_eq!(decoded.output_tokens, 0);
         assert_eq!(decoded.tool_calls_count, 0);
+    }
+}
+
+/// The input to `Agent::process_turn_streaming()`.
+///
+/// The gateway pre-assembles context from the context engine and passes it here,
+/// so the agent does not rebuild context from thread history in the streaming path.
+/// The user message is already persisted by the gateway — the agent creates the
+/// turn record but does NOT store the user message again.
+#[derive(Debug, Clone)]
+pub struct TurnRequest {
+    /// Target session for this turn.
+    pub session_id: Uuid,
+    /// Target thread within the session. Required — the streaming path expects
+    /// a specific thread, unlike `InboundMessage` which falls back to the active thread.
+    pub thread_id: Uuid,
+    /// The user's message text, carried for hook invocations.
+    pub user_message: String,
+    /// Pre-assembled message context from the context engine.
+    pub assembled_context: Vec<ChatMessage>,
+    /// Cooperative cancellation token — the gateway signals this when the client
+    /// disconnects or a shutdown is requested.
+    pub cancellation_token: CancellationToken,
+}
+
+#[cfg(test)]
+mod turn_request_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn test_turn_request_constructible() {
+        let req = TurnRequest {
+            session_id: uuid::Uuid::new_v4(),
+            thread_id: uuid::Uuid::new_v4(),
+            user_message: "hello".to_string(),
+            assembled_context: vec![],
+            cancellation_token: CancellationToken::new(),
+        };
+        assert_eq!(req.user_message, "hello");
+        assert!(req.assembled_context.is_empty());
+    }
+
+    #[test]
+    fn test_thread_id_is_required() {
+        // thread_id is Uuid (not Option<Uuid>) — must be explicitly provided.
+        let req = TurnRequest {
+            session_id: uuid::Uuid::new_v4(),
+            thread_id: uuid::Uuid::new_v4(),
+            user_message: "test".to_string(),
+            assembled_context: vec![],
+            cancellation_token: CancellationToken::new(),
+        };
+        // A non-nil UUID means it was actually provided.
+        assert!(!req.thread_id.is_nil());
+    }
+
+    #[test]
+    fn test_cloneable() {
+        let req = TurnRequest {
+            session_id: uuid::Uuid::new_v4(),
+            thread_id: uuid::Uuid::new_v4(),
+            user_message: "clone me".to_string(),
+            assembled_context: vec![],
+            cancellation_token: CancellationToken::new(),
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.user_message, req.user_message);
+        assert_eq!(cloned.session_id, req.session_id);
+        assert_eq!(cloned.thread_id, req.thread_id);
+    }
+
+    #[test]
+    fn test_cancellation_token_linked_cancel() {
+        // CancellationToken::clone() produces a linked token — both cancel together.
+        let token = CancellationToken::new();
+        let req = TurnRequest {
+            session_id: uuid::Uuid::new_v4(),
+            thread_id: uuid::Uuid::new_v4(),
+            user_message: "cancel test".to_string(),
+            assembled_context: vec![],
+            cancellation_token: token.clone(),
+        };
+        token.cancel();
+        assert!(req.cancellation_token.is_cancelled());
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let req = TurnRequest {
+            session_id: uuid::Uuid::new_v4(),
+            thread_id: uuid::Uuid::new_v4(),
+            user_message: "debug".to_string(),
+            assembled_context: vec![],
+            cancellation_token: CancellationToken::new(),
+        };
+        let s = format!("{:?}", req);
+        assert!(s.contains("TurnRequest"));
     }
 }
 
