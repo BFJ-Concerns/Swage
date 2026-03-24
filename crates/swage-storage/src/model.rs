@@ -443,18 +443,49 @@ pub struct NewApprovalRequest {
 // Agent messages — inter-agent communication
 // ---------------------------------------------------------------------------
 
-// TODO AgentMessage model struct
-// tags: forge:inter-agent-communication
-// Define AgentMessage struct with fields: id (Uuid), sender_agent_id (String),
-// recipient_agent_id (String), kind (MessageKind from swage-core), correlation_id
-// (Option<Uuid>), payload (serde_json::Value), status (MessageStatus from
-// swage-core), failure_reason (Option<String>), created_at (DateTime<Utc>),
-// delivered_at (Option<DateTime<Utc>>).
-// Also define NewAgentMessage (creation input, no id/created_at/delivered_at).
-// Follow the pattern of ApprovalRequest/NewApprovalRequest above.
-// Derive Debug, Clone, Serialize, Deserialize on both.
-// Success: both structs compile and can be constructed in unit tests.
-// ---
+/// A persisted inter-agent message — one row in the `agent_messages` table.
+///
+/// Created by the sending agent and held in the storage layer until the
+/// recipient agent polls its mailbox. The `status` field tracks delivery
+/// lifecycle; `correlation_id` links Result and Cancel messages back to the
+/// originating Delegate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub id: Uuid,
+    /// The agent that originated this message.
+    pub sender_agent_id: String,
+    /// The intended recipient agent.
+    pub recipient_agent_id: String,
+    /// Semantic category of the message — drives routing and hook events.
+    pub kind: swage_core::MessageKind,
+    /// References the originating Delegate message. Required on Result and
+    /// Cancel messages; None for Delegate and Notify.
+    pub correlation_id: Option<Uuid>,
+    /// Message-specific content as a JSON object.
+    pub payload: serde_json::Value,
+    /// Current delivery state (Pending → Delivered | Failed).
+    pub status: swage_core::MessageStatus,
+    /// Populated when `status == Failed` with a human-readable error description.
+    pub failure_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// Set when `status` transitions to `Delivered`.
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a new inter-agent message.
+///
+/// `id`, `status` (`Pending`), `failure_reason`, `created_at`, and
+/// `delivered_at` are assigned by the storage layer — callers supply only
+/// the fields they control.
+#[derive(Debug, Clone)]
+pub struct NewAgentMessage {
+    pub sender_agent_id: String,
+    pub recipient_agent_id: String,
+    pub kind: swage_core::MessageKind,
+    /// Required for Result and Cancel; None for Delegate and Notify.
+    pub correlation_id: Option<Uuid>,
+    pub payload: serde_json::Value,
+}
 
 // ---------------------------------------------------------------------------
 // Creation types — inputs for insert operations (no auto-generated fields)
@@ -1192,5 +1223,71 @@ mod tests {
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
         assert!(back.structured_output.is_none());
+    }
+
+    // --- AgentMessage constructibility ---
+
+    #[test]
+    fn agent_message_is_constructible() {
+        use swage_core::{MessageKind, MessageStatus};
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let msg = AgentMessage {
+            id,
+            sender_agent_id: "agent-a".to_string(),
+            recipient_agent_id: "agent-b".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({"task": "summarise"}),
+            status: MessageStatus::Pending,
+            failure_reason: None,
+            created_at: now,
+            delivered_at: None,
+        };
+        assert_eq!(msg.id, id);
+        assert_eq!(msg.kind, MessageKind::Delegate);
+        assert_eq!(msg.status, MessageStatus::Pending);
+    }
+
+    #[test]
+    fn agent_message_serialises_and_deserialises() {
+        use swage_core::{MessageKind, MessageStatus};
+        let now = Utc::now();
+        let msg = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "a".to_string(),
+            recipient_agent_id: "b".to_string(),
+            kind: MessageKind::Notify,
+            correlation_id: Some(Uuid::new_v4()),
+            payload: serde_json::json!({"content": "hello"}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: now,
+            delivered_at: Some(now),
+        };
+        let json = serde_json::to_string(&msg).expect("serialisation should succeed");
+        let back: AgentMessage =
+            serde_json::from_str(&json).expect("deserialisation should succeed");
+        assert_eq!(back.sender_agent_id, "a");
+        assert_eq!(back.recipient_agent_id, "b");
+        assert_eq!(back.kind, MessageKind::Notify);
+        assert_eq!(back.status, MessageStatus::Delivered);
+    }
+
+    #[test]
+    fn new_agent_message_is_constructible() {
+        use swage_core::MessageKind;
+        let sender = Uuid::new_v4();
+        let _ = sender; // correlation_id is Option<Uuid>, not necessarily sender
+        let nm = NewAgentMessage {
+            sender_agent_id: "agent-a".to_string(),
+            recipient_agent_id: "agent-b".to_string(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(Uuid::new_v4()),
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(nm.sender_agent_id, "agent-a");
+        assert_eq!(nm.kind, MessageKind::Cancel);
+        assert!(nm.correlation_id.is_some());
     }
 }
