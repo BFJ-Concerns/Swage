@@ -54,23 +54,44 @@ pub enum HookEvent {
     /// An agent has stopped execution.
     AgentStop { agent_id: String },
 
-    // TODO Message lifecycle hook events
-    // tags: forge:inter-agent-communication
-    // Add three new variants:
-    //   MessageSend { sender_agent_id, recipient_agent_id, kind, payload }
-    //   MessageDeliver { message_id, sender_agent_id, recipient_agent_id, kind, payload }
-    //   MessageReceive { message_id, sender_agent_id, recipient_agent_id, kind, payload }
-    // All fields are String/Value types matching the message envelope.
-    // `kind` is the message kind string (e.g. "Delegate", "Notify").
-    // Update event_name() to return "MessageSend", "MessageDeliver", "MessageReceive".
-    // MessageSend can block (prevents message creation).
-    // MessageDeliver can block (transitions message to failed).
-    // MessageReceive can block (transitions message to failed).
-    // All three fire for durable messages; MessageDeliver does not fire for Notify.
-    // Follow existing dispatch semantics: priority, timeout, fail-open.
-    // Success: variants compile, event_name() returns correct strings,
-    // hooks can be registered for these events.
-    // ---
+    /// A message is about to be sent from one agent to another.
+    ///
+    /// Hooks can block this event to prevent the message from being created.
+    /// This fires for all durable message kinds.
+    MessageSend {
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "notify").
+        kind: String,
+        payload: Value,
+    },
+
+    /// A message has been delivered to the recipient agent's mailbox.
+    ///
+    /// Hooks can block to transition the message to Failed. This event does
+    /// not fire for Notify messages (ephemeral, no delivery confirmation).
+    /// Enforcement of the Notify exclusion is the caller's responsibility.
+    MessageDeliver {
+        message_id: String,
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "cancel").
+        kind: String,
+        payload: Value,
+    },
+
+    /// A message has been received and is about to be processed by the agent.
+    ///
+    /// Hooks can block to reject the message before the agent acts on it,
+    /// transitioning the message to Failed.
+    MessageReceive {
+        message_id: String,
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "result").
+        kind: String,
+        payload: Value,
+    },
 }
 
 impl HookEvent {
@@ -86,6 +107,9 @@ impl HookEvent {
             HookEvent::AfterResponse { .. } => "AfterResponse",
             HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
+            HookEvent::MessageSend { .. } => "MessageSend",
+            HookEvent::MessageDeliver { .. } => "MessageDeliver",
+            HookEvent::MessageReceive { .. } => "MessageReceive",
         }
     }
 }

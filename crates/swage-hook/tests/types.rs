@@ -339,6 +339,43 @@ async fn hook_can_be_sent_across_threads() {
     assert!(matches!(outcome, HookOutcome::Continue));
 }
 
+// -- Message lifecycle event variants ---------------------------------------
+
+#[test]
+fn hook_event_message_send() {
+    let event = HookEvent::MessageSend {
+        sender_agent_id: "agent-a".into(),
+        recipient_agent_id: "agent-b".into(),
+        kind: "delegate".into(),
+        payload: json!({"task": "summarise"}),
+    };
+    assert_eq!(event.event_name(), "MessageSend");
+}
+
+#[test]
+fn hook_event_message_deliver() {
+    let event = HookEvent::MessageDeliver {
+        message_id: "msg-1".into(),
+        sender_agent_id: "agent-a".into(),
+        recipient_agent_id: "agent-b".into(),
+        kind: "delegate".into(),
+        payload: json!({"task": "summarise"}),
+    };
+    assert_eq!(event.event_name(), "MessageDeliver");
+}
+
+#[test]
+fn hook_event_message_receive() {
+    let event = HookEvent::MessageReceive {
+        message_id: "msg-1".into(),
+        sender_agent_id: "agent-a".into(),
+        recipient_agent_id: "agent-b".into(),
+        kind: "notify".into(),
+        payload: json!({"info": "done"}),
+    };
+    assert_eq!(event.event_name(), "MessageReceive");
+}
+
 // -- Mock hook exercised with every event variant ---------------------------
 
 #[tokio::test]
