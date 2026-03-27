@@ -11,6 +11,7 @@ swage-tool = { path = "../swage-tool" }
 swage-storage = { path = "../swage-storage" }
 swage-hook = { path = "../swage-hook" }
 swage-safety = { path = "../swage-safety" }
+swage-config = { path = "../swage-config" }
 
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
