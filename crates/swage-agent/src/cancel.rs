@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use swage_core::MessageKind;
 use swage_storage::model::AgentMessage;
-use swage_storage::store::TurnStore;
+use swage_storage::store::{AgentMessageStore, TurnStore};
 use swage_storage::{Storage, TurnState};
 
 use crate::error::AgentError;
@@ -32,24 +32,24 @@ pub async fn handle_cancel(
         ));
     };
 
-    // Find the original Delegate in the correlation chain, then locate the
-    // turn created for that delegation. Since we don't have a direct
-    // message→turn link, we look for in-progress turns for the target agent.
-    let correlated = storage.list_by_correlation(correlation_id).await?;
-    let delegate_msg = correlated.iter().find(|m| m.kind == MessageKind::Delegate);
+    // The correlation_id on a Cancel references the original Delegate's message ID.
+    // Look it up directly, then find active turns for the delegate's recipient.
+    let delegate = storage.get_agent_message(correlation_id).await?;
 
-    if let Some(delegate) = delegate_msg {
-        // Find active turns for the recipient of the original delegation.
-        let active_turns = storage
-            .find_in_progress_by_agent(&delegate.recipient_agent_id)
-            .await?;
+    if let Some(delegate) = delegate {
+        if delegate.kind == MessageKind::Delegate {
+            // Find active turns for the recipient of the original delegation.
+            let active_turns = storage
+                .find_in_progress_by_agent(&delegate.recipient_agent_id)
+                .await?;
 
-        // Interrupt the first active turn — in a per-task lifecycle, there's
-        // at most one active turn per agent instantiation.
-        for turn in active_turns {
-            let _ = storage
-                .update_turn_state(turn.id, TurnState::Interrupted)
-                .await;
+            // Interrupt all active turns — in a per-task lifecycle, there's
+            // typically one active turn per agent instantiation.
+            for turn in active_turns {
+                let _ = storage
+                    .update_turn_state(turn.id, TurnState::Interrupted)
+                    .await;
+            }
         }
     }
 
@@ -85,12 +85,12 @@ mod tests {
     use super::*;
     use swage_core::{MessageKind, MessageStatus};
     use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
-    use swage_storage::store::{ProjectStore, SessionStore, ThreadStore};
+    use swage_storage::store::{AgentMessageStore, ProjectStore, SessionStore, ThreadStore};
     use swage_storage::SqliteStorage;
     use uuid::Uuid;
 
-    async fn setup_with_turn(agent_id: &str) -> (Arc<dyn Storage>, Uuid) {
-        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+    async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let project = ProjectStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
@@ -158,7 +158,7 @@ mod tests {
             .await
             .unwrap();
 
-        handle_cancel(&storage, &cancel).await.unwrap();
+        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel).await.unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
@@ -181,7 +181,7 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_shutdown(&storage, &shutdown).await.unwrap();
+        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown).await.unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);

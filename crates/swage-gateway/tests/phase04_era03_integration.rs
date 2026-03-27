@@ -328,7 +328,7 @@ async fn hook_blocks_message_send() {
     }
 
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
-    let registry = Arc::new(HookRegistry::new());
+    let mut registry = HookRegistry::new();
 
     // Event filter function for MessageSend events
     fn is_message_send(event: &HookEvent) -> bool {
@@ -344,6 +344,7 @@ async fn hook_blocks_message_send() {
         timeout: std::time::Duration::from_secs(30),
     });
 
+    let registry = Arc::new(registry);
     let router = swage_agent::MessageRouter::new(storage.clone(), Some(registry));
 
     let result = router

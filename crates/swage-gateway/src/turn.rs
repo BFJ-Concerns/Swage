@@ -1253,6 +1253,7 @@ pub(crate) mod tests {
                 output_tokens: None,
                 cost_microcents: None,
                 structured_output: None,
+                parent_turn_id: turn.parent_turn_id,
                 created_at: chrono::Utc::now(),
                 completed_at: None,
             };

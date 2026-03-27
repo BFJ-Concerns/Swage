@@ -274,6 +274,9 @@ impl Hook for RecordingHook {
             HookEvent::PostToolUse { .. } => "PostToolUse",
             HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
+            HookEvent::MessageSend { .. } => "MessageSend",
+            HookEvent::MessageDeliver { .. } => "MessageDeliver",
+            HookEvent::MessageReceive { .. } => "MessageReceive",
         };
         self.events.lock().unwrap().push(label.to_string());
         HookOutcome::Continue

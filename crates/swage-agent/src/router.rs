@@ -239,14 +239,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_blocks_message_send() {
-        use swage_hook::Hook;
+        use swage_hook::{Hook, HookRegistration};
 
         struct BlockHook;
 
         #[async_trait::async_trait]
         impl Hook for BlockHook {
-            fn event_filter(&self) -> Option<&str> {
-                Some("MessageSend")
+            fn name(&self) -> &str {
+                "block-hook"
             }
 
             async fn execute(&self, _event: &HookEvent) -> HookOutcome {
@@ -255,8 +255,22 @@ mod tests {
         }
 
         let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
-        let registry = Arc::new(HookRegistry::new());
-        registry.register(Arc::new(BlockHook));
+        let mut registry = HookRegistry::new();
+
+        fn is_message_send(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageSend { .. })
+        }
+
+        registry.register(HookRegistration {
+            hook: Arc::new(BlockHook),
+            event_filter: Some(is_message_send),
+            matcher: None,
+            priority: 0,
+            failure_mode: swage_hook::FailureMode::FailOpen,
+            timeout: std::time::Duration::from_secs(30),
+        });
+
+        let registry = Arc::new(registry);
         let router = MessageRouter::new(storage.clone(), Some(registry));
 
         let result = router.send_message(delegate_msg()).await;
