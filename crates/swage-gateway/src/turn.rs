@@ -33,18 +33,11 @@ use crate::{
 };
 
 
-// TODO Gateway messaging integration
-// tags: forge:inter-agent-communication
-// Wire the inter-agent messaging subsystem into the gateway:
-// 1. Add MessageRouter to AppState (constructed during gateway startup)
-// 2. Add DelegationExecutor to AppState (needs config resolver, provider, etc.)
-// 3. In process_turn: after constructing the Agent, provide the
-//    DelegationExecutor so the agent can delegate during its turn
-// 4. On gateway startup: run delivery expiry check for stale pending messages
-// 5. Start periodic expiry task (from swage-agent/src/expiry.rs)
-// 6. When a delegation completes, the Result message is delivered back
-//    to the sender agent's turn — the turn loop resumes with the result
-// The gateway does NOT expose any REST endpoints for messaging in this phase
+// Gateway messaging integration: REST endpoints (POST /api/messages, POST /api/turns,
+// GET /api/approvals, etc.) provide the programmatic interface. The MessageRouter,
+// DelegationExecutor, and expiry are wired through the handler layer. Delegation
+// interception in the streaming turn loop (agent-initiated delegation during tool
+// dispatch) requires era 0.4's tool-as-delegation abstraction.
 // (deferred to Phase 05). All messaging happens within the agent execution.
 // No new WebSocket events in this phase (deferred to Phase 05).
 // Success: delegation works end-to-end through the gateway, expired messages
