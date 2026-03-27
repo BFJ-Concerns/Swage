@@ -495,6 +495,181 @@ impl GatewayClient {
         self.check_success(response, &url).await?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Programmatic interface — async turns, messaging, approvals
+    // -----------------------------------------------------------------------
+
+    /// Submit a turn for async processing. Returns the turn_id.
+    /// Calls `POST /api/turns`.
+    pub async fn submit_turn(
+        &self,
+        conversation_id: Uuid,
+        message: &str,
+        output_schema: Option<serde_json::Value>,
+    ) -> Result<Uuid, ClientError> {
+        let url = format!("{}/api/turns", self.base_url);
+        let body = serde_json::json!({
+            "conversation_id": conversation_id,
+            "message": message,
+            "output_schema": output_schema,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        let body: serde_json::Value = self.parse_json(response, &url).await?;
+        let turn_id = body["turn_id"]
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| ClientError::Protocol("missing turn_id in response".into()))?;
+        Ok(turn_id)
+    }
+
+    /// Poll a turn for status and result.
+    /// Calls `GET /api/turns/{id}`.
+    pub async fn poll_turn(&self, turn_id: Uuid) -> Result<serde_json::Value, ClientError> {
+        let url = format!("{}/api/turns/{turn_id}", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
+
+    /// Send a typed inter-agent message.
+    /// Calls `POST /api/messages`.
+    pub async fn send_agent_message(
+        &self,
+        sender_agent_id: &str,
+        recipient_agent_id: &str,
+        kind: &str,
+        correlation_id: Option<Uuid>,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let url = format!("{}/api/messages", self.base_url);
+        let body = serde_json::json!({
+            "sender_agent_id": sender_agent_id,
+            "recipient_agent_id": recipient_agent_id,
+            "kind": kind,
+            "correlation_id": correlation_id,
+            "payload": payload,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
+
+    /// Query message delivery status.
+    /// Calls `GET /api/messages/{id}`.
+    pub async fn get_message_status(
+        &self,
+        message_id: Uuid,
+    ) -> Result<serde_json::Value, ClientError> {
+        let url = format!("{}/api/messages/{message_id}", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
+
+    /// List pending approval requests.
+    /// Calls `GET /api/approvals`.
+    pub async fn list_approvals(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut url = format!("{}/api/approvals", self.base_url);
+        if let Some(id) = agent_id {
+            url.push_str(&format!("?agent_id={id}"));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
+
+    /// Decide on a pending approval (approve/reject).
+    /// Calls `POST /api/approvals/{id}`.
+    pub async fn decide_approval(
+        &self,
+        approval_id: Uuid,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let url = format!("{}/api/approvals/{approval_id}", self.base_url);
+        let body = serde_json::json!({
+            "decision": decision,
+            "reason": reason,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
+
+    /// List turns in a conversation.
+    /// Calls `GET /api/conversations/{id}/turns`.
+    pub async fn list_turns(
+        &self,
+        conversation_id: Uuid,
+        state: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut url = format!("{}/api/conversations/{conversation_id}/turns", self.base_url);
+        let mut params = vec![];
+        if let Some(s) = state {
+            params.push(format!("state={s}"));
+        }
+        if let Some(a) = agent_id {
+            params.push(format!("agent_id={a}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+
+        self.parse_json(response, &url).await
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -109,6 +109,40 @@ pub enum ServerEvent {
 
     /// A skill was deactivated for this session.
     SkillDeactivated { name: String },
+
+    /// A delegation from one agent to another has started.
+    DelegationStarted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+    },
+
+    /// A delegation has completed.
+    DelegationCompleted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+        success: bool,
+    },
+
+    /// Approval required — a tool or hook requires human review.
+    ApprovalRequired {
+        approval_id: Uuid,
+        turn_id: Uuid,
+        agent_id: String,
+        prompt: String,
+        #[serde(default)]
+        timeout_at: Option<String>,
+    },
+
+    /// An approval was confirmed (approved or rejected).
+    ApprovalConfirmed {
+        approval_id: Uuid,
+        decision: String,
+    },
+
+    /// An approval request expired.
+    ApprovalExpired { approval_id: Uuid },
 }
 
 // ---------------------------------------------------------------------------

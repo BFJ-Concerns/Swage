@@ -18,6 +18,31 @@ impl From<GatewayError> for ApiError {
     }
 }
 
+impl ApiError {
+    /// 404 Not Found for a named entity.
+    pub fn not_found(entity: &str, id: uuid::Uuid) -> Self {
+        ApiError(GatewayError::Storage(swage_core::StorageError::NotFound {
+            entity: entity.to_string(),
+            id: id.to_string(),
+        }))
+    }
+
+    /// 500 Internal Server Error with a free-form message.
+    pub fn internal(message: String) -> Self {
+        ApiError(GatewayError::ConfigError(message))
+    }
+
+    /// 409 Conflict.
+    pub fn conflict(message: String) -> Self {
+        ApiError(GatewayError::ProjectConflict(message))
+    }
+
+    /// 422 Validation Error.
+    pub fn validation(message: String) -> Self {
+        ApiError(GatewayError::ValidationError(message))
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code) = classify(&self.0);

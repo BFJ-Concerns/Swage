@@ -410,6 +410,426 @@ pub async fn shutdown(
 }
 
 // ---------------------------------------------------------------------------
+// Programmatic interface — REST endpoints for async turn submission,
+// approval decisions, agent messaging, and turn listing.
+// ---------------------------------------------------------------------------
+
+/// Request body for async turn submission.
+#[derive(Debug, Deserialize)]
+pub struct SubmitTurnRequest {
+    /// The conversation (session) to submit the turn in.
+    pub conversation_id: Uuid,
+    /// The user message to process.
+    pub message: String,
+    /// Optional output schema that overrides the agent's configured schema
+    /// for this single turn.
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// Response for async turn submission.
+#[derive(Debug, Serialize)]
+pub struct SubmitTurnResponse {
+    pub turn_id: Uuid,
+    pub status: String,
+}
+
+/// Response for turn polling.
+#[derive(Debug, Serialize)]
+pub struct TurnPollResponse {
+    pub turn_id: Uuid,
+    pub state: String,
+    pub assistant_response: Option<String>,
+    pub structured_output: Option<serde_json::Value>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub parent_turn_id: Option<Uuid>,
+}
+
+/// `POST /api/turns` — submit a turn for async processing.
+///
+/// Returns 202 Accepted with the turn_id. The client polls GET /api/turns/:id
+/// for the result. The turn is dispatched to the agent runtime in the background —
+/// no WebSocket connection required.
+pub async fn submit_turn(
+    State(state): State<AppState>,
+    Json(req): Json<SubmitTurnRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    use swage_storage::model::NewTurn;
+    use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+
+    // Verify the session exists and find its thread.
+    let _session = state
+        .storage
+        .get_session(req.conversation_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("conversation", req.conversation_id))?;
+
+    let threads = state
+        .storage
+        .list_by_session(req.conversation_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let thread = threads
+        .first()
+        .ok_or_else(|| ApiError::internal("no thread found for session".into()))?;
+
+    // Create the turn in Pending state — visible to the poller immediately.
+    let turn = state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: swage_storage::TurnState::Pending,
+            parent_turn_id: None,
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let turn_id = turn.id;
+
+    // Spawn background turn processing — the REST client polls for result.
+    let bg_state = state.clone();
+    let message = req.message;
+    let session_id = req.conversation_id;
+    tokio::spawn(async move {
+        use crate::subscription::SubscriptionState;
+        use tokio::sync::{mpsc, Mutex};
+        use std::sync::Arc;
+
+        // Create a dummy WebSocket sender — events are discarded but the
+        // turn processing infrastructure requires it.
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
+        let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
+
+        // Drain events in background so the channel never fills.
+        tokio::spawn(async move {
+            while ws_rx.recv().await.is_some() {}
+        });
+
+        let result = crate::turn::process_turn(
+            &bg_state,
+            session_id,
+            message,
+            ws_tx,
+            subscription,
+        )
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!(turn_id = %turn_id, error = %e, "async turn processing failed");
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SubmitTurnResponse {
+            turn_id,
+            status: "pending".into(),
+        }),
+    ))
+}
+
+/// `GET /api/turns/:id` — poll a turn for status and result.
+///
+/// Returns the turn's current state. When completed, includes the assistant
+/// response, structured output, and token counts.
+pub async fn get_turn(
+    State(state): State<AppState>,
+    Path(turn_id): Path<Uuid>,
+) -> Result<Json<TurnPollResponse>, ApiError> {
+    use swage_storage::store::TurnStore;
+
+    let turn = state
+        .storage
+        .get_turn(turn_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("turn", turn_id))?;
+
+    Ok(Json(TurnPollResponse {
+        turn_id: turn.id,
+        state: turn.state.to_string(),
+        assistant_response: turn.assistant_response,
+        structured_output: turn.structured_output,
+        input_tokens: turn.input_tokens,
+        output_tokens: turn.output_tokens,
+        parent_turn_id: turn.parent_turn_id,
+    }))
+}
+
+/// Request body for sending an inter-agent message.
+#[derive(Debug, Deserialize)]
+pub struct SendMessageRequest {
+    pub sender_agent_id: String,
+    pub recipient_agent_id: String,
+    pub kind: String,
+    pub correlation_id: Option<Uuid>,
+    pub payload: serde_json::Value,
+}
+
+/// Response for message operations.
+#[derive(Debug, Serialize)]
+pub struct MessageResponse {
+    pub id: Uuid,
+    pub status: String,
+}
+
+/// `POST /api/messages` — send a typed message to an agent.
+///
+/// Creates a durable message (Delegate, Result, Cancel, Shutdown) or an
+/// ephemeral Notify. Returns the message ID and initial status.
+pub async fn send_agent_message(
+    State(state): State<AppState>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    use swage_agent::MessageRouter;
+    use swage_core::MessageKind;
+    use swage_storage::model::NewAgentMessage;
+
+    let kind: MessageKind = req
+        .kind
+        .parse()
+        .map_err(|e: String| ApiError::validation(e))?;
+
+    let router = MessageRouter::new(state.storage.clone(), None);
+    let msg = router
+        .send_message(NewAgentMessage {
+            sender_agent_id: req.sender_agent_id,
+            recipient_agent_id: req.recipient_agent_id,
+            kind,
+            correlation_id: req.correlation_id,
+            payload: req.payload,
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            id: msg.id,
+            status: msg.status.to_string(),
+        }),
+    ))
+}
+
+/// `GET /api/messages/:id` — query message delivery status.
+pub async fn get_message_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    use swage_storage::store::AgentMessageStore;
+
+    let msg = state
+        .storage
+        .get_agent_message(id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("message", id))?;
+
+    Ok(Json(MessageResponse {
+        id: msg.id,
+        status: msg.status.to_string(),
+    }))
+}
+
+/// Approval listing response.
+#[derive(Debug, Serialize)]
+pub struct ApprovalListResponse {
+    pub approvals: Vec<ApprovalSummary>,
+}
+
+/// Summary of a pending approval request.
+#[derive(Debug, Serialize)]
+pub struct ApprovalSummary {
+    pub id: Uuid,
+    pub turn_id: Uuid,
+    pub agent_id: String,
+    pub kind: String,
+    pub tool_name: Option<String>,
+    pub prompt: String,
+    pub timeout_at: Option<String>,
+}
+
+/// Query parameters for approval listing.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalListQuery {
+    pub agent_id: Option<String>,
+}
+
+/// `GET /api/approvals` — list pending approval requests.
+///
+/// Optionally filtered by agent_id. Returns all pending approvals visible
+/// to the caller.
+pub async fn list_approvals(
+    State(state): State<AppState>,
+    Query(query): Query<ApprovalListQuery>,
+) -> Result<Json<ApprovalListResponse>, ApiError> {
+    use swage_storage::store::ApprovalStore;
+
+    let approvals = if let Some(ref agent_id) = query.agent_id {
+        state.storage.list_pending_by_agent(agent_id).await
+    } else {
+        state.storage.list_all_pending().await
+    }
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let summaries = approvals
+        .into_iter()
+        .map(|a| ApprovalSummary {
+            id: a.id,
+            turn_id: a.turn_id,
+            agent_id: a.agent_id,
+            kind: a.kind.to_string(),
+            tool_name: a.tool_name,
+            prompt: a.prompt,
+            timeout_at: a.timeout_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+
+    Ok(Json(ApprovalListResponse { approvals: summaries }))
+}
+
+/// Request body for an approval decision.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalDecisionRequest {
+    /// "approved" or "rejected"
+    pub decision: String,
+    pub reason: Option<String>,
+}
+
+/// `POST /api/approvals/:id` — decide on a pending approval.
+///
+/// Routes through the same approval channel mechanism as WebSocket decisions.
+/// Returns 200 on success, 404 if the approval doesn't exist, 409 if already decided.
+pub async fn decide_approval(
+    State(state): State<AppState>,
+    Path(approval_id): Path<Uuid>,
+    Json(req): Json<ApprovalDecisionRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    use crate::state::ApprovalDecision;
+
+    // Try to fire the oneshot channel for this approval.
+    let sender = state
+        .approval_channels
+        .lock()
+        .await
+        .remove(&approval_id);
+
+    match sender {
+        Some(tx) => {
+            let _ = tx.send(ApprovalDecision {
+                decision: req.decision.clone(),
+                reason: req.reason.clone(),
+            });
+
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": req.decision,
+                })),
+            ))
+        }
+        None => {
+            // Already resolved or never registered — check storage.
+            use swage_storage::store::ApprovalStore;
+
+            let existing = state
+                .storage
+                .get_approval(approval_id)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+
+            match existing {
+                None => Err(ApiError::not_found("approval", approval_id)),
+                Some(a) if a.state != swage_storage::model::ApprovalState::Pending => {
+                    Err(ApiError::conflict(format!(
+                        "approval {} already {}",
+                        approval_id, a.state
+                    )))
+                }
+                _ => Err(ApiError::internal(
+                    "approval channel not found — agent may have timed out".into(),
+                )),
+            }
+        }
+    }
+}
+
+/// Turn listing response for a conversation.
+#[derive(Debug, Serialize)]
+pub struct TurnListResponse {
+    pub turns: Vec<TurnPollResponse>,
+}
+
+/// Query parameters for turn listing.
+#[derive(Debug, Deserialize)]
+pub struct TurnListQuery {
+    pub state: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+/// `GET /api/conversations/:id/turns` — list turns in a conversation.
+///
+/// Returns turns for the default thread, optionally filtered by state and agent_id.
+pub async fn list_turns(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<TurnListQuery>,
+) -> Result<Json<TurnListResponse>, ApiError> {
+    use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+
+    // Verify session exists.
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("conversation", session_id))?;
+
+    // Get the default thread.
+    let threads = state
+        .storage
+        .list_by_session(session.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let thread = threads
+        .first()
+        .ok_or_else(|| ApiError::internal("no thread found for session".into()))?;
+
+    // List all turns in the thread.
+    let mut turns = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Apply optional filters.
+    if let Some(ref state_filter) = query.state {
+        turns.retain(|t| t.state.to_string() == *state_filter);
+    }
+    if let Some(ref agent_filter) = query.agent_id {
+        turns.retain(|t| t.agent_id == *agent_filter);
+    }
+
+    let responses = turns
+        .into_iter()
+        .map(|t| TurnPollResponse {
+            turn_id: t.id,
+            state: t.state.to_string(),
+            assistant_response: t.assistant_response,
+            structured_output: t.structured_output,
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            parent_turn_id: t.parent_turn_id,
+        })
+        .collect();
+
+    Ok(Json(TurnListResponse { turns: responses }))
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
 

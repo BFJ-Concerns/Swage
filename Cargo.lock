@@ -2583,6 +2583,7 @@ dependencies = [
  "jsonschema",
  "serde",
  "serde_json",
+ "swage-config",
  "swage-core",
  "swage-hook",
  "swage-provider",

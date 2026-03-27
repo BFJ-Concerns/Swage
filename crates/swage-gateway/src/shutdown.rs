@@ -308,6 +308,20 @@ pub async fn recover_expired_approvals(
     // Clean up any approvals whose turns were deleted during downtime.
     counts.orphaned_cleaned = storage.cleanup_orphaned_approvals().await?;
 
+    // Expire stale agent messages that outlived their TTL during downtime.
+    match storage
+        .expire_stale_messages(swage_agent::DEFAULT_MESSAGE_TTL)
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            info!(expired = n, "expired stale agent messages during startup recovery");
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to expire stale agent messages during startup");
+        }
+    }
+
     Ok(counts)
 }
 

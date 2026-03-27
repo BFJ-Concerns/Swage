@@ -110,6 +110,26 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/skills", get(handlers::list_skills))
         // Turn context snapshots — assembly reports for past turns.
         .route("/api/turns/:id/context", get(handlers::get_turn_context))
+        // Programmatic interface — async turn submission and polling.
+        .route("/api/turns", post(handlers::submit_turn))
+        .route("/api/turns/:id", get(handlers::get_turn))
+        // Turn listing per conversation.
+        .route(
+            "/api/conversations/:id/turns",
+            get(handlers::list_turns),
+        )
+        // Agent messaging — send and query inter-agent messages.
+        .route("/api/messages", post(handlers::send_agent_message))
+        .route("/api/messages/:id", get(handlers::get_message_status))
+        // Approval decisions via REST (same path for TUI, web UI, external scripts).
+        .route(
+            "/api/approvals",
+            get(handlers::list_approvals),
+        )
+        .route(
+            "/api/approvals/:id",
+            post(handlers::decide_approval),
+        )
         // Graceful shutdown endpoint — localhost only, broadcasts Shutdown event.
         .route("/api/shutdown", post(handlers::shutdown))
         // Health check — lightweight, no DB or provider calls.

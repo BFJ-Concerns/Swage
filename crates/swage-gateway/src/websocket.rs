@@ -164,6 +164,21 @@ pub enum ServerEvent {
         /// Validation errors from the final attempt.
         errors: Vec<SchemaValidationError>,
     },
+    /// A delegation from one agent to another has started.
+    /// Subscription-gated: delivered when client subscribes to "delegation".
+    DelegationStarted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+    },
+    /// A delegation has completed (successfully or with failure).
+    /// Subscription-gated: delivered when client subscribes to "delegation".
+    DelegationCompleted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+        success: bool,
+    },
     /// An error occurred during or before turn processing.
     Error { code: String, message: String },
     /// A pending turn was successfully cancelled.
