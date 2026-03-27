@@ -342,25 +342,106 @@ impl RequireApprovalEntry {
 }
 
 
+/// Context transfer mode — controls what crosses agent boundaries during delegation.
+///
+/// Evaluated at send time. The assembled content is embedded in the Delegate
+/// message payload, making it self-contained.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextTransferMode {
+    /// No context forwarded — the sub-agent starts with only the task prompt.
+    #[default]
+    None,
+    /// The delegating agent explicitly selects context elements to forward,
+    /// governed by an `allowed_fields` list.
+    Explicit,
+    /// A compacted summary of the parent context is generated within a
+    /// configurable token budget. Falls back to `None` on failure (fail-open).
+    Summary,
+}
+
+impl std::fmt::Display for ContextTransferMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Explicit => write!(f, "explicit"),
+            Self::Summary => write!(f, "summary"),
+        }
+    }
+}
+
+impl std::str::FromStr for ContextTransferMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "explicit" => Ok(Self::Explicit),
+            "summary" => Ok(Self::Summary),
+            other => Err(format!("unknown context transfer mode: {other}")),
+        }
+    }
+}
+
 /// Context transfer policy for a single target agent.
 ///
-/// Governs what context crosses agent boundaries during delegation.
-/// Evaluated at send time — the Delegate message is self-contained after creation.
-// TODO CommunicationConfig and context transfer policy model
-// tags: forge:inter-agent-communication
-// Define ContextTransferMode enum (None, Explicit, Summary) with serde support,
-// Default = None.
-// Define ContextTransferTargetConfig { mode: ContextTransferMode,
-//   allowed_fields: Vec<String>, summary_budget: Option<u32> }.
-// Define ContextTransferConfig { mode: ContextTransferMode,
-//   allowed_fields: Vec<String>, summary_budget: Option<u32>,
-//   targets: HashMap<String, ContextTransferTargetConfig> }.
-// Define CommunicationConfig { context_transfer: ContextTransferConfig }.
-// Add `communication: CommunicationConfig` to ResolvedConfig with Default.
-// Derive Debug, Clone, PartialEq, Default, Serialize, Deserialize on all.
-// Add unit tests: defaults, TOML round-trips, per-target overrides.
-// Success: types compile, default mode is None, serialisation works.
-// ---
+/// Overrides the defaults in [`ContextTransferConfig`] for a specific
+/// sender → target pair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextTransferTargetConfig {
+    /// Transfer mode for this specific target.
+    pub mode: ContextTransferMode,
+    /// For `Explicit` mode: which context element types to include.
+    /// Silently omits fields that don't exist in the sender's context.
+    #[serde(default)]
+    pub allowed_fields: Vec<String>,
+    /// For `Summary` mode: maximum token budget for the compacted summary.
+    pub summary_budget: Option<u32>,
+}
+
+impl Default for ContextTransferTargetConfig {
+    fn default() -> Self {
+        Self {
+            mode: ContextTransferMode::None,
+            allowed_fields: vec![],
+            summary_budget: None,
+        }
+    }
+}
+
+/// Context transfer configuration — default policy and per-target overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextTransferConfig {
+    /// Default transfer mode for all targets not in `targets`.
+    pub mode: ContextTransferMode,
+    /// For `Explicit` mode: default allowed fields.
+    #[serde(default)]
+    pub allowed_fields: Vec<String>,
+    /// For `Summary` mode: default token budget.
+    pub summary_budget: Option<u32>,
+    /// Per-target overrides keyed by recipient agent_id.
+    #[serde(default)]
+    pub targets: HashMap<String, ContextTransferTargetConfig>,
+}
+
+impl Default for ContextTransferConfig {
+    fn default() -> Self {
+        Self {
+            mode: ContextTransferMode::None,
+            allowed_fields: vec![],
+            summary_budget: None,
+            targets: HashMap::new(),
+        }
+    }
+}
+
+/// Inter-agent communication settings.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CommunicationConfig {
+    /// Context transfer policy (default + per-target overrides).
+    #[serde(default)]
+    pub context_transfer: ContextTransferConfig,
+}
 
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
@@ -388,6 +469,9 @@ pub struct ResolvedConfig {
     /// Output schema validation settings — JSON Schema and retry limits.
     /// Defaults to no schema (validation disabled) with 3 retries.
     pub output: OutputConfig,
+    /// Inter-agent communication settings — context transfer policy.
+    /// Defaults to no communication (context transfer mode = none).
+    pub communication: CommunicationConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
 }

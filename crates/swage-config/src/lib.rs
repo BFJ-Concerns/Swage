@@ -17,7 +17,11 @@ pub mod skill;
 
 // Resolved config types
 pub use model::{
+    CommunicationConfig,
     ContextConfig,
+    ContextTransferConfig,
+    ContextTransferMode,
+    ContextTransferTargetConfig,
     HierarchyLevel,
     LifecycleConfig,
     LogLevel,

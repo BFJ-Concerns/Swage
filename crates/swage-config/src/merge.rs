@@ -128,21 +128,32 @@ pub struct PartialHitlConfig {
     pub timeout_policy: Option<ApprovalTimeoutPolicy>,
 }
 
-// TODO Communication config partial + cascade resolution
-// tags: forge:inter-agent-communication
-// Define PartialContextTransferTargetConfig (all fields Option).
-// Define PartialContextTransferConfig { mode, allowed_fields, summary_budget,
-//   targets: Option<HashMap<String, PartialContextTransferTargetConfig>> }.
-// Define PartialCommunicationConfig { context_transfer: Option<PartialContextTransferConfig> }.
-// Add `communication: Option<PartialCommunicationConfig>` to PartialConfig.
-// Implement merge: mode uses overlay-or-base, allowed_fields uses replacement
-// semantics, summary_budget uses overlay-or-base, targets merge map-style
-// (per-target entry from overlay replaces base entry for same key).
-// Wire into merge_partial() and resolve() functions below.
-// Add integration test: agent-level target policy overrides project-level default.
-// Success: cascade resolution follows standard semantics, unconfigured targets
-// use the default mode, built-in default is None.
-// ---
+/// Partial mirror of `ContextTransferTargetConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialContextTransferTargetConfig {
+    pub mode: Option<crate::model::ContextTransferMode>,
+    pub allowed_fields: Option<Vec<String>>,
+    pub summary_budget: Option<u32>,
+}
+
+/// Partial mirror of `ContextTransferConfig`.
+///
+/// `mode` uses overlay-or-base semantics. `allowed_fields` uses replacement
+/// semantics (overlay list replaces base entirely). `targets` merge map-style
+/// (per-target entry from overlay replaces base entry for the same key).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialContextTransferConfig {
+    pub mode: Option<crate::model::ContextTransferMode>,
+    pub allowed_fields: Option<Vec<String>>,
+    pub summary_budget: Option<u32>,
+    pub targets: Option<HashMap<String, PartialContextTransferTargetConfig>>,
+}
+
+/// Partial mirror of `CommunicationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialCommunicationConfig {
+    pub context_transfer: Option<PartialContextTransferConfig>,
+}
 
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
@@ -160,6 +171,7 @@ pub struct PartialConfig {
     pub tools: Option<PartialToolConfig>,
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
+    pub communication: Option<PartialCommunicationConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +278,35 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             timeout: o.timeout.or(b.timeout),
             timeout_policy: o.timeout_policy.or(b.timeout_policy),
         }),
+        communication: merge_section(
+            base.communication,
+            overlay.communication,
+            |b, o| {
+                let ct = merge_section(
+                    b.context_transfer,
+                    o.context_transfer,
+                    |bt, ot| {
+                        // Targets merge map-style: overlay entry replaces base entry
+                        // for the same key; base entries absent from overlay survive.
+                        let targets = match (bt.targets, ot.targets) {
+                            (Some(mut base_t), Some(overlay_t)) => {
+                                base_t.extend(overlay_t);
+                                Some(base_t)
+                            }
+                            (base_t, overlay_t) => overlay_t.or(base_t),
+                        };
+                        PartialContextTransferConfig {
+                            mode: ot.mode.or(bt.mode),
+                            // Replacement semantics — overlay list replaces base.
+                            allowed_fields: ot.allowed_fields.or(bt.allowed_fields),
+                            summary_budget: ot.summary_budget.or(bt.summary_budget),
+                            targets,
+                        }
+                    },
+                );
+                PartialCommunicationConfig { context_transfer: ct }
+            },
+        ),
     }
 }
 
@@ -373,6 +414,32 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             OutputConfig {
                 schema: o.schema.or(do_.schema),
                 max_retries: o.max_retries.unwrap_or(do_.max_retries),
+            }
+        },
+        communication: {
+            use crate::model::{
+                CommunicationConfig, ContextTransferConfig, ContextTransferTargetConfig,
+            };
+            let c = partial.communication.unwrap_or_default();
+            let ct = c.context_transfer.unwrap_or_default();
+            let dc = ContextTransferConfig::default();
+
+            // Resolve per-target overrides from partial → resolved.
+            let targets = ct.targets.unwrap_or_default().into_iter().map(|(k, v)| {
+                (k, ContextTransferTargetConfig {
+                    mode: v.mode.unwrap_or_default(),
+                    allowed_fields: v.allowed_fields.unwrap_or_default(),
+                    summary_budget: v.summary_budget,
+                })
+            }).collect();
+
+            CommunicationConfig {
+                context_transfer: ContextTransferConfig {
+                    mode: ct.mode.unwrap_or(dc.mode),
+                    allowed_fields: ct.allowed_fields.unwrap_or(dc.allowed_fields),
+                    summary_budget: ct.summary_budget.or(dc.summary_budget),
+                    targets,
+                },
             }
         },
         // Instructions are assembled separately by the instructions module
