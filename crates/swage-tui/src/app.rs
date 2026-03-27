@@ -436,6 +436,58 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         // A no-op from the gateway's perspective — the skill was already
         // loaded so no state change is needed. Silently continue.
         ServerEvent::SkillAlreadyActive { .. } => EventOutcome::Continue,
+
+        // Inter-agent communication events.
+        ServerEvent::DelegationStarted { target_agent_id, .. } => {
+            state.messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!("Delegating to agent: {target_agent_id}"),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
+
+        ServerEvent::DelegationCompleted { target_agent_id, success, .. } => {
+            let status = if success { "succeeded" } else { "failed" };
+            state.messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!("Delegation to {target_agent_id} {status}"),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
+
+        ServerEvent::ApprovalRequired { prompt, .. } => {
+            state.messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!("Approval required: {prompt}"),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
+
+        ServerEvent::ApprovalConfirmed { decision, .. } => {
+            state.messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!("Approval {decision}"),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
+
+        ServerEvent::ApprovalExpired { .. } => {
+            state.messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Approval request expired".to_string(),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
     }
 }
 

@@ -2685,6 +2685,7 @@ dependencies = [
  "swage-config",
  "swage-context",
  "swage-core",
+ "swage-hook",
  "swage-provider",
  "swage-python",
  "swage-safety",

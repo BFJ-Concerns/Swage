@@ -683,7 +683,7 @@ pub async fn list_approvals(
             kind: a.kind.to_string(),
             tool_name: a.tool_name,
             prompt: a.prompt,
-            timeout_at: a.timeout_at.map(|t| t.to_rfc3339()),
+            timeout_at: Some(a.timeout_at.to_rfc3339()),
         })
         .collect();
 

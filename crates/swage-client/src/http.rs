@@ -523,11 +523,19 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        let body: serde_json::Value = self.parse_json(response, &url).await?;
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })?;
         let turn_id = body["turn_id"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
-            .ok_or_else(|| ClientError::Protocol("missing turn_id in response".into()))?;
+            .ok_or_else(|| ClientError::WebSocketFailed {
+                address: url.clone(),
+                message: "missing turn_id in response".into(),
+            })?;
         Ok(turn_id)
     }
 
@@ -543,7 +551,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 
     /// Send a typed inter-agent message.
@@ -573,7 +586,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 
     /// Query message delivery status.
@@ -591,7 +609,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 
     /// List pending approval requests.
@@ -612,7 +635,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 
     /// Decide on a pending approval (approve/reject).
@@ -637,7 +665,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 
     /// List turns in a conversation.
@@ -668,7 +701,12 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
-        self.parse_json(response, &url).await
+        response.json().await.map_err(|e| {
+            ClientError::RequestFailed {
+                address: url.clone(),
+                source: e,
+            }
+        })
     }
 }
 

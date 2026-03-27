@@ -4,6 +4,7 @@
 //! input area) with an optional context inspector panel that splits the
 //! conversation area horizontally when toggled on.
 
+pub mod approval_panel;
 pub mod conversation;
 pub mod input;
 pub mod inspector;

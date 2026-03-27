@@ -155,6 +155,10 @@ impl SubscriptionState {
             | ServerEvent::ApprovalExpired { .. }
             | ServerEvent::ApprovalDecisionError { .. } => true,
 
+            // Inter-agent communication events are always delivered.
+            ServerEvent::DelegationStarted { .. }
+            | ServerEvent::DelegationCompleted { .. } => true,
+
             // Baseline events are always delivered — subscription cannot suppress them.
             ServerEvent::Token { .. }
             | ServerEvent::Error { .. }
