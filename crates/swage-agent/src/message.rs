@@ -204,6 +204,9 @@ pub struct TurnRequest {
     pub user_message: String,
     /// Pre-assembled message context from the context engine.
     pub assembled_context: Vec<ChatMessage>,
+    /// Optional parent turn for delegation chain tracking. `None` for
+    /// user-initiated turns; `Some(sender_turn_id)` for delegated turns.
+    pub parent_turn_id: Option<Uuid>,
     /// Cooperative cancellation token — the gateway signals this when the client
     /// disconnects or a shutdown is requested.
     pub cancellation_token: CancellationToken,
@@ -221,6 +224,7 @@ mod turn_request_tests {
             thread_id: uuid::Uuid::new_v4(),
             user_message: "hello".to_string(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         assert_eq!(req.user_message, "hello");
@@ -235,6 +239,7 @@ mod turn_request_tests {
             thread_id: uuid::Uuid::new_v4(),
             user_message: "test".to_string(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         // A non-nil UUID means it was actually provided.
@@ -248,6 +253,7 @@ mod turn_request_tests {
             thread_id: uuid::Uuid::new_v4(),
             user_message: "clone me".to_string(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         let cloned = req.clone();
@@ -265,6 +271,7 @@ mod turn_request_tests {
             thread_id: uuid::Uuid::new_v4(),
             user_message: "cancel test".to_string(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: token.clone(),
         };
         token.cancel();
@@ -278,6 +285,7 @@ mod turn_request_tests {
             thread_id: uuid::Uuid::new_v4(),
             user_message: "debug".to_string(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         let s = format!("{:?}", req);

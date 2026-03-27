@@ -5,8 +5,10 @@
 //! the task, collecting the result, and delivering it back to Agent A.
 //! Each delegation creates an independent agent instance — no shared state.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, MessageKind, MessageStatus, Role};
@@ -18,6 +20,7 @@ use swage_storage::store::{SessionStore, ThreadStore};
 use swage_storage::{Storage, TurnState};
 use swage_tool::dispatch::ToolDispatcher;
 
+use crate::approval::ApprovalChannelRegistrar;
 use crate::builder::AgentBuilder;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
@@ -26,13 +29,38 @@ use crate::message::TurnRequest;
 use crate::router::MessageRouter;
 use crate::schema_contract::resolve_delegation_schema;
 
+/// In-flight delegation metadata — keyed by delegate message ID.
+/// Shared between `DelegationExecutor` (registers/deregisters) and
+/// `handle_cancel` (looks up token + session to cancel precisely).
+#[derive(Debug)]
+pub struct ActiveDelegation {
+    /// The child session created for this delegation.
+    pub session_id: Uuid,
+    /// The child thread within the delegation's session.
+    pub thread_id: Uuid,
+    /// Cancellation token for the in-flight agent execution.
+    pub cancel_token: tokio_util::sync::CancellationToken,
+}
+
+/// Registry of active delegations, shared between executor and cancel handler.
+pub type ActiveDelegations = Arc<RwLock<HashMap<Uuid, ActiveDelegation>>>;
+
+/// Create an empty active-delegations registry.
+pub fn active_delegations() -> ActiveDelegations {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
 /// Dependencies needed to instantiate and execute target agents for delegation.
 pub struct DelegationExecutor {
     pub storage: Arc<dyn Storage>,
     pub provider: Arc<dyn LlmProvider>,
     pub hook_registry: Option<Arc<HookRegistry>>,
     pub leak_detector: Option<Arc<LeakDetector>>,
+    pub approval_registrar: Option<ApprovalChannelRegistrar>,
     pub router: Arc<MessageRouter>,
+    /// Shared registry of in-flight delegations — lets `handle_cancel`
+    /// find the cancellation token and child session for a specific delegation.
+    pub active_delegations: ActiveDelegations,
 }
 
 impl DelegationExecutor {
@@ -118,11 +146,33 @@ impl DelegationExecutor {
         if let Some(ref detector) = self.leak_detector {
             builder = builder.leak_detector(detector.clone());
         }
+        if let Some(ref registrar) = self.approval_registrar {
+            builder = builder.approval_registrar(registrar.clone());
+        }
 
         let agent = builder.build()?;
 
-        // Create the cancellation token for the delegation.
+        // TODO Memory leak in active_delegations when future is dropped mid-execution
+        // priority: high | tags: review:branch-inter-agent-communication
+        // If `execute_delegation` is dropped (e.g. by a parent timeout or select!) after this
+        // insertion but before the `active.remove` at line 184, the entry is never cleaned up.
+        // Rust async futures do not run remaining code on drop. The fix is a RAII guard (a custom
+        // `Drop` impl or `scopeguard::defer!`) wrapping the `active_delegations` insert so cleanup
+        // is guaranteed regardless of how the future exits.
+        // ---
+
+        // Register the cancellation token so handle_cancel can interrupt
+        // this delegation by message ID.
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut active = self.active_delegations.write().await;
+            active.insert(delegate_msg.id, ActiveDelegation {
+                session_id: session.id,
+                thread_id: thread.id,
+                cancel_token: cancel_token.clone(),
+            });
+        }
+
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
@@ -130,11 +180,18 @@ impl DelegationExecutor {
             thread_id: thread.id,
             user_message: task_description.to_string(),
             assembled_context,
+            parent_turn_id: Some(sender_turn_id),
             cancellation_token: cancel_token.clone(),
         };
 
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
+
+        // Deregister — the delegation is no longer in flight.
+        {
+            let mut active = self.active_delegations.write().await;
+            active.remove(&delegate_msg.id);
+        }
 
         // Drain events (we don't forward them — delegation events are internal).
         while event_rx.try_recv().is_ok() {}

@@ -82,6 +82,7 @@ impl Agent {
         let session_id = request.session_id;
         let thread_id = request.thread_id;
         let user_message = request.user_message;
+        let parent_turn_id = request.parent_turn_id;
         let cancel_token = request.cancellation_token;
 
         // 1. Create turn in Pending state — records intent before any work begins.
@@ -91,7 +92,7 @@ impl Agent {
                 thread_id,
                 agent_id: self.config.agent_id.clone(),
                 state: TurnState::Pending,
-                parent_turn_id: None,
+                parent_turn_id,
             })
             .await?;
 
@@ -3957,6 +3958,7 @@ mod process_turn_streaming_tests {
             thread_id,
             user_message: "Hello, agent!".into(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -4076,6 +4078,7 @@ mod process_turn_streaming_tests {
             thread_id,
             user_message: "cancelled".into(),
             assembled_context: vec![],
+            parent_turn_id: None,
             cancellation_token: cancel,
         };
 

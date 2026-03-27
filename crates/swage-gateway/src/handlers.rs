@@ -421,6 +421,13 @@ pub struct SubmitTurnRequest {
     pub conversation_id: Uuid,
     /// The user message to process.
     pub message: String,
+    // TODO output_schema field is documented but silently ignored in submit_turn
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // The spawned background task never reads `req.output_schema` and therefore never
+    // passes it to `process_turn` / `AgentConfig::with_output_schema`. Any REST caller
+    // requesting structured output will silently receive the session's default schema
+    // behaviour (or none) instead of the requested contract.
+    // ---
     /// Optional output schema that overrides the agent's configured schema
     /// for this single turn.
     pub output_schema: Option<serde_json::Value>,
@@ -473,6 +480,17 @@ pub async fn submit_turn(
     let thread = threads
         .first()
         .ok_or_else(|| ApiError::internal("no thread found for session".into()))?;
+
+    // TODO Async polling returns a stale turn ID — the placeholder is never updated
+    // priority: high | tags: review:branch-inter-agent-communication
+    // `process_turn` calls `agent.process_turn_streaming` internally, which creates
+    // its own Turn record and emits TurnStarted with a fresh UUID. The placeholder
+    // turn created here (returned to the client as `turn_id`) is never updated beyond
+    // Pending, so the client will poll forever without seeing completion. Callers also
+    // see duplicate turn records for a single submission. Fix: either pass `turn_id`
+    // through to process_turn so the agent can adopt it, or delete the placeholder and
+    // redirect GET /api/turns/:id to query by parent_turn_id / session instead.
+    // ---
 
     // Create the turn in Pending state — visible to the poller immediately.
     let turn = state

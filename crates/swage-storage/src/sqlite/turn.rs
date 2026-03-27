@@ -172,14 +172,23 @@ impl TurnStore for SqliteStorage {
         new_state: TurnState,
     ) -> Result<(), StorageError> {
         // Verify the turn exists before updating.
-        self.get_turn(id)
+        let current = self.get_turn(id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "turn".into(),
                 id: id.to_string(),
             })?;
 
-        // State transitions are consumer-driven; no machine enforcement here.
+        // Terminal-state guard: once a turn reaches Completed, Failed, or
+        // Interrupted, refuse further transitions. "First terminal state wins"
+        // prevents races where a completing agent overwrites an Interrupted record.
+        if matches!(
+            current.state,
+            TurnState::Completed | TurnState::Failed | TurnState::Interrupted
+        ) {
+            return Ok(());
+        }
+
         // Completed, Failed, and Interrupted are terminal — set completed_at.
         let is_terminal = matches!(new_state, TurnState::Completed | TurnState::Failed | TurnState::Interrupted);
 
@@ -488,5 +497,25 @@ mod tests {
 
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.structured_output, Some(output));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_state_guard_prevents_overwrite() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+
+        // Transition to Interrupted (terminal).
+        storage.update_turn_state(turn.id, TurnState::Interrupted).await.unwrap();
+        let interrupted = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(interrupted.state, TurnState::Interrupted);
+
+        // Attempting to transition to Completed should be a silent no-op.
+        storage.update_turn_state(turn.id, TurnState::Completed).await.unwrap();
+        let still_interrupted = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_interrupted.state,
+            TurnState::Interrupted,
+            "terminal state should not be overwritten"
+        );
     }
 }

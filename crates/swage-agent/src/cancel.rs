@@ -10,19 +10,24 @@ use swage_storage::model::AgentMessage;
 use swage_storage::store::{AgentMessageStore, TurnStore};
 use swage_storage::{Storage, TurnState};
 
+use crate::delegation::ActiveDelegations;
 use crate::error::AgentError;
 
 /// Handle a Cancel message by interrupting the delegated turn.
 ///
-/// Looks up the delegation chain via correlation_id, finds the target turn,
-/// and transitions it to Interrupted. The cancel message itself is already
-/// claimed (delivered) by the mailbox.
+/// When `active_delegations` is provided, the handler looks up the exact
+/// delegation by message ID — triggering its cancellation token (stopping
+/// the in-memory execution) and interrupting only the turns in that
+/// delegation's thread. Without an active delegation entry (e.g. when the
+/// execution already completed), falls back to `find_in_progress_by_agent`.
 ///
+/// The cancel message itself is already claimed (delivered) by the mailbox.
 /// If the target turn is not found or already in a terminal state, the cancel
 /// is a no-op — "first terminal state wins" (ADR-0002).
 pub async fn handle_cancel(
     storage: &Arc<dyn Storage>,
     cancel_msg: &AgentMessage,
+    active_delegations: Option<&ActiveDelegations>,
 ) -> Result<(), AgentError> {
     debug_assert_eq!(cancel_msg.kind, MessageKind::Cancel);
 
@@ -33,24 +38,46 @@ pub async fn handle_cancel(
     };
 
     // The correlation_id on a Cancel references the original Delegate's message ID.
-    // Look it up directly, then find active turns for the delegate's recipient.
     let delegate = storage.get_agent_message(correlation_id).await?;
 
-    if let Some(delegate) = delegate {
-        if delegate.kind == MessageKind::Delegate {
-            // Find active turns for the recipient of the original delegation.
-            let active_turns = storage
-                .find_in_progress_by_agent(&delegate.recipient_agent_id)
-                .await?;
+    let Some(delegate) = delegate else { return Ok(()) };
+    if delegate.kind != MessageKind::Delegate {
+        return Ok(());
+    }
 
-            // Interrupt all active turns — in a per-task lifecycle, there's
-            // typically one active turn per agent instantiation.
-            for turn in active_turns {
-                let _ = storage
-                    .update_turn_state(turn.id, TurnState::Interrupted)
-                    .await;
+    // Try the active-delegations registry first — this gives us the exact
+    // cancellation token and thread ID for scoped interruption.
+    if let Some(registry) = active_delegations {
+        let active = registry.read().await;
+        if let Some(delegation) = active.get(&correlation_id) {
+            // Trigger cooperative cancellation — the agent's turn loop checks
+            // this token between rounds and tool calls.
+            delegation.cancel_token.cancel();
+
+            // Interrupt only the turns in this delegation's thread.
+            let turns = storage.list_turns_by_thread(delegation.thread_id).await?;
+            for turn in turns {
+                if matches!(turn.state, TurnState::Pending | TurnState::Processing) {
+                    let _ = storage
+                        .update_turn_state(turn.id, TurnState::Interrupted)
+                        .await;
+                }
             }
+            return Ok(());
         }
+    }
+
+    // Fallback: no active delegation entry (execution may have already
+    // finished or active_delegations wasn't provided). Use the broad
+    // agent-level query.
+    let active_turns = storage
+        .find_in_progress_by_agent(&delegate.recipient_agent_id)
+        .await?;
+
+    for turn in active_turns {
+        let _ = storage
+            .update_turn_state(turn.id, TurnState::Interrupted)
+            .await;
     }
 
     Ok(())
@@ -158,10 +185,132 @@ mod tests {
             .await
             .unwrap();
 
-        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel).await.unwrap();
+        // Fallback path — no active delegations provided.
+        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None).await.unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_with_active_delegations_scopes_to_thread() {
+        // Set up TWO agents with the same ID in different sessions/threads
+        // to verify that scoped cancel only interrupts the targeted delegation.
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let project = ProjectStore::get_or_create_default(storage.as_ref())
+            .await
+            .unwrap();
+
+        // First delegation — the one we'll cancel.
+        let session_a = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent-b".into(),
+            })
+            .await
+            .unwrap();
+        let thread_a = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session_a.id,
+                agent_id: "agent-b".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_a = storage
+            .create_turn(NewTurn {
+                thread_id: thread_a.id,
+                agent_id: "agent-b".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Second delegation — should NOT be interrupted.
+        let session_b = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent-b".into(),
+            })
+            .await
+            .unwrap();
+        let thread_b = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session_b.id,
+                agent_id: "agent-b".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_b = storage
+            .create_turn(NewTurn {
+                thread_id: thread_b.id,
+                agent_id: "agent-b".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Create the delegate message for the first delegation.
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        // Register only the first delegation in the active registry.
+        let registry = crate::delegation::active_delegations();
+        {
+            let mut active = registry.write().await;
+            active.insert(delegate.id, crate::delegation::ActiveDelegation {
+                session_id: session_a.id,
+                thread_id: thread_a.id,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+            });
+        }
+
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        handle_cancel(
+            &(storage.clone() as Arc<dyn Storage>),
+            &cancel,
+            Some(&registry),
+        )
+        .await
+        .unwrap();
+
+        // First delegation's turn interrupted.
+        let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
+        assert_eq!(ta.state, TurnState::Interrupted, "targeted turn should be interrupted");
+
+        // Second delegation's turn still processing — not affected.
+        let tb = storage.get_turn(turn_b.id).await.unwrap().unwrap();
+        assert_eq!(tb.state, TurnState::Processing, "other turn should be unaffected");
+
+        // Cancellation token should have been triggered.
+        let active = registry.read().await;
+        let delegation = active.get(&delegate.id).unwrap();
+        assert!(delegation.cancel_token.is_cancelled(), "cancel token should be triggered");
     }
 
     #[tokio::test(flavor = "multi_thread")]

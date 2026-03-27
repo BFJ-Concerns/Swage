@@ -441,9 +441,11 @@ async fn cancel_interrupts_active_delegation() {
         delivered_at: Some(chrono::Utc::now()),
     };
 
+    // Fallback path — no active delegations registry.
     swage_agent::cancel::handle_cancel(
         &(storage.clone() as Arc<dyn Storage>),
         &cancel,
+        None,
     )
     .await
     .unwrap();

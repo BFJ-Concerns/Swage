@@ -424,20 +424,25 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let ct = c.context_transfer.unwrap_or_default();
             let dc = ContextTransferConfig::default();
 
-            // Resolve per-target overrides from partial → resolved.
+            // Resolve top-level defaults first — per-target overrides inherit
+            // from the resolved policy, not from T::default().
+            let resolved_mode = ct.mode.unwrap_or(dc.mode);
+            let resolved_fields = ct.allowed_fields.unwrap_or(dc.allowed_fields);
+            let resolved_budget = ct.summary_budget.or(dc.summary_budget);
+
             let targets = ct.targets.unwrap_or_default().into_iter().map(|(k, v)| {
                 (k, ContextTransferTargetConfig {
-                    mode: v.mode.unwrap_or_default(),
-                    allowed_fields: v.allowed_fields.unwrap_or_default(),
-                    summary_budget: v.summary_budget,
+                    mode: v.mode.unwrap_or(resolved_mode.clone()),
+                    allowed_fields: v.allowed_fields.unwrap_or_else(|| resolved_fields.clone()),
+                    summary_budget: v.summary_budget.or(resolved_budget),
                 })
             }).collect();
 
             CommunicationConfig {
                 context_transfer: ContextTransferConfig {
-                    mode: ct.mode.unwrap_or(dc.mode),
-                    allowed_fields: ct.allowed_fields.unwrap_or(dc.allowed_fields),
-                    summary_budget: ct.summary_budget.or(dc.summary_budget),
+                    mode: resolved_mode,
+                    allowed_fields: resolved_fields,
+                    summary_budget: resolved_budget,
                     targets,
                 },
             }
@@ -1022,6 +1027,56 @@ mod tests {
         assert_eq!(tools.shell_timeout_secs, Some(60), "overlay scalar wins");
         let ra = tools.require_approval.unwrap();
         assert_eq!(ra[0].tool_name(), "write_file", "base require_approval survives");
+    }
+
+    #[test]
+    fn context_transfer_per_target_inherits_resolved_defaults() {
+        // Top-level sets mode=Summary with a budget; per-target entry only
+        // overrides allowed_fields. The target should inherit Summary mode
+        // and the budget — not fall back to None/empty.
+        let partial = PartialConfig {
+            communication: Some(PartialCommunicationConfig {
+                context_transfer: Some(PartialContextTransferConfig {
+                    mode: Some(crate::model::ContextTransferMode::Summary),
+                    allowed_fields: Some(vec!["system".into(), "tools".into()]),
+                    summary_budget: Some(1024),
+                    targets: Some({
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("agent-b".into(), PartialContextTransferTargetConfig {
+                            mode: None, // should inherit Summary
+                            allowed_fields: Some(vec!["system".into()]), // overrides
+                            summary_budget: None, // should inherit 1024
+                        });
+                        m
+                    }),
+                }),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(partial);
+        let ct = &resolved.communication.context_transfer;
+
+        // Top-level resolved correctly.
+        assert_eq!(ct.mode, crate::model::ContextTransferMode::Summary);
+        assert_eq!(ct.summary_budget, Some(1024));
+
+        // Per-target inherits from resolved top-level, not from T::default().
+        let target = ct.targets.get("agent-b").expect("target should exist");
+        assert_eq!(
+            target.mode,
+            crate::model::ContextTransferMode::Summary,
+            "per-target mode should inherit from resolved top-level"
+        );
+        assert_eq!(
+            target.allowed_fields,
+            vec!["system".to_string()],
+            "per-target allowed_fields should be the override value"
+        );
+        assert_eq!(
+            target.summary_budget,
+            Some(1024),
+            "per-target budget should inherit from resolved top-level"
+        );
     }
 
     #[test]

@@ -500,6 +500,7 @@ pub async fn process_turn(
         thread_id,
         user_message: content,
         assembled_context: assembled_messages,
+        parent_turn_id: None,
         cancellation_token: cancel_token,
     };
 
