@@ -4,9 +4,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, ApprovalRequest, ApprovalState, Message, NewApprovalRequest, NewMessage,
-    NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session, Thread, ThreadState,
-    Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, Message, NewAgentMessage,
+    NewApprovalRequest, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
+    Project, Session, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -286,21 +286,58 @@ pub trait ApprovalStore: Send + Sync {
     async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError>;
 }
 
-// TODO AgentMessageStore trait — storage sub-trait for inter-agent messages
-// tags: forge:inter-agent-communication
-// Define AgentMessageStore with async methods:
-//   create_message(NewAgentMessage) → AgentMessage
-//   get_message(Uuid) → Option<AgentMessage>
-//   list_pending_for_agent(agent_id: &str) → Vec<AgentMessage>
-//   update_message_status(id: Uuid, status: MessageStatus, failure_reason: Option<&str>) → bool
-//   list_by_correlation(correlation_id: Uuid) → Vec<AgentMessage>
-//   expire_stale_messages(max_age: Duration) → u64
-// Follow the pattern of ApprovalStore above (async_trait, StorageError return).
-// Add to the Storage supertrait and blanket impl below.
-// Add a StubStorage impl in the tests module (unimplemented!() stubs).
-// Add compile-time check tests following the existing pattern.
-// Success: trait compiles, Storage requires it, StubStorage satisfies it.
-// ---
+/// Persistent mailbox for inter-agent messages.
+///
+/// Follows actor-model semantics: messages are store-and-forward for durable
+/// kinds (Delegate, Result, Cancel, Shutdown) and at-most-once for Notify.
+/// Status transitions are atomic — only one transition from Pending to a
+/// terminal state succeeds.
+#[async_trait]
+pub trait AgentMessageStore: Send + Sync {
+    /// Persist a new agent message with status = Pending.
+    async fn create_agent_message(
+        &self,
+        msg: NewAgentMessage,
+    ) -> Result<AgentMessage, StorageError>;
+
+    /// Retrieve a single message by ID.
+    async fn get_agent_message(&self, id: Uuid) -> Result<Option<AgentMessage>, StorageError>;
+
+    /// List all pending messages for a recipient agent, ordered by creation time.
+    ///
+    /// Used by the mailbox on agent instantiation to discover queued work.
+    async fn list_pending_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<AgentMessage>, StorageError>;
+
+    /// Atomically transition a message to a terminal status (Delivered or Failed).
+    ///
+    /// Returns `true` if the transition succeeded (message was Pending), `false`
+    /// if the message was already in a terminal state (concurrent delivery).
+    /// Sets `delivered_at` when transitioning to Delivered.
+    async fn update_agent_message_status(
+        &self,
+        id: Uuid,
+        status: swage_core::MessageStatus,
+        failure_reason: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
+    /// List all messages sharing a correlation ID, ordered by creation time.
+    ///
+    /// Used to trace delegation chains (Delegate → Result/Cancel).
+    async fn list_by_correlation(
+        &self,
+        correlation_id: Uuid,
+    ) -> Result<Vec<AgentMessage>, StorageError>;
+
+    /// Expire pending messages older than `max_age`, transitioning them to
+    /// Failed with reason "delivery timeout". Returns the count of expired messages.
+    async fn expire_stale_messages(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<u64, StorageError>;
+}
 
 // ---------------------------------------------------------------------------
 // Storage supertrait
@@ -319,6 +356,7 @@ pub trait Storage:
     + ContextSnapshotStore
     + SkillActivationStore
     + ApprovalStore
+    + AgentMessageStore
     + Send
     + Sync
 {
@@ -334,6 +372,7 @@ impl<T> Storage for T where
         + ContextSnapshotStore
         + SkillActivationStore
         + ApprovalStore
+        + AgentMessageStore
         + Send
         + Sync
 {
@@ -570,6 +609,45 @@ mod tests {
             unimplemented!()
         }
         async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AgentMessageStore for StubStorage {
+        async fn create_agent_message(
+            &self,
+            _: NewAgentMessage,
+        ) -> Result<AgentMessage, StorageError> {
+            unimplemented!()
+        }
+        async fn get_agent_message(&self, _: Uuid) -> Result<Option<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_for_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_status(
+            &self,
+            _: Uuid,
+            _: swage_core::MessageStatus,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_correlation(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn expire_stale_messages(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }

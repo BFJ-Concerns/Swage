@@ -21,6 +21,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("004_active_skills", CREATE_ACTIVE_SKILLS),
         ("005_turn_structured_output", ADD_TURN_STRUCTURED_OUTPUT_COLUMN),
         ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
+        ("007_agent_messages", CREATE_AGENT_MESSAGES),
+        ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
     ]
 }
 
@@ -199,23 +201,36 @@ const CREATE_APPROVAL_REQUESTS: &str = "
     CREATE INDEX IF NOT EXISTS idx_approval_requests_state    ON approval_requests(state);
 ";
 
-// TODO SQLite migration for agent_messages table and parent_turn_id column
-// tags: forge:inter-agent-communication
-// Add migration "007_agent_messages" with:
-//   CREATE TABLE agent_messages (id TEXT PK, sender_agent_id TEXT NOT NULL,
-//     recipient_agent_id TEXT NOT NULL, kind TEXT NOT NULL,
-//     correlation_id TEXT, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-//     failure_reason TEXT, created_at TEXT NOT NULL, delivered_at TEXT);
-//   CREATE INDEX idx_agent_messages_recipient_status ON agent_messages(recipient_agent_id, status);
-//   CREATE INDEX idx_agent_messages_correlation ON agent_messages(correlation_id);
-//   CREATE INDEX idx_agent_messages_sender ON agent_messages(sender_agent_id);
-// Add migration "008_turn_parent_turn_id" with:
-//   ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
-//   CREATE INDEX idx_turns_parent_turn_id ON turns(parent_turn_id);
-// Register both in the migrations() vec. Follow existing patterns.
-// Success: migrations run, tables/columns exist, idempotent on re-run,
-// existing data untouched.
-// ---
+/// Inter-agent message mailbox — store-and-forward for durable message kinds.
+const CREATE_AGENT_MESSAGES: &str = "
+    CREATE TABLE IF NOT EXISTS agent_messages (
+        id                  TEXT PRIMARY KEY,
+        sender_agent_id     TEXT NOT NULL,
+        recipient_agent_id  TEXT NOT NULL,
+        kind                TEXT NOT NULL,
+        correlation_id      TEXT,
+        payload             TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'pending',
+        failure_reason      TEXT,
+        created_at          TEXT NOT NULL,
+        delivered_at        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_recipient_status
+        ON agent_messages(recipient_agent_id, status);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_correlation
+        ON agent_messages(correlation_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_sender
+        ON agent_messages(sender_agent_id);
+";
+
+/// Delegation chain tracking — nullable parent reference on turns.
+const ADD_TURN_PARENT_TURN_ID: &str = "
+    ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_turns_parent_turn_id
+        ON turns(parent_turn_id);
+";
 
 /// Apply all pending migrations to `conn`.
 ///

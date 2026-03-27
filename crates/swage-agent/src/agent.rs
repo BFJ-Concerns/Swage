@@ -91,6 +91,7 @@ impl Agent {
                 thread_id,
                 agent_id: self.config.agent_id.clone(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await?;
 
@@ -979,6 +980,7 @@ impl Agent {
                 thread_id,
                 agent_id: self.config.agent_id.clone(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await?;
 
@@ -2832,6 +2834,7 @@ mod resume_session_tests {
             thread_id,
             agent_id: "agent-r".into(),
             state: TurnState::Processing,
+            parent_turn_id: None,
         }).await.expect("create orphaned turn");
 
         let mut agent = test_agent_with_storage("agent-r", storage.clone());
@@ -4420,6 +4423,7 @@ mod approval_gate_tests {
                 thread_id: thread.id,
                 agent_id: "test-agent".into(),
                 state: TurnState::Processing,
+                parent_turn_id: None,
             },
         )
         .await

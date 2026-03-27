@@ -349,6 +349,7 @@ mod tests {
                 thread_id: thread.id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Processing,
+                parent_turn_id: None,
             })
             .await
             .unwrap();

@@ -548,6 +548,7 @@ async fn session_resume_with_shutdown_recovery() {
                 thread_id: threads[0].id,
                 agent_id: "agent-recovery".into(),
                 state: swage_storage::TurnState::Processing,
+                parent_turn_id: None,
             },
         )
         .await

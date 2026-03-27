@@ -83,7 +83,7 @@ mod tests {
             .unwrap();
 
         let turn = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent".to_string(), state: TurnState::Pending })
+            .create_turn(NewTurn { thread_id, agent_id: "agent".to_string(), state: TurnState::Pending, parent_turn_id: None })
             .await
             .unwrap();
 

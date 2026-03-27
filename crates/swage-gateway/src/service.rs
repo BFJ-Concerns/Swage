@@ -658,6 +658,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -701,6 +702,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -734,6 +736,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -832,6 +835,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -915,6 +919,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -1001,6 +1006,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();

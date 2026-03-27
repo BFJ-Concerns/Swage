@@ -121,16 +121,11 @@ pub struct Turn {
     /// validation succeeded. `None` when no schema is configured, or when
     /// validation failed after retry exhaustion.
     pub structured_output: Option<serde_json::Value>,
-    // TODO Turn parent_turn_id field for delegation chain tracking
-    // tags: forge:inter-agent-communication
-    // Add `parent_turn_id: Option<Uuid>` — references the delegating agent's
-    // turn. Null for direct (user-initiated) turns, populated for delegated
-    // turns. Enables multi-hop chain traversal (A → B → C) by following the
-    // parent references. Must also be added to NewTurn below.
-    // Update all existing Turn construction sites (tests, SQLite row mapping)
-    // to include the new field with None as default.
-    // Success: existing tests pass unchanged, new field serialises correctly.
-    // ---
+    /// References the delegating agent's turn for delegation chain tracking.
+    /// `None` for direct (user-initiated) turns; `Some(parent_id)` for turns
+    /// created by inter-agent delegation. Multi-hop chains (A → B → C) are
+    /// traceable by following the parent references.
+    pub parent_turn_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -525,6 +520,9 @@ pub struct NewTurn {
     pub thread_id: Uuid,
     pub agent_id: String,
     pub state: TurnState,
+    /// Optional parent turn for delegation chain tracking. `None` for
+    /// user-initiated turns.
+    pub parent_turn_id: Option<Uuid>,
 }
 
 /// Input for creating a new message within a thread.
@@ -1088,6 +1086,7 @@ mod tests {
             thread_id,
             agent_id: "agent-1".to_string(),
             state: TurnState::Processing,
+            parent_turn_id: None,
             user_input: Some("hello".to_string()),
             assistant_response: Some("hi".to_string()),
             input_tokens: Some(10),
@@ -1119,6 +1118,7 @@ mod tests {
             thread_id,
             agent_id: "agent-2".to_string(),
             state: TurnState::Pending,
+            parent_turn_id: None,
         };
         assert_eq!(turn.thread_id, thread_id);
         assert_eq!(turn.agent_id, "agent-2");
@@ -1137,6 +1137,7 @@ mod tests {
             thread_id,
             agent_id: "agent-1".to_string(),
             state: TurnState::Completed,
+            parent_turn_id: None,
             user_input: None,
             assistant_response: None,
             input_tokens: Some(100),
@@ -1162,6 +1163,7 @@ mod tests {
             thread_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             state: TurnState::Completed,
+            parent_turn_id: None,
             user_input: None,
             assistant_response: None,
             input_tokens: Some(100),
@@ -1187,6 +1189,7 @@ mod tests {
             thread_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             state: TurnState::Completed,
+            parent_turn_id: None,
             user_input: None,
             assistant_response: Some("the answer is Paris".to_string()),
             input_tokens: None,
@@ -1210,6 +1213,7 @@ mod tests {
             thread_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             state: TurnState::Pending,
+            parent_turn_id: None,
             user_input: None,
             assistant_response: None,
             input_tokens: None,

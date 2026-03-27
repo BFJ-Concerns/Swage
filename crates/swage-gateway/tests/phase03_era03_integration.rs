@@ -630,6 +630,7 @@ async fn pending_approval_re_emitted_on_connect() {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -723,6 +724,7 @@ async fn approvals_for_other_agent_not_re_emitted_on_connect() {
                 thread_id,
                 agent_id: "other-agent".to_string(),
                 state: TurnState::AwaitingApproval,
+                parent_turn_id: None,
             })
             .await
             .unwrap();

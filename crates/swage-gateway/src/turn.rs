@@ -1625,6 +1625,48 @@ pub(crate) mod tests {
         }
     }
 
+    #[async_trait]
+    impl swage_storage::store::AgentMessageStore for MockStorage {
+        async fn create_agent_message(
+            &self,
+            _: swage_storage::model::NewAgentMessage,
+        ) -> Result<swage_storage::model::AgentMessage, StorageError> {
+            unimplemented!()
+        }
+        async fn get_agent_message(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_for_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_status(
+            &self,
+            _: Uuid,
+            _: swage_core::MessageStatus,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_correlation(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn expire_stale_messages(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -1900,6 +1942,7 @@ pub(crate) mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                parent_turn_id: None,
             })
             .await
             .unwrap();

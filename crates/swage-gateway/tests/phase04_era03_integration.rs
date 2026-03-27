@@ -73,6 +73,7 @@ async fn setup_agent_turn(
             thread_id: thread.id,
             agent_id: agent_id.to_string(),
             state: TurnState::Processing,
+            parent_turn_id: None,
         })
         .await
         .unwrap();

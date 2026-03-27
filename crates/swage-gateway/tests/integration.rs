@@ -515,6 +515,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             thread_id: thread_orphan.id,
             agent_id: "gateway".to_string(),
             state: TurnState::Processing,
+            parent_turn_id: None,
         })
         .await
         .unwrap();
@@ -538,6 +539,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             thread_id: thread_ok.id,
             agent_id: "gateway".to_string(),
             state: TurnState::Processing,
+            parent_turn_id: None,
         })
         .await
         .unwrap();

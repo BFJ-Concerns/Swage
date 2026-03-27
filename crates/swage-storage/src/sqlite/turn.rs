@@ -42,7 +42,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 /// Column order: id, thread_id, agent_id, user_input, assistant_response,
 /// input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-/// structured_output
+/// structured_output, parent_turn_id
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -61,6 +61,11 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
             rusqlite::types::Type::Text,
             Box::new(ParseError(e.to_string())),
         ))?;
+    let parent_turn_id_str: Option<String> = row.get(12)?;
+    let parent_turn_id = parent_turn_id_str
+        .as_deref()
+        .map(parse_uuid)
+        .transpose()?;
 
     Ok(Turn {
         id: parse_uuid(&id)?,
@@ -75,6 +80,7 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         output_tokens: row.get(6)?,
         cost_microcents: row.get(10)?,
         structured_output,
+        parent_turn_id,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -93,15 +99,18 @@ impl TurnStore for SqliteStorage {
             let now_str = now.to_rfc3339();
             let state_str = turn.state.to_string();
 
+            let parent_str = turn.parent_turn_id.map(|p| p.to_string());
+
             conn.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, state, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO turns (id, thread_id, agent_id, state, created_at, parent_turn_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     id.to_string(),
                     turn.thread_id.to_string(),
                     &turn.agent_id,
                     &state_str,
-                    &now_str
+                    &now_str,
+                    &parent_str,
                 ],
             )?;
 
@@ -116,6 +125,7 @@ impl TurnStore for SqliteStorage {
                 output_tokens: None,
                 cost_microcents: None,
                 structured_output: None,
+                parent_turn_id: turn.parent_turn_id,
                 created_at: now,
                 completed_at: None,
             })
@@ -128,7 +138,7 @@ impl TurnStore for SqliteStorage {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output
+                        structured_output, parent_turn_id
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -146,7 +156,7 @@ impl TurnStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output
+                        structured_output, parent_turn_id
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -198,7 +208,7 @@ impl TurnStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output
+                        structured_output, parent_turn_id
                  FROM turns WHERE state IN ('pending', 'processing') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -306,7 +316,7 @@ mod tests {
     }
 
     fn new_turn(thread_id: Uuid) -> NewTurn {
-        NewTurn { thread_id, agent_id: "test-agent".to_string(), state: TurnState::Pending }
+        NewTurn { thread_id, agent_id: "test-agent".to_string(), state: TurnState::Pending, parent_turn_id: None }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -377,11 +387,11 @@ mod tests {
 
         // Create turns for two different agents.
         let t1 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending })
+            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
             .await
             .unwrap();
         let t2 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-b".to_string(), state: TurnState::Pending })
+            .create_turn(NewTurn { thread_id, agent_id: "agent-b".to_string(), state: TurnState::Pending, parent_turn_id: None })
             .await
             .unwrap();
         // Advance t2 to Processing — still in-progress for agent-b.
@@ -389,7 +399,7 @@ mod tests {
 
         // Complete t3 for agent-a — must NOT appear in results.
         let t3 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending })
+            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
             .await
             .unwrap();
         storage.update_turn_state(t3.id, TurnState::Completed).await.unwrap();
