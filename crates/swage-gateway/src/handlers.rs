@@ -734,13 +734,6 @@ pub struct ApprovalListQuery {
     pub agent_id: Option<String>,
 }
 
-// TODO list_approvals and list_turns return unbounded result sets — add pagination
-// priority: normal | tags: review:inter-agent-comms
-// Both endpoints fetch all matching records in a single query with no limit or
-// cursor. As approval queues and conversation history grow this causes unbounded
-// memory use, slow responses, and potential timeouts. Add a `limit`/`offset` or
-// cursor query parameter and pass it through to the storage layer.
-// ---
 /// `GET /api/approvals` — list pending approval requests.
 ///
 /// Optionally filtered by agent_id. Returns all pending approvals visible

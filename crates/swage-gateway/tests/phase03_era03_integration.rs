@@ -61,6 +61,35 @@ impl Drop for SwageHomeGuard {
     }
 }
 
+// Mock tool for approval testing
+struct WriteFileTool;
+
+#[async_trait]
+impl swage_tool::tool::Tool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn description(&self) -> &str {
+        "Writes content to a file (mock for approval testing)."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn execute(&self, params: Value, _ctx: &dyn swage_tool::context::ToolContext) -> Result<Value, swage_core::ToolError> {
+        Ok(params)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mock provider — streams tool calls and text responses
 // ---------------------------------------------------------------------------
@@ -116,7 +145,9 @@ async fn start_test_server_with_config(
     config: ResolvedConfig,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(WriteFileTool) as Arc<dyn swage_tool::tool::Tool>,
+    ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn ProjectStore>,
