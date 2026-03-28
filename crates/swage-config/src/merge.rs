@@ -153,6 +153,8 @@ pub struct PartialContextTransferConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialCommunicationConfig {
     pub context_transfer: Option<PartialContextTransferConfig>,
+    pub message_ttl_secs: Option<u64>,
+    pub expiry_interval_secs: Option<u64>,
 }
 
 /// A single hierarchy level's config contribution — every section and field
@@ -304,7 +306,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                         }
                     },
                 );
-                PartialCommunicationConfig { context_transfer: ct }
+                PartialCommunicationConfig {
+                    context_transfer: ct,
+                    message_ttl_secs: o.message_ttl_secs.or(b.message_ttl_secs),
+                    expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
+                }
             },
         ),
     }
@@ -439,6 +445,8 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             }).collect();
 
             CommunicationConfig {
+                message_ttl_secs: c.message_ttl_secs.unwrap_or(86400),
+                expiry_interval_secs: c.expiry_interval_secs.unwrap_or(60),
                 context_transfer: ContextTransferConfig {
                     mode: resolved_mode,
                     allowed_fields: resolved_fields,
@@ -1036,6 +1044,8 @@ mod tests {
         // and the budget — not fall back to None/empty.
         let partial = PartialConfig {
             communication: Some(PartialCommunicationConfig {
+                message_ttl_secs: None,
+                expiry_interval_secs: None,
                 context_transfer: Some(PartialContextTransferConfig {
                     mode: Some(crate::model::ContextTransferMode::Summary),
                     allowed_fields: Some(vec!["system".into(), "tools".into()]),

@@ -104,15 +104,19 @@ pub async fn handle_shutdown(
 ) -> Result<(), AgentError> {
     debug_assert_eq!(shutdown_msg.kind, MessageKind::Shutdown);
 
-    // TODO find_in_progress_by_agent omits AwaitingApproval turns — shutdown becomes a no-op
-    // priority: normal | tags: review:branch-inter-agent-communication
-    // The SQL query behind `find_in_progress_by_agent` filters on state IN ('pending',
-    // 'processing'). A turn suspended in `awaiting_approval` is still active but will not
-    // appear here, so shutdown (and the equivalent cancel fallback path) silently skips it.
-    // The approval will continue waiting until its own timeout fires. Extend the query (or
-    // add a separate `find_awaiting_approval_by_agent` call) to cover these turns.
+    // TODO Shutdown only marks turn state — live executions keep running
+    // priority: high | tags: review:branch-inter-agent-communication
+    // `find_in_progress_by_agent` finds turns in storage and marks them
+    // `Interrupted`, but agent turn loops do not poll turn state — they stop
+    // only when their `CancellationToken` is cancelled. A delegated agent that
+    // is mid-execution when shutdown arrives will continue running, execute
+    // further tools, and may still emit a `Result` message. To actually
+    // interrupt live work, `handle_shutdown` needs access to the
+    // `ActiveDelegations` registry (like `handle_cancel`) so it can call
+    // `cancel_token.cancel()` on every active delegation for the target agent.
     // ---
-    // Find all active turns for the target agent.
+
+    // Find all active turns for the target agent (including AwaitingApproval).
     let active_turns = storage
         .find_in_progress_by_agent(&shutdown_msg.recipient_agent_id)
         .await?;

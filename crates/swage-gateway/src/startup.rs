@@ -109,16 +109,16 @@ pub async fn run_gateway(
         }
     }
 
-    // TODO Start inter-agent message expiry background task on gateway startup
-    // priority: normal | tags: review:branch-inter-agent-communication
-    // `swage_agent::expiry::spawn_expiry_task` is defined and exported but is
-    // never called here. Without it, pending messages accumulate indefinitely
-    // once their TTL has elapsed — `expire_stale_messages` is never invoked in
-    // production. Add a step after recovery (before step 6) that calls
-    // `spawn_expiry_task` with the storage reference and the configured TTL and
-    // interval from `CommunicationConfig`. The returned `JoinHandle` should be
-    // aborted on shutdown alongside other background tasks.
-    // ---
+    // Step 5b: Start the inter-agent message expiry background task.
+    let expiry_handle = {
+        let ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
+        let interval = std::time::Duration::from_secs(config.communication.expiry_interval_secs);
+        swage_agent::expiry::spawn_expiry_task(
+            Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+            ttl,
+            interval,
+        )
+    };
 
     // Step 6: Create the LLM provider from configuration.
     let provider = create_provider(&config);
@@ -206,7 +206,10 @@ pub async fn run_gateway(
     .await
     .expect("server error");
 
-    // Step 12b: Remove runtime metadata now that the gateway has stopped.
+    // Step 12b: Abort the message expiry background task.
+    expiry_handle.abort();
+
+    // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
         warn!("Failed to remove runtime metadata on shutdown: {e}");
     }

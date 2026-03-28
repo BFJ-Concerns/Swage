@@ -436,11 +436,37 @@ impl Default for ContextTransferConfig {
 }
 
 /// Inter-agent communication settings.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommunicationConfig {
     /// Context transfer policy (default + per-target overrides).
     #[serde(default)]
     pub context_transfer: ContextTransferConfig,
+    /// How long a pending message survives before expiry (seconds).
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_message_ttl_secs")]
+    pub message_ttl_secs: u64,
+    /// How often the expiry task checks for stale messages (seconds).
+    /// Default: 60.
+    #[serde(default = "default_expiry_interval_secs")]
+    pub expiry_interval_secs: u64,
+}
+
+fn default_message_ttl_secs() -> u64 {
+    86400
+}
+
+fn default_expiry_interval_secs() -> u64 {
+    60
+}
+
+impl Default for CommunicationConfig {
+    fn default() -> Self {
+        Self {
+            context_transfer: ContextTransferConfig::default(),
+            message_ttl_secs: default_message_ttl_secs(),
+            expiry_interval_secs: default_expiry_interval_secs(),
+        }
+    }
 }
 
 /// Fully resolved configuration — the merged output of all hierarchy levels.

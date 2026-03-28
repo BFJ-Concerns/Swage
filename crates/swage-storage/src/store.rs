@@ -66,9 +66,9 @@ pub trait TurnStore: Send + Sync {
     /// State is consumer-driven — the storage layer records whatever state is
     /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
-    /// Find all turns in Pending or Processing state for a given agent.
+    /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
     ///
-    /// Used by startup recovery to identify orphaned in-flight turns.
+    /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError>;
     /// Persist the assistant's response text onto a completed turn.
     async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError>;

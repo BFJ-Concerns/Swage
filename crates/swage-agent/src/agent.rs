@@ -242,10 +242,11 @@ impl Agent {
                                 gate_timeout,
                                 swage_core::ApprovalTimeoutPolicy::default(),
                                 &event_tx,
+                                &cancel_token,
                             ).await? {
                                 ApprovalGateOutcome::Approved => {
                                     // Approved — proceed with normal dispatch.
-                                    self.dispatch_tool_call(call, turn.id, session_id, &event_tx).await?
+                                    self.dispatch_tool_call(call, turn.id, session_id, &event_tx, &cancel_token).await?
                                 }
                                 ApprovalGateOutcome::Rejected { feedback } => {
                                     (feedback, true, "rejected".to_string())
@@ -256,7 +257,7 @@ impl Agent {
                             }
                         }
                         Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(call, turn.id, session_id, &event_tx).await?
+                            self.dispatch_tool_call(call, turn.id, session_id, &event_tx, &cancel_token).await?
                         }
                     };
 
@@ -692,6 +693,7 @@ impl Agent {
         turn_id: Uuid,
         session_id: Uuid,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
     ) -> Result<(String, bool, String), AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
@@ -748,6 +750,7 @@ impl Agent {
                         gate_timeout,
                         policy,
                         event_tx,
+                        cancel_token,
                     )
                     .await?
                 {
@@ -809,6 +812,7 @@ impl Agent {
         timeout: std::time::Duration,
         timeout_policy: swage_core::ApprovalTimeoutPolicy,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
         use swage_storage::model::{ApprovalState, NewApprovalRequest};
@@ -870,32 +874,41 @@ impl Agent {
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         registrar(approval.id, tx);
 
-        // TODO Add cancel_token arm to approval gate select to unblock on cancellation
-        // priority: normal | tags: review:branch-inter-agent-communication
-        // The select below races only the oneshot receiver against the timeout.
-        // If a Cancel message targets this agent while its turn is in
-        // AwaitingApproval, the cancel token fires but this gate stays blocked
-        // until the timeout expires. The turn loop's cancellation check never
-        // runs because control never returns from here. Add a third arm:
-        // `_ = cancel_token.cancelled() => { ... }` that transitions storage
-        // and returns `ApprovalGateOutcome::Interrupted`. Requires threading a
-        // `CancellationToken` parameter through `handle_approval_gate`.
-        // ---
+        // 5. Race the oneshot receiver against the timeout and cancellation.
+        // Three outcomes: human decision arrives, timeout fires, or the turn
+        // is cooperatively cancelled (e.g. inter-agent Cancel message).
+        enum GateResult {
+            Decision(crate::approval::ApprovalDecision),
+            Timeout,
+            Cancelled,
+        }
 
-        // 5. Race the oneshot receiver against the timeout.
-        let decision = tokio::select! {
+        let gate_result = tokio::select! {
             result = rx => {
                 match result {
-                    Ok(d) => Some(d),
-                    // Sender dropped — treat as if the request was abandoned.
-                    Err(_) => None,
+                    Ok(d) => GateResult::Decision(d),
+                    // Sender dropped — treat as timeout (request abandoned).
+                    Err(_) => GateResult::Timeout,
                 }
             }
-            _ = tokio::time::sleep(timeout) => None,
+            _ = tokio::time::sleep(timeout) => GateResult::Timeout,
+            _ = cancel_token.cancelled() => GateResult::Cancelled,
         };
 
-        match decision {
-            Some(d) if d.is_approved() => {
+        match gate_result {
+            GateResult::Cancelled => {
+                // Cooperative cancellation — interrupt immediately regardless
+                // of timeout policy. The approval becomes stale.
+                let _ = self.storage.update_approval_state(
+                    approval.id,
+                    ApprovalState::Expired,
+                    Some("cancelled by inter-agent message"),
+                ).await;
+                let _ = self.storage.update_turn_state(turn_id, TurnState::Interrupted).await;
+                let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                Ok(ApprovalGateOutcome::Interrupted)
+            }
+            GateResult::Decision(d) if d.is_approved() => {
                 // Approved — update storage and resume.
                 let _ = self.storage.update_approval_state(
                     approval.id,
@@ -910,7 +923,7 @@ impl Agent {
                 let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
                 Ok(ApprovalGateOutcome::Approved)
             }
-            Some(d) => {
+            GateResult::Decision(d) => {
                 // Rejected by human.
                 let reason_text = d.reason.clone().unwrap_or_else(|| "rejected by reviewer".into());
                 let _ = self.storage.update_approval_state(
@@ -928,7 +941,7 @@ impl Agent {
                     feedback: format!("Tool call rejected: {reason_text}"),
                 })
             }
-            None => {
+            GateResult::Timeout => {
                 // Timeout or channel dropped — apply policy.
                 let _ = self.storage.update_approval_state(
                     approval.id,
@@ -4380,6 +4393,7 @@ mod approval_gate_tests {
     use std::sync::Arc;
 
     use uuid::Uuid;
+    use tokio_util::sync::CancellationToken;
 
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::{
@@ -4535,6 +4549,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4609,6 +4624,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4675,6 +4691,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_millis(50),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4736,6 +4753,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_millis(50),
                     swage_core::ApprovalTimeoutPolicy::Interrupt,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4747,6 +4765,65 @@ mod approval_gate_tests {
         );
 
         // Turn should be Interrupted, thread Idle.
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Interrupted);
+
+        let thread = ThreadStore::get(storage.as_ref(), thread_id).await.unwrap().unwrap();
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_token_interrupts_approval_gate() {
+        let (storage, _session_id, thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Pre-cancel the token so the gate returns immediately.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let gate = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                agent
+                    .handle_approval_gate(
+                        turn_id, thread_id,
+                        swage_storage::model::ApprovalKind::Tool,
+                        Some("deploy".into()), None, None,
+                        "Approve?".into(), None,
+                        std::time::Duration::from_secs(30),
+                        swage_core::ApprovalTimeoutPolicy::Reject,
+                        &event_tx,
+                        &cancel,
+                    )
+                    .await
+            }
+        });
+
+        let outcome = gate.await.expect("task").expect("gate");
+        assert!(
+            matches!(outcome, ApprovalGateOutcome::Interrupted),
+            "expected Interrupted from cancellation, got: {outcome:?}"
+        );
+
+        // Turn should be Interrupted regardless of the timeout policy.
         let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
 
@@ -4784,6 +4861,7 @@ mod approval_gate_tests {
                 std::time::Duration::from_secs(30),
                 swage_core::ApprovalTimeoutPolicy::Reject,
                 &event_tx,
+                &CancellationToken::new(),
             )
             .await
             .expect("gate should not error");
@@ -4837,6 +4915,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4898,6 +4977,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });
@@ -4954,6 +5034,7 @@ mod approval_gate_tests {
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
+                    &CancellationToken::new(),
                 )
                 .await
         });

@@ -457,6 +457,17 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // connect (or reconnect) after an approval was raised, so we catch them
     // up immediately rather than leaving them blind until the next turn.
     // Fail-open: storage errors are logged and the connection continues.
+    // TODO Approval re-emission leaks cross-session approvals via shared agent_id
+    // priority: high | tags: review:branch-inter-agent-communication
+    // `list_pending_by_agent` returns approvals for ALL sessions that share the
+    // same agent_id. When conversation A reconnects it will receive pending
+    // approval events that belong to conversation B — a different client can
+    // then act on them, approving or rejecting work it has no context for.
+    // Re-emission should be scoped to the current session (or its thread
+    // lineage) rather than the entire agent. Either add a
+    // `list_pending_by_session(session_id)` storage method or filter the
+    // results by matching the approval's turn_id against turns for this session.
+    // ---
     match state.storage.get_session(session_id).await {
         Ok(Some(session)) => {
             match state.storage.list_pending_by_agent(&session.agent_id).await {

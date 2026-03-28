@@ -529,23 +529,17 @@ pub async fn submit_turn(
         match result {
             Ok(()) => {
                 if let Ok(turns) = bg_state.storage.list_turns_by_thread(thread_id).await {
-                    // The real turn is the latest completed turn that isn't
+                    // The real turn is the latest terminal turn that isn't
                     // the placeholder (different ID, created by the agent).
-                    // TODO Mirror Interrupted state when async turn is cooperatively cancelled
-                    // priority: high | tags: review:branch-inter-agent-communication
-                    // This predicate only matches Completed | Failed. When the agent turn is
-                    // cancelled cooperatively, `process_turn` returns `Ok(())` but the real
-                    // turn is Interrupted. The search finds nothing, so the fallback path
-                    // marks the placeholder as Completed — a REST poller sees success rather
-                    // than interruption. Add TurnState::Interrupted to the match arm so
-                    // cancelled turns propagate the correct state to the placeholder.
-                    // ---
+                    // Includes Interrupted so cooperatively cancelled turns
+                    // propagate the correct state to the REST poller.
                     let real_turn = turns.iter().rev().find(|t| {
                         t.id != turn_id
                             && matches!(
                                 t.state,
                                 swage_storage::TurnState::Completed
                                     | swage_storage::TurnState::Failed
+                                    | swage_storage::TurnState::Interrupted
                             )
                     });
                     if let Some(real) = real_turn {

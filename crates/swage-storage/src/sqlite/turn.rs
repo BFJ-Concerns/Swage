@@ -218,7 +218,7 @@ impl TurnStore for SqliteStorage {
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id
-                 FROM turns WHERE state IN ('pending', 'processing') AND agent_id = ?1",
+                 FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
             rows.collect()
@@ -413,10 +413,19 @@ mod tests {
             .unwrap();
         storage.update_turn_state(t3.id, TurnState::Completed).await.unwrap();
 
-        // agent-a has one in-progress turn (t1 is pending).
+        // t4 for agent-a in AwaitingApproval — still active, must appear.
+        let t4 = storage
+            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .await
+            .unwrap();
+        storage.update_turn_state(t4.id, TurnState::AwaitingApproval).await.unwrap();
+
+        // agent-a has two active turns (t1 pending, t4 awaiting approval).
         let a_results = storage.find_in_progress_by_agent("agent-a").await.unwrap();
-        assert_eq!(a_results.len(), 1);
-        assert_eq!(a_results[0].id, t1.id);
+        assert_eq!(a_results.len(), 2);
+        let a_ids: Vec<_> = a_results.iter().map(|t| t.id).collect();
+        assert!(a_ids.contains(&t1.id));
+        assert!(a_ids.contains(&t4.id));
 
         // agent-b has one in-progress turn (t2 is processing).
         let b_results = storage.find_in_progress_by_agent("agent-b").await.unwrap();
