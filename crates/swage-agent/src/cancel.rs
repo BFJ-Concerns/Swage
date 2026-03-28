@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use uuid::Uuid;
+
 use swage_core::MessageKind;
 use swage_storage::model::AgentMessage;
 use swage_storage::store::{AgentMessageStore, TurnStore};
@@ -48,6 +50,14 @@ pub async fn handle_cancel(
     // Try the active-delegations registry first — this gives us the exact
     // cancellation token and thread ID for scoped interruption.
     if let Some(registry) = active_delegations {
+        // TODO Release registry lock before awaiting storage I/O
+        // priority: normal | tags: review:branch-inter-agent-communication
+        // The read lock `active` is held across `storage.list_turns_by_thread` and the
+        // subsequent `update_turn_state` loop below. Holding a tokio RwLock across async
+        // I/O can starve pending writers. Clone `delegation.thread_id` and
+        // `delegation.cancel_token` from the locked guard, then drop the guard before
+        // issuing the storage calls.
+        // ---
         let active = registry.read().await;
         if let Some(delegation) = active.get(&correlation_id) {
             // Trigger cooperative cancellation — the agent's turn loop checks
@@ -67,20 +77,29 @@ pub async fn handle_cancel(
         }
     }
 
-    // TODO Cancel fallback interrupts all active turns for the target agent
-    // priority: high | tags: review:branch-inter-agent-communication
-    // When `active_delegations` is None or the registry has no entry for this
-    // correlation_id, `find_in_progress_by_agent` returns every in-progress turn
-    // for the recipient — not just the one from this delegation. In a scenario
-    // where agent-b is running two concurrent delegations from different senders,
-    // cancelling one will also interrupt the other. Scope the fallback by storing
-    // the thread_id in the `AgentMessage` payload (or the delegate record) so the
-    // fallback can filter to the correct thread even without the in-memory registry.
-    // ---
-
     // Fallback: no active delegation entry (execution may have already
-    // finished or active_delegations wasn't provided). Use the broad
-    // agent-level query.
+    // finished or active_delegations wasn't provided). Scope to the specific
+    // thread if the delegate payload carries a _thread_id annotation;
+    // otherwise fall back to the broad agent-level query.
+    if let Some(thread_id_str) = delegate.payload.get("_thread_id").and_then(|v| v.as_str()) {
+        if let Ok(thread_id) = thread_id_str.parse::<Uuid>() {
+            let turns = storage.list_turns_by_thread(thread_id).await?;
+            for turn in turns {
+                if matches!(
+                    turn.state,
+                    TurnState::Pending | TurnState::Processing | TurnState::AwaitingApproval
+                ) {
+                    let _ = storage
+                        .update_turn_state(turn.id, TurnState::Interrupted)
+                        .await;
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // Last resort: no thread annotation — interrupt all in-progress turns.
+    // See BACKLOG.md [vpbv] for the scoping limitation.
     let active_turns = storage
         .find_in_progress_by_agent(&delegate.recipient_agent_id)
         .await?;
@@ -101,22 +120,25 @@ pub async fn handle_cancel(
 pub async fn handle_shutdown(
     storage: &Arc<dyn Storage>,
     shutdown_msg: &AgentMessage,
+    active_delegations: Option<&ActiveDelegations>,
 ) -> Result<(), AgentError> {
     debug_assert_eq!(shutdown_msg.kind, MessageKind::Shutdown);
 
-    // TODO Shutdown only marks turn state — live executions keep running
-    // priority: high | tags: review:branch-inter-agent-communication
-    // `find_in_progress_by_agent` finds turns in storage and marks them
-    // `Interrupted`, but agent turn loops do not poll turn state — they stop
-    // only when their `CancellationToken` is cancelled. A delegated agent that
-    // is mid-execution when shutdown arrives will continue running, execute
-    // further tools, and may still emit a `Result` message. To actually
-    // interrupt live work, `handle_shutdown` needs access to the
-    // `ActiveDelegations` registry (like `handle_cancel`) so it can call
-    // `cancel_token.cancel()` on every active delegation for the target agent.
-    // ---
+    // Cancel live execution tokens for all delegations targeting this agent.
+    // Without this, agent turn loops continue running — they stop on
+    // CancellationToken, not turn state changes in storage.
+    if let Some(registry) = active_delegations {
+        let active = registry.read().await;
+        for (_id, delegation) in active.iter() {
+            if delegation.recipient_agent_id == shutdown_msg.recipient_agent_id {
+                delegation.cancel_token.cancel();
+            }
+        }
+    }
 
-    // Find all active turns for the target agent (including AwaitingApproval).
+    // Mark any in-progress turns as Interrupted in storage — covers turns
+    // whose tokens aren't in the registry (already finished, or registry
+    // wasn't provided).
     let active_turns = storage
         .find_in_progress_by_agent(&shutdown_msg.recipient_agent_id)
         .await?;
@@ -297,6 +319,7 @@ mod tests {
             active.insert(delegate.id, crate::delegation::ActiveDelegation {
                 session_id: session_a.id,
                 thread_id: thread_a.id,
+                recipient_agent_id: "agent-b".into(),
                 cancel_token: tokio_util::sync::CancellationToken::new(),
             });
         }
@@ -353,9 +376,51 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown).await.unwrap();
+        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown, None).await.unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_cancels_active_delegation_tokens() {
+        let (storage, _turn_id) = setup_with_turn("agent-b").await;
+
+        // Register a delegation targeting agent-b.
+        let registry = crate::delegation::active_delegations();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut active = registry.write().await;
+            active.insert(Uuid::new_v4(), crate::delegation::ActiveDelegation {
+                session_id: Uuid::new_v4(),
+                thread_id: Uuid::new_v4(),
+                recipient_agent_id: "agent-b".into(),
+                cancel_token: cancel_token.clone(),
+            });
+        }
+
+        let shutdown = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Shutdown,
+            correlation_id: None,
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        handle_shutdown(
+            &(storage.clone() as Arc<dyn Storage>),
+            &shutdown,
+            Some(&registry),
+        )
+        .await
+        .unwrap();
+
+        // Token should have been cancelled — live execution would stop.
+        assert!(cancel_token.is_cancelled(), "shutdown must cancel live execution tokens");
     }
 }

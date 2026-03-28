@@ -242,6 +242,22 @@ impl AgentMessageStore for SqliteStorage {
         .await
     }
 
+    async fn update_agent_message_payload(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let payload_str = payload.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_messages SET payload = ?1 WHERE id = ?2",
+                params![&payload_str, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,

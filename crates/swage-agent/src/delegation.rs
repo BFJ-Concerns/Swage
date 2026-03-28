@@ -31,13 +31,15 @@ use crate::schema_contract::resolve_delegation_schema;
 
 /// In-flight delegation metadata — keyed by delegate message ID.
 /// Shared between `DelegationExecutor` (registers/deregisters) and
-/// `handle_cancel` (looks up token + session to cancel precisely).
+/// `handle_cancel` / `handle_shutdown` (looks up tokens to cancel precisely).
 #[derive(Debug)]
 pub struct ActiveDelegation {
     /// The child session created for this delegation.
     pub session_id: Uuid,
     /// The child thread within the delegation's session.
     pub thread_id: Uuid,
+    /// The agent that is executing this delegation (the target).
+    pub recipient_agent_id: String,
     /// Cancellation token for the in-flight agent execution.
     pub cancel_token: tokio_util::sync::CancellationToken,
 }
@@ -104,6 +106,24 @@ impl DelegationExecutor {
         )
         .await?;
 
+        // Annotate the delegate message with the child thread_id so the
+        // fallback cancel path (when the active registry has no entry) can
+        // scope interruption to the correct thread.
+        {
+            let mut payload = delegate_msg.payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "_thread_id".to_string(),
+                    serde_json::Value::String(thread.id.to_string()),
+                );
+            }
+            // Fail-open: a payload update failure shouldn't block delegation.
+            let _ = self
+                .storage
+                .update_agent_message_payload(delegate_msg.id, payload)
+                .await;
+        }
+
         // 3. Build the task description from the Delegate payload.
         let task_description = delegate_msg
             .payload
@@ -163,6 +183,7 @@ impl DelegationExecutor {
             active.insert(delegation_id, ActiveDelegation {
                 session_id: session.id,
                 thread_id: thread.id,
+                recipient_agent_id: delegate_msg.recipient_agent_id.clone(),
                 cancel_token: cancel_token.clone(),
             });
         }

@@ -1571,6 +1571,13 @@ pub(crate) mod tests {
             Ok(result)
         }
 
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+
         async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
             let db = self.db.lock().await;
             let mut result: Vec<_> = db
@@ -1651,6 +1658,13 @@ pub(crate) mod tests {
             _: swage_core::MessageStatus,
             _: Option<&str>,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn list_by_correlation(

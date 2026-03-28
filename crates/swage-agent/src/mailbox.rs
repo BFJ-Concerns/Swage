@@ -43,7 +43,31 @@ pub async fn check_mailbox(
 
     let mut contents = MailboxContents::default();
 
+    // Pre-scan for Shutdown. When present, non-Shutdown messages must not be
+    // claimed as Delivered — the caller will terminate immediately and those
+    // messages would be permanently lost. Mark them Failed instead.
+    let has_shutdown = pending.iter().any(|m| m.kind == MessageKind::Shutdown);
+
     for msg in pending {
+        if has_shutdown && msg.kind != MessageKind::Shutdown {
+            // Fail non-Shutdown messages so they aren't silently abandoned.
+            let _ = storage
+                .update_agent_message_status(
+                    msg.id,
+                    MessageStatus::Failed,
+                    Some("shutdown received"),
+                )
+                .await;
+            // Still note Cancel correlation IDs — useful for cleanup metadata
+            // even during shutdown.
+            if msg.kind == MessageKind::Cancel {
+                if let Some(correlation_id) = msg.correlation_id {
+                    contents.cancelled_delegations.push(correlation_id);
+                }
+            }
+            continue;
+        }
+
         // Claim the message atomically — if this returns false, another
         // instantiation already claimed it (race condition handled).
         let claimed = storage
@@ -55,15 +79,6 @@ pub async fn check_mailbox(
 
         match msg.kind {
             MessageKind::Shutdown => {
-                // TODO Shutdown claiming consumes sibling messages that will never be processed
-                // priority: high | tags: review:branch-inter-agent-communication
-                // All pending messages are claimed as Delivered before the caller inspects
-                // `should_shutdown`. When the caller sees `true` and terminates, any
-                // Delegate/Result messages already claimed here are permanently lost —
-                // future instantiations cannot reclaim them. Either stop the loop and mark
-                // remaining unclaimed messages as Failed("shutdown received"), or skip
-                // claiming non-Shutdown messages once Shutdown is seen.
-                // ---
                 contents.should_shutdown = true;
             }
             MessageKind::Cancel => {
@@ -104,11 +119,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn mailbox_categorises_messages() {
+    async fn shutdown_fails_sibling_messages() {
         let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
 
-        // Queue a Delegate.
-        storage
+        // Queue a Delegate — this should be Failed, not claimed as Delivered.
+        let delegate = storage
             .create_agent_message(NewAgentMessage {
                 sender_agent_id: "sender".into(),
                 recipient_agent_id: "agent-a".into(),
@@ -133,7 +148,13 @@ mod tests {
 
         let contents = check_mailbox(&storage, "agent-a").await.unwrap();
         assert!(contents.should_shutdown);
-        assert_eq!(contents.pending_delegates.len(), 1);
+        // Delegate is NOT collected — it was Failed to prevent silent loss.
+        assert!(contents.pending_delegates.is_empty());
+
+        // Verify the delegate was marked Failed with the shutdown reason.
+        let msg = storage.get_agent_message(delegate.id).await.unwrap().unwrap();
+        assert_eq!(msg.status, MessageStatus::Failed);
+        assert_eq!(msg.failure_reason.as_deref(), Some("shutdown received"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

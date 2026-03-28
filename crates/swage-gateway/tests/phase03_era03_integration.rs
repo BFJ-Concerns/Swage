@@ -698,10 +698,12 @@ async fn no_pending_approvals_no_event_on_connect() {
 /// Re-emission is scoped to the connecting session's own agent_id. An approval
 /// for "other-agent" must not appear on a "gateway" session's WebSocket.
 #[tokio::test(flavor = "multi_thread")]
-async fn approvals_for_other_agent_not_re_emitted_on_connect() {
+async fn approvals_for_other_session_not_re_emitted_on_connect() {
     use swage_core::ApprovalTimeoutPolicy;
-    use swage_storage::model::{ApprovalKind, NewApprovalRequest, NewTurn, TurnState};
-    use swage_storage::store::{ApprovalStore, ThreadStore, TurnStore};
+    use swage_storage::model::{
+        ApprovalKind, NewApprovalRequest, NewSession, NewThread, NewTurn, TurnState,
+    };
+    use swage_storage::store::{ApprovalStore, SessionStore, ThreadStore, TurnStore};
     use uuid::Uuid;
 
     let _guard = SwageHomeGuard::isolate();
@@ -710,19 +712,23 @@ async fn approvals_for_other_agent_not_re_emitted_on_connect() {
     let config = ResolvedConfig::default();
     let (router, addr, storage) = start_test_server_with_config(provider, config).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conversation_id = body["id"].as_str().unwrap();
-    let session_id: Uuid = conversation_id.parse().unwrap();
+    // Create two conversations (sessions).
+    let (_, body_a) = http(&router, "POST", "/api/conversations").await;
+    let conv_a = body_a["id"].as_str().unwrap();
+    let session_a: Uuid = conv_a.parse().unwrap();
 
-    // Seed an approval for "other-agent" — this session's agent is "gateway".
+    let (_, body_b) = http(&router, "POST", "/api/conversations").await;
+    let session_b: Uuid = body_b["id"].as_str().unwrap().parse().unwrap();
+
+    // Seed a pending approval in session B's thread.
     {
-        let threads = storage.list_by_session(session_id).await.unwrap();
+        let threads = storage.list_by_session(session_b).await.unwrap();
         let thread_id = threads[0].id;
 
         let turn = storage
             .create_turn(NewTurn {
                 thread_id,
-                agent_id: "other-agent".to_string(),
+                agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
                 parent_turn_id: None,
             })
@@ -732,7 +738,7 @@ async fn approvals_for_other_agent_not_re_emitted_on_connect() {
         storage
             .create_approval(NewApprovalRequest {
                 turn_id: turn.id,
-                agent_id: "other-agent".to_string(),
+                agent_id: "gateway".to_string(),
                 kind: ApprovalKind::Tool,
                 tool_name: Some("read_file".to_string()),
                 tool_arguments: None,
@@ -746,14 +752,14 @@ async fn approvals_for_other_agent_not_re_emitted_on_connect() {
             .unwrap();
     }
 
-    // Connect as "gateway" — should not receive "other-agent" approvals.
-    let (_sink, mut stream) = connect_ws(addr, conversation_id).await;
+    // Connect to session A — should NOT receive session B's approval.
+    let (_sink, mut stream) = connect_ws(addr, conv_a).await;
     let events = ws_collect_events(&mut stream, Duration::from_millis(200)).await;
     let has_approval = events
         .iter()
         .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("approval_required"));
     assert!(
         !has_approval,
-        "approvals for other agents must not be re-emitted to this session's client"
+        "approvals from another session must not be re-emitted to this session's client"
     );
 }

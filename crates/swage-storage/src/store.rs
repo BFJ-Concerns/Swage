@@ -260,6 +260,16 @@ pub trait ApprovalStore: Send + Sync {
         agent_id: &str,
     ) -> Result<Vec<ApprovalRequest>, StorageError>;
 
+    /// List pending approval requests scoped to a specific session.
+    ///
+    /// Joins through turns → threads → session to return only approvals whose
+    /// turn belongs to the given session. Used by the WebSocket handler to
+    /// re-emit approvals without leaking cross-session data.
+    async fn list_pending_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ApprovalRequest>, StorageError>;
+
     /// List all pending approval requests across all agents.
     ///
     /// Used during startup recovery and by the gateway to re-emit pending
@@ -322,6 +332,16 @@ pub trait AgentMessageStore: Send + Sync {
         status: swage_core::MessageStatus,
         failure_reason: Option<&str>,
     ) -> Result<bool, StorageError>;
+
+    /// Update the payload of an existing message.
+    ///
+    /// Used by `DelegationExecutor` to annotate delegate messages with the
+    /// child thread_id after creation, enabling scoped cancel fallback.
+    async fn update_agent_message_payload(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError>;
 
     /// List all messages sharing a correlation ID, ordered by creation time.
     ///
@@ -597,6 +617,12 @@ mod tests {
         ) -> Result<Vec<ApprovalRequest>, StorageError> {
             unimplemented!()
         }
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
         async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
             unimplemented!()
         }
@@ -636,6 +662,13 @@ mod tests {
             _: swage_core::MessageStatus,
             _: Option<&str>,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn list_by_correlation(

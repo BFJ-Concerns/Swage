@@ -235,6 +235,30 @@ impl ApprovalStore for SqliteStorage {
         .await
     }
 
+    async fn list_pending_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ApprovalRequest>, StorageError> {
+        let session_id_str = session_id.to_string();
+        self.with_conn(move |conn| {
+            // Join through turns → threads to scope approvals to this session.
+            let mut stmt = conn.prepare(
+                "SELECT a.id, a.turn_id, a.agent_id, a.kind, a.tool_name,
+                        a.tool_arguments, a.hook_name, a.prompt, a.context,
+                        a.state, a.timeout_at, a.timeout_policy,
+                        a.decision_reason, a.created_at, a.decided_at
+                 FROM approval_requests a
+                 INNER JOIN turns t ON t.id = a.turn_id
+                 INNER JOIN threads th ON th.id = t.thread_id
+                 WHERE a.state = 'pending' AND th.session_id = ?1
+                 ORDER BY a.created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![&session_id_str], row_to_approval)?;
+            rows.collect()
+        })
+        .await
+    }
+
     async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(

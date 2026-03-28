@@ -353,6 +353,12 @@ mod tests {
         ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
             unimplemented!()
         }
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
         async fn list_all_pending(
             &self,
         ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
@@ -397,6 +403,13 @@ mod tests {
             _: swage_core::MessageStatus,
             _: Option<&str>,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn list_by_correlation(

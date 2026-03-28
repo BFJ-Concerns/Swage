@@ -77,6 +77,14 @@ pub enum ServerEvent {
     },
 
     /// The turn has completed and been committed to storage.
+    // TODO Preserve structured_output in client TurnComplete
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // The gateway's `ServerEvent::TurnComplete` includes
+    // `structured_output: Option<serde_json::Value>` for schema-validated turns.
+    // This client-side struct omits the field, so serde silently drops the value
+    // and consumers cannot read the validated JSON. Add the field (with
+    // `#[serde(default)]`) to mirror the gateway type.
+    // ---
     TurnComplete {
         turn_id: Uuid,
         #[serde(default)]
@@ -169,6 +177,15 @@ pub enum ClientEvent {
     ActivateSkill { name: String },
     /// Request deactivation of a named skill.
     DeactivateSkill { name: String },
+    // TODO Add ApprovalDecision variant to ClientEvent
+    // priority: high | tags: review:branch-inter-agent-communication
+    // The gateway emits `ApprovalRequired` events and expects a matching
+    // `approval_decision` client event in response. This enum has no such
+    // variant, so any client built on `swage-client` that receives
+    // `ApprovalRequired` has no way to send the verdict — every HITL prompt
+    // will silently time out. Add `ApprovalDecision { approval_id: Uuid,
+    // approved: bool }` (or matching the gateway wire format) here.
+    // ---
 }
 
 // ---------------------------------------------------------------------------

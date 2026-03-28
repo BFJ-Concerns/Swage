@@ -457,58 +457,34 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // connect (or reconnect) after an approval was raised, so we catch them
     // up immediately rather than leaving them blind until the next turn.
     // Fail-open: storage errors are logged and the connection continues.
-    // TODO Approval re-emission leaks cross-session approvals via shared agent_id
-    // priority: high | tags: review:branch-inter-agent-communication
-    // `list_pending_by_agent` returns approvals for ALL sessions that share the
-    // same agent_id. When conversation A reconnects it will receive pending
-    // approval events that belong to conversation B — a different client can
-    // then act on them, approving or rejecting work it has no context for.
-    // Re-emission should be scoped to the current session (or its thread
-    // lineage) rather than the entire agent. Either add a
-    // `list_pending_by_session(session_id)` storage method or filter the
-    // results by matching the approval's turn_id against turns for this session.
-    // ---
-    match state.storage.get_session(session_id).await {
-        Ok(Some(session)) => {
-            match state.storage.list_pending_by_agent(&session.agent_id).await {
-                Ok(pending) => {
-                    for approval in pending {
-                        let event = ServerEvent::ApprovalRequired {
-                            approval_id: approval.id.to_string(),
-                            turn_id: approval.turn_id.to_string(),
-                            agent_id: approval.agent_id.clone(),
-                            kind: approval.kind.to_string(),
-                            tool_name: approval.tool_name.clone(),
-                            tool_arguments: approval.tool_arguments.clone(),
-                            prompt: approval.prompt.clone(),
-                            context: approval.context.clone(),
-                            timeout_at: approval.timeout_at.to_rfc3339(),
-                            timeout_policy: approval.timeout_policy.to_string(),
-                        };
-                        // Ignore send errors: if the forward task has already
-                        // exited there is no client to receive the event.
-                        let _ = tx.send(event);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        %session_id,
-                        error = %e,
-                        "failed to list pending approvals for re-emission on connect"
-                    );
-                }
+    // Re-emit pending approvals scoped to this session only. Previous
+    // implementation used list_pending_by_agent which leaked approvals from
+    // other sessions sharing the same agent_id.
+    match state.storage.list_pending_by_session(session_id).await {
+        Ok(pending) => {
+            for approval in pending {
+                let event = ServerEvent::ApprovalRequired {
+                    approval_id: approval.id.to_string(),
+                    turn_id: approval.turn_id.to_string(),
+                    agent_id: approval.agent_id.clone(),
+                    kind: approval.kind.to_string(),
+                    tool_name: approval.tool_name.clone(),
+                    tool_arguments: approval.tool_arguments.clone(),
+                    prompt: approval.prompt.clone(),
+                    context: approval.context.clone(),
+                    timeout_at: approval.timeout_at.to_rfc3339(),
+                    timeout_policy: approval.timeout_policy.to_string(),
+                };
+                // Ignore send errors: if the forward task has already
+                // exited there is no client to receive the event.
+                let _ = tx.send(event);
             }
-        }
-        Ok(None) => {
-            // Race condition: session was valid at upgrade time but gone now.
-            // Extremely unlikely; log and let the connection proceed.
-            tracing::warn!(%session_id, "session not found during approval re-emission");
         }
         Err(e) => {
             tracing::warn!(
                 %session_id,
                 error = %e,
-                "storage error fetching session for approval re-emission"
+                "failed to list pending approvals for re-emission on connect"
             );
         }
     }

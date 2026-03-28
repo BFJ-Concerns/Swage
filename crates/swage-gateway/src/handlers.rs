@@ -648,6 +648,7 @@ pub async fn send_agent_message(
         .parse()
         .map_err(|e: String| ApiError::validation(e))?;
 
+    // Store-only path — live dispatch deferred. See BACKLOG.md [fvxd].
     let router = MessageRouter::new(state.storage.clone(), None);
     let msg = router
         .send_message(NewAgentMessage {
