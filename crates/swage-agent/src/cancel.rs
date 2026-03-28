@@ -302,7 +302,7 @@ mod tests {
 
         // Verify the thread was also reset to Idle — without this, the thread
         // remains stuck in Processing and future turns fail with TurnInProgress.
-        let thread = storage.get_thread(turn.thread_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), turn.thread_id).await.unwrap().unwrap();
         assert_eq!(thread.state, ThreadState::Idle);
     }
 
