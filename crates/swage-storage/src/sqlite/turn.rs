@@ -166,52 +166,38 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
-    // TODO update_turn_state terminal guard is non-atomic — can overwrite terminal states
-    // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
-    // The guard reads current state (get_turn) then issues a separate UPDATE.
-    // Between those two calls another task could write a terminal state
-    // (Completed/Failed/Interrupted); the subsequent UPDATE then overwrites it,
-    // violating the "first terminal state wins" policy. Move the guard into the
-    // SQL WHERE clause — `WHERE id = ?3 AND state NOT IN ('Completed', 'Failed',
-    // 'Interrupted')` — as done atomically in agent_message.rs.
-    // ---
     async fn update_turn_state(
         &self,
         id: Uuid,
         new_state: TurnState,
     ) -> Result<(), StorageError> {
         // Verify the turn exists before updating.
-        let current = self.get_turn(id)
+        let _current = self.get_turn(id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "turn".into(),
                 id: id.to_string(),
             })?;
 
-        // Terminal-state guard: once a turn reaches Completed, Failed, or
-        // Interrupted, refuse further transitions. "First terminal state wins"
-        // prevents races where a completing agent overwrites an Interrupted record.
-        if matches!(
-            current.state,
-            TurnState::Completed | TurnState::Failed | TurnState::Interrupted
-        ) {
-            return Ok(());
-        }
-
-        // Completed, Failed, and Interrupted are terminal — set completed_at.
+        // Terminal-state guard is enforced atomically in the SQL WHERE clause
+        // below — "first terminal state wins" without a read-then-write race.
         let is_terminal = matches!(new_state, TurnState::Completed | TurnState::Failed | TurnState::Interrupted);
 
         self.with_conn(move |conn| {
             let state_str = new_state.to_string();
+            // The WHERE excludes terminal states so a concurrent Interrupted
+            // write can't be overwritten by a late Completed transition.
             if is_terminal {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
-                    "UPDATE turns SET state = ?1, completed_at = ?2 WHERE id = ?3",
+                    "UPDATE turns SET state = ?1, completed_at = ?2
+                     WHERE id = ?3 AND state NOT IN ('Completed', 'Failed', 'Interrupted')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 conn.execute(
-                    "UPDATE turns SET state = ?1 WHERE id = ?2",
+                    "UPDATE turns SET state = ?1
+                     WHERE id = ?2 AND state NOT IN ('Completed', 'Failed', 'Interrupted')",
                     params![&state_str, id.to_string()],
                 )?;
             }

@@ -497,6 +497,16 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             });
             EventOutcome::Continue
         }
+
+        ServerEvent::ApprovalDecisionError { error, message, .. } => {
+            state.messages.push(DisplayMessage {
+                role: "error".to_string(),
+                content: format!("Approval decision failed ({error}): {message}"),
+                timestamp: Utc::now(),
+                tool_calls: vec![],
+            });
+            EventOutcome::Continue
+        }
     }
 }
 

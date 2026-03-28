@@ -5,6 +5,8 @@
 //! The policy is resolved from CommunicationConfig: per-target overrides take
 //! precedence, falling back to the default mode.
 
+use std::collections::HashSet;
+
 use swage_config::{
     ContextTransferConfig, ContextTransferMode, ContextTransferTargetConfig,
 };
@@ -60,17 +62,14 @@ pub fn evaluate_transfer(
         ContextTransferMode::Explicit => {
             // Filter context messages by allowed field names.
             // Fields map to ChatMessage roles for now. Silently omit unknown fields.
-            // TODO Pre-lowercase allowed_fields once to avoid O(N×M) allocations
-            // priority: low | tags: review:branch-inter-agent-communication
-            // `to_string().to_lowercase()` is called on each message role and each field
-            // for every message in the context, producing O(N×M) temporary strings. Pre-compute
-            // the lowercased field set before the iterator to reduce this to O(N+M).
-            // ---
+            // Pre-compute lowercased field set once: O(M) instead of O(N×M) allocations.
+            let allowed_lower: HashSet<String> =
+                allowed_fields.iter().map(|f| f.to_lowercase()).collect();
             let messages = sender_context
                 .iter()
                 .filter(|msg| {
                     let role_str = msg.role.to_string().to_lowercase();
-                    allowed_fields.iter().any(|f| f.to_lowercase() == role_str)
+                    allowed_lower.contains(&role_str)
                 })
                 .cloned()
                 .collect();

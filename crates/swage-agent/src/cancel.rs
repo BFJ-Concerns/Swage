@@ -173,19 +173,11 @@ async fn interrupt_turns_in_thread(
     Ok(())
 }
 
-// TODO handle_shutdown leaves threads in Processing state after interrupting turns
-// priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
-// handle_cancel resets the thread to Idle after interrupting its turn, but
-// handle_shutdown does not. Any thread whose turn is interrupted by a shutdown
-// message stays in Processing indefinitely, causing subsequent turn creation to
-// fail with TurnInProgress until manual intervention. Add thread-to-Idle
-// resets after the for-loop over active_turns (mirroring the logic at the
-// end of handle_cancel).
-// ---
 /// Handle a Shutdown message by interrupting all active turns for the target.
 ///
 /// The shutdown message itself is already claimed by the mailbox. This handler
-/// interrupts any in-progress turns for the target agent.
+/// interrupts any in-progress turns for the target agent, then resets their
+/// threads to Idle so new turns can be created.
 pub async fn handle_shutdown(
     storage: &Arc<dyn Storage>,
     shutdown_msg: &AgentMessage,
@@ -212,12 +204,27 @@ pub async fn handle_shutdown(
         .find_in_progress_by_agent(&shutdown_msg.recipient_agent_id)
         .await?;
 
+    // Collect thread IDs before iterating so we can reset them to Idle.
+    let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
+
     for turn in active_turns {
         if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
             tracing::warn!(
                 turn_id = %turn.id,
                 error = %e,
                 "shutdown: failed to interrupt turn"
+            );
+        }
+    }
+
+    // Reset threads to Idle — mirrors handle_cancel's fallback path. Without
+    // this, threads stay in Processing and reject subsequent turn creation.
+    for thread_id in thread_ids {
+        if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %e,
+                "shutdown: failed to reset thread to Idle"
             );
         }
     }

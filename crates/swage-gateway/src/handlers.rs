@@ -559,19 +559,16 @@ pub async fn submit_turn(
                                 let _ = bg_state.storage.update_cost(turn_id, cost).await;
                             }
                         } else {
-                            // TODO Mark placeholder Failed (not Completed) when no real turn found
-                            // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
-                            // If process_turn returns Ok(()) but no agent turn exists in storage,
-                            // the agent likely failed before persisting its turn. Marking the
-                            // placeholder Completed misrepresents the outcome and hides the
-                            // failure from REST pollers. Use Failed with a warning log here,
-                            // matching the error arm below.
-                            // ---
-                            // Couldn't find the real turn — mark the placeholder as
-                            // completed so the poller doesn't hang forever.
+                            // No real turn found in storage — the agent likely failed
+                            // before persisting. Mark as Failed so REST pollers see the
+                            // failure rather than a misleading Completed status.
+                            tracing::warn!(
+                                turn_id = %turn_id,
+                                "process_turn succeeded but no agent turn found; marking placeholder as failed"
+                            );
                             let _ = bg_state
                                 .storage
-                                .update_turn_state(turn_id, swage_storage::TurnState::Completed)
+                                .update_turn_state(turn_id, swage_storage::TurnState::Failed)
                                 .await;
                         }
                     }

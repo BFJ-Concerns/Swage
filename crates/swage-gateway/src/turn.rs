@@ -172,19 +172,13 @@ pub async fn process_turn(
         .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
     let thread_id = thread.id;
 
-    // TODO Guard must also block new turns while a previous turn is AwaitingApproval
-    // priority: high | tags: review:branch-inter-agent-communication
-    // The guard below only checks TurnState::Processing. When a tool or hook gate
-    // suspends a turn it transitions to AwaitingApproval — at that point this
-    // check passes, allowing a second turn to start before the approval is
-    // resolved. Two concurrent turns in one thread will interleave history and
-    // tool output. Extend the predicate to also match TurnState::AwaitingApproval.
-    // ---
-    // Step 2: Guard — reject if a turn is already Processing for this thread.
+    // Step 2: Guard — reject if a turn is already active for this thread.
+    // Both Processing and AwaitingApproval represent in-progress work; allowing
+    // a second turn while approval is pending would interleave history.
     let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
     if existing_turns
         .iter()
-        .any(|t| t.state == TurnState::Processing)
+        .any(|t| matches!(t.state, TurnState::Processing | TurnState::AwaitingApproval))
     {
         return Err(GatewayError::TurnInProgress { session_id });
     }
