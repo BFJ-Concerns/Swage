@@ -166,6 +166,15 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
+    // TODO update_turn_state terminal guard is non-atomic — can overwrite terminal states
+    // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+    // The guard reads current state (get_turn) then issues a separate UPDATE.
+    // Between those two calls another task could write a terminal state
+    // (Completed/Failed/Interrupted); the subsequent UPDATE then overwrites it,
+    // violating the "first terminal state wins" policy. Move the guard into the
+    // SQL WHERE clause — `WHERE id = ?3 AND state NOT IN ('Completed', 'Failed',
+    // 'Interrupted')` — as done atomically in agent_message.rs.
+    // ---
     async fn update_turn_state(
         &self,
         id: Uuid,

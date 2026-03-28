@@ -271,6 +271,16 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             }
         }),
         output: merge_section(base.output, overlay.output, |b, o| PartialOutputConfig {
+            // TODO `PartialOutputConfig::schema` cannot represent "disable inherited schema"
+            // priority: normal | tags: review:inter-agent-comms
+            // `schema` is `Option<serde_json::Value>`, so `None` always means "not configured
+            // here" and `o.schema.or(b.schema)` falls through to the base. A child config has
+            // no way to explicitly clear a schema inherited from a higher level. The struct-level
+            // doc comment describes the field as `Option<Option<_>>` (the inner Option
+            // distinguishes "absent" from "explicitly disabled"), but the actual declaration is
+            // `Option<_>`. Fix: change to `Option<Option<serde_json::Value>>` so callers can set
+            // `Some(None)` to opt out, and update merge accordingly.
+            // ---
             // Both fields use overlay-wins semantics: if the overlay has a value,
             // it wins; otherwise the base value is kept.
             schema: o.schema.or(b.schema),

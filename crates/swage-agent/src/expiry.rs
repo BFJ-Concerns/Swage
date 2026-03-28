@@ -39,6 +39,13 @@ pub fn spawn_expiry_task(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // TODO Set MissedTickBehavior::Skip on expiry interval to avoid burst on resume
+        // priority: normal | tags: review:branch-inter-agent-communication
+        // The default MissedTickBehavior is Burst: if the system is paused or under heavy
+        // load and ticks are missed, the interval will fire repeatedly to catch up. For a
+        // background database cleanup task this can cause a burst of expired-message queries
+        // immediately after resuming. Use `ticker.set_missed_tick_behavior(Skip)` or `Delay`.
+        // ---
         let mut ticker = tokio::time::interval(interval);
 
         loop {

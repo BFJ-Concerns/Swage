@@ -531,4 +531,27 @@ mod tests {
             .unwrap();
         assert_eq!(expired, 0);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_payload_persists_new_value() {
+        let storage = make_storage().await;
+        let msg = storage.create_agent_message(delegate_msg()).await.unwrap();
+        assert_eq!(msg.payload["task"], "summarise report");
+
+        // Add a _thread_id annotation — the real use case for this method.
+        let new_payload = serde_json::json!({
+            "task": "summarise report",
+            "_thread_id": "deadbeef-0000-0000-0000-000000000001",
+        });
+        storage
+            .update_agent_message_payload(msg.id, new_payload.clone())
+            .await
+            .unwrap();
+
+        let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(updated.payload, new_payload);
+        assert_eq!(updated.payload["_thread_id"], "deadbeef-0000-0000-0000-000000000001");
+        // Original fields preserved.
+        assert_eq!(updated.payload["task"], "summarise report");
+    }
 }

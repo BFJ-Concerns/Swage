@@ -559,6 +559,14 @@ pub async fn submit_turn(
                                 let _ = bg_state.storage.update_cost(turn_id, cost).await;
                             }
                         } else {
+                            // TODO Mark placeholder Failed (not Completed) when no real turn found
+                            // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+                            // If process_turn returns Ok(()) but no agent turn exists in storage,
+                            // the agent likely failed before persisting its turn. Marking the
+                            // placeholder Completed misrepresents the outcome and hides the
+                            // failure from REST pollers. Use Failed with a warning log here,
+                            // matching the error arm below.
+                            // ---
                             // Couldn't find the real turn — mark the placeholder as
                             // completed so the poller doesn't hang forever.
                             let _ = bg_state
@@ -729,6 +737,13 @@ pub struct ApprovalListQuery {
     pub agent_id: Option<String>,
 }
 
+// TODO list_approvals and list_turns return unbounded result sets — add pagination
+// priority: normal | tags: review:inter-agent-comms
+// Both endpoints fetch all matching records in a single query with no limit or
+// cursor. As approval queues and conversation history grow this causes unbounded
+// memory use, slow responses, and potential timeouts. Add a `limit`/`offset` or
+// cursor query parameter and pass it through to the storage layer.
+// ---
 /// `GET /api/approvals` — list pending approval requests.
 ///
 /// Optionally filtered by agent_id. Returns all pending approvals visible

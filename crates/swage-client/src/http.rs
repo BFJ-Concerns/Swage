@@ -523,12 +523,27 @@ impl GatewayClient {
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
+        // TODO Missing `check_success` in new async turn/message helpers
+        // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+        // `submit_turn`, `poll_turn`, `send_agent_message`, and `get_message_status` all call
+        // `response.json()` directly without first calling `self.check_success(response, &url)`.
+        // On non-2xx responses the server error body is parsed as a successful response, giving
+        // a misleading "missing turn_id" / JSON decode error instead of the real gateway status.
+        // Apply the same `check_success` pattern used on lines 131, 167, 265, and 495.
+        // ---
         let body: serde_json::Value = response.json().await.map_err(|e| {
             ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
             }
         })?;
+        // TODO Use RequestFailed (or a new variant) instead of WebSocketFailed here
+        // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+        // submit_turn is an HTTP method; returning WebSocketFailed for a malformed
+        // response body implies a WebSocket connectivity failure rather than an HTTP
+        // response parsing error. Use ClientError::RequestFailed or introduce a
+        // dedicated MalformedResponse variant.
+        // ---
         let turn_id = body["turn_id"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())

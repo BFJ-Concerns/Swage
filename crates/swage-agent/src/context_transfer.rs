@@ -60,6 +60,12 @@ pub fn evaluate_transfer(
         ContextTransferMode::Explicit => {
             // Filter context messages by allowed field names.
             // Fields map to ChatMessage roles for now. Silently omit unknown fields.
+            // TODO Pre-lowercase allowed_fields once to avoid O(N×M) allocations
+            // priority: low | tags: review:branch-inter-agent-communication
+            // `to_string().to_lowercase()` is called on each message role and each field
+            // for every message in the context, producing O(N×M) temporary strings. Pre-compute
+            // the lowercased field set before the iterator to reduce this to O(N+M).
+            // ---
             let messages = sender_context
                 .iter()
                 .filter(|msg| {

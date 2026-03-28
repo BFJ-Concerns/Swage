@@ -191,6 +191,66 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_during_shutdown_populates_cancelled_delegations() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+        let correlation = Uuid::new_v4();
+
+        // Queue a Cancel with a correlation ID.
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "sender".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Cancel,
+                correlation_id: Some(correlation),
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        // Queue a Shutdown — causes the Cancel to be Failed rather than
+        // Delivered, but its correlation ID should still be captured.
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "sender".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Shutdown,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let contents = check_mailbox(&storage, "agent-a").await.unwrap();
+        assert!(contents.should_shutdown);
+        // The Cancel was Failed (not Delivered), but its correlation ID
+        // must still appear so a restarted agent doesn't re-execute the
+        // cancelled delegation.
+        assert_eq!(contents.cancelled_delegations, vec![correlation]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn result_messages_collected_in_pending_results() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+        let correlation = Uuid::new_v4();
+
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "sub-agent".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: Some(correlation),
+                payload: serde_json::json!({"response": "done"}),
+            })
+            .await
+            .unwrap();
+
+        let contents = check_mailbox(&storage, "agent-a").await.unwrap();
+        assert_eq!(contents.pending_results.len(), 1);
+        assert_eq!(contents.pending_results[0].correlation_id, Some(correlation));
+        assert_eq!(contents.pending_results[0].payload["response"], "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancel_collects_correlation_ids() {
         let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
         let correlation = Uuid::new_v4();

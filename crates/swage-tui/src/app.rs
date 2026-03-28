@@ -459,6 +459,15 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
+        // TODO Wire ApprovalRequired into ApprovalPanel widget — currently a no-op system msg
+        // priority: high | tags: review:inter-agent-comms
+        // `ui/approval_panel.rs` introduces an ApprovalPanel widget and state struct but
+        // nothing in app.rs populates or renders it. The three approval events
+        // (ApprovalRequired, ApprovalConfirmed, ApprovalExpired) are handled by adding
+        // plain system messages only. The panel is dead code. Update AppState to hold
+        // ApprovalPanelState, populate it on ApprovalRequired, clear it on
+        // Confirmed/Expired, and render the widget in the main layout.
+        // ---
         ServerEvent::ApprovalRequired { prompt, .. } => {
             state.messages.push(DisplayMessage {
                 role: "system".to_string(),

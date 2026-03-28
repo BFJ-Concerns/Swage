@@ -899,6 +899,13 @@ impl Agent {
             GateResult::Cancelled => {
                 // Cooperative cancellation — interrupt immediately regardless
                 // of timeout policy. The approval becomes stale.
+                // TODO Wrap cancel state updates in a transaction
+                // priority: normal | tags: review:branch-inter-agent-communication
+                // Three sequential storage writes with `let _ =` mean a failure on the first
+                // (update_approval_state) leaves the approval in its prior state while the turn
+                // still transitions to Interrupted and the thread to Idle — inconsistent.
+                // Wrap in a transaction or at minimum log failures so the discrepancy is visible.
+                // ---
                 let _ = self.storage.update_approval_state(
                     approval.id,
                     ApprovalState::Expired,

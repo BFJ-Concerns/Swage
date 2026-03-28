@@ -148,6 +148,15 @@ pub enum ServerEvent {
 
     /// An approval request expired.
     ApprovalExpired { approval_id: Uuid },
+    // TODO Add ApprovalDecisionError variant to ServerEvent
+    // priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+    // The client sends `ClientEvent::ApprovalDecision` and the gateway responds
+    // with an `ApprovalDecisionError` frame when the decision is invalid (bad
+    // `decision` string) or the approval is stale/not found. Without this
+    // variant, `next_event()` will log a deserialisation warning and silently
+    // discard the frame, leaving callers unable to detect rejection and
+    // potentially waiting indefinitely for `ApprovalConfirmed`.
+    // ---
 }
 
 // ---------------------------------------------------------------------------

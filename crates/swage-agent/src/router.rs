@@ -294,4 +294,76 @@ mod tests {
         let pending = storage.list_pending_for_agent("agent-b").await.unwrap();
         assert!(pending.is_empty());
     }
+
+    // --- Hook blocking tests ---
+
+    /// A hook that blocks every event it sees.
+    struct AlwaysBlockHook(&'static str);
+
+    #[async_trait::async_trait]
+    impl swage_hook::Hook for AlwaysBlockHook {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+            HookOutcome::Block(format!("policy: blocked by {}", self.0))
+        }
+    }
+
+    fn make_router_with_blocking_hook(
+        storage: Arc<dyn Storage>,
+        filter: fn(&HookEvent) -> bool,
+    ) -> MessageRouter {
+        let mut registry = HookRegistry::new();
+        let mut reg = swage_hook::HookRegistration::new(Arc::new(AlwaysBlockHook("blocker")));
+        reg.event_filter = Some(filter);
+        registry.register(reg);
+        MessageRouter::new(storage, Some(Arc::new(registry)))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_blocks_deliver_message_deliver_event() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        fn is_deliver(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageDeliver { .. })
+        }
+
+        let router = make_router_with_blocking_hook(storage.clone(), is_deliver);
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        let result = router.deliver_message(&msg).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::HookBlocked { hook, .. } => assert_eq!(hook, "MessageDeliver"),
+            other => panic!("expected HookBlocked, got {other:?}"),
+        }
+
+        // Message should be Failed in storage (not stuck in Pending).
+        let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, MessageStatus::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_blocks_deliver_message_receive_event() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        fn is_receive(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageReceive { .. })
+        }
+
+        let router = make_router_with_blocking_hook(storage.clone(), is_receive);
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        let result = router.deliver_message(&msg).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::HookBlocked { hook, .. } => assert_eq!(hook, "MessageReceive"),
+            other => panic!("expected HookBlocked, got {other:?}"),
+        }
+
+        let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, MessageStatus::Failed);
+    }
 }

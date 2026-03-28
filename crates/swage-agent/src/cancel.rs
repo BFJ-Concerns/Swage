@@ -173,6 +173,15 @@ async fn interrupt_turns_in_thread(
     Ok(())
 }
 
+// TODO handle_shutdown leaves threads in Processing state after interrupting turns
+// priority: normal | tags: review:inter-agent-comms, review:branch-inter-agent-communication
+// handle_cancel resets the thread to Idle after interrupting its turn, but
+// handle_shutdown does not. Any thread whose turn is interrupted by a shutdown
+// message stays in Processing indefinitely, causing subsequent turn creation to
+// fail with TurnInProgress until manual intervention. Add thread-to-Idle
+// resets after the for-loop over active_turns (mirroring the logic at the
+// end of handle_cancel).
+// ---
 /// Handle a Shutdown message by interrupting all active turns for the target.
 ///
 /// The shutdown message itself is already claimed by the mailbox. This handler
@@ -304,6 +313,185 @@ mod tests {
         // remains stuck in Processing and future turns fail with TurnInProgress.
         let thread = ThreadStore::get(storage.as_ref(), turn.thread_id).await.unwrap().unwrap();
         assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_with_no_correlation_id_returns_error() {
+        let (storage, _turn_id) = setup_with_turn("agent-b").await;
+
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: None, // Missing — should fail.
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        let result = handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::InvalidConfig(msg) => {
+                assert!(msg.contains("correlation_id"), "error should mention correlation_id: {msg}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_thread_id_annotation_scopes_to_annotated_thread() {
+        // Set up two threads for agent-b — the annotation should scope
+        // interruption to only the annotated thread.
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let project = ProjectStore::get_or_create_default(storage.as_ref())
+            .await
+            .unwrap();
+
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent-b".into(),
+            })
+            .await
+            .unwrap();
+
+        // Thread A — the annotated target.
+        let thread_a = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent-b".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_a = storage
+            .create_turn(NewTurn {
+                thread_id: thread_a.id,
+                agent_id: "agent-b".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Thread B — should NOT be interrupted.
+        let thread_b = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent-b".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_b = storage
+            .create_turn(NewTurn {
+                thread_id: thread_b.id,
+                agent_id: "agent-b".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Create a delegate with _thread_id annotation pointing to thread_a.
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({
+                    "_thread_id": thread_a.id.to_string(),
+                    "task": "something"
+                }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(delegate.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        // No active delegations — forces the _thread_id annotation fallback.
+        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+            .await
+            .unwrap();
+
+        // Thread A's turn should be interrupted.
+        let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
+        assert_eq!(ta.state, TurnState::Interrupted, "annotated thread's turn should be interrupted");
+
+        // Thread A should be reset to Idle.
+        let thread_a_state = ThreadStore::get(storage.as_ref(), thread_a.id).await.unwrap().unwrap();
+        assert_eq!(thread_a_state.state, ThreadState::Idle, "annotated thread should be reset to Idle");
+
+        // Thread B's turn should be unaffected.
+        let tb = storage.get_turn(turn_b.id).await.unwrap().unwrap();
+        assert_eq!(tb.state, TurnState::Processing, "other thread's turn should be unaffected");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_malformed_thread_id_annotation_falls_through_to_broad_cancel() {
+        let (storage, turn_id) = setup_with_turn("agent-b").await;
+
+        // Create a delegate with a malformed _thread_id — not a valid UUID.
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({
+                    "_thread_id": "not-a-valid-uuid",
+                }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(delegate.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        // Should succeed — malformed UUID is ignored, falls through to
+        // the broad agent-level cancel path.
+        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+            .await
+            .unwrap();
+
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, TurnState::Interrupted, "should still interrupt via broad fallback");
     }
 
     #[tokio::test(flavor = "multi_thread")]
