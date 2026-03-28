@@ -50,22 +50,24 @@ pub async fn handle_cancel(
     // Try the active-delegations registry first — this gives us the exact
     // cancellation token and thread ID for scoped interruption.
     if let Some(registry) = active_delegations {
-        // TODO Release registry lock before awaiting storage I/O
-        // priority: normal | tags: review:branch-inter-agent-communication
-        // The read lock `active` is held across `storage.list_turns_by_thread` and the
-        // subsequent `update_turn_state` loop below. Holding a tokio RwLock across async
-        // I/O can starve pending writers. Clone `delegation.thread_id` and
-        // `delegation.cancel_token` from the locked guard, then drop the guard before
-        // issuing the storage calls.
-        // ---
-        let active = registry.read().await;
-        if let Some(delegation) = active.get(&correlation_id) {
+        // Extract the delegation data we need, then release the lock before
+        // any async I/O — holding a tokio RwLock across .await can starve
+        // pending writers.
+        let delegation_data = {
+            let active = registry.read().await;
+            active.get(&correlation_id).map(|d| {
+                (d.thread_id, d.cancel_token.clone())
+            })
+        };
+        // Guard dropped here — safe to await storage calls.
+
+        if let Some((thread_id, cancel_token)) = delegation_data {
             // Trigger cooperative cancellation — the agent's turn loop checks
             // this token between rounds and tool calls.
-            delegation.cancel_token.cancel();
+            cancel_token.cancel();
 
             // Interrupt only the turns in this delegation's thread.
-            let turns = storage.list_turns_by_thread(delegation.thread_id).await?;
+            let turns = storage.list_turns_by_thread(thread_id).await?;
             for turn in turns {
                 if matches!(turn.state, TurnState::Pending | TurnState::Processing) {
                     let _ = storage
@@ -77,6 +79,17 @@ pub async fn handle_cancel(
         }
     }
 
+    // TODO Reset thread state to Idle in fallback cancellation paths
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // The fallback paths below update turn states to Interrupted but do not
+    // transition the corresponding thread to ThreadState::Idle. If the agent's
+    // turn loop has already exited (e.g. via a non-cooperative error path) the
+    // thread remains stuck in Processing, blocking future turns from being
+    // initiated. The primary path (line 64) avoids this by firing the
+    // cancel_token, which causes the live agent loop to do its own state
+    // cleanup. The fallback paths have no such mechanism and should call
+    // storage.update_state(thread_id, ThreadState::Idle) explicitly.
+    // ---
     // Fallback: no active delegation entry (execution may have already
     // finished or active_delegations wasn't provided). Scope to the specific
     // thread if the delegate payload carries a _thread_id annotation;

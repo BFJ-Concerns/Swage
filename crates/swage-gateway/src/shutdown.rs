@@ -268,6 +268,14 @@ pub async fn recover_expired_approvals(
             continue;
         }
 
+        // TODO orphaned turn on restart after approval timeout
+        // priority: high | tags: review:branch-inter-agent-communication
+        // Reject policy moves the turn back to Processing, but no agent task is running
+        // after a restart to consume the rejection and advance the turn. The turn is left
+        // permanently orphaned in Processing state and will block all subsequent requests
+        // for that conversation with TurnInProgress. Consider emitting an ApprovalExpired
+        // WebSocket event and driving turn completion via the session recovery path instead.
+        // ---
         match approval.timeout_policy {
             ApprovalTimeoutPolicy::Reject => {
                 // Return the turn to Processing so the agent can continue
@@ -308,6 +316,14 @@ pub async fn recover_expired_approvals(
     // Clean up any approvals whose turns were deleted during downtime.
     counts.orphaned_cleaned = storage.cleanup_orphaned_approvals().await?;
 
+    // TODO startup expiry uses hardcoded DEFAULT_MESSAGE_TTL instead of configured value
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // `expire_stale_messages` is called with `swage_agent::DEFAULT_MESSAGE_TTL` (24 h)
+    // rather than the `config.communication.message_ttl_secs` value. Deployments with a
+    // non-default TTL will expire messages too early or too late on restart until the
+    // periodic expiry task runs. Pass the configured TTL (already available at the call
+    // site from startup.rs where this function is invoked) so behaviour is consistent.
+    // ---
     // Expire stale agent messages that outlived their TTL during downtime.
     match storage
         .expire_stale_messages(swage_agent::DEFAULT_MESSAGE_TTL)

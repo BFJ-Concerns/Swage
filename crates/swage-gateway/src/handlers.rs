@@ -775,6 +775,15 @@ pub async fn decide_approval(
 
     match sender {
         Some(tx) => {
+            // TODO silent decision loss when agent has already timed out
+            // priority: high | tags: review:branch-inter-agent-communication
+            // `tx.send()` failure is silently discarded. If the waiting agent cancelled or
+            // timed out just before this call, the send fails, the approval remains pending
+            // in storage, but the sender has been removed from `approval_channels` — the
+            // decision is permanently lost with no retry path. Check the `Result` and, on
+            // failure, fall through to the storage-based update path (or return a 409/503)
+            // so the decision is either persisted or the caller can retry.
+            // ---
             let _ = tx.send(ApprovalDecision {
                 decision: req.decision.clone(),
                 reason: req.reason.clone(),

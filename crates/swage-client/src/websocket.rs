@@ -77,14 +77,6 @@ pub enum ServerEvent {
     },
 
     /// The turn has completed and been committed to storage.
-    // TODO Preserve structured_output in client TurnComplete
-    // priority: normal | tags: review:branch-inter-agent-communication
-    // The gateway's `ServerEvent::TurnComplete` includes
-    // `structured_output: Option<serde_json::Value>` for schema-validated turns.
-    // This client-side struct omits the field, so serde silently drops the value
-    // and consumers cannot read the validated JSON. Add the field (with
-    // `#[serde(default)]`) to mirror the gateway type.
-    // ---
     TurnComplete {
         turn_id: Uuid,
         #[serde(default)]
@@ -93,6 +85,11 @@ pub enum ServerEvent {
         output_tokens: Option<u32>,
         #[serde(default)]
         cost_microcents: Option<i64>,
+        /// Validated JSON output when an output schema was configured and
+        /// validation passed. Absent when no schema is configured or
+        /// validation failed after retry exhaustion.
+        #[serde(default)]
+        structured_output: Option<serde_json::Value>,
     },
 
     /// An error occurred. `code` is a well-known string (e.g. `"provider_error"`).
@@ -177,15 +174,20 @@ pub enum ClientEvent {
     ActivateSkill { name: String },
     /// Request deactivation of a named skill.
     DeactivateSkill { name: String },
-    // TODO Add ApprovalDecision variant to ClientEvent
-    // priority: high | tags: review:branch-inter-agent-communication
-    // The gateway emits `ApprovalRequired` events and expects a matching
-    // `approval_decision` client event in response. This enum has no such
-    // variant, so any client built on `swage-client` that receives
-    // `ApprovalRequired` has no way to send the verdict — every HITL prompt
-    // will silently time out. Add `ApprovalDecision { approval_id: Uuid,
-    // approved: bool }` (or matching the gateway wire format) here.
-    // ---
+    /// Submit a human verdict on a pending approval request.
+    ///
+    /// Sent in response to a `ServerEvent::ApprovalRequired`. The `decision`
+    /// field must be `"approved"` or `"rejected"`, matching the gateway's
+    /// wire format.
+    ApprovalDecision {
+        /// Identifies the approval request being resolved.
+        approval_id: String,
+        /// The human's verdict: `"approved"` or `"rejected"`.
+        decision: String,
+        /// Optional explanation from the human reviewer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +308,24 @@ impl GatewayWebSocket {
     pub async fn unsubscribe(&mut self, channels: Vec<String>) -> Result<(), ClientError> {
         self.send(ClientEvent::Unsubscribe { channels }).await
     }
+
+    /// Submit a human verdict on a pending approval request.
+    ///
+    /// `decision` must be `"approved"` or `"rejected"`. The gateway validates
+    /// the value and returns an `ApprovalDecisionError` event for anything else.
+    pub async fn approval_decision(
+        &mut self,
+        approval_id: String,
+        decision: String,
+        reason: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.send(ClientEvent::ApprovalDecision {
+            approval_id,
+            decision,
+            reason,
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +417,7 @@ mod tests {
         let id = Uuid::new_v4();
         let json = format!(r#"{{"type":"turn_complete","turn_id":"{id}"}}"#);
         let event: ServerEvent = serde_json::from_str(&json).unwrap();
-        let ServerEvent::TurnComplete { turn_id, input_tokens, output_tokens, cost_microcents } = event else {
+        let ServerEvent::TurnComplete { turn_id, input_tokens, output_tokens, cost_microcents, structured_output } = event else {
             panic!("expected TurnComplete variant");
         };
         assert_eq!(turn_id, id);
@@ -405,6 +425,7 @@ mod tests {
         assert!(input_tokens.is_none());
         assert!(output_tokens.is_none());
         assert!(cost_microcents.is_none());
+        assert!(structured_output.is_none());
     }
 
     #[test]
@@ -548,6 +569,48 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "deactivate_skill");
         assert_eq!(v["name"], "my-skill");
+    }
+
+    #[test]
+    fn approval_decision_serialises() {
+        let event = ClientEvent::ApprovalDecision {
+            approval_id: "abc-123".to_string(),
+            decision: "approved".to_string(),
+            reason: Some("looks good".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "approval_decision");
+        assert_eq!(v["approval_id"], "abc-123");
+        assert_eq!(v["decision"], "approved");
+        assert_eq!(v["reason"], "looks good");
+    }
+
+    #[test]
+    fn approval_decision_omits_none_reason() {
+        let event = ClientEvent::ApprovalDecision {
+            approval_id: "abc-123".to_string(),
+            decision: "rejected".to_string(),
+            reason: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "approval_decision");
+        assert_eq!(v["decision"], "rejected");
+        assert!(v.get("reason").is_none(), "None reason should be omitted from JSON");
+    }
+
+    #[test]
+    fn turn_complete_with_structured_output_deserialises() {
+        let id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"turn_complete","turn_id":"{id}","structured_output":{{"answer":42}}}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::TurnComplete { structured_output, .. } = event else {
+            panic!("expected TurnComplete variant");
+        };
+        assert_eq!(structured_output, Some(serde_json::json!({"answer": 42})));
     }
 
     // -- URL building --

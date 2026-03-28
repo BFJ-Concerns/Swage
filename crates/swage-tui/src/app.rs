@@ -627,6 +627,7 @@ mod tests {
                 input_tokens: Some(50),
                 output_tokens: Some(10),
                 cost_microcents: None,
+                structured_output: None,
             },
         );
         assert_eq!(state.messages.len(), 1);

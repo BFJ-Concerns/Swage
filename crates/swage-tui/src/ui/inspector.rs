@@ -109,7 +109,7 @@ pub fn render_inspector(frame: &mut Frame, area: Rect, context_report: Option<&C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContextReport, ContextSection};
+    use crate::state::{ContextSection};
 
     // --- make_bar ---
 
