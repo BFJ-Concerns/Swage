@@ -81,7 +81,8 @@ pub async fn run_gateway(
     // Step 5b: Apply timeout policy to any approval requests that expired
     // while the gateway was offline. Approvals still within their window are
     // left as-is and will be re-emitted to clients on WebSocket connect.
-    match crate::shutdown::recover_expired_approvals(&*raw_storage).await {
+    let message_ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
+    match crate::shutdown::recover_expired_approvals(&*raw_storage, message_ttl).await {
         Ok(counts) => {
             if counts.rejected_by_timeout > 0 {
                 info!(
@@ -111,11 +112,10 @@ pub async fn run_gateway(
 
     // Step 5b: Start the inter-agent message expiry background task.
     let expiry_handle = {
-        let ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
         let interval = std::time::Duration::from_secs(config.communication.expiry_interval_secs);
         swage_agent::expiry::spawn_expiry_task(
             Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
-            ttl,
+            message_ttl,
             interval,
         )
     };

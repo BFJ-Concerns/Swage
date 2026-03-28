@@ -342,6 +342,17 @@ impl RequireApprovalEntry {
 }
 
 
+// TODO Deduplicate ContextTransferMode with swage_core::messaging::ContextTransferMode
+// tags: guidelines, review:branch-inter-agent-communication
+// Two parallel definitions of the same concept: `swage_config::ContextTransferMode` (here,
+// used for config deserialization) and `swage_core::ContextTransferMode` (wire format).
+// The serde attributes differ: `lowercase` here vs `snake_case` in core — equivalent for
+// current single-word variants (`None`, `Explicit`, `Summary`) but would diverge silently
+// if a multi-word variant (e.g. `PartialSummary`) were added to one but not the other.
+// Violates CLAUDE.md's extensibility principle — a single addition requires two changes.
+// Fix: either re-export the core type here (if config crate can depend on core messaging),
+// or add a conversion function and a test that asserts both enums have the same variants.
+// ---
 /// Context transfer mode — controls what crosses agent boundaries during delegation.
 ///
 /// Evaluated at send time. The assembled content is embedded in the Delegate

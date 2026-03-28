@@ -117,6 +117,18 @@ impl DelegationExecutor {
                     serde_json::Value::String(thread.id.to_string()),
                 );
             }
+            // TODO Silently swallowed payload-update error widens cancel blast radius
+            // tags: correctness, review:branch-inter-agent-communication
+            // `update_agent_message_payload` is fail-open here, but the consequence is
+            // non-trivial: if the write fails, the `_thread_id` annotation is never
+            // persisted. The fallback cancel path (`handle_cancel` without a live active-
+            // delegations entry) then cannot scope interruption to this delegation's thread
+            // and instead cancels ALL in-progress turns for the target agent. In a scenario
+            // where that agent has concurrent work (separate delegations), those turns are
+            // interrupted even though they were not the target of the cancel.
+            // Fix: log a warning and consider propagating the error so the caller can
+            // decide whether to proceed or surface the inconsistency.
+            // ---
             // Fail-open: a payload update failure shouldn't block delegation.
             let _ = self
                 .storage
@@ -206,6 +218,13 @@ impl DelegationExecutor {
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
 
+        // TODO Remove the explicit drop — it's redundant with the RAII DelegationGuard
+        // tags: simplification, review:branch-inter-agent-communication
+        // The guard already handles removal on drop (including mid-execution cancellation).
+        // Having both an explicit drop AND a RAII guard raises the question of which
+        // mechanism the reader should trust. Drop the explicit removal and let the guard
+        // document itself as the cleanup mechanism.
+        // ---
         // Guard handles deregistration on drop, but we can also remove eagerly
         // for clarity. The guard's drop is a no-op if already removed.
         drop(_guard);
@@ -214,6 +233,13 @@ impl DelegationExecutor {
         while event_rx.try_recv().is_ok() {}
 
         // 6. Create Result or failure message.
+        // TODO Factor out shared NewAgentMessage fields from Ok/Err arms
+        // tags: simplification, review:branch-inter-agent-communication
+        // Both branches construct NewAgentMessage with identical sender_agent_id,
+        // recipient_agent_id, kind, and correlation_id — only payload differs.
+        // Extract those four fields into a local or a small closure to avoid
+        // repeating them across both arms.
+        // ---
         match result {
             Ok(outbound) => {
                 // Build result payload with the structured output (if any).

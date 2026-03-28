@@ -155,6 +155,14 @@ impl SubscriptionState {
             | ServerEvent::ApprovalExpired { .. }
             | ServerEvent::ApprovalDecisionError { .. } => true,
 
+            // TODO Resolve doc/impl conflict for DelegationStarted and DelegationCompleted
+            // priority: normal | tags: review:branch-inter-agent-communication
+            // The ServerEvent doc comments for DelegationStarted and DelegationCompleted
+            // (websocket.rs) say these are delivered "when client subscribes to 'delegation'",
+            // implying subscription-gated delivery. The implementation here treats them as
+            // always-delivered (matching approval events). One of the two needs updating:
+            // either the doc should say "always delivered" or the gate check should be added.
+            // ---
             // Inter-agent communication events are always delivered.
             ServerEvent::DelegationStarted { .. }
             | ServerEvent::DelegationCompleted { .. } => true,

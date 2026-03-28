@@ -230,6 +230,7 @@ pub struct ApprovalRecoveryCounts {
 /// `list_all_pending` or `cleanup_orphaned_approvals` query fails.
 pub async fn recover_expired_approvals(
     storage: &dyn Storage,
+    message_ttl: std::time::Duration,
 ) -> Result<ApprovalRecoveryCounts, StorageError> {
     let mut counts = ApprovalRecoveryCounts::default();
 
@@ -268,47 +269,26 @@ pub async fn recover_expired_approvals(
             continue;
         }
 
-        // TODO orphaned turn on restart after approval timeout
-        // priority: high | tags: review:branch-inter-agent-communication
-        // Reject policy moves the turn back to Processing, but no agent task is running
-        // after a restart to consume the rejection and advance the turn. The turn is left
-        // permanently orphaned in Processing state and will block all subsequent requests
-        // for that conversation with TurnInProgress. Consider emitting an ApprovalExpired
-        // WebSocket event and driving turn completion via the session recovery path instead.
-        // ---
-        match approval.timeout_policy {
-            ApprovalTimeoutPolicy::Reject => {
-                // Return the turn to Processing so the agent can continue
-                // with "approval timed out" rejection feedback.
-                if let Err(e) = storage
-                    .update_turn_state(approval.turn_id, TurnState::Processing)
-                    .await
-                {
-                    warn!(
-                        approval_id = %approval.id,
-                        turn_id = %approval.turn_id,
-                        error = %e,
-                        "failed to reset turn to Processing after approval timeout"
-                    );
-                } else {
-                    counts.rejected_by_timeout += 1;
-                }
-            }
-            ApprovalTimeoutPolicy::Interrupt => {
-                // Interrupt: the turn ends here without further completions.
-                if let Err(e) = storage
-                    .update_turn_state(approval.turn_id, TurnState::Interrupted)
-                    .await
-                {
-                    warn!(
-                        approval_id = %approval.id,
-                        turn_id = %approval.turn_id,
-                        error = %e,
-                        "failed to set turn to Interrupted after approval timeout"
-                    );
-                } else {
-                    counts.interrupted_by_timeout += 1;
-                }
+        // Both policies result in Interrupted at startup — no live agent
+        // exists to consume a rejection, so Processing would orphan the turn
+        // permanently (blocking the conversation with TurnInProgress).
+        let target_state = TurnState::Interrupted;
+
+        if let Err(e) = storage
+            .update_turn_state(approval.turn_id, target_state)
+            .await
+        {
+            warn!(
+                approval_id = %approval.id,
+                turn_id = %approval.turn_id,
+                policy = ?approval.timeout_policy,
+                error = %e,
+                "failed to set turn to Interrupted after approval timeout"
+            );
+        } else {
+            match approval.timeout_policy {
+                ApprovalTimeoutPolicy::Reject => counts.rejected_by_timeout += 1,
+                ApprovalTimeoutPolicy::Interrupt => counts.interrupted_by_timeout += 1,
             }
         }
     }
@@ -316,17 +296,9 @@ pub async fn recover_expired_approvals(
     // Clean up any approvals whose turns were deleted during downtime.
     counts.orphaned_cleaned = storage.cleanup_orphaned_approvals().await?;
 
-    // TODO startup expiry uses hardcoded DEFAULT_MESSAGE_TTL instead of configured value
-    // priority: normal | tags: review:branch-inter-agent-communication
-    // `expire_stale_messages` is called with `swage_agent::DEFAULT_MESSAGE_TTL` (24 h)
-    // rather than the `config.communication.message_ttl_secs` value. Deployments with a
-    // non-default TTL will expire messages too early or too late on restart until the
-    // periodic expiry task runs. Pass the configured TTL (already available at the call
-    // site from startup.rs where this function is invoked) so behaviour is consistent.
-    // ---
     // Expire stale agent messages that outlived their TTL during downtime.
     match storage
-        .expire_stale_messages(swage_agent::DEFAULT_MESSAGE_TTL)
+        .expire_stale_messages(message_ttl)
         .await
     {
         Ok(0) => {}
@@ -547,17 +519,19 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Reject).await;
 
-        let counts = recover_expired_approvals(&*storage)
-            .await
-            .expect("recovery should not fail");
+        let counts =
+            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+                .await
+                .expect("recovery should not fail");
 
         // Approval must be Expired.
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
         assert_eq!(approval.state, ApprovalState::Expired);
 
-        // Turn must be Processing so the agent can resume with timeout feedback.
+        // Both policies result in Interrupted at startup — no live agent
+        // exists to consume a rejection, so Processing would orphan the turn.
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.state, TurnState::Processing);
+        assert_eq!(turn.state, TurnState::Interrupted);
 
         assert_eq!(counts.rejected_by_timeout, 1);
         assert_eq!(counts.interrupted_by_timeout, 0);
@@ -577,9 +551,10 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Interrupt).await;
 
-        let counts = recover_expired_approvals(&*storage)
-            .await
-            .expect("recovery should not fail");
+        let counts =
+            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+                .await
+                .expect("recovery should not fail");
 
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
         assert_eq!(approval.state, ApprovalState::Expired);
@@ -605,9 +580,10 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, future, ApprovalTimeoutPolicy::Reject).await;
 
-        let counts = recover_expired_approvals(&*storage)
-            .await
-            .expect("recovery should not fail");
+        let counts =
+            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+                .await
+                .expect("recovery should not fail");
 
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
         assert_eq!(
@@ -632,9 +608,10 @@ mod tests {
     async fn no_pending_approvals_returns_zero_counts() {
         let storage = swage_storage::SqliteStorage::in_memory().unwrap();
 
-        let counts = recover_expired_approvals(&storage)
-            .await
-            .expect("recovery on empty storage should not fail");
+        let counts =
+            recover_expired_approvals(&storage, swage_agent::DEFAULT_MESSAGE_TTL)
+                .await
+                .expect("recovery on empty storage should not fail");
 
         assert_eq!(counts.rejected_by_timeout, 0);
         assert_eq!(counts.interrupted_by_timeout, 0);

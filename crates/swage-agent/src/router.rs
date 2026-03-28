@@ -101,6 +101,14 @@ impl MessageRouter {
     ///
     /// Dispatches MessageDeliver and MessageReceive hooks. If either blocks,
     /// the message transitions to Failed. Otherwise, transitions to Delivered.
+    // TODO Add tests for hook blocking in deliver_message
+    // tags: test-coverage, review:branch-inter-agent-communication
+    // Both the MessageDeliver and MessageReceive block paths (lines 113–119,
+    // 122–138) have no test. If broken, a blocking hook silently fails to
+    // transition the message to Failed — leaving it stuck in Pending.
+    // Needed: router with blocking MessageDeliver hook → deliver_message fails and
+    // message transitions to Failed; same test for MessageReceive hook.
+    // ---
     pub async fn deliver_message(&self, msg: &AgentMessage) -> Result<(), AgentError> {
         if let Some(ref registry) = self.hook_registry {
             let event = HookEvent::MessageDeliver {
@@ -119,6 +127,14 @@ impl MessageRouter {
             }
         }
 
+        // TODO Extract a helper to DRY up the repeated hook-dispatch-or-fail pattern
+        // tags: simplification, review:branch-inter-agent-communication
+        // The block below repeats the same structure as the MessageDeliver block above:
+        // check registry, dispatch event, if blocked fail_message then return Err.
+        // A private `dispatch_blocking_hook(&self, msg, event, hook_name) -> Result<(), AgentError>`
+        // method would eliminate the duplication and make `deliver_message` a
+        // two-liner pair of calls.
+        // ---
         if let Some(ref registry) = self.hook_registry {
             let event = HookEvent::MessageReceive {
                 message_id: msg.id.to_string(),

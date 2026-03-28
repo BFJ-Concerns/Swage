@@ -528,6 +528,14 @@ pub async fn submit_turn(
         // internally — find it and copy the result data across.
         match result {
             Ok(()) => {
+                // TODO Silent failure: storage error here leaves placeholder turn Pending indefinitely
+                // tags: error-handling, review:branch-inter-agent-communication
+                // If `list_turns_by_thread` returns Err, the if-let arm is skipped entirely.
+                // The placeholder turn stays in Pending state with no recovery path and no log
+                // entry, causing the REST poller to hang forever (it never receives a terminal
+                // state). Add an else branch that logs the error and falls through to marking
+                // the placeholder Failed/Completed so the client is unblocked.
+                // ---
                 if let Ok(turns) = bg_state.storage.list_turns_by_thread(thread_id).await {
                     // The real turn is the latest terminal turn that isn't
                     // the placeholder (different ID, created by the agent).
@@ -775,27 +783,59 @@ pub async fn decide_approval(
 
     match sender {
         Some(tx) => {
-            // TODO silent decision loss when agent has already timed out
-            // priority: high | tags: review:branch-inter-agent-communication
-            // `tx.send()` failure is silently discarded. If the waiting agent cancelled or
-            // timed out just before this call, the send fails, the approval remains pending
-            // in storage, but the sender has been removed from `approval_channels` — the
-            // decision is permanently lost with no retry path. Check the `Result` and, on
-            // failure, fall through to the storage-based update path (or return a 409/503)
-            // so the decision is either persisted or the caller can retry.
-            // ---
-            let _ = tx.send(ApprovalDecision {
+            let decision = ApprovalDecision {
                 decision: req.decision.clone(),
                 reason: req.reason.clone(),
-            });
+            };
 
-            Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "approval_id": approval_id,
-                    "decision": req.decision,
-                })),
-            ))
+            if tx.send(decision).is_ok() {
+                // Agent received the decision via the live channel.
+                Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "approval_id": approval_id,
+                        "decision": req.decision,
+                    })),
+                ))
+            } else {
+                // Agent timed out or cancelled just before we sent —
+                // persist the decision to storage so it isn't lost.
+                use swage_storage::model::ApprovalState;
+                use swage_storage::store::ApprovalStore;
+
+                // TODO Validate decision string before mapping to ApprovalState
+                // priority: high | tags: review:branch-inter-agent-communication
+                // `req.decision` is an arbitrary string (ApprovalDecisionRequest.decision: String).
+                // Any value other than "approved" silently becomes Rejected — a typo like "approve"
+                // or "deny" is accepted without error and treated as a rejection. The live-channel
+                // path above also forwards the raw string without validation. Validate at the struct
+                // level (enum) or at the top of the handler, and return 400/422 for unknown values.
+                // ---
+                let new_state = match req.decision.as_str() {
+                    "approved" => ApprovalState::Approved,
+                    _ => ApprovalState::Rejected,
+                };
+
+                match state
+                    .storage
+                    .update_approval_state(approval_id, new_state, req.reason.as_deref())
+                    .await
+                {
+                    Ok(true) => Ok((
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "approval_id": approval_id,
+                            "decision": req.decision,
+                            "note": "agent timed out; decision persisted to storage",
+                        })),
+                    )),
+                    Ok(false) => Err(ApiError::conflict(format!(
+                        "approval {} already resolved",
+                        approval_id,
+                    ))),
+                    Err(e) => Err(ApiError::internal(e.to_string())),
+                }
+            }
         }
         None => {
             // Already resolved or never registered — check storage.
@@ -815,6 +855,15 @@ pub async fn decide_approval(
                         approval_id, a.state
                     )))
                 }
+                // TODO Persist decision for Pending approvals with no in-memory channel
+                // priority: high | tags: review:branch-inter-agent-communication
+                // This arm is reached when the approval exists, is still Pending, but has no
+                // in-memory channel (e.g. after a gateway restart, or when another process calls
+                // this REST endpoint). Returning 500 here means REST clients cannot resolve exactly
+                // the recovered approvals that GET /api/approvals exposes. The `tx.send().is_err()`
+                // branch above already writes to storage for the live-channel-timeout case — the
+                // same storage write should happen here so that storage remains the durable record.
+                // ---
                 _ => Err(ApiError::internal(
                     "approval channel not found — agent may have timed out".into(),
                 )),
