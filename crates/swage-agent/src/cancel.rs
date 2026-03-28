@@ -67,6 +67,17 @@ pub async fn handle_cancel(
         }
     }
 
+    // TODO Cancel fallback interrupts all active turns for the target agent
+    // priority: high | tags: review:branch-inter-agent-communication
+    // When `active_delegations` is None or the registry has no entry for this
+    // correlation_id, `find_in_progress_by_agent` returns every in-progress turn
+    // for the recipient — not just the one from this delegation. In a scenario
+    // where agent-b is running two concurrent delegations from different senders,
+    // cancelling one will also interrupt the other. Scope the fallback by storing
+    // the thread_id in the `AgentMessage` payload (or the delegate record) so the
+    // fallback can filter to the correct thread even without the in-memory registry.
+    // ---
+
     // Fallback: no active delegation entry (execution may have already
     // finished or active_delegations wasn't provided). Use the broad
     // agent-level query.
@@ -93,6 +104,14 @@ pub async fn handle_shutdown(
 ) -> Result<(), AgentError> {
     debug_assert_eq!(shutdown_msg.kind, MessageKind::Shutdown);
 
+    // TODO find_in_progress_by_agent omits AwaitingApproval turns — shutdown becomes a no-op
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // The SQL query behind `find_in_progress_by_agent` filters on state IN ('pending',
+    // 'processing'). A turn suspended in `awaiting_approval` is still active but will not
+    // appear here, so shutdown (and the equivalent cancel fallback path) silently skips it.
+    // The approval will continue waiting until its own timeout fires. Extend the query (or
+    // add a separate `find_awaiting_approval_by_agent` call) to cover these turns.
+    // ---
     // Find all active turns for the target agent.
     let active_turns = storage
         .find_in_progress_by_agent(&shutdown_msg.recipient_agent_id)

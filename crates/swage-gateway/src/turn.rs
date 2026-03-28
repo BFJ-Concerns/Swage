@@ -161,6 +161,7 @@ pub async fn process_turn(
     content: String,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the session's thread. The gateway creates one thread per
     // session in create_conversation / create_session_in_project.
@@ -470,7 +471,11 @@ pub async fn process_turn(
     // Wire output schema from config: if a schema is configured, pass it to the
     // agent so it validates the LLM response and retries on failure.
     let mut agent_config = AgentConfig::new(session.agent_id.clone());
-    if let Some(schema) = config.output.schema.clone() {
+    // Per-request schema override (from REST submit_turn) takes precedence
+    // over the config-level schema.
+    if let Some(schema) = output_schema_override {
+        agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
+    } else if let Some(schema) = config.output.schema.clone() {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
     let agent = match AgentBuilder::new()
@@ -1780,7 +1785,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete without error");
 
@@ -1863,7 +1868,7 @@ pub(crate) mod tests {
 
         let state_clone = Arc::clone(&state);
         let handle = tokio::spawn(async move {
-            process_turn(&*state_clone, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await
+            process_turn(&*state_clone, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await
         });
 
         for _ in 0..50 {
@@ -1905,7 +1910,7 @@ pub(crate) mod tests {
         .await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("error is surfaced via event, not Err return");
 
@@ -1948,7 +1953,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result = process_turn(&state, session_id, "Another message".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
+        let result = process_turn(&state, session_id, "Another message".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await;
 
         assert!(
             matches!(result, Err(GatewayError::TurnInProgress { .. })),
@@ -2053,7 +2058,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2106,7 +2111,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Store this".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Store this".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2140,7 +2145,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use unknown".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Use unknown".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should still complete");
 
@@ -2189,7 +2194,7 @@ pub(crate) mod tests {
             make_state_with_tools(vec![round_1, round_2, round_3]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Multi-round".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Multi-round".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2330,7 +2335,7 @@ pub(crate) mod tests {
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "capture".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await.expect("turn ok");
+        process_turn(&state, session_id, "capture".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await.expect("turn ok");
 
         let working_dir = captured
             .lock()
@@ -2388,7 +2393,7 @@ pub(crate) mod tests {
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "hi".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await.expect("turn ok");
+        process_turn(&state, session_id, "hi".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await.expect("turn ok");
 
         // Verify the provider was invoked — the agent delegates model selection
         // to the provider via model_id() rather than setting CompletionRequest.model.
@@ -2404,7 +2409,7 @@ pub(crate) mod tests {
         ]]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hello".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Hello".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2498,7 +2503,7 @@ pub(crate) mod tests {
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "Check context".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Check context".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2650,7 +2655,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2692,7 +2697,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use broken".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Use broken".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2741,7 +2746,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use fail_tool".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Use fail_tool".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -2841,7 +2846,7 @@ pub(crate) mod tests {
                     // before the span would be created.
                     tracing::callsite::rebuild_interest_cache();
 
-                    process_turn(&state, session_id, "test".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+                    process_turn(&state, session_id, "test".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
                         .await
                         .expect("turn should complete");
                 });
@@ -2930,6 +2935,7 @@ pub(crate) mod tests {
                         "test".to_string(),
                         tx,
                         Arc::new(Mutex::new(SubscriptionState::new(true))),
+                        None,
                     )
                     .await
                     .expect("turn should complete");
@@ -3222,7 +3228,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -3253,7 +3259,7 @@ pub(crate) mod tests {
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))))
+        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
             .await
             .expect("turn should complete");
 
@@ -3295,6 +3301,7 @@ pub(crate) mod tests {
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3362,6 +3369,7 @@ pub(crate) mod tests {
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3414,6 +3422,7 @@ pub(crate) mod tests {
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3473,6 +3482,7 @@ pub(crate) mod tests {
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3535,6 +3545,7 @@ pub(crate) mod tests {
             "give me json".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3591,6 +3602,7 @@ pub(crate) mod tests {
             "give me x".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
+            None,
         )
         .await
         .expect("turn should complete");
@@ -3630,6 +3642,7 @@ pub(crate) mod tests {
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
+            None,
         )
         .await
         .expect("turn should complete");

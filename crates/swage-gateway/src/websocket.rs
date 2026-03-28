@@ -675,7 +675,7 @@ async fn dispatch_client_message(
                             let state = state.clone();
                             let sub   = Arc::clone(&subscription);
                             tokio::spawn(async move {
-                                if let Err(e) = turn::process_turn(&state, session_id, text, tx.clone(), sub).await {
+                                if let Err(e) = turn::process_turn(&state, session_id, text, tx.clone(), sub, None).await {
                                     let (code, message) = classify_gateway_error(&e);
                                     let _ = tx.send(ServerEvent::Error { code, message });
                                 }
@@ -687,7 +687,7 @@ async fn dispatch_client_message(
                         let state = state.clone();
                         let sub   = Arc::clone(&subscription);
                         tokio::spawn(async move {
-                            if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub).await {
+                            if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub, None).await {
                                 let (code, message) = classify_gateway_error(&e);
                                 let _ = tx.send(ServerEvent::Error { code, message });
                             }
@@ -699,7 +699,7 @@ async fn dispatch_client_message(
                     let state = state.clone();
                     let sub   = Arc::clone(&subscription);
                     tokio::spawn(async move {
-                        if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub).await {
+                        if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub, None).await {
                             let (code, message) = classify_gateway_error(&e);
                             let _ = tx.send(ServerEvent::Error { code, message });
                         }

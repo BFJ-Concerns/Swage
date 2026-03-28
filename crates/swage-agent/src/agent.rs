@@ -870,6 +870,18 @@ impl Agent {
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         registrar(approval.id, tx);
 
+        // TODO Add cancel_token arm to approval gate select to unblock on cancellation
+        // priority: normal | tags: review:branch-inter-agent-communication
+        // The select below races only the oneshot receiver against the timeout.
+        // If a Cancel message targets this agent while its turn is in
+        // AwaitingApproval, the cancel token fires but this gate stays blocked
+        // until the timeout expires. The turn loop's cancellation check never
+        // runs because control never returns from here. Add a third arm:
+        // `_ = cancel_token.cancelled() => { ... }` that transitions storage
+        // and returns `ApprovalGateOutcome::Interrupted`. Requires threading a
+        // `CancellationToken` parameter through `handle_approval_gate`.
+        // ---
+
         // 5. Race the oneshot receiver against the timeout.
         let decision = tokio::select! {
             result = rx => {

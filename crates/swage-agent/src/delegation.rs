@@ -152,26 +152,24 @@ impl DelegationExecutor {
 
         let agent = builder.build()?;
 
-        // TODO Memory leak in active_delegations when future is dropped mid-execution
-        // priority: high | tags: review:branch-inter-agent-communication
-        // If `execute_delegation` is dropped (e.g. by a parent timeout or select!) after this
-        // insertion but before the `active.remove` at line 184, the entry is never cleaned up.
-        // Rust async futures do not run remaining code on drop. The fix is a RAII guard (a custom
-        // `Drop` impl or `scopeguard::defer!`) wrapping the `active_delegations` insert so cleanup
-        // is guaranteed regardless of how the future exits.
-        // ---
-
         // Register the cancellation token so handle_cancel can interrupt
-        // this delegation by message ID.
+        // this delegation by message ID. The RAII guard ensures the entry is
+        // removed even if this future is dropped mid-execution (e.g. by a
+        // parent timeout or select!).
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let delegation_id = delegate_msg.id;
         {
             let mut active = self.active_delegations.write().await;
-            active.insert(delegate_msg.id, ActiveDelegation {
+            active.insert(delegation_id, ActiveDelegation {
                 session_id: session.id,
                 thread_id: thread.id,
                 cancel_token: cancel_token.clone(),
             });
         }
+        let _guard = DelegationGuard {
+            delegations: self.active_delegations.clone(),
+            delegation_id,
+        };
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
@@ -187,11 +185,9 @@ impl DelegationExecutor {
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
 
-        // Deregister — the delegation is no longer in flight.
-        {
-            let mut active = self.active_delegations.write().await;
-            active.remove(&delegate_msg.id);
-        }
+        // Guard handles deregistration on drop, but we can also remove eagerly
+        // for clarity. The guard's drop is a no-op if already removed.
+        drop(_guard);
 
         // Drain events (we don't forward them — delegation events are internal).
         while event_rx.try_recv().is_ok() {}
@@ -248,5 +244,31 @@ impl DelegationExecutor {
                 Ok(result_msg)
             }
         }
+    }
+}
+
+/// RAII guard that removes a delegation from the active registry on drop.
+///
+/// Async futures don't run remaining code when dropped (e.g. by a parent
+/// `select!` or timeout). This guard ensures the `active_delegations` entry
+/// is cleaned up regardless of how the future exits, preventing memory leaks
+/// in the delegation registry.
+struct DelegationGuard {
+    delegations: ActiveDelegations,
+    delegation_id: Uuid,
+}
+
+impl Drop for DelegationGuard {
+    fn drop(&mut self) {
+        let delegations = self.delegations.clone();
+        let id = self.delegation_id;
+        // Spawn a blocking task to acquire the write lock — Drop is sync,
+        // so we can't .await directly. The tokio runtime may already be
+        // shutting down, in which case the spawn fails silently (acceptable:
+        // the registry is being torn down anyway).
+        let _ = tokio::task::spawn(async move {
+            let mut active = delegations.write().await;
+            active.remove(&id);
+        });
     }
 }

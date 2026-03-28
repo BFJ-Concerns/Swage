@@ -109,6 +109,17 @@ pub async fn run_gateway(
         }
     }
 
+    // TODO Start inter-agent message expiry background task on gateway startup
+    // priority: normal | tags: review:branch-inter-agent-communication
+    // `swage_agent::expiry::spawn_expiry_task` is defined and exported but is
+    // never called here. Without it, pending messages accumulate indefinitely
+    // once their TTL has elapsed — `expire_stale_messages` is never invoked in
+    // production. Add a step after recovery (before step 6) that calls
+    // `spawn_expiry_task` with the storage reference and the configured TTL and
+    // interval from `CommunicationConfig`. The returned `JoinHandle` should be
+    // aborted on shutdown alongside other background tasks.
+    // ---
+
     // Step 6: Create the LLM provider from configuration.
     let provider = create_provider(&config);
 

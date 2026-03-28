@@ -421,13 +421,6 @@ pub struct SubmitTurnRequest {
     pub conversation_id: Uuid,
     /// The user message to process.
     pub message: String,
-    // TODO output_schema field is documented but silently ignored in submit_turn
-    // priority: normal | tags: review:branch-inter-agent-communication
-    // The spawned background task never reads `req.output_schema` and therefore never
-    // passes it to `process_turn` / `AgentConfig::with_output_schema`. Any REST caller
-    // requesting structured output will silently receive the session's default schema
-    // behaviour (or none) instead of the requested contract.
-    // ---
     /// Optional output schema that overrides the agent's configured schema
     /// for this single turn.
     pub output_schema: Option<serde_json::Value>,
@@ -481,18 +474,10 @@ pub async fn submit_turn(
         .first()
         .ok_or_else(|| ApiError::internal("no thread found for session".into()))?;
 
-    // TODO Async polling returns a stale turn ID — the placeholder is never updated
-    // priority: high | tags: review:branch-inter-agent-communication
-    // `process_turn` calls `agent.process_turn_streaming` internally, which creates
-    // its own Turn record and emits TurnStarted with a fresh UUID. The placeholder
-    // turn created here (returned to the client as `turn_id`) is never updated beyond
-    // Pending, so the client will poll forever without seeing completion. Callers also
-    // see duplicate turn records for a single submission. Fix: either pass `turn_id`
-    // through to process_turn so the agent can adopt it, or delete the placeholder and
-    // redirect GET /api/turns/:id to query by parent_turn_id / session instead.
-    // ---
-
-    // Create the turn in Pending state — visible to the poller immediately.
+    // Create a placeholder turn in Pending state — visible to the poller
+    // immediately. The agent will create its own internal turn record during
+    // processing; after completion we mirror the result onto this placeholder
+    // so the REST client's poll resolves correctly.
     let turn = state
         .storage
         .create_turn(NewTurn {
@@ -505,13 +490,16 @@ pub async fn submit_turn(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let turn_id = turn.id;
+    let thread_id = thread.id;
 
     // Spawn background turn processing — the REST client polls for result.
     let bg_state = state.clone();
     let message = req.message;
+    let output_schema = req.output_schema;
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
+        use swage_storage::store::TurnStore;
         use tokio::sync::{mpsc, Mutex};
         use std::sync::Arc;
 
@@ -531,11 +519,67 @@ pub async fn submit_turn(
             message,
             ws_tx,
             subscription,
+            output_schema,
         )
         .await;
 
-        if let Err(e) = result {
-            tracing::warn!(turn_id = %turn_id, error = %e, "async turn processing failed");
+        // Mirror the agent's real turn result onto the placeholder so the
+        // REST poller sees completion. The agent creates its own turn record
+        // internally — find it and copy the result data across.
+        match result {
+            Ok(()) => {
+                if let Ok(turns) = bg_state.storage.list_turns_by_thread(thread_id).await {
+                    // The real turn is the latest completed turn that isn't
+                    // the placeholder (different ID, created by the agent).
+                    // TODO Mirror Interrupted state when async turn is cooperatively cancelled
+                    // priority: high | tags: review:branch-inter-agent-communication
+                    // This predicate only matches Completed | Failed. When the agent turn is
+                    // cancelled cooperatively, `process_turn` returns `Ok(())` but the real
+                    // turn is Interrupted. The search finds nothing, so the fallback path
+                    // marks the placeholder as Completed — a REST poller sees success rather
+                    // than interruption. Add TurnState::Interrupted to the match arm so
+                    // cancelled turns propagate the correct state to the placeholder.
+                    // ---
+                    let real_turn = turns.iter().rev().find(|t| {
+                        t.id != turn_id
+                            && matches!(
+                                t.state,
+                                swage_storage::TurnState::Completed
+                                    | swage_storage::TurnState::Failed
+                            )
+                    });
+                    if let Some(real) = real_turn {
+                        let _ = bg_state.storage.update_turn_state(turn_id, real.state.clone()).await;
+                        if let Some(ref resp) = real.assistant_response {
+                            let _ = bg_state.storage.update_response(turn_id, resp).await;
+                        }
+                        if let (Some(input), Some(output)) = (real.input_tokens, real.output_tokens)
+                        {
+                            let _ = bg_state.storage.update_tokens(turn_id, input, output).await;
+                        }
+                        if let Some(ref so) = real.structured_output {
+                            let _ = bg_state.storage.update_structured_output(turn_id, so).await;
+                        }
+                        if let Some(cost) = real.cost_microcents {
+                            let _ = bg_state.storage.update_cost(turn_id, cost).await;
+                        }
+                    } else {
+                        // Couldn't find the real turn — mark the placeholder as
+                        // completed so the poller doesn't hang forever.
+                        let _ = bg_state
+                            .storage
+                            .update_turn_state(turn_id, swage_storage::TurnState::Completed)
+                            .await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(turn_id = %turn_id, error = %e, "async turn processing failed");
+                let _ = bg_state
+                    .storage
+                    .update_turn_state(turn_id, swage_storage::TurnState::Failed)
+                    .await;
+            }
         }
     });
 

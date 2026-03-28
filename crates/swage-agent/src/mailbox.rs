@@ -55,6 +55,15 @@ pub async fn check_mailbox(
 
         match msg.kind {
             MessageKind::Shutdown => {
+                // TODO Shutdown claiming consumes sibling messages that will never be processed
+                // priority: high | tags: review:branch-inter-agent-communication
+                // All pending messages are claimed as Delivered before the caller inspects
+                // `should_shutdown`. When the caller sees `true` and terminates, any
+                // Delegate/Result messages already claimed here are permanently lost —
+                // future instantiations cannot reclaim them. Either stop the loop and mark
+                // remaining unclaimed messages as Failed("shutdown received"), or skip
+                // claiming non-Shutdown messages once Shutdown is seen.
+                // ---
                 contents.should_shutdown = true;
             }
             MessageKind::Cancel => {
