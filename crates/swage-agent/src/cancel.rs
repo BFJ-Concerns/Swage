@@ -3,6 +3,7 @@
 //! Cancel interrupts a specific delegation (by correlation_id).
 //! Shutdown terminates all active work under a target agent.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -17,30 +18,23 @@ use crate::error::AgentError;
 
 /// Handle a Cancel message by interrupting the delegated turn.
 ///
-/// When `active_delegations` is provided, the handler looks up the exact
-/// delegation by message ID — triggering its cancellation token (stopping
-/// the in-memory execution) and interrupting only the turns in that
-/// delegation's thread. Without an active delegation entry (e.g. when the
-/// execution already completed), falls back to `find_in_progress_by_agent`.
+/// When `active_delegations` is provided, the handler uses a three-path
+/// fallback to scope the interruption as narrowly as possible:
+///
+/// 1. **Active delegation entry** — looks up the exact delegation by message
+///    ID, triggers its cancellation token (stopping the in-memory execution),
+///    and interrupts only the turns in that delegation's thread.
+/// 2. **Thread-ID annotation** — if no live entry exists (e.g. execution
+///    already completed) but the Delegate message payload carries a
+///    `_thread_id` annotation (injected by `DelegationExecutor`), interrupts
+///    only the turns in that specific thread.
+/// 3. **Last resort** — falls back to `find_in_progress_by_agent`, which
+///    interrupts all in-progress turns for the target agent. This is the
+///    broadest scope and only fires when neither of the above is available.
 ///
 /// The cancel message itself is already claimed (delivered) by the mailbox.
 /// If the target turn is not found or already in a terminal state, the cancel
 /// is a no-op — "first terminal state wins" (ADR-0002).
-// TODO Fix doc above — three-path fallback is described as two-path
-// tags: comments, review:branch-inter-agent-communication
-// The doc says "without an active delegation entry, falls back to
-// find_in_progress_by_agent" — skipping the intermediate path where the
-// delegate payload carries a `_thread_id` annotation (injected by
-// DelegationExecutor). That middle path scopes interruption to one thread
-// without a registry entry. Omitting it from the doc misleads readers into
-// thinking broad agent-level cancellation is the only fallback.
-// ---
-// TODO Add test for handle_cancel with correlation_id = None
-// tags: test-coverage, review:branch-inter-agent-communication
-// The early-return error path (line 37–40) has no unit test. A Cancel message
-// with no correlation_id is invalid and returns Err(InvalidConfig) — callers
-// that don't validate inputs could surface this silently.
-// ---
 pub async fn handle_cancel(
     storage: &Arc<dyn Storage>,
     cancel_msg: &AgentMessage,
@@ -82,14 +76,15 @@ pub async fn handle_cancel(
             cancel_token.cancel();
 
             // Interrupt only the turns in this delegation's thread.
-            let turns = storage.list_turns_by_thread(thread_id).await?;
-            for turn in turns {
-                if matches!(turn.state, TurnState::Pending | TurnState::Processing) {
-                    let _ = storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await;
-                }
-            }
+            // The active-delegation path uses a narrower set of interruptible
+            // states (no AwaitingApproval) since the live cancel token handles
+            // in-flight approval waits directly.
+            interrupt_turns_in_thread(
+                storage,
+                thread_id,
+                &[TurnState::Pending, TurnState::Processing],
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -101,50 +96,14 @@ pub async fn handle_cancel(
     //
     // These paths also reset the thread to Idle — no live agent loop exists
     // to do cleanup, so the thread would remain stuck in Processing.
-    //
-    // TODO Extract a helper for the interrupt-turns-in-thread pattern
-    // tags: simplification, review:branch-inter-agent-communication
-    // The `list_turns_by_thread` + iterate + `update_turn_state(Interrupted)` sequence
-    // appears three times across this file (active-delegation path at line 70,
-    // thread-annotation path here, and last-resort path below). A helper like
-    // `interrupt_turns_in_thread(storage, thread_id, &[states])` would consolidate
-    // them and make the different state sets (Pending|Processing vs
-    // Pending|Processing|AwaitingApproval) explicit at each call site.
-    // ---
-    // TODO Add tests for the _thread_id annotation fallback path
-    // tags: test-coverage, review:branch-inter-agent-communication
-    // This entire branch (delegate payload carries `_thread_id`) has no test coverage.
-    // Need: (1) verify only the annotated thread's turns are interrupted, (2) verify
-    // thread.state is reset to Idle, (3) verify a malformed _thread_id is handled
-    // without error. Criticality high — if broken, threads get stuck in Processing
-    // and can't accept new turns without a workaround.
-    // ---
     if let Some(thread_id_str) = delegate.payload.get("_thread_id").and_then(|v| v.as_str()) {
         if let Ok(thread_id) = thread_id_str.parse::<Uuid>() {
-            let turns = storage.list_turns_by_thread(thread_id).await?;
-            for turn in turns {
-                if matches!(
-                    turn.state,
-                    TurnState::Pending | TurnState::Processing | TurnState::AwaitingApproval
-                ) {
-                    // TODO Silent failure in fallback cancel: storage error leaves turn/thread stuck in Processing
-                    // tags: error-handling, review:branch-inter-agent-communication
-                    // Unlike the active-delegation path (line 82), these fallback paths have no live
-                    // cancellation token — interruption is communicated solely via storage writes.
-                    // A storage error here silently leaves the turn in Processing and the thread
-                    // stuck, with no agent loop to clean up. Future `process_turn` calls for this
-                    // thread will fail with TurnInProgress indefinitely. Log the error at minimum.
-                    // Same applies to `update_state(Idle)` below, the last-resort path (line 158,
-                    // 164), and `handle_shutdown` lines 202-204 — all share this pattern.
-                    // ---
-                    let _ = storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await;
-                }
-            }
-            let _ = storage
-                .update_state(thread_id, ThreadState::Idle)
-                .await;
+            interrupt_turns_in_thread(
+                storage,
+                thread_id,
+                &[TurnState::Pending, TurnState::Processing, TurnState::AwaitingApproval],
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -155,26 +114,62 @@ pub async fn handle_cancel(
         .find_in_progress_by_agent(&delegate.recipient_agent_id)
         .await?;
 
-    // Collect unique thread IDs before interrupting — we need to reset each
-    // thread to Idle since no live agent loop will do cleanup.
-    // TODO Import HashSet at the top of the file instead of using the full path inline
-    // tags: simplification, review:branch-inter-agent-communication
-    // ---
-    let thread_ids: std::collections::HashSet<Uuid> =
-        active_turns.iter().map(|t| t.thread_id).collect();
+    let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
 
     for turn in active_turns {
-        let _ = storage
-            .update_turn_state(turn.id, TurnState::Interrupted)
-            .await;
+        if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+            tracing::warn!(
+                turn_id = %turn.id,
+                error = %e,
+                "fallback cancel: failed to interrupt turn — thread may remain stuck"
+            );
+        }
     }
 
     for thread_id in thread_ids {
-        let _ = storage
-            .update_state(thread_id, ThreadState::Idle)
-            .await;
+        if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %e,
+                "fallback cancel: failed to reset thread to Idle"
+            );
+        }
     }
 
+    Ok(())
+}
+
+/// Interrupt turns in a thread that match any of the given states, then reset
+/// the thread to Idle.
+///
+/// Used by the cancel fallback paths where no live cancellation token exists —
+/// interruption is communicated solely via storage writes. Logs warnings on
+/// storage errors so stuck threads are diagnosable.
+async fn interrupt_turns_in_thread(
+    storage: &Arc<dyn Storage>,
+    thread_id: Uuid,
+    interruptible_states: &[TurnState],
+) -> Result<(), AgentError> {
+    let turns = storage.list_turns_by_thread(thread_id).await?;
+    for turn in turns {
+        if interruptible_states.contains(&turn.state) {
+            if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+                tracing::warn!(
+                    turn_id = %turn.id,
+                    thread_id = %thread_id,
+                    error = %e,
+                    "failed to interrupt turn in fallback cancel — thread may remain stuck"
+                );
+            }
+        }
+    }
+    if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
+        tracing::warn!(
+            thread_id = %thread_id,
+            error = %e,
+            "failed to reset thread to Idle after fallback cancel"
+        );
+    }
     Ok(())
 }
 
@@ -209,9 +204,13 @@ pub async fn handle_shutdown(
         .await?;
 
     for turn in active_turns {
-        let _ = storage
-            .update_turn_state(turn.id, TurnState::Interrupted)
-            .await;
+        if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+            tracing::warn!(
+                turn_id = %turn.id,
+                error = %e,
+                "shutdown: failed to interrupt turn"
+            );
+        }
     }
 
     Ok(())
@@ -300,11 +299,11 @@ mod tests {
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
-        // TODO Extend test to verify thread.state is reset to Idle
-        // tags: test-coverage, review:branch-inter-agent-communication
-        // The last-resort cancel path calls `update_state(thread_id, Idle)` but this
-        // test only checks turn.state. A stuck thread in Processing blocks future turns.
-        // ---
+
+        // Verify the thread was also reset to Idle — without this, the thread
+        // remains stuck in Processing and future turns fail with TurnInProgress.
+        let thread = storage.get_thread(turn.thread_id).await.unwrap().unwrap();
+        assert_eq!(thread.state, ThreadState::Idle);
     }
 
     #[tokio::test(flavor = "multi_thread")]

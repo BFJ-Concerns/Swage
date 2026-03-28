@@ -342,57 +342,10 @@ impl RequireApprovalEntry {
 }
 
 
-// TODO Deduplicate ContextTransferMode with swage_core::messaging::ContextTransferMode
-// tags: guidelines, review:branch-inter-agent-communication
-// Two parallel definitions of the same concept: `swage_config::ContextTransferMode` (here,
-// used for config deserialization) and `swage_core::ContextTransferMode` (wire format).
-// The serde attributes differ: `lowercase` here vs `snake_case` in core — equivalent for
-// current single-word variants (`None`, `Explicit`, `Summary`) but would diverge silently
-// if a multi-word variant (e.g. `PartialSummary`) were added to one but not the other.
-// Violates CLAUDE.md's extensibility principle — a single addition requires two changes.
-// Fix: either re-export the core type here (if config crate can depend on core messaging),
-// or add a conversion function and a test that asserts both enums have the same variants.
-// ---
-/// Context transfer mode — controls what crosses agent boundaries during delegation.
-///
-/// Evaluated at send time. The assembled content is embedded in the Delegate
-/// message payload, making it self-contained.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContextTransferMode {
-    /// No context forwarded — the sub-agent starts with only the task prompt.
-    #[default]
-    None,
-    /// The delegating agent explicitly selects context elements to forward,
-    /// governed by an `allowed_fields` list.
-    Explicit,
-    /// A compacted summary of the parent context is generated within a
-    /// configurable token budget. Falls back to `None` on failure (fail-open).
-    Summary,
-}
-
-impl std::fmt::Display for ContextTransferMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::None => write!(f, "none"),
-            Self::Explicit => write!(f, "explicit"),
-            Self::Summary => write!(f, "summary"),
-        }
-    }
-}
-
-impl std::str::FromStr for ContextTransferMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "none" => Ok(Self::None),
-            "explicit" => Ok(Self::Explicit),
-            "summary" => Ok(Self::Summary),
-            other => Err(format!("unknown context transfer mode: {other}")),
-        }
-    }
-}
+// Re-exported from swage-core — single definition for both config and wire format.
+// The core type uses `serde(rename_all = "snake_case")` which is equivalent to
+// `lowercase` for all current single-word variants (None, Explicit, Summary).
+pub use swage_core::ContextTransferMode;
 
 /// Context transfer policy for a single target agent.
 ///

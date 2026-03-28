@@ -117,23 +117,22 @@ impl DelegationExecutor {
                     serde_json::Value::String(thread.id.to_string()),
                 );
             }
-            // TODO Silently swallowed payload-update error widens cancel blast radius
-            // tags: correctness, review:branch-inter-agent-communication
-            // `update_agent_message_payload` is fail-open here, but the consequence is
-            // non-trivial: if the write fails, the `_thread_id` annotation is never
-            // persisted. The fallback cancel path (`handle_cancel` without a live active-
-            // delegations entry) then cannot scope interruption to this delegation's thread
-            // and instead cancels ALL in-progress turns for the target agent. In a scenario
-            // where that agent has concurrent work (separate delegations), those turns are
-            // interrupted even though they were not the target of the cancel.
-            // Fix: log a warning and consider propagating the error so the caller can
-            // decide whether to proceed or surface the inconsistency.
-            // ---
-            // Fail-open: a payload update failure shouldn't block delegation.
-            let _ = self
+            // Fail-open: a payload update failure shouldn't block delegation,
+            // but the consequence is non-trivial — without the _thread_id
+            // annotation, the fallback cancel path interrupts ALL in-progress
+            // turns for the target agent instead of scoping to this thread.
+            if let Err(e) = self
                 .storage
                 .update_agent_message_payload(delegate_msg.id, payload)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    delegate_id = %delegate_msg.id,
+                    thread_id = %thread.id,
+                    error = %e,
+                    "failed to annotate delegate message with _thread_id — cancel fallback will use broad scope"
+                );
+            }
         }
 
         // 3. Build the task description from the Delegate payload.
@@ -218,31 +217,25 @@ impl DelegationExecutor {
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
 
-        // TODO Remove the explicit drop — it's redundant with the RAII DelegationGuard
-        // tags: simplification, review:branch-inter-agent-communication
-        // The guard already handles removal on drop (including mid-execution cancellation).
-        // Having both an explicit drop AND a RAII guard raises the question of which
-        // mechanism the reader should trust. Drop the explicit removal and let the guard
-        // document itself as the cleanup mechanism.
-        // ---
-        // Guard handles deregistration on drop, but we can also remove eagerly
-        // for clarity. The guard's drop is a no-op if already removed.
-        drop(_guard);
+        // DelegationGuard handles deregistration on drop (including mid-
+        // execution cancellation). No explicit removal needed.
 
         // Drain events (we don't forward them — delegation events are internal).
         while event_rx.try_recv().is_ok() {}
 
-        // 6. Create Result or failure message.
-        // TODO Factor out shared NewAgentMessage fields from Ok/Err arms
-        // tags: simplification, review:branch-inter-agent-communication
-        // Both branches construct NewAgentMessage with identical sender_agent_id,
-        // recipient_agent_id, kind, and correlation_id — only payload differs.
-        // Extract those four fields into a local or a small closure to avoid
-        // repeating them across both arms.
-        // ---
+        // 6. Create Result or failure message — only the payload differs.
+        let send_result = |payload| {
+            NewAgentMessage {
+                sender_agent_id: delegate_msg.recipient_agent_id.clone(),
+                recipient_agent_id: delegate_msg.sender_agent_id.clone(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate_msg.id),
+                payload,
+            }
+        };
+
         match result {
             Ok(outbound) => {
-                // Build result payload with the structured output (if any).
                 let mut result_payload = serde_json::json!({
                     "response": outbound.response,
                     "input_tokens": outbound.input_tokens,
@@ -254,32 +247,19 @@ impl DelegationExecutor {
 
                 let result_msg = self
                     .router
-                    .send_message(NewAgentMessage {
-                        sender_agent_id: delegate_msg.recipient_agent_id.clone(),
-                        recipient_agent_id: delegate_msg.sender_agent_id.clone(),
-                        kind: MessageKind::Result,
-                        correlation_id: Some(delegate_msg.id),
-                        payload: result_payload,
-                    })
+                    .send_message(send_result(result_payload))
                     .await?;
 
                 Ok(result_msg)
             }
             Err(e) => {
-                // Delegation failed — create a failure notification.
                 let failure_payload = serde_json::json!({
                     "error": e.to_string(),
                 });
 
                 let result_msg = self
                     .router
-                    .send_message(NewAgentMessage {
-                        sender_agent_id: delegate_msg.recipient_agent_id.clone(),
-                        recipient_agent_id: delegate_msg.sender_agent_id.clone(),
-                        kind: MessageKind::Result,
-                        correlation_id: Some(delegate_msg.id),
-                        payload: failure_payload,
-                    })
+                    .send_message(send_result(failure_payload))
                     .await?;
 
                 // Also fail the original delegate message.

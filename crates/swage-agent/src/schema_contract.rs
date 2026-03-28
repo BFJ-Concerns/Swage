@@ -28,17 +28,11 @@ pub struct DelegationOutputConfig {
 /// 2. Target agent's own `[output]` config.
 /// 3. No schema — no validation occurs.
 ///
-/// `max_retries` follows the same priority: delegate payload first, then target config.
-// TODO Clarify max_retries priority — the claim above is only partially true
-// tags: comments, review:branch-inter-agent-communication
-// The doc says max_retries uses the same delegate-first priority, but that
-// only holds in case 1 (delegate provides a schema). In cases 2 and 3 (no
-// delegate schema), the code uses target_output_config.max_retries directly —
-// delegate_retries is silently ignored even if present in the payload. A
-// delegator that sends `max_retries: 5` without an `output_schema` will be
-// surprised to find the override is discarded. Whether that's intentional or
-// an oversight, the doc should say so clearly.
-// ---
+/// `max_retries` follows a narrower priority: the delegate's value is only
+/// used when the delegate also provides an `output_schema` (case 1). When
+/// falling back to the target's own schema (case 2) or no schema (case 3),
+/// `max_retries` always comes from the target config — any `max_retries`
+/// in the payload without an accompanying schema is intentionally ignored.
 pub fn resolve_delegation_schema(
     delegate_payload: &Value,
     target_output_config: &OutputConfig,

@@ -165,14 +165,15 @@ pub enum ServerEvent {
         errors: Vec<SchemaValidationError>,
     },
     /// A delegation from one agent to another has started.
-    /// Subscription-gated: delivered when client subscribes to "delegation".
+    /// Always delivered — clients need delegation lifecycle events to track
+    /// sub-agent progress regardless of subscription state.
     DelegationStarted {
         parent_turn_id: Uuid,
         child_turn_id: Uuid,
         target_agent_id: String,
     },
     /// A delegation has completed (successfully or with failure).
-    /// Subscription-gated: delivered when client subscribes to "delegation".
+    /// Always delivered — matches DelegationStarted semantics.
     DelegationCompleted {
         parent_turn_id: Uuid,
         child_turn_id: Uuid,

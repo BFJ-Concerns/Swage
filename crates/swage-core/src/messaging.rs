@@ -109,20 +109,16 @@ impl FromStr for MessageStatus {
 /// Controls how much of the delegating agent's context is forwarded to a
 /// sub-agent when a `Delegate` message is sent.
 ///
-/// The mode is set per-message and may be overridden by agent configuration.
-// TODO Fix doc above — mode is per-config, not per-message
-// tags: comments, review:branch-inter-agent-communication
-// "The mode is set per-message" is backwards. The mode lives in
-// CommunicationConfig / ContextTransferConfig (with optional per-target
-// overrides) and is resolved at send time by context_transfer::resolve_policy.
-// The Delegate message payload carries the *result* of that policy (the
-// transferred context messages), but the mode itself is not a message field.
-// Saying "per-message, overridden by config" implies the opposite hierarchy.
-// ---
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The mode lives in `CommunicationConfig` / `ContextTransferConfig` (with
+/// optional per-target overrides) and is resolved at send time by
+/// `context_transfer::resolve_policy`. The Delegate message payload carries
+/// the *result* of that policy (the transferred context messages), not the
+/// mode itself.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextTransferMode {
     /// No context forwarded — the sub-agent starts with only the task prompt.
+    #[default]
     None,
     /// The delegating agent explicitly selects the context elements to forward.
     Explicit,

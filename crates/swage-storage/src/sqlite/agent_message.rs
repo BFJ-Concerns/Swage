@@ -242,14 +242,6 @@ impl AgentMessageStore for SqliteStorage {
         .await
     }
 
-    // TODO Add test for update_agent_message_payload
-    // tags: test-coverage, review:branch-inter-agent-communication
-    // This method has no unit test. DelegationExecutor relies on it to annotate
-    // the delegate message with `_thread_id` (for the cancel fallback path).
-    // If it silently fails to persist, the cancellation fallback degrades without
-    // error — threads can get stuck in Processing.
-    // Suggested: create a message, update its payload, fetch and assert new value.
-    // ---
     async fn update_agent_message_payload(
         &self,
         id: Uuid,
@@ -299,15 +291,10 @@ impl AgentMessageStore for SqliteStorage {
         max_age: std::time::Duration,
     ) -> Result<u64, StorageError> {
         self.with_conn(move |conn| {
-            // TODO Document the max_value() fallback behaviour
-            // tags: comments, review:branch-inter-agent-communication
-            // If max_age can't convert to chrono::Duration (value too large),
-            // chrono_age becomes max_value and `Utc::now() - max_value`
-            // saturates to DateTime::MIN — so cutoff is far in the past and
-            // no messages match the `created_at < cutoff` predicate. Effectively
-            // a no-op, and silently so. Worth noting why this is the intended
-            // safe fallback rather than, say, an unreachable branch.
-            // ---
+            // Intentional safe fallback: if max_age overflows chrono's Duration,
+            // max_value makes the cutoff saturate to DateTime::MIN — no messages
+            // match the predicate, so expiration is a no-op. This is preferable
+            // to panicking on an unreachable conversion error.
             let chrono_age = chrono::Duration::from_std(max_age)
                 .unwrap_or(chrono::Duration::max_value());
             let cutoff = Utc::now() - chrono_age;

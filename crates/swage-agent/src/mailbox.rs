@@ -51,30 +51,24 @@ pub async fn check_mailbox(
     for msg in pending {
         if has_shutdown && msg.kind != MessageKind::Shutdown {
             // Fail non-Shutdown messages so they aren't silently abandoned.
-            // TODO Silent failure: storage error leaves pre-shutdown messages Pending
-            // tags: error-handling, review:branch-inter-agent-communication
-            // If `update_agent_message_status` fails here, the message stays in Pending
-            // and will be re-delivered to the next agent instantiation after a restart —
-            // directly undermining the "mark Failed so it isn't re-delivered" guarantee.
-            // At minimum, log the error. Ideally propagate or retry so the Pending→Failed
-            // transition is eventually durable.
-            // ---
-            let _ = storage
+            // If this write fails the message stays Pending and may be
+            // re-delivered on the next instantiation — log so it's diagnosable.
+            if let Err(e) = storage
                 .update_agent_message_status(
                     msg.id,
                     MessageStatus::Failed,
                     Some("shutdown received"),
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    message_id = %msg.id,
+                    error = %e,
+                    "failed to mark pre-shutdown message as Failed — may be re-delivered"
+                );
+            }
             // Still note Cancel correlation IDs — useful for cleanup metadata
             // even during shutdown.
-            // TODO Add test: Cancel during shutdown still populates cancelled_delegations
-            // tags: test-coverage, review:branch-inter-agent-communication
-            // No test covers the case where Shutdown + Cancel are both pending. The Cancel
-            // message is marked Failed (above), but its correlation_id should still appear
-            // in `cancelled_delegations`. Without this, a restarted agent could re-execute
-            // a previously-cancelled delegation.
-            // ---
             if msg.kind == MessageKind::Cancel {
                 if let Some(correlation_id) = msg.correlation_id {
                     contents.cancelled_delegations.push(correlation_id);
@@ -104,12 +98,6 @@ pub async fn check_mailbox(
             MessageKind::Delegate => {
                 contents.pending_delegates.push(msg);
             }
-            // TODO Add test for Result messages collected in pending_results
-            // tags: test-coverage, review:branch-inter-agent-communication
-            // `pending_results` is populated here but has no test. Agents that restart
-            // mid-delegation depend on this at startup to learn sub-task outcomes.
-            // A bug here means the agent never processes its sub-delegation results.
-            // ---
             MessageKind::Result => {
                 contents.pending_results.push(msg);
             }

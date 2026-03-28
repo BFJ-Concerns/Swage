@@ -528,49 +528,56 @@ pub async fn submit_turn(
         // internally — find it and copy the result data across.
         match result {
             Ok(()) => {
-                // TODO Silent failure: storage error here leaves placeholder turn Pending indefinitely
-                // tags: error-handling, review:branch-inter-agent-communication
-                // If `list_turns_by_thread` returns Err, the if-let arm is skipped entirely.
-                // The placeholder turn stays in Pending state with no recovery path and no log
-                // entry, causing the REST poller to hang forever (it never receives a terminal
-                // state). Add an else branch that logs the error and falls through to marking
-                // the placeholder Failed/Completed so the client is unblocked.
-                // ---
-                if let Ok(turns) = bg_state.storage.list_turns_by_thread(thread_id).await {
-                    // The real turn is the latest terminal turn that isn't
-                    // the placeholder (different ID, created by the agent).
-                    // Includes Interrupted so cooperatively cancelled turns
-                    // propagate the correct state to the REST poller.
-                    let real_turn = turns.iter().rev().find(|t| {
-                        t.id != turn_id
-                            && matches!(
-                                t.state,
-                                swage_storage::TurnState::Completed
-                                    | swage_storage::TurnState::Failed
-                                    | swage_storage::TurnState::Interrupted
-                            )
-                    });
-                    if let Some(real) = real_turn {
-                        let _ = bg_state.storage.update_turn_state(turn_id, real.state.clone()).await;
-                        if let Some(ref resp) = real.assistant_response {
-                            let _ = bg_state.storage.update_response(turn_id, resp).await;
+                match bg_state.storage.list_turns_by_thread(thread_id).await {
+                    Ok(turns) => {
+                        // The real turn is the latest terminal turn that isn't
+                        // the placeholder (different ID, created by the agent).
+                        // Includes Interrupted so cooperatively cancelled turns
+                        // propagate the correct state to the REST poller.
+                        let real_turn = turns.iter().rev().find(|t| {
+                            t.id != turn_id
+                                && matches!(
+                                    t.state,
+                                    swage_storage::TurnState::Completed
+                                        | swage_storage::TurnState::Failed
+                                        | swage_storage::TurnState::Interrupted
+                                )
+                        });
+                        if let Some(real) = real_turn {
+                            let _ = bg_state.storage.update_turn_state(turn_id, real.state.clone()).await;
+                            if let Some(ref resp) = real.assistant_response {
+                                let _ = bg_state.storage.update_response(turn_id, resp).await;
+                            }
+                            if let (Some(input), Some(output)) = (real.input_tokens, real.output_tokens)
+                            {
+                                let _ = bg_state.storage.update_tokens(turn_id, input, output).await;
+                            }
+                            if let Some(ref so) = real.structured_output {
+                                let _ = bg_state.storage.update_structured_output(turn_id, so).await;
+                            }
+                            if let Some(cost) = real.cost_microcents {
+                                let _ = bg_state.storage.update_cost(turn_id, cost).await;
+                            }
+                        } else {
+                            // Couldn't find the real turn — mark the placeholder as
+                            // completed so the poller doesn't hang forever.
+                            let _ = bg_state
+                                .storage
+                                .update_turn_state(turn_id, swage_storage::TurnState::Completed)
+                                .await;
                         }
-                        if let (Some(input), Some(output)) = (real.input_tokens, real.output_tokens)
-                        {
-                            let _ = bg_state.storage.update_tokens(turn_id, input, output).await;
-                        }
-                        if let Some(ref so) = real.structured_output {
-                            let _ = bg_state.storage.update_structured_output(turn_id, so).await;
-                        }
-                        if let Some(cost) = real.cost_microcents {
-                            let _ = bg_state.storage.update_cost(turn_id, cost).await;
-                        }
-                    } else {
-                        // Couldn't find the real turn — mark the placeholder as
-                        // completed so the poller doesn't hang forever.
+                    }
+                    Err(e) => {
+                        // Storage error listing turns — mark the placeholder as
+                        // failed so the REST poller isn't left hanging indefinitely.
+                        tracing::warn!(
+                            turn_id = %turn_id,
+                            error = %e,
+                            "failed to list turns for result mirroring; marking placeholder failed"
+                        );
                         let _ = bg_state
                             .storage
-                            .update_turn_state(turn_id, swage_storage::TurnState::Completed)
+                            .update_turn_state(turn_id, swage_storage::TurnState::Failed)
                             .await;
                     }
                 }
@@ -755,6 +762,34 @@ pub async fn list_approvals(
     Ok(Json(ApprovalListResponse { approvals: summaries }))
 }
 
+/// The two valid approval outcomes.
+///
+/// Used for both REST and WebSocket decision paths. Parsed from the request
+/// string early so invalid values surface as 422 before any side-effects.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ApprovalOutcome {
+    Approved,
+    Rejected,
+}
+
+impl ApprovalOutcome {
+    /// Parse a decision string, returning `None` for unrecognised values.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// Request body for an approval decision.
 #[derive(Debug, Deserialize)]
 pub struct ApprovalDecisionRequest {
@@ -774,6 +809,14 @@ pub async fn decide_approval(
 ) -> Result<impl IntoResponse, ApiError> {
     use crate::state::ApprovalDecision;
 
+    // Validate the decision string early — before any side effects.
+    let outcome = ApprovalOutcome::parse(&req.decision).ok_or_else(|| {
+        ApiError::validation(format!(
+            "invalid decision '{}': expected 'approved' or 'rejected'",
+            req.decision,
+        ))
+    })?;
+
     // Try to fire the oneshot channel for this approval.
     let sender = state
         .approval_channels
@@ -781,10 +824,16 @@ pub async fn decide_approval(
         .await
         .remove(&approval_id);
 
+    // Map the validated outcome to storage state once, used by all paths.
+    let new_state = match outcome {
+        ApprovalOutcome::Approved => swage_storage::model::ApprovalState::Approved,
+        ApprovalOutcome::Rejected => swage_storage::model::ApprovalState::Rejected,
+    };
+
     match sender {
         Some(tx) => {
             let decision = ApprovalDecision {
-                decision: req.decision.clone(),
+                decision: outcome.as_str().to_string(),
                 reason: req.reason.clone(),
             };
 
@@ -794,27 +843,13 @@ pub async fn decide_approval(
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "approval_id": approval_id,
-                        "decision": req.decision,
+                        "decision": outcome.as_str(),
                     })),
                 ))
             } else {
                 // Agent timed out or cancelled just before we sent —
                 // persist the decision to storage so it isn't lost.
-                use swage_storage::model::ApprovalState;
                 use swage_storage::store::ApprovalStore;
-
-                // TODO Validate decision string before mapping to ApprovalState
-                // priority: high | tags: review:branch-inter-agent-communication
-                // `req.decision` is an arbitrary string (ApprovalDecisionRequest.decision: String).
-                // Any value other than "approved" silently becomes Rejected — a typo like "approve"
-                // or "deny" is accepted without error and treated as a rejection. The live-channel
-                // path above also forwards the raw string without validation. Validate at the struct
-                // level (enum) or at the top of the handler, and return 400/422 for unknown values.
-                // ---
-                let new_state = match req.decision.as_str() {
-                    "approved" => ApprovalState::Approved,
-                    _ => ApprovalState::Rejected,
-                };
 
                 match state
                     .storage
@@ -825,7 +860,7 @@ pub async fn decide_approval(
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "approval_id": approval_id,
-                            "decision": req.decision,
+                            "decision": outcome.as_str(),
                             "note": "agent timed out; decision persisted to storage",
                         })),
                     )),
@@ -838,7 +873,9 @@ pub async fn decide_approval(
             }
         }
         None => {
-            // Already resolved or never registered — check storage.
+            // No in-memory channel — either already resolved, or the agent
+            // timed out / restarted. Persist the decision to storage directly
+            // so recovered approvals are resolvable via the REST API.
             use swage_storage::store::ApprovalStore;
 
             let existing = state
@@ -855,18 +892,29 @@ pub async fn decide_approval(
                         approval_id, a.state
                     )))
                 }
-                // TODO Persist decision for Pending approvals with no in-memory channel
-                // priority: high | tags: review:branch-inter-agent-communication
-                // This arm is reached when the approval exists, is still Pending, but has no
-                // in-memory channel (e.g. after a gateway restart, or when another process calls
-                // this REST endpoint). Returning 500 here means REST clients cannot resolve exactly
-                // the recovered approvals that GET /api/approvals exposes. The `tx.send().is_err()`
-                // branch above already writes to storage for the live-channel-timeout case — the
-                // same storage write should happen here so that storage remains the durable record.
-                // ---
-                _ => Err(ApiError::internal(
-                    "approval channel not found — agent may have timed out".into(),
-                )),
+                Some(_) => {
+                    // Pending in storage with no live channel — persist the
+                    // decision so the approval record reflects the outcome.
+                    match state
+                        .storage
+                        .update_approval_state(approval_id, new_state, req.reason.as_deref())
+                        .await
+                    {
+                        Ok(true) => Ok((
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "approval_id": approval_id,
+                                "decision": outcome.as_str(),
+                                "note": "no live channel; decision persisted to storage",
+                            })),
+                        )),
+                        Ok(false) => Err(ApiError::conflict(format!(
+                            "approval {} already resolved",
+                            approval_id,
+                        ))),
+                        Err(e) => Err(ApiError::internal(e.to_string())),
+                    }
+                }
             }
         }
     }
