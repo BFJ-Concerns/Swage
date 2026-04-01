@@ -274,6 +274,45 @@ impl DelegationExecutor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DelegationHandler — trait for tool-as-delegation
+// ---------------------------------------------------------------------------
+
+/// Trait for handling delegation requests from within the agent turn loop.
+///
+/// When the LLM calls the "delegate" tool, the agent catches
+/// `ToolError::RequiresDelegation` and invokes this handler. The handler
+/// resolves the target agent's config, runs the delegation, and returns
+/// the result as the tool call's output.
+///
+/// The gateway implements this trait with the full delegation infrastructure.
+/// In tests, it can be mocked to verify the delegation control flow without
+/// actually running a second agent.
+#[async_trait::async_trait]
+pub trait DelegationHandler: Send + Sync {
+    /// Execute a delegation to the target agent and return its result.
+    ///
+    /// The handler is responsible for:
+    /// - Resolving the target agent's config from the hierarchy
+    /// - Creating the delegate message and child session
+    /// - Running the target agent via DelegationExecutor
+    /// - Returning the result (or error) as a JSON value
+    async fn handle_delegation(
+        &self,
+        target_agent_id: &str,
+        task: &str,
+        context: Option<serde_json::Value>,
+        sender_agent_id: &str,
+        sender_turn_id: Uuid,
+        project_id: Uuid,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<serde_json::Value, AgentError>;
+}
+
+// ---------------------------------------------------------------------------
+// RAII guard
+// ---------------------------------------------------------------------------
+
 /// RAII guard that removes a delegation from the active registry on drop.
 ///
 /// Async futures don't run remaining code when dropped (e.g. by a parent

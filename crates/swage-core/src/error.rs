@@ -308,6 +308,23 @@ pub enum ToolError {
         /// Policy applied if the timeout elapses without a decision.
         timeout_policy: Option<ApprovalTimeoutPolicy>,
     },
+
+    /// Tool requests delegation to another agent.
+    ///
+    /// Returned by the delegate tool to signal that the agent turn loop should
+    /// suspend, run the target agent via the delegation handler, and return the
+    /// result as this tool's output. Like `RequiresApproval`, this is control
+    /// flow, not an error — the agent handles it by orchestrating delegation.
+    #[error("tool {name} requires delegation to {target_agent_id}")]
+    RequiresDelegation {
+        name: String,
+        /// The agent to delegate work to.
+        target_agent_id: String,
+        /// Task description for the delegate agent.
+        task: String,
+        /// Optional context to transfer to the delegate agent.
+        context: Option<serde_json::Value>,
+    },
 }
 
 impl std::fmt::Display for PermissionDeniedReason {
@@ -335,6 +352,8 @@ impl ToolError {
             ToolError::PermissionDenied { .. } => false,
             // Approval is a distinct control flow — not a transient failure.
             ToolError::RequiresApproval { .. } => false,
+            // Delegation is control flow — the agent handles it.
+            ToolError::RequiresDelegation { .. } => false,
         }
     }
 }

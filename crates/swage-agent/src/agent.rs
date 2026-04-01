@@ -46,6 +46,14 @@ pub struct Agent {
     /// When set, the agent can pause tool execution and wait for human review.
     pub(crate) approval_registrar: Option<ApprovalChannelRegistrar>,
 
+    /// Handler for tool-as-delegation — called when the LLM invokes the
+    /// "delegate" tool. When `None`, delegation tool calls return an error.
+    pub(crate) delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
+
+    /// Project ID for the current session — needed for delegation to create
+    /// child sessions in the same project.
+    pub(crate) project_id: Option<Uuid>,
+
     /// The currently active session, if any.
     pub(crate) active_session_id: Option<Uuid>,
     /// The currently active thread within the active session.
@@ -779,6 +787,63 @@ impl Agent {
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
                         Err(AgentError::Cancelled)
+                    }
+                }
+            }
+            // --- Tool-as-delegation: the LLM invoked the delegate tool ---
+            Err(swage_core::ToolError::RequiresDelegation {
+                name: _,
+                target_agent_id,
+                task,
+                context,
+            }) => {
+                let handler = match &self.delegation_handler {
+                    Some(h) => h.clone(),
+                    None => {
+                        return Ok((
+                            "delegation is not available — no delegation handler configured"
+                                .to_string(),
+                            true,
+                            "error".to_string(),
+                        ));
+                    }
+                };
+
+                let project_id = self.project_id.unwrap_or(Uuid::nil());
+
+                // Emit DelegationStarted event so clients can track progress.
+                let _ = event_tx.send(AgentEvent::DelegationStarted {
+                    target_agent_id: target_agent_id.clone(),
+                    task: task.clone(),
+                });
+
+                // Run the delegation — this may take significant time.
+                match handler
+                    .handle_delegation(
+                        &target_agent_id,
+                        &task,
+                        context,
+                        &self.config.agent_id,
+                        turn_id,
+                        project_id,
+                        cancel_token.clone(),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = event_tx.send(AgentEvent::DelegationCompleted {
+                            target_agent_id: target_agent_id.clone(),
+                            success: true,
+                        });
+                        let result_str = serde_json::to_string(&result).unwrap_or_default();
+                        Ok((result_str, false, "success".to_string()))
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(AgentEvent::DelegationCompleted {
+                            target_agent_id: target_agent_id.clone(),
+                            success: false,
+                        });
+                        Ok((format!("delegation failed: {e}"), true, "error".to_string()))
                     }
                 }
             }
@@ -1801,6 +1866,8 @@ mod hook_inbound_response_tests {
             hook_registry,
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -1986,6 +2053,8 @@ mod hook_inbound_response_tests {
             hook_registry: None,
             leak_detector: Some(Arc::new(detector)),
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2111,6 +2180,8 @@ mod hook_dispatch_tests {
             hook_registry: registry.map(|r| Arc::new(r)),
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2804,6 +2875,8 @@ mod resume_session_tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: None,
             active_thread_id: None,
         }
@@ -3179,6 +3252,8 @@ mod create_thread_tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: Some(session.id),
             active_thread_id: None,
         };
@@ -3231,6 +3306,8 @@ mod create_thread_tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
             active_session_id: None, // intentionally absent
             active_thread_id: None,
         };

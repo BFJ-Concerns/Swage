@@ -24,6 +24,7 @@ const PROTECTED_NAMES: &[&str] = &[
     "python_execute",
     "python_dispatch",
     "workspace",
+    "delegate",
 ];
 
 /// Registry of tools available for dispatch.

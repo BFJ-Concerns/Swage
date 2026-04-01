@@ -23,6 +23,8 @@ pub struct AgentBuilder {
     hook_registry: Option<Arc<HookRegistry>>,
     leak_detector: Option<Arc<LeakDetector>>,
     approval_registrar: Option<ApprovalChannelRegistrar>,
+    delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
+    project_id: Option<uuid::Uuid>,
 }
 
 impl AgentBuilder {
@@ -35,6 +37,8 @@ impl AgentBuilder {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            delegation_handler: None,
+            project_id: None,
         }
     }
 
@@ -73,6 +77,16 @@ impl AgentBuilder {
         self
     }
 
+    pub fn delegation_handler(mut self, handler: Arc<dyn crate::delegation::DelegationHandler>) -> Self {
+        self.delegation_handler = Some(handler);
+        self
+    }
+
+    pub fn project_id(mut self, project_id: uuid::Uuid) -> Self {
+        self.project_id = Some(project_id);
+        self
+    }
+
     /// Validate configuration and produce a ready-to-use [`Agent`].
     pub fn build(self) -> Result<Agent, AgentError> {
         // Required fields must be present before we inspect their contents.
@@ -106,6 +120,8 @@ impl AgentBuilder {
             hook_registry: self.hook_registry,
             leak_detector: self.leak_detector,
             approval_registrar: self.approval_registrar,
+            delegation_handler: self.delegation_handler,
+            project_id: self.project_id,
             active_session_id: None,
             active_thread_id: None,
         })

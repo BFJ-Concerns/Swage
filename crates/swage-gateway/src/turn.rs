@@ -667,6 +667,24 @@ pub async fn process_turn(
             }
             // Approval lifecycle events — route to the session-scoped ws_tx
             // so only the client connected to this agent sees the event.
+            AgentEvent::DelegationStarted { target_agent_id, task: _ } => {
+                // Tool-as-delegation started — emit as a delegation event.
+                // We use turn_id for parent_turn_id; child_turn_id is unknown
+                // at this point (the child turn hasn't been created yet).
+                let _ = ws_tx.send(ServerEvent::DelegationStarted {
+                    parent_turn_id: turn_id,
+                    child_turn_id: Uuid::nil(),
+                    target_agent_id,
+                });
+            }
+            AgentEvent::DelegationCompleted { target_agent_id, success } => {
+                let _ = ws_tx.send(ServerEvent::DelegationCompleted {
+                    parent_turn_id: turn_id,
+                    child_turn_id: Uuid::nil(),
+                    target_agent_id,
+                    success,
+                });
+            }
             event @ (AgentEvent::ApprovalRequired { .. }
                 | AgentEvent::ApprovalConfirmed { .. }
                 | AgentEvent::ApprovalExpired { .. }) => {

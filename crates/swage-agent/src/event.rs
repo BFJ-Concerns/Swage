@@ -132,6 +132,24 @@ pub enum AgentEvent {
         timeout_policy: String,
     },
 
+    /// A tool-as-delegation has started — the parent agent's turn is
+    /// suspended while the target agent executes.
+    DelegationStarted {
+        /// The agent that is being delegated to.
+        target_agent_id: String,
+        /// The task description sent to the delegate.
+        task: String,
+    },
+
+    /// A tool-as-delegation has completed — the parent turn will resume
+    /// with the delegate's result as the tool output.
+    DelegationCompleted {
+        /// The agent that was delegated to.
+        target_agent_id: String,
+        /// Whether the delegation succeeded.
+        success: bool,
+    },
+
     /// A non-recoverable error occurred during turn processing.
     Error { message: String },
 }
@@ -300,15 +318,23 @@ mod tests {
             approval_id: Uuid::new_v4(),
             timeout_policy: "interrupt".to_string(),
         }).unwrap();
+        tx.send(AgentEvent::DelegationStarted {
+            target_agent_id: "reviewer".to_string(),
+            task: "Review code".to_string(),
+        }).unwrap();
+        tx.send(AgentEvent::DelegationCompleted {
+            target_agent_id: "reviewer".to_string(),
+            success: true,
+        }).unwrap();
         tx.send(AgentEvent::Error { message: "err".to_string() }).unwrap();
 
-        // Drain the channel — all 9 events must arrive.
+        // Drain the channel — all 11 events must arrive.
         let mut received = 0;
         drop(tx);
         while rx.recv().await.is_some() {
             received += 1;
         }
-        assert_eq!(received, 9);
+        assert_eq!(received, 11);
     }
 
     #[tokio::test]
