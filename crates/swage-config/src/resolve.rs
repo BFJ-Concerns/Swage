@@ -52,23 +52,49 @@ pub fn load_resolved_config(project: &str, agent: &str) -> Result<ResolvedConfig
     load_resolved_config_from(&root, project, agent)
 }
 
+/// Fully resolve configuration for a given project, team, and agent.
+///
+/// Same as [`load_resolved_config`] but inserts the team level between
+/// project and agent in the merge chain: Global → Project → Team → Agent.
+pub fn load_resolved_config_for_team(
+    project: &str,
+    team: &str,
+    agent: &str,
+) -> Result<ResolvedConfig, ConfigError> {
+    let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
+    load_resolved_config_from_with_team(&root, project, Some(team), agent)
+}
+
 /// Fully resolve configuration given an explicit root directory.
 ///
+/// Shorthand for [`load_resolved_config_from_with_team`] with no team level.
+pub fn load_resolved_config_from(
+    root: &Path,
+    project: &str,
+    agent: &str,
+) -> Result<ResolvedConfig, ConfigError> {
+    load_resolved_config_from_with_team(root, project, None, agent)
+}
+
+/// Fully resolve configuration given an explicit root directory, with an
+/// optional team level in the cascade.
+///
 /// Pipeline:
-/// 1. Build hierarchy paths (Global → Lens → Project → Agent).
+/// 1. Build hierarchy paths (Global → Lens → Project → [Team] → Agent).
 /// 2. Load and validate each config.toml that exists. Lens config is validated
 ///    but its values are **not** merged (0.1 constraint).
 /// 3. If any validation errors were found, return them all as `ConfigError`.
-/// 4. Merge the active levels (Global, Project, Agent) via `merge_chain` +
-///    `resolve` to produce the typed `ResolvedConfig`.
+/// 4. Merge the active levels via `merge_chain` + `resolve` to produce the
+///    typed `ResolvedConfig`.
 /// 5. Assemble instructions from the same active levels.
 /// 6. Return the complete `ResolvedConfig`.
 ///
 /// Missing config files at any level are silently skipped — that level
 /// simply inherits values from above.
-pub fn load_resolved_config_from(
+pub fn load_resolved_config_from_with_team(
     root: &Path,
     project: &str,
+    team: Option<&str>,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Build paths for each hierarchy level.
@@ -88,12 +114,25 @@ pub fn load_resolved_config_from(
     // Lens: validate but discard — its values are not part of the merge chain.
     let _ = try_load_file(&lens_config, &mut all_problems);
 
-    // Active merge levels: Global → Project → Agent.
-    let mut merge_chain: Vec<PartialConfig> = Vec::new();
-    for path in &[&global_config, &project_config, &agent_config] {
+    // Active merge levels: Global → Project → [Team] → Agent.
+    let mut config_chain: Vec<PartialConfig> = Vec::new();
+    for path in &[&global_config, &project_config] {
         if let Some(partial) = try_load_file(path, &mut all_problems) {
-            merge_chain.push(partial);
+            config_chain.push(partial);
         }
+    }
+
+    // Team level sits between project and agent — only present when specified.
+    let team_dir = team.map(|t| project_dir.join("teams").join(t));
+    if let Some(ref td) = team_dir {
+        let team_config = td.join("config.toml");
+        if let Some(partial) = try_load_file(&team_config, &mut all_problems) {
+            config_chain.push(partial);
+        }
+    }
+
+    if let Some(partial) = try_load_file(&agent_config, &mut all_problems) {
+        config_chain.push(partial);
     }
 
     // Fail fast if any file had errors — report everything collected.
@@ -102,21 +141,50 @@ pub fn load_resolved_config_from(
     }
 
     // Merge and resolve to typed config.
-    let merged = merge::merge_chain(merge_chain);
+    let merged = merge::merge_chain(config_chain);
     let mut resolved = merge::resolve(merged);
 
     // Assemble instructions from the same active levels.
-    let levels: Vec<(HierarchyLevel, &Path)> = vec![
+    // Build the team instructions path up front so it outlives the levels vec.
+    let team_instrs = team_dir.as_ref().map(|td| td.join("instructions"));
+    let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
         (HierarchyLevel::Global,  global_instrs.as_path()),
         (HierarchyLevel::Project, project_instrs.as_path()),
-        (HierarchyLevel::Agent,   agent_instrs.as_path()),
     ];
+    if let Some(ref ti) = team_instrs {
+        levels.push((HierarchyLevel::Team, ti.as_path()));
+    }
+    levels.push((HierarchyLevel::Agent, agent_instrs.as_path()));
+
     match instructions::assemble_instructions(&levels) {
         Ok(text)    => resolved.instructions = text,
         Err(problem) => return Err(ConfigError::new(vec![problem])),
     }
 
     Ok(resolved)
+}
+
+/// Apply a programmatic overlay (e.g. a task definition) to a resolved config.
+///
+/// Used by the topology engine to overlay task-specific settings (instructions,
+/// output schema, model, tool permissions) onto an agent's resolved config.
+/// Overlay fields that are `None` leave the base unchanged.
+pub fn apply_overlay(base: ResolvedConfig, overlay: PartialConfig) -> ResolvedConfig {
+    // Convert the resolved base to a partial, merge with the overlay,
+    // then resolve again. This reuses the merge semantics (replacement
+    // for permission lists, map-merge for pricing, etc.).
+    let base_partial = PartialConfig::from(base.clone());
+    let merged = merge::merge_partial(base_partial, overlay);
+    let mut resolved = merge::resolve(merged);
+
+    // Preserve instructions from the base — task overlays don't carry
+    // file-based instructions. If the overlay needs to prepend/append
+    // instructions, the caller should set resolved.instructions directly.
+    if resolved.instructions.is_empty() {
+        resolved.instructions = base.instructions;
+    }
+
+    resolved
 }
 
 /// Validate one or more config files without loading a full resolved config.
@@ -238,5 +306,149 @@ mod tests {
 
         let problems = validate_files(&[bad_file.as_path()]);
         assert!(!problems.is_empty(), "should report validation problems");
+    }
+
+    // --- Team config cascade ---
+
+    #[test]
+    fn team_config_merges_between_project_and_agent() {
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[server]\nhost = \"10.0.0.1\"\nport = 3000\n"),
+            "proj",
+            Some("[provider]\nmodel = \"claude-opus\"\n"),
+            "bot",
+            Some("[server]\nport = 4000\n"),
+        );
+        // Add team config that overrides provider model.
+        let team_dir = tmp.path().join("projects/proj/teams/review-team");
+        fs::create_dir_all(&team_dir).unwrap();
+        fs::write(team_dir.join("config.toml"), "[provider]\nmodel = \"claude-haiku\"\n").unwrap();
+
+        let cfg = load_resolved_config_from_with_team(
+            tmp.path(), "proj", Some("review-team"), "bot",
+        ).expect("should succeed");
+
+        // Agent overrides port (agent > team > project > global)
+        assert_eq!(cfg.server.port, 4000, "agent should win on port");
+        // Team overrides project model, agent doesn't set model so team wins
+        assert_eq!(cfg.provider.model, "claude-haiku", "team should override project model");
+        // Global host survives (no override)
+        assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
+    }
+
+    #[test]
+    fn agent_overrides_team_config() {
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            None,
+            "proj",
+            None,
+            "bot",
+            Some("[provider]\nmodel = \"agent-model\"\n"),
+        );
+        let team_dir = tmp.path().join("projects/proj/teams/myteam");
+        fs::create_dir_all(&team_dir).unwrap();
+        fs::write(team_dir.join("config.toml"), "[provider]\nmodel = \"team-model\"\n").unwrap();
+
+        let cfg = load_resolved_config_from_with_team(
+            tmp.path(), "proj", Some("myteam"), "bot",
+        ).expect("should succeed");
+
+        assert_eq!(cfg.provider.model, "agent-model", "agent should override team");
+    }
+
+    #[test]
+    fn missing_team_config_silently_skipped() {
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[server]\nport = 5000\n"),
+            "proj",
+            None,
+            "default",
+            None,
+        );
+
+        // Team directory exists but has no config.toml.
+        let team_dir = tmp.path().join("projects/proj/teams/empty-team");
+        fs::create_dir_all(&team_dir).unwrap();
+
+        let cfg = load_resolved_config_from_with_team(
+            tmp.path(), "proj", Some("empty-team"), "default",
+        ).expect("should succeed");
+        assert_eq!(cfg.server.port, 5000, "global port should survive");
+    }
+
+    #[test]
+    fn no_team_behaves_like_original() {
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[server]\nhost = \"1.2.3.4\"\nport = 9000\n"),
+            "proj",
+            None,
+            "bot",
+            None,
+        );
+
+        let without_team = load_resolved_config_from(tmp.path(), "proj", "bot")
+            .expect("should succeed");
+        let with_none_team = load_resolved_config_from_with_team(
+            tmp.path(), "proj", None, "bot",
+        ).expect("should succeed");
+
+        assert_eq!(without_team, with_none_team,
+            "None team should produce same result as no-team function");
+    }
+
+    // --- Task overlay ---
+
+    #[test]
+    fn apply_overlay_overrides_provider_model() {
+        let base = ResolvedConfig::default();
+        let overlay = PartialConfig {
+            provider: Some(merge::PartialProviderConfig {
+                model: Some("task-model".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = apply_overlay(base, overlay);
+        assert_eq!(result.provider.model, "task-model");
+        // Other fields should keep defaults
+        assert_eq!(result.server.port, 3000);
+    }
+
+    #[test]
+    fn apply_overlay_preserves_instructions() {
+        let mut base = ResolvedConfig::default();
+        base.instructions = "You are a helpful assistant.".to_string();
+
+        let overlay = PartialConfig {
+            provider: Some(merge::PartialProviderConfig {
+                model: Some("fast-model".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = apply_overlay(base, overlay);
+        assert_eq!(result.instructions, "You are a helpful assistant.");
+        assert_eq!(result.provider.model, "fast-model");
+    }
+
+    #[test]
+    fn apply_overlay_empty_overlay_preserves_base() {
+        let mut base = ResolvedConfig::default();
+        base.server.port = 9999;
+        base.provider.model = "my-model".to_string();
+
+        let result = apply_overlay(base.clone(), PartialConfig::default());
+        assert_eq!(result.server.port, 9999);
+        assert_eq!(result.provider.model, "my-model");
     }
 }

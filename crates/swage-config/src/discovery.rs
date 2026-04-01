@@ -39,6 +39,8 @@ pub struct DiscoveredProject {
     pub path: PathBuf,
     /// Names of agents discovered under the project's `agents/` sub-directory.
     pub agents: Vec<String>,
+    /// Names of teams discovered under the project's `teams/` sub-directory.
+    pub teams: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +115,13 @@ pub fn discover_agents(project_dir: &Path) -> Vec<String> {
     subdirectory_names(&project_dir.join("agents"))
 }
 
+/// Scan `{project_dir}/teams/` for subdirectories.
+/// Returns team names (directory names), sorted alphabetically.
+/// Returns an empty list if the `teams/` directory does not exist.
+pub fn discover_teams(project_dir: &Path) -> Vec<String> {
+    subdirectory_names(&project_dir.join("teams"))
+}
+
 /// Scan `{root}/projects/` for subdirectories.
 /// Each subdirectory is treated as a project regardless of whether it has
 /// a `config.toml` — a project without one simply inherits global config.
@@ -126,7 +135,8 @@ pub fn discover_projects(root: &Path) -> Vec<DiscoveredProject> {
         .map(|name| {
             let path = projects_dir.join(&name);
             let agents = discover_agents(&path);
-            DiscoveredProject { name, path, agents }
+            let teams = discover_teams(&path);
+            DiscoveredProject { name, path, agents, teams }
         })
         .collect()
 }
@@ -284,6 +294,26 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agents = discover_agents(tmp.path());
         assert!(agents.is_empty());
+    }
+
+    // --- discover_teams ---
+
+    #[test]
+    fn discover_teams_finds_team_directories() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("teams/research")).unwrap();
+        fs::create_dir_all(tmp.path().join("teams/coding")).unwrap();
+
+        let teams = discover_teams(tmp.path());
+        assert!(teams.contains(&"research".to_string()), "should find research");
+        assert!(teams.contains(&"coding".to_string()),   "should find coding");
+    }
+
+    #[test]
+    fn discover_teams_returns_empty_when_teams_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let teams = discover_teams(tmp.path());
+        assert!(teams.is_empty());
     }
 
     // --- discover ---

@@ -23,17 +23,22 @@ pub use model::{
     ContextTransferMode,
     ContextTransferTargetConfig,
     HierarchyLevel,
+    HitlConfig,
     LifecycleConfig,
     LogLevel,
     LoggingConfig,
+    ObservabilityConfig,
     OutputConfig,
+    PricingConfig,
     Protocol,
     ProviderConfig,
+    RequireApprovalEntry,
     ResolvedConfig,
     SandboxConfig,
     SearchProviderConfig,
     ServerConfig,
     ToolConfig,
+    ToolPermissionConfig,
     WorkspaceConfig,
 };
 
@@ -43,8 +48,15 @@ pub use error::{ConfigError, ConfigProblem, ConfigProblemKind};
 // Discovery
 pub use discovery::{
     AssemblyFile, DiscoveredProject, ResolvedAssembly,
-    discover, discover_assemblies, resolve_assembly, resolve_root, has_default_lens,
+    discover, discover_assemblies, discover_teams, resolve_assembly, resolve_root,
+    has_default_lens,
 };
 
+// Merge types — PartialConfig for programmatic overlays (task definitions)
+pub use merge::PartialConfig;
+
 // Resolution pipeline — primary public API
-pub use resolve::{load_resolved_config, load_resolved_config_from, validate_files};
+pub use resolve::{
+    apply_overlay, load_resolved_config, load_resolved_config_from,
+    load_resolved_config_for_team, load_resolved_config_from_with_team, validate_files,
+};

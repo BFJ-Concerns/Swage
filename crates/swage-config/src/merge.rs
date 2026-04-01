@@ -177,6 +177,86 @@ pub struct PartialConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ResolvedConfig → PartialConfig conversion (for overlay merging)
+// ---------------------------------------------------------------------------
+
+impl From<ResolvedConfig> for PartialConfig {
+    fn from(r: ResolvedConfig) -> Self {
+        PartialConfig {
+            server: Some(PartialServerConfig {
+                host: Some(r.server.host),
+                port: Some(r.server.port),
+            }),
+            provider: Some(PartialProviderConfig {
+                protocol: Some(r.provider.protocol),
+                model: Some(r.provider.model),
+                api_key_env: Some(r.provider.api_key_env),
+            }),
+            workspace: Some(PartialWorkspaceConfig {
+                path: Some(r.workspace.path),
+            }),
+            sandbox: Some(PartialSandboxConfig {
+                enabled: Some(r.sandbox.enabled),
+            }),
+            lifecycle: Some(PartialLifecycleConfig {
+                idle_timeout: Some(r.lifecycle.idle_timeout),
+            }),
+            logging: Some(PartialLoggingConfig {
+                level: Some(r.logging.level),
+            }),
+            context: Some(PartialContextConfig {
+                assembly: Some(r.context.assembly),
+                timeout: Some(r.context.timeout),
+                budget: Some(r.context.budget),
+            }),
+            pricing: Some(PartialPricingConfig {
+                models: if r.pricing.models.is_empty() { None } else { Some(r.pricing.models) },
+            }),
+            observability: Some(PartialObservabilityConfig {
+                force_on: Some(r.observability.force_on),
+            }),
+            tools: Some(PartialToolConfig {
+                shell_timeout_secs: Some(r.tools.shell_timeout_secs),
+                max_output_bytes: Some(r.tools.max_output_bytes),
+                search: Some(r.tools.search),
+                allow: Some(r.tools.permissions.allow),
+                deny: Some(r.tools.permissions.deny),
+                bundles: Some(r.tools.permissions.bundles),
+                require_approval: Some(r.tools.permissions.require_approval),
+            }),
+            output: Some(PartialOutputConfig {
+                schema: r.output.schema,
+                max_retries: Some(r.output.max_retries),
+            }),
+            hitl: Some(PartialHitlConfig {
+                timeout: Some(r.hitl.timeout),
+                timeout_policy: Some(r.hitl.timeout_policy),
+            }),
+            communication: Some(PartialCommunicationConfig {
+                context_transfer: Some(PartialContextTransferConfig {
+                    mode: Some(r.communication.context_transfer.mode),
+                    allowed_fields: Some(r.communication.context_transfer.allowed_fields),
+                    summary_budget: r.communication.context_transfer.summary_budget,
+                    targets: if r.communication.context_transfer.targets.is_empty() {
+                        None
+                    } else {
+                        Some(r.communication.context_transfer.targets.into_iter().map(|(k, v)| {
+                            (k, PartialContextTransferTargetConfig {
+                                mode: Some(v.mode),
+                                allowed_fields: Some(v.allowed_fields),
+                                summary_budget: v.summary_budget,
+                            })
+                        }).collect())
+                    },
+                }),
+                message_ttl_secs: Some(r.communication.message_ttl_secs),
+                expiry_interval_secs: Some(r.communication.expiry_interval_secs),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Merge helpers
 // ---------------------------------------------------------------------------
 
@@ -1102,5 +1182,44 @@ mod tests {
         let resolved = resolve(partial);
         assert_eq!(resolved.tools.permissions.require_approval.len(), 1);
         assert_eq!(resolved.tools.permissions.require_approval[0].tool_name(), "shell_exec");
+    }
+
+    // --- ResolvedConfig → PartialConfig round-trip ---
+
+    #[test]
+    fn resolved_to_partial_round_trip_preserves_fields() {
+        let mut original = ResolvedConfig::default();
+        original.server.port = 8080;
+        original.provider.model = "test-model".to_string();
+        original.tools.shell_timeout_secs = 120;
+
+        let partial = PartialConfig::from(original.clone());
+        let restored = resolve(partial);
+
+        assert_eq!(restored.server.port, 8080);
+        assert_eq!(restored.provider.model, "test-model");
+        assert_eq!(restored.tools.shell_timeout_secs, 120);
+    }
+
+    #[test]
+    fn resolved_to_partial_then_overlay_merge() {
+        let mut base = ResolvedConfig::default();
+        base.server.port = 9000;
+        base.provider.model = "base-model".to_string();
+
+        let base_partial = PartialConfig::from(base);
+        let overlay = PartialConfig {
+            provider: Some(PartialProviderConfig {
+                model: Some("overlay-model".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge_partial(base_partial, overlay);
+        let resolved = resolve(merged);
+
+        assert_eq!(resolved.server.port, 9000, "base port should survive");
+        assert_eq!(resolved.provider.model, "overlay-model", "overlay should win");
     }
 }

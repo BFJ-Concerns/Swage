@@ -11,7 +11,8 @@ use crate::merge::PartialConfig;
 /// Top-level TOML sections recognised by the config schema.
 const KNOWN_SECTIONS: &[&str] = &[
     "server", "provider", "workspace", "sandbox", "lifecycle", "logging",
-    "tools", "context", "pricing", "observability",
+    "tools", "context", "pricing", "observability", "output", "hitl",
+    "communication",
 ];
 
 /// Valid field names for each known section.
@@ -23,12 +24,22 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "sandbox"   => &["enabled"],
         "lifecycle" => &["idle_timeout"],
         "logging"   => &["level"],
-        "tools"     => &["shell_timeout_secs", "max_output_bytes", "search"],
+        // Scalar tool settings plus flattened permission fields (allow, deny,
+        // bundles, require_approval) which live at the [tools] level in TOML.
+        "tools"     => &[
+            "shell_timeout_secs", "max_output_bytes", "search",
+            "allow", "deny", "bundles", "require_approval",
+        ],
         "context"   => &["assembly", "timeout", "budget"],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing"        => &["models"],
         "observability"  => &["force_on"],
+        "output"         => &["schema", "max_retries"],
+        "hitl"           => &["timeout", "timeout_policy"],
+        // context_transfer is a dynamic sub-table — field-level validation
+        // skipped for its contents, same as pricing.models.
+        "communication"  => &["context_transfer", "message_ttl_secs", "expiry_interval_secs"],
         _           => &[],
     }
 }
@@ -98,6 +109,21 @@ fn check_field_type(
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing",        "models")    => ("table",   matches!(value, Value::Table(_))),
         ("observability",  "force_on")  => ("boolean", matches!(value, Value::Boolean(_))),
+        // [tools] permission fields — flat under [tools] in TOML
+        ("tools",  "allow")              => ("array",   matches!(value, Value::Array(_))),
+        ("tools",  "deny")               => ("array",   matches!(value, Value::Array(_))),
+        ("tools",  "bundles")            => ("table",   matches!(value, Value::Table(_))),
+        ("tools",  "require_approval")   => ("array",   matches!(value, Value::Array(_))),
+        // [output] — schema validation settings
+        ("output",  "schema")            => ("table",   matches!(value, Value::Table(_))),
+        ("output",  "max_retries")       => ("integer", matches!(value, Value::Integer(_))),
+        // [hitl] — human-in-the-loop settings
+        ("hitl",  "timeout")             => ("integer", matches!(value, Value::Integer(_))),
+        ("hitl",  "timeout_policy")      => ("string",  matches!(value, Value::String(_))),
+        // [communication] — inter-agent messaging settings
+        ("communication", "context_transfer")     => ("table",   matches!(value, Value::Table(_))),
+        ("communication", "message_ttl_secs")     => ("integer", matches!(value, Value::Integer(_))),
+        ("communication", "expiry_interval_secs") => ("integer", matches!(value, Value::Integer(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
     };
@@ -214,6 +240,82 @@ fn check_field_semantics(
                         ConfigProblemKind::SemanticError {
                             message: format!(
                                 "context.budget must be a positive integer, got {b}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("hitl", "timeout") => {
+            if let Value::Integer(t) = value {
+                if *t < 1 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "hitl.timeout must be a positive integer, got {t}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("hitl", "timeout_policy") => {
+            if let Value::String(policy) = value {
+                const VALID: &[&str] = &["reject", "interrupt"];
+                if !VALID.contains(&policy.to_lowercase().as_str()) {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "unknown timeout policy '{policy}'; expected one of: reject, interrupt"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("output", "max_retries") => {
+            if let Value::Integer(r) = value {
+                if *r < 0 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "output.max_retries must be non-negative, got {r}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("communication", "message_ttl_secs") => {
+            if let Value::Integer(t) = value {
+                if *t < 1 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "communication.message_ttl_secs must be a positive integer, got {t}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        ("communication", "expiry_interval_secs") => {
+            if let Value::Integer(t) = value {
+                if *t < 1 {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(field_path.to_string()),
+                        ConfigProblemKind::SemanticError {
+                            message: format!(
+                                "communication.expiry_interval_secs must be a positive integer, got {t}"
                             ),
                         },
                     ));
@@ -612,6 +714,213 @@ timeout = 10
         let toml = "[context]\nbudget = 4096";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(problems.is_empty(), "budget=4096 is valid, got: {problems:?}");
+    }
+
+    // --- [output] section tests ---
+
+    #[test]
+    fn output_section_validates_without_warnings() {
+        let toml = "[output]\nmax_retries = 5\n";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid [output] should produce no errors, got: {problems:?}");
+    }
+
+    #[test]
+    fn output_max_retries_wrong_type_produces_error() {
+        let toml = "[output]\nmax_retries = \"five\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for output.max_retries should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn output_max_retries_negative_produces_semantic_error() {
+        let toml = "[output]\nmax_retries = -1";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "negative max_retries should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn output_schema_must_be_table() {
+        let toml = "[output]\nschema = \"not a table\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for output.schema should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn output_unknown_field_produces_error() {
+        let toml = "[output]\nfoo = 42";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
+            "unknown field in [output] should produce error"
+        );
+    }
+
+    // --- [hitl] section tests ---
+
+    #[test]
+    fn hitl_section_validates_without_warnings() {
+        let toml = "[hitl]\ntimeout = 300\ntimeout_policy = \"reject\"\n";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid [hitl] should produce no errors, got: {problems:?}");
+    }
+
+    #[test]
+    fn hitl_timeout_wrong_type_produces_error() {
+        let toml = "[hitl]\ntimeout = \"long\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for hitl.timeout should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn hitl_timeout_zero_produces_semantic_error() {
+        let toml = "[hitl]\ntimeout = 0";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "hitl.timeout=0 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn hitl_timeout_policy_wrong_type_produces_error() {
+        let toml = "[hitl]\ntimeout_policy = 42";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "integer value for hitl.timeout_policy should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn hitl_timeout_policy_invalid_produces_semantic_error() {
+        let toml = "[hitl]\ntimeout_policy = \"explode\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "'explode' is not a valid timeout policy"
+        );
+    }
+
+    #[test]
+    fn hitl_timeout_policy_interrupt_is_valid() {
+        let toml = "[hitl]\ntimeout_policy = \"interrupt\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "interrupt is a valid policy, got: {problems:?}");
+    }
+
+    // --- [communication] section tests ---
+
+    #[test]
+    fn communication_section_validates_without_warnings() {
+        let toml = "[communication]\nmessage_ttl_secs = 86400\nexpiry_interval_secs = 60\n";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid [communication] should produce no errors, got: {problems:?}");
+    }
+
+    #[test]
+    fn communication_message_ttl_wrong_type_produces_error() {
+        let toml = "[communication]\nmessage_ttl_secs = \"one day\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for message_ttl_secs should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn communication_message_ttl_zero_produces_semantic_error() {
+        let toml = "[communication]\nmessage_ttl_secs = 0";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "message_ttl_secs=0 should produce SemanticError"
+        );
+    }
+
+    #[test]
+    fn communication_context_transfer_must_be_table() {
+        let toml = "[communication]\ncontext_transfer = \"not a table\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for context_transfer should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn communication_unknown_field_produces_error() {
+        let toml = "[communication]\nbogus = 42";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
+            "unknown field in [communication] should produce error"
+        );
+    }
+
+    // --- [tools] permission fields ---
+
+    #[test]
+    fn tools_allow_field_validates() {
+        let toml = "[tools]\nallow = [\"*\"]";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "tools.allow should be a valid field, got: {problems:?}");
+    }
+
+    #[test]
+    fn tools_deny_field_validates() {
+        let toml = "[tools]\ndeny = [\"shell\"]";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "tools.deny should be a valid field, got: {problems:?}");
+    }
+
+    #[test]
+    fn tools_allow_wrong_type_produces_error() {
+        let toml = "[tools]\nallow = \"not an array\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            "string value for tools.allow should produce TypeError"
+        );
+    }
+
+    // --- combined section test ---
+
+    #[test]
+    fn all_sections_validate_together() {
+        let toml = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[provider]
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[output]
+max_retries = 3
+
+[hitl]
+timeout = 300
+timeout_policy = "reject"
+
+[communication]
+message_ttl_secs = 86400
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(problems.is_empty(), "valid config with all sections should produce no errors, got: {problems:?}");
     }
 
     #[test]
