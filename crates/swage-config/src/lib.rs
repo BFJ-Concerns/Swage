@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod resolve;
 pub mod prompt_rule;
 pub mod skill;
+pub mod task;
 
 // ---------------------------------------------------------------------------
 // Re-exports — public surface of the crate
@@ -54,6 +55,9 @@ pub use discovery::{
 
 // Merge types — PartialConfig for programmatic overlays (task definitions)
 pub use merge::PartialConfig;
+
+// Task definitions
+pub use task::TaskDefinition;
 
 // Resolution pipeline — primary public API
 pub use resolve::{
