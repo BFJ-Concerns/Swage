@@ -173,13 +173,15 @@ pub async fn process_turn(
     let thread_id = thread.id;
 
     // Step 2: Guard — reject if a turn is already active for this thread.
-    // Both Processing and AwaitingApproval represent in-progress work; allowing
-    // a second turn while approval is pending would interleave history.
+    // Processing, AwaitingApproval, and Delegating all represent in-progress
+    // work; allowing a second turn would interleave history.
     let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
-    if existing_turns
-        .iter()
-        .any(|t| matches!(t.state, TurnState::Processing | TurnState::AwaitingApproval))
-    {
+    if existing_turns.iter().any(|t| {
+        matches!(
+            t.state,
+            TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating
+        )
+    }) {
         return Err(GatewayError::TurnInProgress { session_id });
     }
 

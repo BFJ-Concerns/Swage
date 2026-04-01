@@ -191,13 +191,13 @@ impl TurnStore for SqliteStorage {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE turns SET state = ?1, completed_at = ?2
-                     WHERE id = ?3 AND state NOT IN ('Completed', 'Failed', 'Interrupted')",
+                     WHERE id = ?3 AND state NOT IN ('completed', 'failed', 'interrupted')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('Completed', 'Failed', 'Interrupted')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'failed', 'interrupted')",
                     params![&state_str, id.to_string()],
                 )?;
             }
@@ -213,7 +213,7 @@ impl TurnStore for SqliteStorage {
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id
-                 FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval') AND agent_id = ?1",
+                 FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
             rows.collect()

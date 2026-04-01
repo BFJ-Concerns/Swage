@@ -36,6 +36,19 @@ pub enum TurnState {
     /// Stored as "awaiting_approval" in the SQLite text column — no ALTER TABLE
     /// needed to introduce this state.
     AwaitingApproval,
+
+    /// Turn is suspended while a tool-as-delegation is in progress.
+    ///
+    /// The parent agent's turn pauses while the delegate agent executes. On
+    /// completion the turn transitions back to Processing. On gateway restart,
+    /// turns in this state are transitioned to Interrupted (the in-flight
+    /// delegation was lost).
+    ///
+    /// State transitions:
+    ///   Processing → Delegating     (delegate tool invoked)
+    ///   Delegating → Processing     (delegation completed — turn resumes)
+    ///   Delegating → Interrupted    (gateway restart recovery)
+    Delegating,
 }
 
 impl std::fmt::Display for TurnState {
@@ -47,6 +60,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
             TurnState::AwaitingApproval => "awaiting_approval",
+            TurnState::Delegating => "delegating",
         };
         write!(f, "{s}")
     }
@@ -63,6 +77,7 @@ impl FromStr for TurnState {
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),
             "awaiting_approval" => Ok(TurnState::AwaitingApproval),
+            "delegating" => Ok(TurnState::Delegating),
             other => Err(format!("unknown turn state: {other}")),
         }
     }

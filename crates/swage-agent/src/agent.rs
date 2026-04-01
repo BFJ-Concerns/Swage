@@ -811,6 +811,10 @@ impl Agent {
 
                 let project_id = self.project_id.unwrap_or(Uuid::nil());
 
+                // Suspend the parent turn — durable state so restart recovery
+                // can find it and transition to Interrupted.
+                let _ = self.storage.update_turn_state(turn_id, TurnState::Delegating).await;
+
                 // Emit DelegationStarted event so clients can track progress.
                 let _ = event_tx.send(AgentEvent::DelegationStarted {
                     target_agent_id: target_agent_id.clone(),
@@ -818,7 +822,7 @@ impl Agent {
                 });
 
                 // Run the delegation — this may take significant time.
-                match handler
+                let delegation_result = handler
                     .handle_delegation(
                         &target_agent_id,
                         &task,
@@ -828,8 +832,14 @@ impl Agent {
                         project_id,
                         cancel_token.clone(),
                     )
-                    .await
-                {
+                    .await;
+
+                // Resume the parent turn — back to Processing regardless of
+                // outcome. The tool call result (success or error string) is
+                // what the LLM sees.
+                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+
+                match delegation_result {
                     Ok(result) => {
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
                             target_agent_id: target_agent_id.clone(),
