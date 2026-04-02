@@ -93,7 +93,17 @@ pub fn execute_topology_definition(
         ))
     })?;
 
-    let path_str = path.display().to_string();
+    execute_topology_source(&code, &path.display().to_string(), timeout, catalog)
+}
+
+pub fn execute_topology_source(
+    code: &str,
+    source_name: &str,
+    timeout: Duration,
+    catalog: TopologyEntityCatalog,
+) -> Result<TopologyGraph, TopologyDefinitionError> {
+    let code = code.to_string();
+    let path_str = source_name.to_string();
     let (result_tx, result_rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
@@ -184,6 +194,13 @@ fn run_topology(
             "failed to deserialize topology definition: {err}"
         ))
     })?;
+
+    let mut catalog = catalog;
+    for node in &graph.nodes {
+        if let Some(task_name) = &node.task_name {
+            catalog.known_tasks.insert(task_name.clone());
+        }
+    }
 
     validate_graph(&graph, &catalog).map_err(TopologyDefinitionError::Validation)?;
     Ok(graph)

@@ -180,6 +180,35 @@ pub enum ServerEvent {
         target_agent_id: String,
         success: bool,
     },
+    /// A topology run has started for a session.
+    TopologyRunStarted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        team_id: Uuid,
+    },
+    /// A topology node has started for a session.
+    TopologyNodeStarted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        node_execution_id: Uuid,
+        node_id: String,
+    },
+    /// A topology node has finished for a session.
+    TopologyNodeCompleted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        node_execution_id: Uuid,
+        node_id: String,
+        success: bool,
+    },
+    /// A topology run has finished for a session.
+    TopologyRunCompleted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_output: Option<serde_json::Value>,
+    },
     /// An error occurred during or before turn processing.
     Error { code: String, message: String },
     /// A pending turn was successfully cancelled.
@@ -422,6 +451,9 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                 result = bcast_rx.recv() => {
                     match result {
                         Ok(event) => {
+                            if !broadcast_event_matches_session(session_id, &event) {
+                                continue;
+                            }
                             let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
@@ -529,6 +561,17 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     {
         let mut connections = state.active_connections.lock().await;
         connections.remove(&session_id);
+    }
+}
+
+fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
+    match event {
+        ServerEvent::Shutdown { .. } => true,
+        ServerEvent::TopologyRunStarted { session_id: target, .. }
+        | ServerEvent::TopologyNodeStarted { session_id: target, .. }
+        | ServerEvent::TopologyNodeCompleted { session_id: target, .. }
+        | ServerEvent::TopologyRunCompleted { session_id: target, .. } => *target == session_id,
+        _ => false,
     }
 }
 
@@ -1205,6 +1248,55 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&serialised).unwrap();
         assert_eq!(parsed["type"], "shutdown");
         assert_eq!(parsed["reason"], "admin request");
+    }
+
+    #[test]
+    fn topology_run_started_serialises() {
+        let event = ServerEvent::TopologyRunStarted {
+            session_id: Uuid::nil(),
+            topology_run_id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "topology_run_started");
+        assert!(json["session_id"].is_string());
+        assert!(json["topology_run_id"].is_string());
+        assert!(json["team_id"].is_string());
+    }
+
+    #[test]
+    fn topology_run_completed_omits_final_output_when_absent() {
+        let event = ServerEvent::TopologyRunCompleted {
+            session_id: Uuid::nil(),
+            topology_run_id: Uuid::new_v4(),
+            success: false,
+            final_output: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "topology_run_completed");
+        assert_eq!(json["success"], false);
+        assert!(!json.as_object().unwrap().contains_key("final_output"));
+    }
+
+    #[test]
+    fn broadcast_event_matches_only_its_session() {
+        let session_id = Uuid::new_v4();
+        let other_session_id = Uuid::new_v4();
+        let event = ServerEvent::TopologyNodeStarted {
+            session_id,
+            topology_run_id: Uuid::new_v4(),
+            node_execution_id: Uuid::new_v4(),
+            node_id: "plan".into(),
+        };
+
+        assert!(broadcast_event_matches_session(session_id, &event));
+        assert!(!broadcast_event_matches_session(other_session_id, &event));
+        assert!(broadcast_event_matches_session(
+            other_session_id,
+            &ServerEvent::Shutdown {
+                reason: "idle".into(),
+            },
+        ));
     }
 
     // -----------------------------------------------------------------------

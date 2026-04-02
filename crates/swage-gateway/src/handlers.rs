@@ -16,8 +16,9 @@ use crate::{
     service::{
         ConversationDetail, ConversationResponse, ConversationService, ConversationSummary,
         CreateProjectRequest, CreateTeamRequest, ProjectListResponse, ProjectResponse,
-        ProjectService, TeamListResponse, TeamResponse, TeamService, UpdateProjectRequest,
-        UpdateTeamRequest,
+        ProjectService, TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
+        TopologyRunResponse, TopologyRunService, UpdateProjectRequest, UpdateTeamRequest,
+        CreateTopologyRunRequest,
     },
     state::AppState,
 };
@@ -238,6 +239,37 @@ pub async fn delete_team(
     let svc = TeamService::new(state.storage, state.project_store);
     svc.delete_team(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/teams/:id/runs` — validate and execute a topology run.
+pub async fn create_topology_run(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    Json(req): Json<CreateTopologyRunRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let svc = TopologyRunService::new(state);
+    let resp = svc.create_run(team_id, req).await?;
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /api/teams/:id/runs` — list topology runs for a team.
+pub async fn list_topology_runs(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+) -> Result<Json<Vec<TopologyRunResponse>>, ApiError> {
+    let svc = TopologyRunService::new(state);
+    let resp = svc.list_runs(team_id).await?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/topology-runs/:id` — inspect a topology run and its trace.
+pub async fn get_topology_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TopologyRunDetailResponse>, ApiError> {
+    let svc = TopologyRunService::new(state);
+    let resp = svc.get_run(id).await?;
+    Ok(Json(resp))
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,13 +1105,14 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use swage_provider::LlmProvider;
     use swage_storage::store::{ProjectStore, SessionStore, Storage, TeamStore};
 
     use super::*;
     use crate::{
         server::build_router,
         state::AppState,
-        turn::tests::{MockProvider, MockStorage},
+        turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider},
         websocket::ServerEvent,
     };
 
@@ -1093,11 +1126,18 @@ mod tests {
     fn make_router() -> (Router, Arc<MockStorage>) {
         let storage = Arc::new(MockStorage::new());
         let provider = Arc::new(MockProvider::new(vec![]));
+        make_router_with_provider(provider as Arc<dyn LlmProvider>, storage)
+    }
+
+    fn make_router_with_provider(
+        provider: Arc<dyn LlmProvider>,
+        storage: Arc<MockStorage>,
+    ) -> (Router, Arc<MockStorage>) {
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
             project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
-            provider: provider as Arc<dyn swage_provider::LlmProvider>,
+            provider,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -1915,6 +1955,228 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(storage.get_team(team.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn post_team_runs_returns_201_with_trace() {
+        let provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"decision\":\"review\",\"draft\":\"hello\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 6,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"result\":\"approved\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 8,
+                    output_tokens: 4,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+        ]));
+        let storage = Arc::new(MockStorage::new());
+        let (router, storage) = make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
+
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "team-run-project".into(),
+                slug: "team-run-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "analysis".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into(), "reviewer".into()],
+            })
+            .await
+            .unwrap();
+
+        let topology_source = r#"
+import swage_topology as topo
+
+def build_topology():
+    return topo.graph(
+        "plan",
+        [
+            topo.llm_node(
+                "plan",
+                "planner",
+                "draft-plan",
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "decision": {"type": "string"},
+                        "draft": {"type": "string"}
+                    }
+                }
+            ),
+            topo.llm_node(
+                "review",
+                "reviewer",
+                "review-plan",
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "result": {"type": "string"}
+                    }
+                }
+            ),
+        ],
+        [
+            topo.conditional_edge(
+                "plan-to-review",
+                "plan",
+                "review",
+                "decision",
+                "review",
+            )
+        ],
+        max_fan_out=4,
+        max_concurrency=2,
+        max_total_tokens=100,
+    )
+"#;
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/teams/{}/runs", team.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "topology_source": topology_source,
+                            "message": "hello"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp).await;
+        assert_eq!(body["run"]["state"].as_str().unwrap(), "completed");
+        assert_eq!(body["run"]["final_output"]["result"], "approved");
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(body["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_topology_run_returns_200_with_trace() {
+        let provider = Arc::new(MockProvider::new(vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"result\":\"ok\"}".into(),
+            },
+            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 4,
+                output_tokens: 2,
+            }),
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]));
+        let storage = Arc::new(MockStorage::new());
+        let (router, storage) = make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
+
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "single-run-project".into(),
+                slug: "single-run-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "single".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+
+        let topology_source = r#"
+import swage_topology as topo
+
+def build_topology():
+    return topo.graph(
+        "plan",
+        [
+            topo.llm_node(
+                "plan",
+                "planner",
+                "draft-plan",
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "result": {"type": "string"}
+                    }
+                }
+            )
+        ],
+        [],
+        max_fan_out=1,
+        max_concurrency=1,
+        max_total_tokens=20,
+    )
+"#;
+
+        let create_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/teams/{}/runs", team.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "topology_source": topology_source,
+                            "message": "hello"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let create_body = body_json(create_resp).await;
+        let run_id = create_body["run"]["id"].as_str().unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/topology-runs/{run_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["run"]["id"].as_str().unwrap(), run_id);
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

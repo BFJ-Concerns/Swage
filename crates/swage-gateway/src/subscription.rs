@@ -156,8 +156,13 @@ impl SubscriptionState {
             | ServerEvent::ApprovalDecisionError { .. } => true,
 
             // Inter-agent communication events are always delivered.
-            ServerEvent::DelegationStarted { .. }
-            | ServerEvent::DelegationCompleted { .. } => true,
+            ServerEvent::DelegationStarted { .. } | ServerEvent::DelegationCompleted { .. } => true,
+
+            // Topology progress events are always delivered to the matching session.
+            ServerEvent::TopologyRunStarted { .. }
+            | ServerEvent::TopologyNodeStarted { .. }
+            | ServerEvent::TopologyNodeCompleted { .. }
+            | ServerEvent::TopologyRunCompleted { .. } => true,
 
             // Baseline events are always delivered — subscription cannot suppress them.
             ServerEvent::Token { .. }
@@ -187,12 +192,18 @@ mod tests {
 
     #[test]
     fn channel_parses_context() {
-        assert_eq!("context".parse::<ObservabilityChannel>().unwrap(), ObservabilityChannel::Context);
+        assert_eq!(
+            "context".parse::<ObservabilityChannel>().unwrap(),
+            ObservabilityChannel::Context
+        );
     }
 
     #[test]
     fn channel_parses_tools() {
-        assert_eq!("tools".parse::<ObservabilityChannel>().unwrap(), ObservabilityChannel::Tools);
+        assert_eq!(
+            "tools".parse::<ObservabilityChannel>().unwrap(),
+            ObservabilityChannel::Tools
+        );
     }
 
     #[test]
@@ -305,7 +316,9 @@ mod tests {
     #[test]
     fn token_always_delivered() {
         let state = unsubscribed();
-        let event = ServerEvent::Token { content: "hi".to_string() };
+        let event = ServerEvent::Token {
+            content: "hi".to_string(),
+        };
         assert!(state.should_deliver(&event));
     }
 
@@ -329,7 +342,9 @@ mod tests {
     #[test]
     fn shutdown_always_delivered() {
         let state = unsubscribed();
-        let event = ServerEvent::Shutdown { reason: "idle".to_string() };
+        let event = ServerEvent::Shutdown {
+            reason: "idle".to_string(),
+        };
         assert!(state.should_deliver(&event));
     }
 
@@ -395,7 +410,10 @@ mod tests {
             turn_id: Uuid::new_v4(),
             report: serde_json::json!({"errors": []}),
         };
-        assert!(!state.should_deliver(&event), "empty errors array should not bypass gate");
+        assert!(
+            !state.should_deliver(&event),
+            "empty errors array should not bypass gate"
+        );
     }
 
     // ToolStart / ToolEnd gating
@@ -526,7 +544,10 @@ mod tests {
             attempts: 3,
             errors: vec![],
         };
-        assert!(state.should_deliver(&event), "OutputSchemaFailed must always be delivered");
+        assert!(
+            state.should_deliver(&event),
+            "OutputSchemaFailed must always be delivered"
+        );
     }
 
     #[test]

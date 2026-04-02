@@ -124,6 +124,14 @@ impl TopologyExecutor {
             },
         )
         .await;
+        broadcast_topology_event(
+            &self.state,
+            ServerEvent::TopologyRunStarted {
+                session_id,
+                topology_run_id: topology_run.id,
+                team_id: request.team.id,
+            },
+        );
 
         let node_map: HashMap<String, TopologyNode> = request
             .graph
@@ -302,6 +310,15 @@ impl TopologyExecutor {
                 },
             )
             .await;
+            broadcast_topology_event(
+                &self.state,
+                ServerEvent::TopologyRunCompleted {
+                    session_id,
+                    topology_run_id: topology_run.id,
+                    success: false,
+                    final_output: None,
+                },
+            );
             return Err(TopologyEngineError::InvalidGraph(error_message));
         }
 
@@ -339,6 +356,15 @@ impl TopologyExecutor {
             },
         )
         .await;
+        broadcast_topology_event(
+            &self.state,
+            ServerEvent::TopologyRunCompleted {
+                session_id,
+                topology_run_id: topology_run.id,
+                success: true,
+                final_output: Some(final_output.clone()),
+            },
+        );
 
         Ok(TopologyExecutionResult {
             topology_run_id: topology_run.id,
@@ -437,6 +463,15 @@ async fn execute_node(
         },
     )
     .await;
+    broadcast_topology_event(
+        &state,
+        ServerEvent::TopologyNodeStarted {
+            session_id,
+            topology_run_id,
+            node_execution_id: node_execution.id,
+            node_id: node.id.clone(),
+        },
+    );
 
     let result = match node.kind {
         TopologyNodeKind::Deterministic => execute_deterministic_node(&node, &input_json),
@@ -495,6 +530,16 @@ async fn execute_node(
                 },
             )
             .await;
+            broadcast_topology_event(
+                &state,
+                ServerEvent::TopologyNodeCompleted {
+                    session_id,
+                    topology_run_id,
+                    node_execution_id: node_execution.id,
+                    node_id: node.id.clone(),
+                    success: true,
+                },
+            );
 
             Ok(NodeCompletion {
                 node_id: node.id,
@@ -505,6 +550,7 @@ async fn execute_node(
             })
         }
         Err(error) => {
+            let node_id = node.id.clone();
             state
                 .storage
                 .update_node_execution(
@@ -519,12 +565,22 @@ async fn execute_node(
                 HookEvent::NodeEnd {
                     topology_run_id: topology_run_id.to_string(),
                     node_execution_id: node_execution.id.to_string(),
-                    node_id: node.id,
+                    node_id: node_id.clone(),
                     success: false,
                     output: None,
                 },
             )
             .await;
+            broadcast_topology_event(
+                &state,
+                ServerEvent::TopologyNodeCompleted {
+                    session_id,
+                    topology_run_id,
+                    node_execution_id: node_execution.id,
+                    node_id,
+                    success: false,
+                },
+            );
             Err(error)
         }
     }
@@ -939,6 +995,10 @@ async fn dispatch_hook(hook_registry: Option<&Arc<HookRegistry>>, event: HookEve
         return;
     };
     let _ = hook_registry.dispatch(event).await;
+}
+
+fn broadcast_topology_event(state: &AppState, event: ServerEvent) {
+    let _ = state.broadcast.send(event);
 }
 
 #[cfg(test)]

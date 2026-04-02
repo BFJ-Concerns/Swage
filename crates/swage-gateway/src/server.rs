@@ -102,6 +102,14 @@ pub fn build_router(state: AppState) -> Router {
                 .put(handlers::update_team)
                 .delete(handlers::delete_team),
         )
+        .route(
+            "/api/teams/:id/runs",
+            get(handlers::list_topology_runs).post(handlers::create_topology_run),
+        )
+        .route(
+            "/api/topology-runs/:id",
+            get(handlers::get_topology_run),
+        )
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
