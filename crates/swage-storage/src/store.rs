@@ -363,6 +363,26 @@ pub trait ApprovalStore: Send + Sync {
     /// Called during startup recovery to handle the case where an agent was
     /// killed with approvals in flight. Returns the number of rows updated.
     async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError>;
+
+    /// Persist approval memory for a specific session and tool request fingerprint.
+    ///
+    /// Used for session-scoped auto-approval: once a user approves a matching
+    /// request, subsequent identical tool invocations in the same session can
+    /// skip the explicit approval gate.
+    async fn remember_approval(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Return whether a matching approval memory entry exists for this session.
+    async fn has_approval_memory(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Persistent mailbox for inter-agent messages.
@@ -804,6 +824,22 @@ mod tests {
             unimplemented!()
         }
         async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn remember_approval(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn has_approval_memory(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

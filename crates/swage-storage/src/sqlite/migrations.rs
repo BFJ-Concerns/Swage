@@ -28,6 +28,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
         ("009_teams", CREATE_TEAMS),
         ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
+        ("011_approval_memory", CREATE_APPROVAL_MEMORY),
     ]
 }
 
@@ -320,6 +321,19 @@ const CREATE_TOPOLOGY_TRACE: &str = "
     );
 
     CREATE INDEX IF NOT EXISTS idx_node_retries_execution_id ON node_retries(node_execution_id);
+";
+
+/// Session-scoped memory for approved tool requests.
+const CREATE_APPROVAL_MEMORY: &str = "
+    CREATE TABLE IF NOT EXISTS approval_memory (
+        session_id           TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        tool_name            TEXT NOT NULL,
+        request_fingerprint  TEXT NOT NULL,
+        created_at           TEXT NOT NULL,
+        PRIMARY KEY (session_id, tool_name, request_fingerprint)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approval_memory_session_id ON approval_memory(session_id);
 ";
 
 /// Apply all pending migrations to `conn`.
@@ -1156,6 +1170,15 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
             .expect("node_retries table should exist after migration");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn approval_memory_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_memory", [], |r| r.get(0))
+            .expect("approval_memory table should exist after migration");
         assert_eq!(count, 0);
     }
 

@@ -756,12 +756,52 @@ impl Agent {
                 timeout_policy,
             }) => {
                 // Config-driven approval gate.
-                use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+                use crate::approval::{
+                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                    approval_request_fingerprint,
+                };
                 let gate_timeout = std::time::Duration::from_secs(
                     timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
                 );
                 let policy = timeout_policy.unwrap_or_default();
                 let prompt = format!("Approval required to execute tool: {}", call.name);
+                let request_fingerprint = approval_request_fingerprint(&call.arguments);
+
+                match self
+                    .storage
+                    .has_approval_memory(session_id, &call.name, &request_fingerprint)
+                    .await
+                {
+                    Ok(true) => {
+                        match dispatcher
+                            .dispatch_approved(
+                                &call.name,
+                                call.arguments.clone(),
+                                &ctx,
+                                &self.config.agent_id,
+                            )
+                            .await
+                        {
+                            Ok(output) => {
+                                let result_str =
+                                    serde_json::to_string(&output.result).unwrap_or_default();
+                                return Ok((result_str, false, "success".to_string()));
+                            }
+                            Err(e) => {
+                                return Ok((e.to_string(), true, "error".to_string()));
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            session_id = %session_id,
+                            tool = %call.name,
+                            "failed to read approval memory; falling back to explicit approval"
+                        );
+                    }
+                }
 
                 match self
                     .handle_approval_gate(
@@ -1041,6 +1081,33 @@ impl Agent {
                 Ok(ApprovalGateOutcome::Interrupted)
             }
             GateResult::Decision(d) if d.is_approved() => {
+                if kind == swage_storage::model::ApprovalKind::Tool {
+                    if let (Some(tool_name), Some(tool_arguments)) =
+                        (tool_name.as_ref(), tool_arguments.as_ref())
+                    {
+                        if let Ok(Some(thread)) = self.storage.get(thread_id).await {
+                            let request_fingerprint =
+                                crate::approval::approval_request_fingerprint(tool_arguments);
+                            if let Err(error) = self
+                                .storage
+                                .remember_approval(
+                                    thread.session_id,
+                                    tool_name,
+                                    &request_fingerprint,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %error,
+                                    session_id = %thread.session_id,
+                                    tool = %tool_name,
+                                    "failed to persist session approval memory"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // Approved — update storage and resume.
                 let _ = self.storage.update_approval_state(
                     approval.id,
@@ -4715,12 +4782,13 @@ mod process_turn_streaming_tests {
 mod approval_gate_tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use uuid::Uuid;
     use tokio_util::sync::CancellationToken;
 
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::{
-        TurnState, ThreadState, TurnStore, ThreadStore, SessionStore,
+        ApprovalStore, TurnState, ThreadState, TurnStore, ThreadStore, SessionStore,
         model::NewProject,
         store::ProjectStore,
     };
@@ -4729,6 +4797,10 @@ mod approval_gate_tests {
     use crate::builder::AgentBuilder;
     use crate::config::{AgentConfig, CompactionThreshold};
     use crate::event::AgentEvent;
+    use swage_core::ToolCall;
+    use swage_tool::permission::{PermissionConfig, RequireApprovalEntry};
+    use swage_tool::registry::ToolRegistry;
+    use swage_tool::tool::Tool;
 
     use std::collections::HashMap;
 
@@ -4911,6 +4983,104 @@ mod approval_gate_tests {
         while let Ok(e) = event_rx.try_recv() { events.push(e); }
         assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalConfirmed { decision, .. } if decision == "approved")));
+        let fingerprint = crate::approval::approval_request_fingerprint(&serde_json::json!({"path": "/tmp/foo"}));
+        assert!(storage
+            .has_approval_memory(_session_id, "write_file", &fingerprint)
+            .await
+            .expect("approval memory query"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remembered_tool_approval_skips_the_explicit_gate() {
+        struct EchoTool;
+
+        #[async_trait]
+        impl Tool for EchoTool {
+            fn name(&self) -> &str { "echo" }
+            fn description(&self) -> &str { "Echoes the given text." }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                })
+            }
+            async fn execute(
+                &self,
+                params: serde_json::Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                Ok(serde_json::json!({"echo": params["text"]}))
+            }
+        }
+
+        let (storage, session_id, _thread_id, turn_id) = setup().await;
+        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool) as Arc<dyn Tool>).unwrap();
+        let dispatcher = swage_tool::dispatch::ToolDispatcher::new(
+            Arc::new(registry),
+            PermissionConfig {
+                allow: vec![],
+                deny: vec![],
+                bundles: Default::default(),
+                require_approval: vec![RequireApprovalEntry {
+                    tool_name: "echo".into(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                }],
+            },
+            Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+            swage_tool::rate_limit::RateLimitConfig::default(),
+            Arc::new(swage_safety::LeakDetector::default()),
+            false,
+        );
+
+        let fingerprint = crate::approval::approval_request_fingerprint(&serde_json::json!({"text": "hello"}));
+        storage
+            .remember_approval(session_id, "echo", &fingerprint)
+            .await
+            .expect("remember approval");
+
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(null_provider())
+            .storage(storage.clone())
+            .tool_dispatcher(dispatcher)
+            .approval_registrar(make_registrar(channels.clone()))
+            .build()
+            .expect("build agent");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result, is_error, status) = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "call-1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "hello"}),
+                },
+                turn_id,
+                session_id,
+                &[],
+                &event_tx,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("dispatch should succeed via remembered approval");
+
+        assert!(!is_error);
+        assert_eq!(status, "success");
+        assert_eq!(result, "{\"echo\":\"hello\"}");
+        assert!(channels.lock().unwrap().is_empty(), "explicit approval gate should not open");
     }
 
     #[tokio::test(flavor = "multi_thread")]

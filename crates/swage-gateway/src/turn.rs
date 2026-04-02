@@ -1199,6 +1199,7 @@ pub(crate) mod tests {
         pub(crate) node_executions: HashMap<Uuid, NodeExecution>,
         pub(crate) edge_evaluations: Vec<EdgeEvaluation>,
         pub(crate) node_retries: Vec<NodeRetry>,
+        pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
         pub(crate) sessions: HashMap<Uuid, Session>,
         pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
@@ -2134,6 +2135,33 @@ pub(crate) mod tests {
                 }
             }
             Ok(count)
+        }
+
+        async fn remember_approval(
+            &self,
+            session_id: Uuid,
+            tool_name: &str,
+            request_fingerprint: &str,
+        ) -> Result<(), StorageError> {
+            self.db.lock().await.approval_memory.insert((
+                session_id,
+                tool_name.to_string(),
+                request_fingerprint.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn has_approval_memory(
+            &self,
+            session_id: Uuid,
+            tool_name: &str,
+            request_fingerprint: &str,
+        ) -> Result<bool, StorageError> {
+            Ok(self.db.lock().await.approval_memory.contains(&(
+                session_id,
+                tool_name.to_string(),
+                request_fingerprint.to_string(),
+            )))
         }
     }
 

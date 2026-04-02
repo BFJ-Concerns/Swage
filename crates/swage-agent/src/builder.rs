@@ -231,6 +231,45 @@ mod tests {
     }
 
     #[async_trait]
+    impl swage_storage::store::TeamStore for StubStorage {
+        async fn create_team(
+            &self,
+            _: swage_storage::NewTeam,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team(&self, _: Uuid) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team_by_name(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_teams_by_project(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_team(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<Vec<String>>,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
     impl ThreadStore for StubStorage {
         async fn create(&self, _: NewThread) -> Result<Thread, StorageError> {
             unimplemented!()
@@ -360,6 +399,94 @@ mod tests {
             unimplemented!()
         }
     }
+
+    #[async_trait]
+    impl swage_storage::store::TopologyTraceStore for StubStorage {
+        async fn create_topology_run(
+            &self,
+            _: swage_storage::NewTopologyRun,
+        ) -> Result<swage_storage::TopologyRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_topology_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_team(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_topology_run(
+            &self,
+            _: Uuid,
+            _: swage_storage::TopologyRunState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_execution(
+            &self,
+            _: swage_storage::NewNodeExecution,
+        ) -> Result<swage_storage::NodeExecution, StorageError> {
+            unimplemented!()
+        }
+        async fn get_node_execution(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_executions_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_node_execution(
+            &self,
+            _: Uuid,
+            _: swage_storage::NodeExecutionState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_edge_evaluation(
+            &self,
+            _: swage_storage::NewEdgeEvaluation,
+        ) -> Result<swage_storage::EdgeEvaluation, StorageError> {
+            unimplemented!()
+        }
+        async fn list_edge_evaluations_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::EdgeEvaluation>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_retry(
+            &self,
+            _: swage_storage::NewNodeRetry,
+        ) -> Result<swage_storage::NodeRetry, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_retries(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeRetry>, StorageError> {
+            unimplemented!()
+        }
+    }
     #[async_trait]
     impl swage_storage::store::ApprovalStore for StubStorage {
         async fn create_approval(
@@ -400,6 +527,22 @@ mod tests {
             unimplemented!()
         }
         async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn remember_approval(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn has_approval_memory(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

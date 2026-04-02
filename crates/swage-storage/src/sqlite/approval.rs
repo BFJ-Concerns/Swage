@@ -311,6 +311,50 @@ impl ApprovalStore for SqliteStorage {
         })
         .await
     }
+
+    async fn remember_approval(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        let tool_name = tool_name.to_owned();
+        let request_fingerprint = request_fingerprint.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO approval_memory (session_id, tool_name, request_fingerprint, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session_id.to_string(),
+                    tool_name,
+                    request_fingerprint,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn has_approval_memory(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<bool, StorageError> {
+        let tool_name = tool_name.to_owned();
+        let request_fingerprint = request_fingerprint.to_owned();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM approval_memory
+                 WHERE session_id = ?1 AND tool_name = ?2 AND request_fingerprint = ?3",
+                params![session_id.to_string(), tool_name, request_fingerprint],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,5 +660,76 @@ mod tests {
             fetched.context,
             Some(serde_json::json!({"step": "init"}))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remember_approval_round_trips_by_session_tool_and_fingerprint() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let project = storage
+            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .await
+            .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!storage
+            .has_approval_memory(session.id, "shell", "fp:123")
+            .await
+            .unwrap());
+
+        storage
+            .remember_approval(session.id, "shell", "fp:123")
+            .await
+            .unwrap();
+
+        assert!(storage
+            .has_approval_memory(session.id, "shell", "fp:123")
+            .await
+            .unwrap());
+        assert!(!storage
+            .has_approval_memory(session.id, "shell", "fp:456")
+            .await
+            .unwrap());
+        assert!(!storage
+            .has_approval_memory(session.id, "file_read", "fp:123")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_memory_cascades_with_session_delete() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let project = storage
+            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .await
+            .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+
+        storage
+            .remember_approval(session.id, "shell", "fp:123")
+            .await
+            .unwrap();
+        assert!(storage
+            .has_approval_memory(session.id, "shell", "fp:123")
+            .await
+            .unwrap());
+
+        storage.delete_session(session.id).await.unwrap();
+
+        assert!(!storage
+            .has_approval_memory(session.id, "shell", "fp:123")
+            .await
+            .unwrap());
     }
 }
