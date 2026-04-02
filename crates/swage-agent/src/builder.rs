@@ -25,6 +25,7 @@ pub struct AgentBuilder {
     approval_registrar: Option<ApprovalChannelRegistrar>,
     delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
     project_id: Option<uuid::Uuid>,
+    context_transfer_config: Option<swage_config::ContextTransferConfig>,
 }
 
 impl AgentBuilder {
@@ -39,6 +40,7 @@ impl AgentBuilder {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: None,
         }
     }
 
@@ -87,6 +89,14 @@ impl AgentBuilder {
         self
     }
 
+    pub fn context_transfer_config(
+        mut self,
+        context_transfer_config: swage_config::ContextTransferConfig,
+    ) -> Self {
+        self.context_transfer_config = Some(context_transfer_config);
+        self
+    }
+
     /// Validate configuration and produce a ready-to-use [`Agent`].
     pub fn build(self) -> Result<Agent, AgentError> {
         // Required fields must be present before we inspect their contents.
@@ -122,6 +132,7 @@ impl AgentBuilder {
             approval_registrar: self.approval_registrar,
             delegation_handler: self.delegation_handler,
             project_id: self.project_id,
+            context_transfer_config: self.context_transfer_config.unwrap_or_default(),
             active_session_id: None,
             active_thread_id: None,
         })

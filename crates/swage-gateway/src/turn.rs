@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, GatewayError, Role};
-use swage_storage::model::{NewMessage, TurnState};
+use swage_storage::model::{NewAgentMessage, NewMessage, TurnState};
 
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
@@ -16,7 +16,10 @@ use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 
-use swage_agent::{AgentBuilder, AgentConfig, AgentError, AgentEvent, TurnRequest};
+use swage_agent::{
+    AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor,
+    DelegationHandler, MessageRouter, TurnRequest,
+};
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::permission::PermissionConfig;
@@ -129,6 +132,233 @@ fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
         .collect();
 
     parts.join("\n\n")
+}
+
+fn build_approval_registrar(
+    approval_channels: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                Uuid,
+                tokio::sync::oneshot::Sender<swage_agent::ApprovalDecision>,
+            >,
+        >,
+    >,
+) -> swage_agent::ApprovalChannelRegistrar {
+    Arc::new(move |approval_id, sender| {
+        approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(approval_id, sender);
+    })
+}
+
+fn build_permission_config(
+    config: &swage_config::ResolvedConfig,
+    startup_config: &swage_config::ResolvedConfig,
+) -> PermissionConfig {
+    let mut deny = config.tools.permissions.deny.clone();
+    for entry in &startup_config.tools.permissions.deny {
+        if !deny.contains(entry) {
+            deny.push(entry.clone());
+        }
+    }
+
+    PermissionConfig {
+        allow: config.tools.permissions.allow.clone(),
+        deny,
+        bundles: config.tools.permissions.bundles.clone(),
+        require_approval: config
+            .tools
+            .permissions
+            .require_approval
+            .iter()
+            .map(|entry| match entry {
+                swage_config::model::RequireApprovalEntry::Simple(tool_name) => {
+                    ToolRequireApprovalEntry {
+                        tool_name: tool_name.clone(),
+                        timeout_secs: Some(config.hitl.timeout),
+                        timeout_policy: Some(config.hitl.timeout_policy.clone()),
+                    }
+                }
+                swage_config::model::RequireApprovalEntry::WithOptions {
+                    tool,
+                    timeout,
+                    timeout_policy,
+                } => ToolRequireApprovalEntry {
+                    tool_name: tool.clone(),
+                    timeout_secs: Some(timeout.unwrap_or(config.hitl.timeout)),
+                    timeout_policy: Some(
+                        timeout_policy
+                            .clone()
+                            .unwrap_or_else(|| config.hitl.timeout_policy.clone()),
+                    ),
+                },
+            })
+            .collect(),
+    }
+}
+
+fn build_gateway_dispatcher(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> ToolDispatcher {
+    let permissions = build_permission_config(config, &state.config);
+
+    let dispatcher = ToolDispatcher::new(
+        state.tool_dispatcher.registry().clone(),
+        permissions,
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    );
+
+    let inner_strategy: Option<Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>> =
+        state.sandbox.as_ref().map(|sandbox| {
+            Arc::new(SandboxedExecutor::new(sandbox.clone()))
+                as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
+        });
+
+    dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+        inner_strategy,
+        ws_tx,
+    )))
+}
+
+fn build_agent_config(
+    agent_id: String,
+    config: &swage_config::ResolvedConfig,
+    output_schema_override: Option<serde_json::Value>,
+) -> AgentConfig {
+    let mut agent_config = AgentConfig::new(agent_id);
+    if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
+        agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
+    }
+    agent_config
+}
+
+#[derive(Clone)]
+struct GatewayDelegationHandler {
+    state: AppState,
+    active_delegations: swage_agent::ActiveDelegations,
+}
+
+impl GatewayDelegationHandler {
+    fn new(state: AppState) -> Self {
+        Self {
+            state,
+            active_delegations: swage_agent::active_delegations(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DelegationHandler for GatewayDelegationHandler {
+    async fn handle_delegation(
+        &self,
+        target_agent_id: &str,
+        task: &str,
+        context: Option<serde_json::Value>,
+        sender_agent_id: &str,
+        sender_turn_id: Uuid,
+        project_id: Uuid,
+        cancel_token: CancellationToken,
+    ) -> Result<serde_json::Value, AgentError> {
+        let project = self
+            .state
+            .project_store
+            .get(project_id)
+            .await?
+            .ok_or_else(|| {
+                AgentError::InvalidConfig(format!(
+                    "delegation project {project_id} no longer exists"
+                ))
+            })?;
+
+        let target_resolved = match swage_config::load_resolved_config(&project.slug, target_agent_id)
+        {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    project = %project.slug,
+                    target_agent_id,
+                    error = %error,
+                    "failed to load target agent config, using startup config for delegation"
+                );
+                self.state.config.clone()
+            }
+        };
+
+        let target_agent_config = build_agent_config(
+            target_agent_id.to_string(),
+            &target_resolved,
+            None,
+        );
+        let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+
+        // Delegated child agents execute within the gateway runtime, but their
+        // internal tool activity is not surfaced on the parent conversation's
+        // WebSocket stream.
+        let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
+        let target_dispatcher = build_gateway_dispatcher(&self.state, &target_resolved, silent_ws_tx);
+
+        let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
+        let executor = DelegationExecutor {
+            storage: self.state.storage.clone(),
+            provider: self.state.provider.clone(),
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: Some(build_approval_registrar(
+                self.state.approval_channels.clone(),
+            )),
+            delegation_handler: Some(Arc::new(self.clone())),
+            router: router.clone(),
+            active_delegations: self.active_delegations.clone(),
+        };
+
+        let mut payload = serde_json::json!({
+            "task": task,
+        });
+        if let Some(context) = context {
+            payload["context"] = context;
+        }
+
+        let delegate_msg = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: sender_agent_id.to_string(),
+                recipient_agent_id: target_agent_id.to_string(),
+                kind: swage_core::MessageKind::Delegate,
+                correlation_id: None,
+                payload,
+            })
+            .await?;
+
+        router.deliver_message(&delegate_msg).await?;
+
+        let child_cancel_token = cancel_token.child_token();
+        let result_msg = match executor
+            .execute_delegation(
+                &delegate_msg,
+                sender_turn_id,
+                project_id,
+                target_agent_config,
+                target_context_transfer_config,
+                Some(target_dispatcher),
+                child_cancel_token,
+            )
+            .await
+        {
+            Ok(result_msg) => result_msg,
+            Err(error) => {
+                let _ = router.fail_message(delegate_msg.id, &error.to_string()).await;
+                return Err(error);
+            }
+        };
+
+        router.deliver_message(&result_msg).await?;
+        Ok(result_msg.payload.clone())
+    }
 }
 
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
@@ -408,85 +638,21 @@ pub async fn process_turn(
 
     // Step 7: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When a sandbox is
-    // available, inject SandboxedExecutor as the execution strategy so
-    // tool calls are routed through bubblewrap transparently.
-    //
-    // Merge deny entries from the startup config (state.config) into the
-    // per-turn permissions. The startup config represents the operator's
-    // global constraints and may not exist in disk-loaded project configs.
-    // Deny entries are additive — a tool denied by the startup config stays
-    // denied regardless of what the project config allows.
-    let mut deny = config.tools.permissions.deny.clone();
-    for entry in &state.config.tools.permissions.deny {
-        if !deny.contains(entry) {
-            deny.push(entry.clone());
-        }
-    }
-    let permissions = PermissionConfig {
-        allow: config.tools.permissions.allow.clone(),
-        deny,
-        bundles: config.tools.permissions.bundles.clone(),
-        require_approval: config.tools.permissions.require_approval
-            .iter()
-            .map(|entry| match entry {
-                swage_config::model::RequireApprovalEntry::Simple(tool_name) => {
-                    ToolRequireApprovalEntry {
-                        tool_name: tool_name.clone(),
-                        timeout_secs: None,
-                        timeout_policy: None,
-                    }
-                }
-                swage_config::model::RequireApprovalEntry::WithOptions { tool, timeout, timeout_policy } => {
-                    ToolRequireApprovalEntry {
-                        tool_name: tool.clone(),
-                        timeout_secs: *timeout,
-                        timeout_policy: timeout_policy.clone(),
-                    }
-                }
-            })
-            .collect(),
-    };
-
-    // Clone the existing registry from the startup dispatcher — the tools
-    // themselves don't change, only the permission rules.
-    let dispatcher = ToolDispatcher::new(
-        state.tool_dispatcher.registry().clone(),
-        permissions,
-        Arc::new(RateLimiter::new()),
-        RateLimitConfig::default(),
-        Arc::new(LeakDetector::default()),
-        false,
-    );
-    // Build the composite execution strategy. GatewayExecutionStrategy scopes
-    // PYTHON_CONTEXT for python_execute calls, and optionally wraps the
-    // SandboxedExecutor for sandboxed tool execution.
-    let inner_strategy: Option<Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>> =
-        state.sandbox.as_ref().map(|sandbox| {
-            Arc::new(SandboxedExecutor::new(sandbox.clone()))
-                as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
-        });
-    let gateway_strategy = GatewayExecutionStrategy::new(
-        inner_strategy,
-        ws_tx.clone(),
-    );
-    let dispatcher = dispatcher.with_execution_strategy(Arc::new(gateway_strategy));
+    // available, inject SandboxedExecutor as the execution strategy so tool
+    // calls are routed through bubblewrap transparently.
+    let dispatcher = build_gateway_dispatcher(state, &config, ws_tx.clone());
 
     // Step 8: Build the Agent that will execute the turn.
-    // Wire output schema from config: if a schema is configured, pass it to the
-    // agent so it validates the LLM response and retries on failure.
-    let mut agent_config = AgentConfig::new(session.agent_id.clone());
-    // Per-request schema override (from REST submit_turn) takes precedence
-    // over the config-level schema.
-    if let Some(schema) = output_schema_override {
-        agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
-    } else if let Some(schema) = config.output.schema.clone() {
-        agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
-    }
+    let agent_config = build_agent_config(session.agent_id.clone(), &config, output_schema_override);
     let agent = match AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
         .storage(state.storage.clone())
         .tool_dispatcher(dispatcher)
+        .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
+        .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
+        .project_id(project_id)
+        .context_transfer_config(config.communication.context_transfer.clone())
         .build()
     {
         Ok(a) => a,
@@ -1341,7 +1507,13 @@ pub(crate) mod tests {
                 .values()
                 .filter(|t| {
                     t.agent_id == agent_id
-                        && matches!(t.state, TurnState::Pending | TurnState::Processing)
+                        && matches!(
+                            t.state,
+                            TurnState::Pending
+                                | TurnState::Processing
+                                | TurnState::AwaitingApproval
+                                | TurnState::Delegating
+                        )
                 })
                 .cloned()
                 .collect())
@@ -1753,7 +1925,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -1801,7 +1973,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -1897,7 +2069,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2067,7 +2239,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -2250,6 +2422,146 @@ pub(crate) mod tests {
         assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
+        let _guard = SwageHomeGuard::isolate();
+
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let project = storage
+            .get_or_create_default()
+            .await
+            .expect("default project");
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+        let root_thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create root thread");
+
+        let parent_round = vec![
+            StreamChunk::ToolUse {
+                call_id: "delegate-1".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({
+                    "target_agent": "agent-b",
+                    "task": "Summarise this request",
+                }),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let child_round = vec![
+            StreamChunk::Delta {
+                content: "Delegate answer".into(),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+        let parent_resume_round = vec![
+            StreamChunk::Delta {
+                content: "Parent resumed after delegation".into(),
+            },
+            StreamChunk::Done { finish_reason: None },
+        ];
+
+        let provider = Arc::new(MultiRoundMockProvider::new(vec![
+            parent_round,
+            child_round,
+            parent_resume_round,
+        ]));
+
+        let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+        ]);
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            dispatcher,
+            None,
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            "Delegate this".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ServerEvent::DelegationStarted { target_agent_id, parent_turn_id, .. }
+                if target_agent_id == "agent-b" && *parent_turn_id != Uuid::nil()
+            )),
+            "expected DelegationStarted event, got: {events:?}"
+        );
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ServerEvent::DelegationCompleted { target_agent_id, success, .. }
+                if target_agent_id == "agent-b" && *success
+            )),
+            "expected DelegationCompleted event, got: {events:?}"
+        );
+
+        let root_turns = state
+            .storage
+            .list_turns_by_thread(root_thread.id)
+            .await
+            .expect("list root turns");
+        assert_eq!(root_turns.len(), 1, "expected exactly one root turn");
+        let root_turn = &root_turns[0];
+        assert_eq!(root_turn.state, TurnState::Completed);
+        assert_eq!(
+            root_turn.assistant_response.as_deref(),
+            Some("Parent resumed after delegation"),
+        );
+
+        let child_sessions = state
+            .storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions");
+        assert_eq!(child_sessions.len(), 1, "expected one child session");
+
+        let child_threads = state
+            .storage
+            .list_by_session(child_sessions[0].id)
+            .await
+            .expect("list child threads");
+        assert_eq!(child_threads.len(), 1, "expected one child thread");
+
+        let child_turns = state
+            .storage
+            .list_turns_by_thread(child_threads[0].id)
+            .await
+            .expect("list child turns");
+        assert_eq!(child_turns.len(), 1, "expected one child turn");
+        assert_eq!(child_turns[0].state, TurnState::Completed);
+        assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
+        assert_eq!(child_turns[0].assistant_response.as_deref(), Some("Delegate answer"));
+    }
+
     // -----------------------------------------------------------------------
     // Project context and config resolution tests
     // -----------------------------------------------------------------------
@@ -2367,7 +2679,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2425,7 +2737,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2535,7 +2847,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2660,7 +2972,7 @@ pub(crate) mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }

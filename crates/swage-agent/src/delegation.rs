@@ -59,6 +59,7 @@ pub struct DelegationExecutor {
     pub hook_registry: Option<Arc<HookRegistry>>,
     pub leak_detector: Option<Arc<LeakDetector>>,
     pub approval_registrar: Option<ApprovalChannelRegistrar>,
+    pub delegation_handler: Option<Arc<dyn DelegationHandler>>,
     pub router: Arc<MessageRouter>,
     /// Shared registry of in-flight delegations — lets `handle_cancel`
     /// find the cancellation token and child session for a specific delegation.
@@ -72,13 +73,18 @@ impl DelegationExecutor {
     /// `project_id` is the project the child session should belong to (inherited
     /// from the parent session). `target_config` and `target_tool_dispatcher`
     /// are resolved by the caller (gateway) from the config cascade.
+    /// `cancel_token` is a child token for this delegation: cancelling the
+    /// parent turn cascades into the delegate, while delegate-specific cancel
+    /// signals do not interrupt the parent turn directly.
     pub async fn execute_delegation(
         &self,
         delegate_msg: &AgentMessage,
         sender_turn_id: Uuid,
         project_id: Uuid,
         target_config: AgentConfig,
+        target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
 
@@ -180,14 +186,19 @@ impl DelegationExecutor {
         if let Some(ref registrar) = self.approval_registrar {
             builder = builder.approval_registrar(registrar.clone());
         }
+        if let Some(ref delegation_handler) = self.delegation_handler {
+            builder = builder.delegation_handler(delegation_handler.clone());
+        }
+
+        builder = builder
+            .project_id(project_id)
+            .context_transfer_config(target_context_transfer_config);
 
         let agent = builder.build()?;
 
         // Register the cancellation token so handle_cancel can interrupt
         // this delegation by message ID. The RAII guard ensures the entry is
-        // removed even if this future is dropped mid-execution (e.g. by a
-        // parent timeout or select!).
-        let cancel_token = tokio_util::sync::CancellationToken::new();
+        // removed even if this future is dropped mid-execution.
         let delegation_id = delegate_msg.id;
         {
             let mut active = self.active_delegations.write().await;

@@ -362,6 +362,7 @@ fn build_tool_dispatcher(
             provider_config: config.tools.search.clone(),
         }),
         Arc::new(UrlFetchTool::default()),
+        Arc::new(swage_tool::delegate::DelegateTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
     ];
@@ -557,6 +558,23 @@ mod tests {
             filter.to_string().contains("error"),
             "expected 'error' in filter, got: {}",
             filter,
+        );
+    }
+
+    #[test]
+    fn build_tool_dispatcher_registers_delegate_tool() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+        );
+
+        assert!(
+            dispatcher
+                .registry()
+                .get(swage_tool::delegate::DELEGATE_TOOL_NAME)
+                .is_some(),
+            "delegate tool should be registered with the built-in dispatcher",
         );
     }
 }

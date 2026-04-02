@@ -54,6 +54,9 @@ pub struct Agent {
     /// child sessions in the same project.
     pub(crate) project_id: Option<Uuid>,
 
+    /// Context transfer policy applied when this agent delegates work.
+    pub(crate) context_transfer_config: swage_config::ContextTransferConfig,
+
     /// The currently active session, if any.
     pub(crate) active_session_id: Option<Uuid>,
     /// The currently active thread within the active session.
@@ -254,7 +257,14 @@ impl Agent {
                             ).await? {
                                 ApprovalGateOutcome::Approved => {
                                     // Approved — proceed with normal dispatch.
-                                    self.dispatch_tool_call(call, turn.id, session_id, &event_tx, &cancel_token).await?
+                                    self.dispatch_tool_call(
+                                        call,
+                                        turn.id,
+                                        session_id,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                    ).await?
                                 }
                                 ApprovalGateOutcome::Rejected { feedback } => {
                                     (feedback, true, "rejected".to_string())
@@ -265,7 +275,14 @@ impl Agent {
                             }
                         }
                         Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(call, turn.id, session_id, &event_tx, &cancel_token).await?
+                            self.dispatch_tool_call(
+                                call,
+                                turn.id,
+                                session_id,
+                                &llm_request.messages,
+                                &event_tx,
+                                &cancel_token,
+                            ).await?
                         }
                     };
 
@@ -700,6 +717,7 @@ impl Agent {
         call: &ToolCall,
         turn_id: Uuid,
         session_id: Uuid,
+        current_context: &[ChatMessage],
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
     ) -> Result<(String, bool, String), AgentError> {
@@ -811,6 +829,25 @@ impl Agent {
 
                 let project_id = self.project_id.unwrap_or(Uuid::nil());
 
+                let transferred_context = match context {
+                    Some(context) => Some(context),
+                    None => {
+                        let transferred = crate::context_transfer::transfer_context_async(
+                            &self.context_transfer_config,
+                            &target_agent_id,
+                            current_context,
+                            Some(self.provider.as_ref()),
+                        )
+                        .await;
+
+                        if transferred.messages.is_empty() {
+                            None
+                        } else {
+                            serde_json::to_value(&transferred.messages).ok()
+                        }
+                    }
+                };
+
                 // Suspend the parent turn — durable state so restart recovery
                 // can find it and transition to Interrupted.
                 let _ = self.storage.update_turn_state(turn_id, TurnState::Delegating).await;
@@ -826,7 +863,7 @@ impl Agent {
                     .handle_delegation(
                         &target_agent_id,
                         &task,
-                        context,
+                        transferred_context,
                         &self.config.agent_id,
                         turn_id,
                         project_id,
@@ -1878,6 +1915,7 @@ mod hook_inbound_response_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2065,6 +2103,7 @@ mod hook_inbound_response_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2192,6 +2231,7 @@ mod hook_dispatch_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: None,
             active_thread_id: None,
         }
@@ -2887,6 +2927,7 @@ mod resume_session_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: None,
             active_thread_id: None,
         }
@@ -3264,6 +3305,7 @@ mod create_thread_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: Some(session.id),
             active_thread_id: None,
         };
@@ -3318,6 +3360,7 @@ mod create_thread_tests {
             approval_registrar: None,
             delegation_handler: None,
             project_id: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
             active_session_id: None, // intentionally absent
             active_thread_id: None,
         };
@@ -3658,6 +3701,179 @@ mod tool_dispatch_cycle_tests {
             .expect("process_message should succeed even with denied tool");
 
         assert_eq!(result.response, "I noted the denial.");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_without_explicit_context_uses_summary_transfer_policy() {
+        struct SummaryOnlyProvider {
+            summary: String,
+        }
+
+        #[async_trait]
+        impl LlmProvider for SummaryOnlyProvider {
+            fn model_id(&self) -> &str {
+                "summary-only"
+            }
+
+            async fn complete(
+                &self,
+                _: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
+                Ok(CompletionResponse {
+                    content: self.summary.clone(),
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    finish_reason: FinishReason::Stop,
+                    cost: None,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, ProviderError> {
+                unimplemented!("not used in dispatch_tool_call test")
+            }
+
+            fn stream(
+                &self,
+                _: CompletionRequest,
+            ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+                unimplemented!("not used in dispatch_tool_call test")
+            }
+        }
+
+        struct CapturingDelegationHandler {
+            captured_context: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+        }
+
+        #[async_trait]
+        impl crate::delegation::DelegationHandler for CapturingDelegationHandler {
+            async fn handle_delegation(
+                &self,
+                _target_agent_id: &str,
+                _task: &str,
+                context: Option<serde_json::Value>,
+                _sender_agent_id: &str,
+                _sender_turn_id: Uuid,
+                _project_id: Uuid,
+                _cancel_token: tokio_util::sync::CancellationToken,
+            ) -> Result<serde_json::Value, AgentError> {
+                *self.captured_context.lock().unwrap() = context;
+                Ok(json!({"response": "delegated"}))
+            }
+        }
+
+        let (storage, project_id) = setup_storage().await;
+        let session = swage_storage::SessionStore::create_session(
+            storage.as_ref(),
+            swage_storage::NewSession {
+                project_id,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .expect("create session");
+        let thread = swage_storage::ThreadStore::create(
+            storage.as_ref(),
+            swage_storage::NewThread {
+                session_id: session.id,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .expect("create thread");
+        let turn = swage_storage::TurnStore::create_turn(
+            storage.as_ref(),
+            swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "test-agent".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            },
+        )
+        .await
+        .expect("create turn");
+
+        let captured_context = Arc::new(std::sync::Mutex::new(None));
+        let handler = Arc::new(CapturingDelegationHandler {
+            captured_context: captured_context.clone(),
+        });
+
+        let provider = Arc::new(SummaryOnlyProvider {
+            summary: "The user needs a concise report summary and prior assistant context.".into(),
+        });
+        let dispatcher = ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
+        ]);
+        let agent = AgentBuilder::new()
+            .config(AgentConfig {
+                agent_id: "test-agent".into(),
+                max_tool_rounds: 10,
+                compaction_threshold: CompactionThreshold::MessageCount(100),
+                metadata: HashMap::new(),
+                output_schema: None,
+                max_output_retries: 3,
+            })
+            .provider(provider)
+            .storage(storage.clone())
+            .tool_dispatcher(dispatcher)
+            .delegation_handler(handler)
+            .project_id(project_id)
+            .context_transfer_config(swage_config::ContextTransferConfig {
+                mode: swage_config::ContextTransferMode::Summary,
+                allowed_fields: vec![],
+                summary_budget: Some(64),
+                targets: HashMap::new(),
+            })
+            .build()
+            .expect("build agent");
+
+        let current_context = vec![
+            ChatMessage::new(Role::System, "You are a helpful assistant."),
+            ChatMessage::new(Role::User, "Please prepare a report."),
+            ChatMessage::new(Role::Assistant, "I will gather the details."),
+        ];
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result, is_error, status) = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "delegate-1".into(),
+                    name: "delegate".into(),
+                    arguments: json!({
+                        "target_agent": "reviewer",
+                        "task": "Review the report draft"
+                    }),
+                },
+                turn.id,
+                session.id,
+                &current_context,
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("delegation should succeed");
+
+        assert!(!is_error, "delegation result should not be marked as an error");
+        assert_eq!(status, "success");
+        assert_eq!(result, "{\"response\":\"delegated\"}");
+
+        let captured = captured_context
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("delegation context should be captured");
+        let transferred: Vec<ChatMessage> = serde_json::from_value(captured)
+            .expect("captured context should deserialize as chat messages");
+
+        assert_eq!(transferred.len(), 1, "summary mode should send one compacted message");
+        assert_eq!(transferred[0].role, Role::System);
+        let summary_text = match &transferred[0].content[0] {
+            ContentPart::Text { text } => text.clone(),
+            other => panic!("expected text summary, got: {other:?}"),
+        };
+        assert!(summary_text.contains("Context summary from delegating agent"));
+        assert!(summary_text.contains("concise report summary"));
     }
 }
 
