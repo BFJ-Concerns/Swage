@@ -1,31 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_config::ResolvedConfig;
+use swage_agent::ApprovalDecision;
 use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
 use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
-
-/// Carries the outcome of a human approval decision back to the waiting agent task.
-///
-/// Sent through a oneshot channel stored in `AppState::approval_channels`
-/// keyed by `approval_id`. The WebSocket handler fires it when the client
-/// sends an `ApprovalDecision` message.
-#[derive(Debug, Clone)]
-pub struct ApprovalDecision {
-    /// "approved" or "rejected" — mirrors the ClientEvent field.
-    pub decision: String,
-    /// Optional human-readable rationale supplied by the approver.
-    pub reason: Option<String>,
-}
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -46,10 +34,10 @@ pub struct AppState {
     pub config: ResolvedConfig,
     /// Maps session_id → CancellationToken for turns currently being processed.
     /// Used by `cancel_turn` and by graceful shutdown to interrupt active work.
-    pub active_turns: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
+    pub active_turns: Arc<AsyncMutex<HashMap<Uuid, CancellationToken>>>,
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
-    pub active_connections: Arc<Mutex<HashSet<Uuid>>>,
+    pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
@@ -84,9 +72,9 @@ pub struct AppState {
     ///
     /// When an agent suspends on a tool awaiting human approval it inserts a
     /// `oneshot::Sender<ApprovalDecision>` keyed by `approval_id`. The WebSocket
-    /// handler removes the sender and fires it when the client sends an
-    /// `ApprovalDecision` message. Absent key means the approval has already been
-    /// resolved or was never registered (stale/duplicate client message).
+    /// and REST handlers remove the sender and fire it when the client submits a
+    /// decision. A plain std mutex is sufficient here — the critical section is a
+    /// single HashMap operation with no async work under the lock.
     pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
 }
 
@@ -105,8 +93,8 @@ impl AppState {
             project_store,
             provider,
             config,
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(HashSet::new())),
+            active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(tool_dispatcher),
             sandbox,
             activity_tracker: Arc::new(ActivityTracker::new()),
@@ -130,7 +118,6 @@ mod tests {
     use serde_json::Value;
     use swage_core::SandboxError;
     use swage_sandbox::{Sandbox, ToolCallResult};
-    use tokio::sync::Mutex;
 
     use super::*;
     use crate::turn::tests::{MockProvider, MockStorage};
@@ -165,8 +152,8 @@ mod tests {
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(HashSet::new())),
+            active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
@@ -194,7 +181,7 @@ mod tests {
         // Newly constructed state must have an empty approval_channels map —
         // no leftover entries from a previous session.
         let state = make_minimal_state(None);
-        let guard = state.approval_channels.blocking_lock();
+        let guard = state.approval_channels.lock().unwrap();
         assert!(guard.is_empty(), "approval_channels should be empty on construction");
     }
 
@@ -205,8 +192,8 @@ mod tests {
         let state = make_minimal_state(None);
         let approval_id = Uuid::new_v4();
         let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
-        state.approval_channels.lock().await.insert(approval_id, tx);
-        let sender = state.approval_channels.lock().await.remove(&approval_id)
+        state.approval_channels.lock().unwrap().insert(approval_id, tx);
+        let sender = state.approval_channels.lock().unwrap().remove(&approval_id)
             .expect("sender should be present");
         sender.send(ApprovalDecision { decision: "approved".to_string(), reason: None }).unwrap();
         let decision = rx.await.expect("receiver should get decision");

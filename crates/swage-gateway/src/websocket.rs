@@ -846,9 +846,9 @@ async fn dispatch_client_message(
             // If no sender is present the agent either timed out or never registered —
             // proceed to emit the confirmed event anyway for UI consistency.
             {
-                let mut channels = state.approval_channels.lock().await;
+                let mut channels = state.approval_channels.lock().unwrap();
                 if let Some(sender) = channels.remove(&approval_uuid) {
-                    let _ = sender.send(crate::state::ApprovalDecision {
+                    let _ = sender.send(swage_agent::ApprovalDecision {
                         decision: decision.clone(),
                         reason: reason.clone(),
                     });
@@ -1357,7 +1357,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1400,7 +1400,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         (state, session_id)
@@ -1890,11 +1890,11 @@ mod tests {
 
         // Register a oneshot channel so the handler can notify a waiting agent.
         let (oneshot_tx, oneshot_rx) =
-            tokio::sync::oneshot::channel::<crate::state::ApprovalDecision>();
+            tokio::sync::oneshot::channel::<swage_agent::ApprovalDecision>();
         state
             .approval_channels
             .lock()
-            .await
+            .unwrap()
             .insert(approval.id, oneshot_tx);
 
         let (tx, _rx) = mpsc::unbounded_channel();

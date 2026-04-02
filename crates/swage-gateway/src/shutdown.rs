@@ -17,7 +17,7 @@
 //!   responses before the process exits.
 //!
 //! - [`recover_orphaned_turns`] — runs once at startup to transition any turns
-//!   left in `Processing` state by a previous unclean exit to `Interrupted`.
+//!   left in an in-progress state by a previous unclean exit to `Interrupted`.
 //!
 //! Typical call sequence at shutdown:
 //! ```text
@@ -172,7 +172,7 @@ pub async fn shutdown_active_turns(state: &AppState) {
     }
 }
 
-/// Transition all Processing turns for the gateway agent to Interrupted.
+/// Transition all in-progress turns for the gateway agent to Interrupted.
 ///
 /// Runs at startup — before the server begins accepting connections — to clean
 /// up turns left dangling by a previous unclean shutdown.
@@ -333,9 +333,13 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// Build a MockStorage pre-populated with `processing` Processing turns
-    /// and `completed` Completed turns (all belonging to a single thread).
-    async fn make_storage(processing: usize, completed: usize) -> Arc<MockStorage> {
+    /// Build a MockStorage pre-populated with in-progress and completed turns
+    /// (all belonging to a single thread).
+    async fn make_storage(
+        processing: usize,
+        delegating: usize,
+        completed: usize,
+    ) -> Arc<MockStorage> {
         let storage = Arc::new(MockStorage::new());
 
         // Create the project → session → thread hierarchy required for FK integrity.
@@ -370,6 +374,18 @@ mod tests {
                 .unwrap();
         }
 
+        for _ in 0..delegating {
+            storage
+                .create_turn(NewTurn {
+                    thread_id,
+                    agent_id: "gateway".to_string(),
+                    state: TurnState::Delegating,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+        }
+
         for _ in 0..completed {
             // Create as Processing (the normal pre-terminal state), then
             // immediately transition to Completed.
@@ -397,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_marks_in_progress_interrupted_leaves_completed_untouched() {
-        let storage = make_storage(2, 1).await;
+        let storage = make_storage(2, 0, 1).await;
 
         let count = recover_orphaned_turns(&*storage)
             .await
@@ -424,6 +440,24 @@ mod tests {
             .expect("recovery should not fail on empty storage");
 
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_marks_delegating_turns_interrupted() {
+        let storage = make_storage(0, 1, 0).await;
+
+        let count = recover_orphaned_turns(&*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert_eq!(count, 1, "delegating turn should be recovered");
+
+        let db = storage.db.lock().await;
+        let n_interrupted = db.turns.values().filter(|t| t.state == TurnState::Interrupted).count();
+        let n_delegating = db.turns.values().filter(|t| t.state == TurnState::Delegating).count();
+
+        assert_eq!(n_interrupted, 1, "delegating turn should become Interrupted");
+        assert_eq!(n_delegating, 0, "no turns should remain Delegating");
     }
 
     // -----------------------------------------------------------------------

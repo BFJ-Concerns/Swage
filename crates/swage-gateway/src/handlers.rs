@@ -812,7 +812,7 @@ pub async fn decide_approval(
     Path(approval_id): Path<Uuid>,
     Json(req): Json<ApprovalDecisionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use crate::state::ApprovalDecision;
+    use swage_agent::ApprovalDecision;
 
     // Validate the decision string early — before any side effects.
     let outcome = ApprovalOutcome::parse(&req.decision).ok_or_else(|| {
@@ -826,7 +826,7 @@ pub async fn decide_approval(
     let sender = state
         .approval_channels
         .lock()
-        .await
+        .unwrap()
         .remove(&approval_id);
 
     // Map the validated outcome to storage state once, used by all paths.
@@ -1049,7 +1049,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (build_router(state), storage)
     }
@@ -1762,7 +1762,7 @@ mod tests {
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }
