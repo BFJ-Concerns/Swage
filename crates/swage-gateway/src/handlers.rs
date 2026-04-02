@@ -15,8 +15,9 @@ use crate::{
     error::ApiError,
     service::{
         ConversationDetail, ConversationResponse, ConversationService, ConversationSummary,
-        CreateProjectRequest, ProjectListResponse, ProjectResponse, ProjectService,
-        UpdateProjectRequest,
+        CreateProjectRequest, CreateTeamRequest, ProjectListResponse, ProjectResponse,
+        ProjectService, TeamListResponse, TeamResponse, TeamService, UpdateProjectRequest,
+        UpdateTeamRequest,
     },
     state::AppState,
 };
@@ -180,6 +181,62 @@ pub async fn delete_project(
 ) -> Result<StatusCode, ApiError> {
     let svc = ProjectService::new(state.project_store);
     svc.delete_project(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Team handlers
+// ---------------------------------------------------------------------------
+
+/// `POST /api/projects/:project_id/teams` — create a team in a project.
+pub async fn create_team(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(req): Json<CreateTeamRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let svc = TeamService::new(state.storage, state.project_store);
+    let resp = svc.create_team(project_id, req).await?;
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /api/projects/:project_id/teams` — list teams in a project.
+pub async fn list_teams(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<TeamListResponse>, ApiError> {
+    let svc = TeamService::new(state.storage, state.project_store);
+    let resp = svc.list_teams(project_id).await?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/teams/:id` — fetch a team by ID.
+pub async fn get_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TeamResponse>, ApiError> {
+    let svc = TeamService::new(state.storage, state.project_store);
+    let resp = svc.get_team(id).await?;
+    Ok(Json(resp))
+}
+
+/// `PUT /api/teams/:id` — partially update a team.
+pub async fn update_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateTeamRequest>,
+) -> Result<Json<TeamResponse>, ApiError> {
+    let svc = TeamService::new(state.storage, state.project_store);
+    let resp = svc.update_team(id, req).await?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/teams/:id` — delete a team.
+pub async fn delete_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let svc = TeamService::new(state.storage, state.project_store);
+    svc.delete_team(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1016,7 +1073,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use swage_storage::store::{ProjectStore, SessionStore, Storage};
+    use swage_storage::store::{ProjectStore, SessionStore, Storage, TeamStore};
 
     use super::*;
     use crate::{
@@ -1686,6 +1743,178 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // Team routes
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_project_teams_returns_201_with_json() {
+        let (router, storage) = make_router();
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "team-project".into(),
+                slug: "team-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/teams", project.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"name":"research","description":"Research team","entry_agent_id":"planner","members":["reviewer"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp).await;
+        assert_eq!(body["name"].as_str().unwrap(), "research");
+        assert_eq!(body["entry_agent_id"].as_str().unwrap(), "planner");
+        let members = body["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].as_str().unwrap(), "planner");
+        assert_eq!(members[1].as_str().unwrap(), "reviewer");
+    }
+
+    #[tokio::test]
+    async fn get_project_teams_returns_200_with_array() {
+        let (router, storage) = make_router();
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "team-list-project".into(),
+                slug: "team-list-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "research".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+        storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "review".into(),
+                description: String::new(),
+                entry_agent_id: "reviewer".into(),
+                members: vec!["reviewer".into()],
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/projects/{}/teams", project.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let teams = body["teams"].as_array().unwrap();
+        assert_eq!(teams.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn put_team_returns_200_and_updates_members() {
+        let (router, storage) = make_router();
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "team-update-project".into(),
+                slug: "team-update-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "research".into(),
+                description: "Initial".into(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/teams/{}", team.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"entry_agent_id":"reviewer","members":["critic"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["entry_agent_id"].as_str().unwrap(), "reviewer");
+        let members = body["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].as_str().unwrap(), "reviewer");
+        assert_eq!(members[1].as_str().unwrap(), "critic");
+    }
+
+    #[tokio::test]
+    async fn delete_team_returns_204() {
+        let (router, storage) = make_router();
+        let project = storage
+            .create(swage_storage::model::NewProject {
+                name: "team-delete-project".into(),
+                slug: "team-delete-project".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(swage_storage::model::NewTeam {
+                project_id: project.id,
+                name: "temporary".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/teams/{}", team.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(storage.get_team(team.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

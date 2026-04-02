@@ -1020,12 +1020,13 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, Message,
-            NewApprovalRequest, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
-            Project, Session, Thread, ThreadState, ToolCallRecord, Turn, TurnState,
+            NewApprovalRequest, NewMessage, NewProject, NewSession, NewTeam, NewThread,
+            NewToolCall, NewTurn, Project, Session, Team, Thread, ThreadState,
+            ToolCallRecord, Turn, TurnState,
         },
         store::{
             ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, SessionStore,
-            SkillActivationStore, ThreadStore, ToolCallStore, TurnStore,
+            SkillActivationStore, TeamStore, ThreadStore, ToolCallStore, TurnStore,
         },
     };
 
@@ -1190,6 +1191,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct InMemoryDb {
         pub(crate) projects: HashMap<Uuid, Project>,
+        pub(crate) teams: HashMap<Uuid, Team>,
         pub(crate) sessions: HashMap<Uuid, Session>,
         pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
@@ -1296,6 +1298,88 @@ pub(crate) mod tests {
                 )),
                 _ => Ok(db.projects.remove(&id).is_some()),
             }
+        }
+    }
+
+    #[async_trait]
+    impl TeamStore for MockStorage {
+        async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError> {
+            let now = chrono::Utc::now();
+            let created = Team {
+                id: Uuid::new_v4(),
+                project_id: team.project_id,
+                name: team.name,
+                description: team.description,
+                entry_agent_id: team.entry_agent_id,
+                members: team.members,
+                created_at: now,
+                updated_at: now,
+            };
+            self.db.lock().await.teams.insert(created.id, created.clone());
+            Ok(created)
+        }
+
+        async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError> {
+            Ok(self.db.lock().await.teams.get(&id).cloned())
+        }
+
+        async fn get_team_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<Team>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .teams
+                .values()
+                .find(|team| team.project_id == project_id && team.name == name)
+                .cloned())
+        }
+
+        async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError> {
+            let mut teams: Vec<Team> = self
+                .db
+                .lock()
+                .await
+                .teams
+                .values()
+                .filter(|team| team.project_id == project_id)
+                .cloned()
+                .collect();
+            teams.sort_by_key(|team| team.created_at);
+            Ok(teams)
+        }
+
+        async fn update_team(
+            &self,
+            id: Uuid,
+            name: Option<String>,
+            description: Option<String>,
+            entry_agent_id: Option<String>,
+            members: Option<Vec<String>>,
+        ) -> Result<Team, StorageError> {
+            let mut db = self.db.lock().await;
+            match db.teams.get_mut(&id) {
+                None => Err(StorageError::NotFound { entity: "Team".into(), id: id.to_string() }),
+                Some(team) => {
+                    if let Some(name) = name {
+                        team.name = name;
+                    }
+                    if let Some(description) = description {
+                        team.description = description;
+                    }
+                    if let Some(entry_agent_id) = entry_agent_id {
+                        team.entry_agent_id = entry_agent_id;
+                    }
+                    if let Some(members) = members {
+                        team.members = members;
+                    }
+                    team.updated_at = chrono::Utc::now();
+                    Ok(team.clone())
+                }
+            }
+        }
+
+        async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self.db.lock().await.teams.remove(&id).is_some())
         }
     }
 

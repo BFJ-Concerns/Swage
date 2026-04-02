@@ -4,10 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use swage_core::GatewayError;
+use swage_core::{GatewayError, StorageError};
 use serde_json::Value as JsonValue;
 use swage_storage::{
-    model::{NewProject, NewSession, NewThread, TurnState},
+    model::{NewProject, NewSession, NewTeam, NewThread, Team, TurnState},
     store::{ProjectStore, Storage},
 };
 
@@ -569,6 +569,256 @@ fn project_to_response(p: swage_storage::model::Project) -> ProjectResponse {
         slug: p.slug,
         workspace_path: p.workspace_path,
         created_at: p.created_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Team service — request/response types and service logic
+// ---------------------------------------------------------------------------
+
+/// Request body for creating a team within a project.
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub entry_agent_id: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// Request body for partially updating a team.
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub entry_agent_id: Option<String>,
+    pub members: Option<Vec<String>>,
+}
+
+/// API response for a single team.
+#[derive(Debug, Serialize)]
+pub struct TeamResponse {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub entry_agent_id: String,
+    pub members: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// API response for the list-teams endpoint.
+#[derive(Debug, Serialize)]
+pub struct TeamListResponse {
+    pub teams: Vec<TeamResponse>,
+}
+
+/// Mediates between HTTP team handlers and storage.
+#[derive(Clone)]
+pub struct TeamService {
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) project_store: Arc<dyn ProjectStore>,
+}
+
+impl TeamService {
+    pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
+        Self { storage, project_store }
+    }
+
+    pub async fn create_team(
+        &self,
+        project_id: Uuid,
+        req: CreateTeamRequest,
+    ) -> Result<TeamResponse, GatewayError> {
+        self.ensure_project_exists(project_id).await?;
+        validate_team_name(&req.name)?;
+        validate_agent_id(&req.entry_agent_id, "entry_agent_id")?;
+
+        if self
+            .storage
+            .get_team_by_name(project_id, &req.name)
+            .await?
+            .is_some()
+        {
+            return Err(GatewayError::Storage(StorageError::ConstraintViolation(
+                format!("a team named '{}' already exists in project {project_id}", req.name),
+            )));
+        }
+
+        let members = normalise_members(req.members, &req.entry_agent_id)?;
+        let team = self
+            .storage
+            .create_team(NewTeam {
+                project_id,
+                name: req.name,
+                description: req.description,
+                entry_agent_id: req.entry_agent_id,
+                members,
+            })
+            .await?;
+
+        Ok(team_to_response(team))
+    }
+
+    pub async fn list_teams(&self, project_id: Uuid) -> Result<TeamListResponse, GatewayError> {
+        self.ensure_project_exists(project_id).await?;
+        let teams = self.storage.list_teams_by_project(project_id).await?;
+        Ok(TeamListResponse {
+            teams: teams.into_iter().map(team_to_response).collect(),
+        })
+    }
+
+    pub async fn get_team(&self, id: Uuid) -> Result<TeamResponse, GatewayError> {
+        self.storage
+            .get_team(id)
+            .await?
+            .map(team_to_response)
+            .ok_or_else(|| team_not_found(id))
+    }
+
+    pub async fn update_team(
+        &self,
+        id: Uuid,
+        req: UpdateTeamRequest,
+    ) -> Result<TeamResponse, GatewayError> {
+        let UpdateTeamRequest {
+            name,
+            description,
+            entry_agent_id,
+            members,
+        } = req;
+
+        let existing = self
+            .storage
+            .get_team(id)
+            .await?
+            .ok_or_else(|| team_not_found(id))?;
+
+        if let Some(ref name) = name {
+            validate_team_name(name)?;
+            if let Some(conflict) = self
+                .storage
+                .get_team_by_name(existing.project_id, name)
+                .await?
+            {
+                if conflict.id != id {
+                    return Err(GatewayError::Storage(StorageError::ConstraintViolation(
+                        format!("a team named '{}' already exists in project {}", name, existing.project_id),
+                    )));
+                }
+            }
+        }
+
+        if let Some(ref entry_agent_id) = entry_agent_id {
+            validate_agent_id(entry_agent_id, "entry_agent_id")?;
+        }
+
+        let resolved_entry_agent_id = entry_agent_id
+            .clone()
+            .unwrap_or_else(|| existing.entry_agent_id.clone());
+        let members = match members {
+            Some(members) => Some(normalise_members(members, &resolved_entry_agent_id)?),
+            None if resolved_entry_agent_id != existing.entry_agent_id
+                && !existing.members.iter().any(|member| member == &resolved_entry_agent_id) =>
+            {
+                Some(normalise_members(existing.members.clone(), &resolved_entry_agent_id)?)
+            }
+            None => None,
+        };
+
+        let team = self
+            .storage
+            .update_team(
+                id,
+                name,
+                description,
+                entry_agent_id,
+                members,
+            )
+            .await?;
+
+        Ok(team_to_response(team))
+    }
+
+    pub async fn delete_team(&self, id: Uuid) -> Result<(), GatewayError> {
+        if !self.storage.delete_team(id).await? {
+            return Err(team_not_found(id));
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_project_exists(&self, project_id: Uuid) -> Result<(), GatewayError> {
+        self.project_store
+            .get(project_id)
+            .await?
+            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+        Ok(())
+    }
+}
+
+fn validate_team_name(name: &str) -> Result<(), GatewayError> {
+    if name.trim().is_empty() {
+        return Err(GatewayError::ValidationError("name must not be empty".into()));
+    }
+    Ok(())
+}
+
+fn validate_agent_id(agent_id: &str, field_name: &str) -> Result<(), GatewayError> {
+    if agent_id.trim().is_empty() {
+        return Err(GatewayError::ValidationError(format!("{field_name} must not be empty")));
+    }
+    Ok(())
+}
+
+fn normalise_members(
+    members: Vec<String>,
+    entry_agent_id: &str,
+) -> Result<Vec<String>, GatewayError> {
+    let mut normalised = Vec::new();
+
+    let entry_agent_id = entry_agent_id.trim();
+    if entry_agent_id.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "entry_agent_id must not be empty".into(),
+        ));
+    }
+
+    normalised.push(entry_agent_id.to_string());
+    for member in members {
+        let member = member.trim();
+        if member.is_empty() {
+            return Err(GatewayError::ValidationError(
+                "members must not contain empty agent IDs".into(),
+            ));
+        }
+        if !normalised.iter().any(|existing| existing == member) {
+            normalised.push(member.to_string());
+        }
+    }
+
+    Ok(normalised)
+}
+
+fn team_not_found(id: Uuid) -> GatewayError {
+    GatewayError::Storage(StorageError::NotFound {
+        entity: "team".into(),
+        id: id.to_string(),
+    })
+}
+
+fn team_to_response(team: Team) -> TeamResponse {
+    TeamResponse {
+        id: team.id,
+        project_id: team.project_id,
+        name: team.name,
+        description: team.description,
+        entry_agent_id: team.entry_agent_id,
+        members: team.members,
+        created_at: team.created_at,
+        updated_at: team.updated_at,
     }
 }
 

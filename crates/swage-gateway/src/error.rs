@@ -64,6 +64,12 @@ fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
         GatewayError::ProjectConflict(_) => (StatusCode::CONFLICT, "conflict"),
         GatewayError::ValidationError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
         GatewayError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
+        GatewayError::Storage(swage_core::StorageError::NotFound { .. }) => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
+        GatewayError::Storage(swage_core::StorageError::ConstraintViolation(_)) => {
+            (StatusCode::CONFLICT, "conflict")
+        }
         // All other variants are unexpected internal failures.
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }

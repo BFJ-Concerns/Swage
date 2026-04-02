@@ -5,8 +5,8 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, Message, NewAgentMessage,
-    NewApprovalRequest, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn,
-    Project, Session, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    NewApprovalRequest, NewMessage, NewProject, NewSession, NewTeam, NewThread, NewToolCall,
+    NewTurn, Project, Session, Team, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,26 @@ pub trait SessionStore: Send + Sync {
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+}
+
+#[async_trait]
+pub trait TeamStore: Send + Sync {
+    async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError>;
+    async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
+    async fn get_team_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<Team>, StorageError>;
+    /// List teams in a project ordered by created_at ascending.
+    async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError>;
+    /// Partially update a team. Only `Some` fields are changed.
+    async fn update_team(
+        &self,
+        id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        entry_agent_id: Option<String>,
+        members: Option<Vec<String>>,
+    ) -> Result<Team, StorageError>;
+    /// Delete a team. Returns true if it existed and was removed.
+    async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -368,7 +388,8 @@ pub trait AgentMessageStore: Send + Sync {
 /// `ProjectStore` is not included — it is independently available and consumers
 /// that need project operations import it separately.
 pub trait Storage:
-    SessionStore
+    TeamStore
+    + SessionStore
     + ThreadStore
     + TurnStore
     + MessageStore
@@ -384,7 +405,8 @@ pub trait Storage:
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: SessionStore
+    T: TeamStore
+        + SessionStore
         + ThreadStore
         + TurnStore
         + MessageStore
@@ -460,6 +482,35 @@ mod tests {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TeamStore for StubStorage {
+        async fn create_team(&self, _: NewTeam) -> Result<Team, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team(&self, _: Uuid) -> Result<Option<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_teams_by_project(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_team(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<Vec<String>>,
+        ) -> Result<Team, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

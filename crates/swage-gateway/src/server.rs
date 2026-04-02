@@ -92,6 +92,16 @@ pub fn build_router(state: AppState) -> Router {
                 .put(handlers::update_project)
                 .delete(handlers::delete_project),
         )
+        .route(
+            "/api/projects/:project_id/teams",
+            get(handlers::list_teams).post(handlers::create_team),
+        )
+        .route(
+            "/api/teams/:id",
+            get(handlers::get_team)
+                .put(handlers::update_team)
+                .delete(handlers::delete_team),
+        )
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
