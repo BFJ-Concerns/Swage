@@ -7,6 +7,7 @@ pub mod project;
 pub mod session;
 pub mod skill_activation;
 pub mod team;
+pub mod topology;
 pub mod thread;
 pub mod tool_call;
 pub mod turn;

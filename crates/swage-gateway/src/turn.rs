@@ -1020,13 +1020,16 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, Message,
-            NewApprovalRequest, NewMessage, NewProject, NewSession, NewTeam, NewThread,
-            NewToolCall, NewTurn, Project, Session, Team, Thread, ThreadState,
-            ToolCallRecord, Turn, TurnState,
+            EdgeEvaluation, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+            NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
+            NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
+            NodeRetry, Project, Session, Team, Thread, ThreadState, ToolCallRecord,
+            TopologyRun, TopologyRunState, Turn, TurnState,
         },
         store::{
             ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, SessionStore,
-            SkillActivationStore, TeamStore, ThreadStore, ToolCallStore, TurnStore,
+            SkillActivationStore, TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore,
+            TurnStore,
         },
     };
 
@@ -1192,6 +1195,10 @@ pub(crate) mod tests {
     pub(crate) struct InMemoryDb {
         pub(crate) projects: HashMap<Uuid, Project>,
         pub(crate) teams: HashMap<Uuid, Team>,
+        pub(crate) topology_runs: HashMap<Uuid, TopologyRun>,
+        pub(crate) node_executions: HashMap<Uuid, NodeExecution>,
+        pub(crate) edge_evaluations: Vec<EdgeEvaluation>,
+        pub(crate) node_retries: Vec<NodeRetry>,
         pub(crate) sessions: HashMap<Uuid, Session>,
         pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
@@ -1380,6 +1387,226 @@ pub(crate) mod tests {
 
         async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError> {
             Ok(self.db.lock().await.teams.remove(&id).is_some())
+        }
+    }
+
+    #[async_trait]
+    impl TopologyTraceStore for MockStorage {
+        async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError> {
+            let now = chrono::Utc::now();
+            let created = TopologyRun {
+                id: Uuid::new_v4(),
+                team_id: run.team_id,
+                session_id: run.session_id,
+                source_turn_id: run.source_turn_id,
+                state: run.state.clone(),
+                final_output: run.final_output,
+                error_message: run.error_message,
+                created_at: now,
+                completed_at: if matches!(
+                    run.state,
+                    TopologyRunState::Completed | TopologyRunState::Failed | TopologyRunState::Interrupted
+                ) {
+                    Some(now)
+                } else {
+                    None
+                },
+            };
+            self.db.lock().await.topology_runs.insert(created.id, created.clone());
+            Ok(created)
+        }
+
+        async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError> {
+            Ok(self.db.lock().await.topology_runs.get(&id).cloned())
+        }
+
+        async fn list_topology_runs_by_team(&self, team_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+            let mut runs: Vec<TopologyRun> = self
+                .db
+                .lock()
+                .await
+                .topology_runs
+                .values()
+                .filter(|run| run.team_id == team_id)
+                .cloned()
+                .collect();
+            runs.sort_by_key(|run| run.created_at);
+            Ok(runs)
+        }
+
+        async fn list_topology_runs_by_session(&self, session_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+            let mut runs: Vec<TopologyRun> = self
+                .db
+                .lock()
+                .await
+                .topology_runs
+                .values()
+                .filter(|run| run.session_id == session_id)
+                .cloned()
+                .collect();
+            runs.sort_by_key(|run| run.created_at);
+            Ok(runs)
+        }
+
+        async fn update_topology_run(
+            &self,
+            id: Uuid,
+            state: TopologyRunState,
+            final_output: Option<&serde_json::Value>,
+            error_message: Option<&str>,
+        ) -> Result<(), StorageError> {
+            let mut db = self.db.lock().await;
+            let run = db.topology_runs.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "TopologyRun".into(),
+                id: id.to_string(),
+            })?;
+            run.state = state.clone();
+            if let Some(final_output) = final_output {
+                run.final_output = Some(final_output.clone());
+            }
+            if let Some(error_message) = error_message {
+                run.error_message = Some(error_message.to_string());
+            }
+            if matches!(
+                state,
+                TopologyRunState::Completed | TopologyRunState::Failed | TopologyRunState::Interrupted
+            ) {
+                run.completed_at = Some(chrono::Utc::now());
+            }
+            Ok(())
+        }
+
+        async fn create_node_execution(
+            &self,
+            execution: NewNodeExecution,
+        ) -> Result<NodeExecution, StorageError> {
+            let now = chrono::Utc::now();
+            let created = NodeExecution {
+                id: Uuid::new_v4(),
+                topology_run_id: execution.topology_run_id,
+                node_id: execution.node_id,
+                node_kind: execution.node_kind,
+                agent_id: execution.agent_id,
+                task_name: execution.task_name,
+                state: execution.state.clone(),
+                input_json: execution.input_json,
+                output_json: execution.output_json,
+                error_message: execution.error_message,
+                created_at: now,
+                completed_at: if matches!(
+                    execution.state,
+                    NodeExecutionState::Completed | NodeExecutionState::Failed | NodeExecutionState::Skipped
+                ) {
+                    Some(now)
+                } else {
+                    None
+                },
+            };
+            self.db.lock().await.node_executions.insert(created.id, created.clone());
+            Ok(created)
+        }
+
+        async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError> {
+            Ok(self.db.lock().await.node_executions.get(&id).cloned())
+        }
+
+        async fn list_node_executions_by_run(&self, topology_run_id: Uuid) -> Result<Vec<NodeExecution>, StorageError> {
+            let mut executions: Vec<NodeExecution> = self
+                .db
+                .lock()
+                .await
+                .node_executions
+                .values()
+                .filter(|execution| execution.topology_run_id == topology_run_id)
+                .cloned()
+                .collect();
+            executions.sort_by_key(|execution| execution.created_at);
+            Ok(executions)
+        }
+
+        async fn update_node_execution(
+            &self,
+            id: Uuid,
+            state: NodeExecutionState,
+            output_json: Option<&serde_json::Value>,
+            error_message: Option<&str>,
+        ) -> Result<(), StorageError> {
+            let mut db = self.db.lock().await;
+            let execution = db.node_executions.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "NodeExecution".into(),
+                id: id.to_string(),
+            })?;
+            execution.state = state.clone();
+            if let Some(output_json) = output_json {
+                execution.output_json = Some(output_json.clone());
+            }
+            if let Some(error_message) = error_message {
+                execution.error_message = Some(error_message.to_string());
+            }
+            if matches!(
+                state,
+                NodeExecutionState::Completed | NodeExecutionState::Failed | NodeExecutionState::Skipped
+            ) {
+                execution.completed_at = Some(chrono::Utc::now());
+            }
+            Ok(())
+        }
+
+        async fn create_edge_evaluation(
+            &self,
+            evaluation: NewEdgeEvaluation,
+        ) -> Result<EdgeEvaluation, StorageError> {
+            let created = EdgeEvaluation {
+                id: Uuid::new_v4(),
+                topology_run_id: evaluation.topology_run_id,
+                source_node_execution_id: evaluation.source_node_execution_id,
+                edge_id: evaluation.edge_id,
+                target_node_id: evaluation.target_node_id,
+                condition_expression: evaluation.condition_expression,
+                matched: evaluation.matched,
+                payload_json: evaluation.payload_json,
+                created_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.edge_evaluations.push(created.clone());
+            Ok(created)
+        }
+
+        async fn list_edge_evaluations_by_run(&self, topology_run_id: Uuid) -> Result<Vec<EdgeEvaluation>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .edge_evaluations
+                .iter()
+                .filter(|evaluation| evaluation.topology_run_id == topology_run_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError> {
+            let created = NodeRetry {
+                id: Uuid::new_v4(),
+                node_execution_id: retry.node_execution_id,
+                attempt_number: retry.attempt_number,
+                failure_kind: retry.failure_kind,
+                error_message: retry.error_message,
+                recovery_guidance: retry.recovery_guidance,
+                created_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.node_retries.push(created.clone());
+            Ok(created)
+        }
+
+        async fn list_node_retries(&self, node_execution_id: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .node_retries
+                .iter()
+                .filter(|retry| retry.node_execution_id == node_execution_id)
+                .cloned()
+                .collect())
         }
     }
 

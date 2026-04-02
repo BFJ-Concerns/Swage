@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use swage_core::StorageError;
 
 /// Track which migrations have been applied.
@@ -19,11 +19,15 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("002_context_snapshots", CREATE_CONTEXT_SNAPSHOTS),
         ("003_turn_cost", ADD_TURN_COST_COLUMN),
         ("004_active_skills", CREATE_ACTIVE_SKILLS),
-        ("005_turn_structured_output", ADD_TURN_STRUCTURED_OUTPUT_COLUMN),
+        (
+            "005_turn_structured_output",
+            ADD_TURN_STRUCTURED_OUTPUT_COLUMN,
+        ),
         ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
         ("007_agent_messages", CREATE_AGENT_MESSAGES),
         ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
         ("009_teams", CREATE_TEAMS),
+        ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
     ]
 }
 
@@ -254,6 +258,70 @@ const CREATE_TEAMS: &str = "
     CREATE INDEX IF NOT EXISTS idx_teams_project_id ON teams(project_id);
 ";
 
+/// Topology runs and execution traces for multi-agent team orchestration.
+const CREATE_TOPOLOGY_TRACE: &str = "
+    CREATE TABLE IF NOT EXISTS topology_runs (
+        id               TEXT NOT NULL PRIMARY KEY,
+        team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        source_turn_id   TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        state            TEXT NOT NULL DEFAULT 'pending',
+        final_output_json TEXT,
+        error_message    TEXT,
+        created_at       TEXT NOT NULL,
+        completed_at     TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_topology_runs_team_id ON topology_runs(team_id);
+    CREATE INDEX IF NOT EXISTS idx_topology_runs_session_id ON topology_runs(session_id);
+    CREATE INDEX IF NOT EXISTS idx_topology_runs_source_turn_id ON topology_runs(source_turn_id);
+
+    CREATE TABLE IF NOT EXISTS node_executions (
+        id               TEXT NOT NULL PRIMARY KEY,
+        topology_run_id  TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
+        node_id          TEXT NOT NULL,
+        node_kind        TEXT NOT NULL,
+        agent_id         TEXT,
+        task_name        TEXT,
+        state            TEXT NOT NULL DEFAULT 'pending',
+        input_json       TEXT,
+        output_json      TEXT,
+        error_message    TEXT,
+        created_at       TEXT NOT NULL,
+        completed_at     TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_node_executions_run_id ON node_executions(topology_run_id);
+    CREATE INDEX IF NOT EXISTS idx_node_executions_run_node_id ON node_executions(topology_run_id, node_id);
+
+    CREATE TABLE IF NOT EXISTS edge_evaluations (
+        id                       TEXT NOT NULL PRIMARY KEY,
+        topology_run_id          TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
+        source_node_execution_id TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
+        edge_id                  TEXT NOT NULL,
+        target_node_id           TEXT NOT NULL,
+        condition_expression     TEXT,
+        matched                  INTEGER NOT NULL,
+        payload_json             TEXT,
+        created_at               TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_run_id ON edge_evaluations(topology_run_id);
+    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_source_execution_id ON edge_evaluations(source_node_execution_id);
+
+    CREATE TABLE IF NOT EXISTS node_retries (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        node_execution_id  TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
+        attempt_number     INTEGER NOT NULL,
+        failure_kind       TEXT NOT NULL,
+        error_message      TEXT NOT NULL,
+        recovery_guidance  TEXT,
+        created_at         TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_node_retries_execution_id ON node_retries(node_execution_id);
+";
+
 /// Apply all pending migrations to `conn`.
 ///
 /// Migrations are tracked by name in `_swage_migrations`. Already-applied
@@ -362,8 +430,10 @@ mod tests {
     }
 
     fn default_project_id(conn: &Connection) -> String {
-        conn.query_row("SELECT id FROM projects WHERE name='default'", [], |r| r.get(0))
-            .expect("default project")
+        conn.query_row("SELECT id FROM projects WHERE name='default'", [], |r| {
+            r.get(0)
+        })
+        .expect("default project")
     }
 
     // ---------------------------------------------------------------------------
@@ -399,8 +469,8 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let _turn_id   = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let _turn_id = insert_turn(&conn, &thread_id, &now);
 
         // Re-run migrations (idempotent).
         super::run_migrations(&conn).expect("re-run should succeed");
@@ -471,8 +541,8 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let turn_id    = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
 
         // Insert without parent_call_id — should default to NULL.
         let call_id = uuid::Uuid::new_v4().to_string();
@@ -491,7 +561,10 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("select parent_call_id");
-        assert!(parent.is_none(), "parent_call_id should be NULL for native calls");
+        assert!(
+            parent.is_none(),
+            "parent_call_id should be NULL for native calls"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -541,7 +614,10 @@ mod tests {
              VALUES (?1, 'beta', 'alpha', NULL, ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         );
-        assert!(result.is_err(), "duplicate slug should violate the unique index");
+        assert!(
+            result.is_err(),
+            "duplicate slug should violate the unique index"
+        );
     }
 
     #[test]
@@ -555,7 +631,10 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("pragma_table_info query after idempotent re-run");
-        assert_eq!(count, 1, "slug column should still exist after idempotent re-run");
+        assert_eq!(
+            count, 1,
+            "slug column should still exist after idempotent re-run"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -678,7 +757,7 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without specifying state — should default to 'pending'.
         let turn_id = uuid::Uuid::new_v4().to_string();
@@ -791,13 +870,19 @@ mod tests {
         let session_id = insert_session(&conn, &project_id, &now);
         let _thread_id = insert_thread(&conn, &session_id, &now);
 
-        conn.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![session_id])
-            .expect("delete session");
+        conn.execute(
+            "DELETE FROM sessions WHERE id=?1",
+            rusqlite::params![session_id],
+        )
+        .expect("delete session");
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))
             .expect("count after cascade");
-        assert_eq!(remaining, 0, "threads should cascade-delete when session is deleted");
+        assert_eq!(
+            remaining, 0,
+            "threads should cascade-delete when session is deleted"
+        );
     }
 
     #[test]
@@ -806,16 +891,22 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let _turn_id   = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let _turn_id = insert_turn(&conn, &thread_id, &now);
 
-        conn.execute("DELETE FROM threads WHERE id=?1", rusqlite::params![thread_id])
-            .expect("delete thread");
+        conn.execute(
+            "DELETE FROM threads WHERE id=?1",
+            rusqlite::params![thread_id],
+        )
+        .expect("delete thread");
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
             .expect("count after cascade");
-        assert_eq!(remaining, 0, "turns should cascade-delete when thread is deleted");
+        assert_eq!(
+            remaining, 0,
+            "turns should cascade-delete when thread is deleted"
+        );
     }
 
     #[test]
@@ -824,7 +915,7 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
             "INSERT INTO messages (id, thread_id, role, content, position, agent_id, created_at)
@@ -833,13 +924,19 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM threads WHERE id=?1", rusqlite::params![thread_id])
-            .expect("delete thread");
+        conn.execute(
+            "DELETE FROM threads WHERE id=?1",
+            rusqlite::params![thread_id],
+        )
+        .expect("delete thread");
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .expect("count after cascade");
-        assert_eq!(remaining, 0, "messages should cascade-delete when thread is deleted");
+        assert_eq!(
+            remaining, 0,
+            "messages should cascade-delete when thread is deleted"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -861,8 +958,8 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let turn_id    = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
 
         // Insert a snapshot for the turn.
         conn.execute(
@@ -879,7 +976,10 @@ mod tests {
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM context_snapshots", [], |r| r.get(0))
             .expect("count after cascade");
-        assert_eq!(remaining, 0, "context_snapshots should be deleted via turn cascade");
+        assert_eq!(
+            remaining, 0,
+            "context_snapshots should be deleted via turn cascade"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -896,7 +996,10 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("pragma_table_info query");
-        assert_eq!(col_count, 1, "turns.cost_microcents column should exist after migration");
+        assert_eq!(
+            col_count, 1,
+            "turns.cost_microcents column should exist after migration"
+        );
     }
 
     #[test]
@@ -905,7 +1008,7 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without cost — should default to NULL.
         let turn_id = uuid::Uuid::new_v4().to_string();
@@ -946,8 +1049,8 @@ mod tests {
         let project_id = default_project_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let turn_id    = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
 
         // Insert a minimal approval request referencing the turn.
         conn.execute(
@@ -965,7 +1068,10 @@ mod tests {
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM approval_requests", [], |r| r.get(0))
             .expect("count after cascade");
-        assert_eq!(remaining, 0, "approval_requests should cascade-delete with the turn");
+        assert_eq!(
+            remaining, 0,
+            "approval_requests should cascade-delete with the turn"
+        );
     }
 
     #[test]
@@ -994,8 +1100,8 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         let session_id = insert_session(&conn, &project_id, &now);
-        let thread_id  = insert_thread(&conn, &session_id, &now);
-        let turn_id    = insert_turn(&conn, &thread_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
 
         // Insert a tool call referencing the turn.
         let call_id = uuid::Uuid::new_v4().to_string();
@@ -1015,5 +1121,107 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
             .expect("count after cascade");
         assert_eq!(remaining, 0, "tool_calls should be deleted via cascade");
+    }
+
+    #[test]
+    fn topology_runs_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM topology_runs", [], |r| r.get(0))
+            .expect("topology_runs table should exist after migration");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn node_executions_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
+            .expect("node_executions table should exist after migration");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn edge_evaluations_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
+            .expect("edge_evaluations table should exist after migration");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn node_retries_table_created() {
+        let conn = open_migrated();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
+            .expect("node_retries table should exist after migration");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn topology_run_cascade_delete_removes_trace_rows() {
+        let conn = open_migrated();
+        let project_id = default_project_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &project_id, &now);
+        let team_id = uuid::Uuid::new_v4().to_string();
+
+        conn.execute(
+            "INSERT INTO teams (id, project_id, name, description, entry_agent_id, members, created_at, updated_at)
+             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
+            rusqlite::params![team_id, project_id, now],
+        )
+        .expect("insert team");
+
+        let run_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
+             VALUES (?1, ?2, ?3, 'running', ?4)",
+            rusqlite::params![run_id, team_id, session_id, now],
+        )
+        .expect("insert topology run");
+
+        let execution_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
+             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
+            rusqlite::params![execution_id, run_id, now],
+        )
+        .expect("insert node execution");
+
+        conn.execute(
+            "INSERT INTO edge_evaluations (id, topology_run_id, source_node_execution_id, edge_id, target_node_id, matched, created_at)
+             VALUES (?1, ?2, ?3, 'edge-1', 'review', 1, ?4)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, execution_id, now],
+        )
+        .expect("insert edge evaluation");
+
+        conn.execute(
+            "INSERT INTO node_retries (id, node_execution_id, attempt_number, failure_kind, error_message, created_at)
+             VALUES (?1, ?2, 1, 'timeout', 'timed out', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), execution_id, now],
+        )
+        .expect("insert node retry");
+
+        conn.execute(
+            "DELETE FROM topology_runs WHERE id = ?1",
+            rusqlite::params![run_id],
+        )
+        .expect("delete topology run");
+
+        let remaining_nodes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
+            .expect("count node executions");
+        let remaining_edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
+            .expect("count edge evaluations");
+        let remaining_retries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
+            .expect("count node retries");
+
+        assert_eq!(remaining_nodes, 0);
+        assert_eq!(remaining_edges, 0);
+        assert_eq!(remaining_retries, 0);
     }
 }

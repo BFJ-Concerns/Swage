@@ -531,6 +531,192 @@ pub struct NewTeam {
     pub members: Vec<String>,
 }
 
+/// Topology run lifecycle state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyRunState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl std::fmt::Display for TopologyRunState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TopologyRunState::Pending => "pending",
+            TopologyRunState::Running => "running",
+            TopologyRunState::Completed => "completed",
+            TopologyRunState::Failed => "failed",
+            TopologyRunState::Interrupted => "interrupted",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for TopologyRunState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(TopologyRunState::Pending),
+            "running" => Ok(TopologyRunState::Running),
+            "completed" => Ok(TopologyRunState::Completed),
+            "failed" => Ok(TopologyRunState::Failed),
+            "interrupted" => Ok(TopologyRunState::Interrupted),
+            other => Err(format!("unknown topology run state: {other}")),
+        }
+    }
+}
+
+/// A persisted topology run for a team conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyRun {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub session_id: Uuid,
+    /// The user- or delegate-triggered turn that started this topology run.
+    pub source_turn_id: Option<Uuid>,
+    pub state: TopologyRunState,
+    /// Final structured output for the topology, if one was produced.
+    pub final_output: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a topology run.
+#[derive(Debug, Clone)]
+pub struct NewTopologyRun {
+    pub team_id: Uuid,
+    pub session_id: Uuid,
+    pub source_turn_id: Option<Uuid>,
+    pub state: TopologyRunState,
+    pub final_output: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Node execution lifecycle state within a topology run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeExecutionState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+impl std::fmt::Display for NodeExecutionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            NodeExecutionState::Pending => "pending",
+            NodeExecutionState::Running => "running",
+            NodeExecutionState::Completed => "completed",
+            NodeExecutionState::Failed => "failed",
+            NodeExecutionState::Skipped => "skipped",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for NodeExecutionState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(NodeExecutionState::Pending),
+            "running" => Ok(NodeExecutionState::Running),
+            "completed" => Ok(NodeExecutionState::Completed),
+            "failed" => Ok(NodeExecutionState::Failed),
+            "skipped" => Ok(NodeExecutionState::Skipped),
+            other => Err(format!("unknown node execution state: {other}")),
+        }
+    }
+}
+
+/// A single node execution within a topology run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeExecution {
+    pub id: Uuid,
+    pub topology_run_id: Uuid,
+    /// Stable identifier from the topology definition.
+    pub node_id: String,
+    /// Semantic node kind such as `llm`, `deterministic`, or `continuation`.
+    pub node_kind: String,
+    pub agent_id: Option<String>,
+    pub task_name: Option<String>,
+    pub state: NodeExecutionState,
+    pub input_json: Option<serde_json::Value>,
+    pub output_json: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a node execution record.
+#[derive(Debug, Clone)]
+pub struct NewNodeExecution {
+    pub topology_run_id: Uuid,
+    pub node_id: String,
+    pub node_kind: String,
+    pub agent_id: Option<String>,
+    pub task_name: Option<String>,
+    pub state: NodeExecutionState,
+    pub input_json: Option<serde_json::Value>,
+    pub output_json: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Edge-condition evaluation emitted during topology traversal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeEvaluation {
+    pub id: Uuid,
+    pub topology_run_id: Uuid,
+    pub source_node_execution_id: Uuid,
+    pub edge_id: String,
+    pub target_node_id: String,
+    pub condition_expression: Option<String>,
+    pub matched: bool,
+    pub payload_json: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for creating an edge evaluation record.
+#[derive(Debug, Clone)]
+pub struct NewEdgeEvaluation {
+    pub topology_run_id: Uuid,
+    pub source_node_execution_id: Uuid,
+    pub edge_id: String,
+    pub target_node_id: String,
+    pub condition_expression: Option<String>,
+    pub matched: bool,
+    pub payload_json: Option<serde_json::Value>,
+}
+
+/// Retry history for a node execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRetry {
+    pub id: Uuid,
+    pub node_execution_id: Uuid,
+    pub attempt_number: i32,
+    pub failure_kind: String,
+    pub error_message: String,
+    pub recovery_guidance: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for recording a node retry attempt.
+#[derive(Debug, Clone)]
+pub struct NewNodeRetry {
+    pub node_execution_id: Uuid,
+    pub attempt_number: i32,
+    pub failure_kind: String,
+    pub error_message: String,
+    pub recovery_guidance: Option<String>,
+}
+
 /// Input for creating a new project.
 #[derive(Debug, Clone)]
 pub struct NewProject {
@@ -754,7 +940,10 @@ mod tests {
             updated_at: now,
         };
         let json = serde_json::to_string(&project).expect("serialisation should succeed");
-        assert!(json.contains("\"slug\":\"my-project\""), "slug should appear in JSON");
+        assert!(
+            json.contains("\"slug\":\"my-project\""),
+            "slug should appear in JSON"
+        );
     }
 
     #[test]
@@ -765,6 +954,118 @@ mod tests {
             workspace_path: None,
         };
         assert_eq!(np.slug, "test");
+    }
+
+    // --- Topology trace models ---
+
+    #[test]
+    fn topology_run_state_display_from_str_round_trip() {
+        let states = [
+            TopologyRunState::Pending,
+            TopologyRunState::Running,
+            TopologyRunState::Completed,
+            TopologyRunState::Failed,
+            TopologyRunState::Interrupted,
+        ];
+
+        for state in states {
+            let text = state.to_string();
+            let parsed = TopologyRunState::from_str(&text).expect("state should parse");
+            assert_eq!(parsed, state);
+        }
+    }
+
+    #[test]
+    fn node_execution_state_display_from_str_round_trip() {
+        let states = [
+            NodeExecutionState::Pending,
+            NodeExecutionState::Running,
+            NodeExecutionState::Completed,
+            NodeExecutionState::Failed,
+            NodeExecutionState::Skipped,
+        ];
+
+        for state in states {
+            let text = state.to_string();
+            let parsed = NodeExecutionState::from_str(&text).expect("state should parse");
+            assert_eq!(parsed, state);
+        }
+    }
+
+    #[test]
+    fn topology_run_serialises_final_output() {
+        let run = TopologyRun {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            source_turn_id: Some(Uuid::new_v4()),
+            state: TopologyRunState::Completed,
+            final_output: Some(serde_json::json!({"result": "done"})),
+            error_message: None,
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        let json = serde_json::to_string(&run).expect("serialisation should succeed");
+        let back: TopologyRun =
+            serde_json::from_str(&json).expect("deserialisation should succeed");
+        assert_eq!(back.state, TopologyRunState::Completed);
+        assert_eq!(
+            back.final_output,
+            Some(serde_json::json!({"result": "done"}))
+        );
+    }
+
+    #[test]
+    fn node_execution_edge_evaluation_and_retry_serialise() {
+        let execution = NodeExecution {
+            id: Uuid::new_v4(),
+            topology_run_id: Uuid::new_v4(),
+            node_id: "plan".into(),
+            node_kind: "llm".into(),
+            agent_id: Some("planner".into()),
+            task_name: Some("draft-plan".into()),
+            state: NodeExecutionState::Completed,
+            input_json: Some(serde_json::json!({"prompt": "hello"})),
+            output_json: Some(serde_json::json!({"decision": "continue"})),
+            error_message: None,
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+        let edge = EdgeEvaluation {
+            id: Uuid::new_v4(),
+            topology_run_id: execution.topology_run_id,
+            source_node_execution_id: execution.id,
+            edge_id: "plan->review".into(),
+            target_node_id: "review".into(),
+            condition_expression: Some("decision == 'continue'".into()),
+            matched: true,
+            payload_json: Some(serde_json::json!({"branch": "continue"})),
+            created_at: Utc::now(),
+        };
+        let retry = NodeRetry {
+            id: Uuid::new_v4(),
+            node_execution_id: execution.id,
+            attempt_number: 2,
+            failure_kind: "schema_validation".into(),
+            error_message: "missing field".into(),
+            recovery_guidance: Some("return valid JSON".into()),
+            created_at: Utc::now(),
+        };
+
+        let execution_json = serde_json::to_string(&execution).expect("execution serialises");
+        let edge_json = serde_json::to_string(&edge).expect("edge serialises");
+        let retry_json = serde_json::to_string(&retry).expect("retry serialises");
+
+        let execution_back: NodeExecution =
+            serde_json::from_str(&execution_json).expect("execution deserialises");
+        let edge_back: EdgeEvaluation =
+            serde_json::from_str(&edge_json).expect("edge deserialises");
+        let retry_back: NodeRetry = serde_json::from_str(&retry_json).expect("retry deserialises");
+
+        assert_eq!(execution_back.node_id, "plan");
+        assert!(edge_back.matched);
+        assert_eq!(retry_back.attempt_number, 2);
     }
 
     // --- ApprovalState round-trips ---
@@ -1219,7 +1520,10 @@ mod tests {
             completed_at: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
-        assert!(json.contains("cost_microcents"), "cost_microcents field should appear in JSON");
+        assert!(
+            json.contains("cost_microcents"),
+            "cost_microcents field should appear in JSON"
+        );
         let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
         assert_eq!(back.cost_microcents, Some(999));
     }
@@ -1246,7 +1550,10 @@ mod tests {
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
-        assert!(json.contains("structured_output"), "structured_output should appear in JSON");
+        assert!(
+            json.contains("structured_output"),
+            "structured_output should appear in JSON"
+        );
         let back: Turn = serde_json::from_str(&json).expect("deserialisation should succeed");
         assert_eq!(back.structured_output, Some(schema_result));
     }

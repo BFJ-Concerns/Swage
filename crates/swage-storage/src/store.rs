@@ -4,9 +4,11 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, Message, NewAgentMessage,
-    NewApprovalRequest, NewMessage, NewProject, NewSession, NewTeam, NewThread, NewToolCall,
-    NewTurn, Project, Session, Team, Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, EdgeEvaluation, Message,
+    NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+    NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team, Thread,
+    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,53 @@ pub trait TeamStore: Send + Sync {
     ) -> Result<Team, StorageError>;
     /// Delete a team. Returns true if it existed and was removed.
     async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait TopologyTraceStore: Send + Sync {
+    async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError>;
+    async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError>;
+    async fn list_topology_runs_by_team(&self, team_id: Uuid) -> Result<Vec<TopologyRun>, StorageError>;
+    async fn list_topology_runs_by_session(&self, session_id: Uuid) -> Result<Vec<TopologyRun>, StorageError>;
+    async fn update_topology_run(
+        &self,
+        id: Uuid,
+        state: TopologyRunState,
+        final_output: Option<&serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    async fn create_node_execution(
+        &self,
+        execution: NewNodeExecution,
+    ) -> Result<NodeExecution, StorageError>;
+    async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError>;
+    async fn list_node_executions_by_run(
+        &self,
+        topology_run_id: Uuid,
+    ) -> Result<Vec<NodeExecution>, StorageError>;
+    async fn update_node_execution(
+        &self,
+        id: Uuid,
+        state: NodeExecutionState,
+        output_json: Option<&serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    async fn create_edge_evaluation(
+        &self,
+        evaluation: NewEdgeEvaluation,
+    ) -> Result<EdgeEvaluation, StorageError>;
+    async fn list_edge_evaluations_by_run(
+        &self,
+        topology_run_id: Uuid,
+    ) -> Result<Vec<EdgeEvaluation>, StorageError>;
+
+    async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError>;
+    async fn list_node_retries(
+        &self,
+        node_execution_id: Uuid,
+    ) -> Result<Vec<NodeRetry>, StorageError>;
 }
 
 #[async_trait]
@@ -398,6 +447,7 @@ pub trait Storage:
     + SkillActivationStore
     + ApprovalStore
     + AgentMessageStore
+    + TopologyTraceStore
     + Send
     + Sync
 {
@@ -415,6 +465,7 @@ impl<T> Storage for T where
         + SkillActivationStore
         + ApprovalStore
         + AgentMessageStore
+        + TopologyTraceStore
         + Send
         + Sync
 {
@@ -511,6 +562,73 @@ mod tests {
             unimplemented!()
         }
         async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TopologyTraceStore for StubStorage {
+        async fn create_topology_run(&self, _: NewTopologyRun) -> Result<TopologyRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_topology_run(&self, _: Uuid) -> Result<Option<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_team(&self, _: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_session(&self, _: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_topology_run(
+            &self,
+            _: Uuid,
+            _: TopologyRunState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_execution(
+            &self,
+            _: NewNodeExecution,
+        ) -> Result<NodeExecution, StorageError> {
+            unimplemented!()
+        }
+        async fn get_node_execution(&self, _: Uuid) -> Result<Option<NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_executions_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_node_execution(
+            &self,
+            _: Uuid,
+            _: NodeExecutionState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_edge_evaluation(
+            &self,
+            _: NewEdgeEvaluation,
+        ) -> Result<EdgeEvaluation, StorageError> {
+            unimplemented!()
+        }
+        async fn list_edge_evaluations_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<EdgeEvaluation>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_retry(&self, _: NewNodeRetry) -> Result<NodeRetry, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_retries(&self, _: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
             unimplemented!()
         }
     }
@@ -858,6 +976,32 @@ mod tests {
     fn storage_supertrait_includes_skill_activation_store() {
         fn _assert<T: Storage>(t: &T) {
             let _ = t.activate_skill(Uuid::new_v4(), "forge");
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: TopologyTraceStore has the expected methods.
+    #[test]
+    fn topology_trace_store_compile_check() {
+        fn _assert<T: TopologyTraceStore>(t: &T) {
+            let _ = t.get_topology_run(Uuid::new_v4());
+            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
+            let _ = t.list_topology_runs_by_session(Uuid::new_v4());
+            let _ = t.get_node_execution(Uuid::new_v4());
+            let _ = t.list_node_executions_by_run(Uuid::new_v4());
+            let _ = t.list_edge_evaluations_by_run(Uuid::new_v4());
+            let _ = t.list_node_retries(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies TopologyTraceStore.
+    #[test]
+    fn storage_supertrait_includes_topology_trace_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
         }
         let stub = StubStorage;
         _assert(&stub);
