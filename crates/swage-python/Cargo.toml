@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 swage-core = { path = "../swage-core" }
 swage-context = { path = "../swage-context" }
 swage-config = { path = "../swage-config" }
+swage-topology = { path = "../swage-topology" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

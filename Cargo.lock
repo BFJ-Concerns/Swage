@@ -2745,6 +2745,7 @@ dependencies = [
  "swage-config",
  "swage-context",
  "swage-core",
+ "swage-topology",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -2807,6 +2808,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "swage-topology"
+version = "0.2603.2200"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
