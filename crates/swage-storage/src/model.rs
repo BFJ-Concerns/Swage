@@ -497,9 +497,39 @@ pub struct NewAgentMessage {
     pub payload: serde_json::Value,
 }
 
+/// A team — the organisational unit for multi-agent orchestration.
+///
+/// Teams belong to a project and define a member list plus an entry agent
+/// (the agent that receives user messages). Topology definitions reference
+/// teams to bind agents to tasks in a directed graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Team {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    /// Unique name within the project.
+    pub name: String,
+    pub description: String,
+    /// The agent that receives user messages for this team.
+    pub entry_agent_id: String,
+    /// Member agent IDs as a JSON-serialised array.
+    pub members: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Creation types — inputs for insert operations (no auto-generated fields)
 // ---------------------------------------------------------------------------
+
+/// Input for creating a new team.
+#[derive(Debug, Clone)]
+pub struct NewTeam {
+    pub project_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub entry_agent_id: String,
+    pub members: Vec<String>,
+}
 
 /// Input for creating a new project.
 #[derive(Debug, Clone)]

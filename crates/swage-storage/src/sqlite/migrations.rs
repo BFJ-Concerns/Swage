@@ -23,6 +23,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
         ("007_agent_messages", CREATE_AGENT_MESSAGES),
         ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
+        ("009_teams", CREATE_TEAMS),
     ]
 }
 
@@ -230,6 +231,27 @@ const ADD_TURN_PARENT_TURN_ID: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_turns_parent_turn_id
         ON turns(parent_turn_id);
+";
+
+/// Teams: the organisational unit for multi-agent orchestration.
+///
+/// A team belongs to a project and defines an entry agent (receives user
+/// messages) plus a member list. Teams link to topology definitions and
+/// are the scope boundary for budget controls.
+const CREATE_TEAMS: &str = "
+    CREATE TABLE IF NOT EXISTS teams (
+        id             TEXT NOT NULL PRIMARY KEY,
+        project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name           TEXT NOT NULL,
+        description    TEXT NOT NULL DEFAULT '',
+        entry_agent_id TEXT NOT NULL,
+        members        TEXT NOT NULL DEFAULT '[]',
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        UNIQUE(project_id, name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_teams_project_id ON teams(project_id);
 ";
 
 /// Apply all pending migrations to `conn`.
