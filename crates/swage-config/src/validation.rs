@@ -1,46 +1,65 @@
-use std::path::Path;
-use toml::Value;
 use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
+use std::path::Path;
+use toml::Value;
 
 // ---------------------------------------------------------------------------
 // Schema constants
 // ---------------------------------------------------------------------------
 
-
 /// Top-level TOML sections recognised by the config schema.
 const KNOWN_SECTIONS: &[&str] = &[
-    "server", "provider", "workspace", "sandbox", "lifecycle", "logging",
-    "tools", "context", "pricing", "observability", "output", "hitl",
+    "server",
+    "provider",
+    "workspace",
+    "sandbox",
+    "lifecycle",
+    "logging",
+    "tools",
+    "context",
+    "pricing",
+    "observability",
+    "output",
+    "hitl",
     "communication",
 ];
 
 /// Valid field names for each known section.
 fn known_fields_for(section: &str) -> &'static [&'static str] {
     match section {
-        "server"    => &["host", "port"],
-        "provider"  => &["protocol", "model", "api_key_env"],
+        "server" => &["host", "port"],
+        "provider" => &["protocol", "model", "api_key_env"],
         "workspace" => &["path"],
-        "sandbox"   => &["enabled"],
+        "sandbox" => &["enabled"],
         "lifecycle" => &["idle_timeout"],
-        "logging"   => &["level"],
+        "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
-        "tools"     => &[
-            "shell_timeout_secs", "max_output_bytes", "search",
-            "allow", "deny", "bundles", "require_approval",
+        "tools" => &[
+            "shell_timeout_secs",
+            "max_output_bytes",
+            "plugin_directory",
+            "search",
+            "allow",
+            "deny",
+            "bundles",
+            "require_approval",
         ],
-        "context"   => &["assembly", "timeout", "budget"],
+        "context" => &["assembly", "timeout", "budget"],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
-        "pricing"        => &["models"],
-        "observability"  => &["force_on"],
-        "output"         => &["schema", "max_retries"],
-        "hitl"           => &["timeout", "timeout_policy"],
+        "pricing" => &["models"],
+        "observability" => &["force_on"],
+        "output" => &["schema", "max_retries"],
+        "hitl" => &["timeout", "timeout_policy"],
         // context_transfer is a dynamic sub-table — field-level validation
         // skipped for its contents, same as pricing.models.
-        "communication"  => &["context_transfer", "message_ttl_secs", "expiry_interval_secs"],
-        _           => &[],
+        "communication" => &[
+            "context_transfer",
+            "message_ttl_secs",
+            "expiry_interval_secs",
+        ],
+        _ => &[],
     }
 }
 
@@ -57,7 +76,11 @@ fn byte_to_line(content: &str, offset: usize) -> usize {
         + 1
 }
 
-fn make_problem(file_path: &Path, field_path: Option<String>, kind: ConfigProblemKind) -> ConfigProblem {
+fn make_problem(
+    file_path: &Path,
+    field_path: Option<String>,
+    kind: ConfigProblemKind,
+) -> ConfigProblem {
     ConfigProblem {
         file_path: file_path.to_path_buf(),
         field_path,
@@ -67,13 +90,13 @@ fn make_problem(file_path: &Path, field_path: Option<String>, kind: ConfigProble
 
 fn toml_type_name(v: &Value) -> &'static str {
     match v {
-        Value::String(_)   => "string",
-        Value::Integer(_)  => "integer",
-        Value::Float(_)    => "float",
-        Value::Boolean(_)  => "boolean",
+        Value::String(_) => "string",
+        Value::Integer(_) => "integer",
+        Value::Float(_) => "float",
+        Value::Boolean(_) => "boolean",
         Value::Datetime(_) => "datetime",
-        Value::Array(_)    => "array",
-        Value::Table(_)    => "table",
+        Value::Array(_) => "array",
+        Value::Table(_) => "table",
     }
 }
 
@@ -91,39 +114,42 @@ fn check_field_type(
     field_path: &str,
 ) -> Option<ConfigProblem> {
     let (expected, is_ok): (&str, bool) = match (section, field) {
-        ("server",    "host")        => ("string",  matches!(value, Value::String(_))),
-        ("server",    "port")        => ("integer", matches!(value, Value::Integer(_))),
-        ("provider",  "protocol")    => ("string",  matches!(value, Value::String(_))),
-        ("provider",  "model")       => ("string",  matches!(value, Value::String(_))),
-        ("provider",  "api_key_env") => ("string",  matches!(value, Value::String(_))),
-        ("workspace", "path")        => ("string",  matches!(value, Value::String(_))),
-        ("sandbox",   "enabled")     => ("boolean", matches!(value, Value::Boolean(_))),
-        ("lifecycle", "idle_timeout")  => ("integer", matches!(value, Value::Integer(_))),
-        ("logging",   "level")         => ("string",  matches!(value, Value::String(_))),
-        ("tools",  "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
-        ("tools",  "max_output_bytes")   => ("integer", matches!(value, Value::Integer(_))),
-        ("tools",  "search")             => ("table",   matches!(value, Value::Table(_))),
-        ("context",  "assembly")          => ("string",  matches!(value, Value::String(_))),
-        ("context",  "timeout")           => ("integer", matches!(value, Value::Integer(_))),
-        ("context",  "budget")            => ("integer", matches!(value, Value::Integer(_))),
+        ("server", "host") => ("string", matches!(value, Value::String(_))),
+        ("server", "port") => ("integer", matches!(value, Value::Integer(_))),
+        ("provider", "protocol") => ("string", matches!(value, Value::String(_))),
+        ("provider", "model") => ("string", matches!(value, Value::String(_))),
+        ("provider", "api_key_env") => ("string", matches!(value, Value::String(_))),
+        ("workspace", "path") => ("string", matches!(value, Value::String(_))),
+        ("sandbox", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("lifecycle", "idle_timeout") => ("integer", matches!(value, Value::Integer(_))),
+        ("logging", "level") => ("string", matches!(value, Value::String(_))),
+        ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
+        ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
+        ("tools", "plugin_directory") => ("string", matches!(value, Value::String(_))),
+        ("tools", "search") => ("table", matches!(value, Value::Table(_))),
+        ("context", "assembly") => ("string", matches!(value, Value::String(_))),
+        ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
+        ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
         // pricing.models is a dynamic map — validate only that it is a table.
-        ("pricing",        "models")    => ("table",   matches!(value, Value::Table(_))),
-        ("observability",  "force_on")  => ("boolean", matches!(value, Value::Boolean(_))),
+        ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
+        ("observability", "force_on") => ("boolean", matches!(value, Value::Boolean(_))),
         // [tools] permission fields — flat under [tools] in TOML
-        ("tools",  "allow")              => ("array",   matches!(value, Value::Array(_))),
-        ("tools",  "deny")               => ("array",   matches!(value, Value::Array(_))),
-        ("tools",  "bundles")            => ("table",   matches!(value, Value::Table(_))),
-        ("tools",  "require_approval")   => ("array",   matches!(value, Value::Array(_))),
+        ("tools", "allow") => ("array", matches!(value, Value::Array(_))),
+        ("tools", "deny") => ("array", matches!(value, Value::Array(_))),
+        ("tools", "bundles") => ("table", matches!(value, Value::Table(_))),
+        ("tools", "require_approval") => ("array", matches!(value, Value::Array(_))),
         // [output] — schema validation settings
-        ("output",  "schema")            => ("table",   matches!(value, Value::Table(_))),
-        ("output",  "max_retries")       => ("integer", matches!(value, Value::Integer(_))),
+        ("output", "schema") => ("table", matches!(value, Value::Table(_))),
+        ("output", "max_retries") => ("integer", matches!(value, Value::Integer(_))),
         // [hitl] — human-in-the-loop settings
-        ("hitl",  "timeout")             => ("integer", matches!(value, Value::Integer(_))),
-        ("hitl",  "timeout_policy")      => ("string",  matches!(value, Value::String(_))),
+        ("hitl", "timeout") => ("integer", matches!(value, Value::Integer(_))),
+        ("hitl", "timeout_policy") => ("string", matches!(value, Value::String(_))),
         // [communication] — inter-agent messaging settings
-        ("communication", "context_transfer")     => ("table",   matches!(value, Value::Table(_))),
-        ("communication", "message_ttl_secs")     => ("integer", matches!(value, Value::Integer(_))),
-        ("communication", "expiry_interval_secs") => ("integer", matches!(value, Value::Integer(_))),
+        ("communication", "context_transfer") => ("table", matches!(value, Value::Table(_))),
+        ("communication", "message_ttl_secs") => ("integer", matches!(value, Value::Integer(_))),
+        ("communication", "expiry_interval_secs") => {
+            ("integer", matches!(value, Value::Integer(_)))
+        }
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
     };
@@ -223,9 +249,7 @@ fn check_field_semantics(
                         file_path,
                         Some(field_path.to_string()),
                         ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "context.timeout must be between 1 and 60, got {t}"
-                            ),
+                            message: format!("context.timeout must be between 1 and 60, got {t}"),
                         },
                     ));
                 }
@@ -238,9 +262,7 @@ fn check_field_semantics(
                         file_path,
                         Some(field_path.to_string()),
                         ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "context.budget must be a positive integer, got {b}"
-                            ),
+                            message: format!("context.budget must be a positive integer, got {b}"),
                         },
                     ));
                 }
@@ -253,9 +275,7 @@ fn check_field_semantics(
                         file_path,
                         Some(field_path.to_string()),
                         ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "hitl.timeout must be a positive integer, got {t}"
-                            ),
+                            message: format!("hitl.timeout must be a positive integer, got {t}"),
                         },
                     ));
                 }
@@ -284,9 +304,7 @@ fn check_field_semantics(
                         file_path,
                         Some(field_path.to_string()),
                         ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "output.max_retries must be non-negative, got {r}"
-                            ),
+                            message: format!("output.max_retries must be non-negative, got {r}"),
                         },
                     ));
                 }
@@ -373,7 +391,9 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
             problems.push(make_problem(
                 file_path,
                 None,
-                ConfigProblemKind::UnknownSection { name: section_name.clone() },
+                ConfigProblemKind::UnknownSection {
+                    name: section_name.clone(),
+                },
             ));
             // No point inspecting fields in an unknown section.
             continue;
@@ -411,9 +431,13 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
             }
 
             // Type check — skip semantic check if the type is wrong.
-            if let Some(type_problem) =
-                check_field_type(section_name, field_name, field_value, file_path, &field_path_str)
-            {
+            if let Some(type_problem) = check_field_type(
+                section_name,
+                field_name,
+                field_value,
+                file_path,
+                &field_path_str,
+            ) {
                 problems.push(type_problem);
                 continue;
             }
@@ -437,7 +461,10 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
 /// Returns `Err` with all collected problems if any validation fails.
 /// Returns `Ok(PartialConfig)` when the content is syntactically and
 /// semantically valid.
-pub fn parse_and_validate(content: &str, file_path: &Path) -> Result<PartialConfig, Vec<ConfigProblem>> {
+pub fn parse_and_validate(
+    content: &str,
+    file_path: &Path,
+) -> Result<PartialConfig, Vec<ConfigProblem>> {
     let problems = validate_toml_string(content, file_path);
     if !problems.is_empty() {
         return Err(problems);
@@ -468,7 +495,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn path(s: &str) -> PathBuf { s.into() }
+    fn path(s: &str) -> PathBuf {
+        s.into()
+    }
 
     // --- validate_toml_string ---
 
@@ -478,7 +507,8 @@ mod tests {
         assert!(!problems.is_empty(), "should produce at least one error");
         assert!(
             matches!(problems[0].kind, ConfigProblemKind::ParseError { .. }),
-            "should be a ParseError, got {:?}", problems[0].kind
+            "should be a ParseError, got {:?}",
+            problems[0].kind
         );
     }
 
@@ -498,9 +528,9 @@ mod tests {
     fn unknown_section_produces_error() {
         let toml = "[server]\nport = 3000\n\n[databse]\nurl = \"test\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        let found = problems.iter().any(|p| {
-            matches!(&p.kind, ConfigProblemKind::UnknownSection { name } if name == "databse")
-        });
+        let found = problems.iter().any(
+            |p| matches!(&p.kind, ConfigProblemKind::UnknownSection { name } if name == "databse"),
+        );
         assert!(found, "should report unknown section 'databse'");
     }
 
@@ -520,7 +550,9 @@ mod tests {
         let toml = "[server]\nport = \"not a number\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "should report TypeError for port as string"
         );
     }
@@ -529,10 +561,14 @@ mod tests {
     fn multiple_errors_all_collected() {
         let toml = "[server]\nport = \"bad\"\n\n[unknown_section]\nfoo = 1";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        let has_type_err = problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. }));
-        let has_unknown  = problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::UnknownSection { .. }));
+        let has_type_err = problems
+            .iter()
+            .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. }));
+        let has_unknown = problems
+            .iter()
+            .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownSection { .. }));
         assert!(has_type_err, "should report TypeError");
-        assert!(has_unknown,  "should report UnknownSection");
+        assert!(has_unknown, "should report UnknownSection");
     }
 
     #[test]
@@ -548,7 +584,10 @@ model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 "#;
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid TOML should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid TOML should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -556,7 +595,9 @@ api_key_env = "ANTHROPIC_API_KEY"
         let toml = "[server]\nport = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "port=0 should produce SemanticError"
         );
     }
@@ -566,7 +607,9 @@ api_key_env = "ANTHROPIC_API_KEY"
         let toml = "[logging]\nlevel = \"verbose\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "'verbose' is not a valid log level"
         );
     }
@@ -576,7 +619,9 @@ api_key_env = "ANTHROPIC_API_KEY"
         let toml = "[provider]\nprotocol = \"unknown-llm\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "'unknown-llm' is not a valid protocol"
         );
     }
@@ -593,12 +638,14 @@ port = 8080
 [provider]
 model = "claude-opus"
 "#;
-        let partial = parse_and_validate(toml, &path("config.toml"))
-            .expect("valid TOML should return Ok");
+        let partial =
+            parse_and_validate(toml, &path("config.toml")).expect("valid TOML should return Ok");
         let server = partial.server.expect("server section should be present");
         assert_eq!(server.host.as_deref(), Some("10.0.0.1"));
         assert_eq!(server.port, Some(8080));
-        let provider = partial.provider.expect("provider section should be present");
+        let provider = partial
+            .provider
+            .expect("provider section should be present");
         assert_eq!(provider.model.as_deref(), Some("claude-opus"));
     }
 
@@ -620,7 +667,10 @@ shell_timeout_secs = 60
 max_output_bytes = 50000
 "#;
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid [tools] config should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid [tools] config should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -631,7 +681,10 @@ assembly = "default"
 timeout = 10
 "#;
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid [context] config should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid [context] config should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -639,7 +692,9 @@ timeout = 10
         let toml = "[tools]\nshell_timeout_secs = \"sixty\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for shell_timeout_secs should produce TypeError"
         );
     }
@@ -649,7 +704,9 @@ timeout = 10
         let toml = "[context]\nassembly = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "integer value for context.assembly should produce TypeError"
         );
     }
@@ -660,7 +717,9 @@ timeout = 10
         let toml = "[context]\ntimeout = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "timeout=0 should produce SemanticError"
         );
     }
@@ -670,7 +729,9 @@ timeout = 10
         let toml = "[context]\ntimeout = 61";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "timeout=61 should produce SemanticError"
         );
     }
@@ -694,7 +755,9 @@ timeout = 10
         let toml = "[context]\nbudget = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "budget=0 should produce SemanticError"
         );
     }
@@ -704,7 +767,9 @@ timeout = 10
         let toml = "[context]\nbudget = -1";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "budget=-1 should produce SemanticError"
         );
     }
@@ -713,7 +778,10 @@ timeout = 10
     fn context_budget_positive_is_valid() {
         let toml = "[context]\nbudget = 4096";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "budget=4096 is valid, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "budget=4096 is valid, got: {problems:?}"
+        );
     }
 
     // --- [output] section tests ---
@@ -722,7 +790,10 @@ timeout = 10
     fn output_section_validates_without_warnings() {
         let toml = "[output]\nmax_retries = 5\n";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid [output] should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid [output] should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -730,7 +801,9 @@ timeout = 10
         let toml = "[output]\nmax_retries = \"five\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for output.max_retries should produce TypeError"
         );
     }
@@ -740,7 +813,9 @@ timeout = 10
         let toml = "[output]\nmax_retries = -1";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "negative max_retries should produce SemanticError"
         );
     }
@@ -750,7 +825,9 @@ timeout = 10
         let toml = "[output]\nschema = \"not a table\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for output.schema should produce TypeError"
         );
     }
@@ -760,7 +837,9 @@ timeout = 10
         let toml = "[output]\nfoo = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
             "unknown field in [output] should produce error"
         );
     }
@@ -771,7 +850,10 @@ timeout = 10
     fn hitl_section_validates_without_warnings() {
         let toml = "[hitl]\ntimeout = 300\ntimeout_policy = \"reject\"\n";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid [hitl] should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid [hitl] should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -779,7 +861,9 @@ timeout = 10
         let toml = "[hitl]\ntimeout = \"long\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for hitl.timeout should produce TypeError"
         );
     }
@@ -789,7 +873,9 @@ timeout = 10
         let toml = "[hitl]\ntimeout = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "hitl.timeout=0 should produce SemanticError"
         );
     }
@@ -799,7 +885,9 @@ timeout = 10
         let toml = "[hitl]\ntimeout_policy = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "integer value for hitl.timeout_policy should produce TypeError"
         );
     }
@@ -809,7 +897,9 @@ timeout = 10
         let toml = "[hitl]\ntimeout_policy = \"explode\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "'explode' is not a valid timeout policy"
         );
     }
@@ -818,7 +908,10 @@ timeout = 10
     fn hitl_timeout_policy_interrupt_is_valid() {
         let toml = "[hitl]\ntimeout_policy = \"interrupt\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "interrupt is a valid policy, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "interrupt is a valid policy, got: {problems:?}"
+        );
     }
 
     // --- [communication] section tests ---
@@ -827,7 +920,10 @@ timeout = 10
     fn communication_section_validates_without_warnings() {
         let toml = "[communication]\nmessage_ttl_secs = 86400\nexpiry_interval_secs = 60\n";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid [communication] should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid [communication] should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -835,7 +931,9 @@ timeout = 10
         let toml = "[communication]\nmessage_ttl_secs = \"one day\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for message_ttl_secs should produce TypeError"
         );
     }
@@ -845,7 +943,9 @@ timeout = 10
         let toml = "[communication]\nmessage_ttl_secs = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "message_ttl_secs=0 should produce SemanticError"
         );
     }
@@ -855,7 +955,9 @@ timeout = 10
         let toml = "[communication]\ncontext_transfer = \"not a table\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for context_transfer should produce TypeError"
         );
     }
@@ -865,7 +967,9 @@ timeout = 10
         let toml = "[communication]\nbogus = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownField { .. })),
             "unknown field in [communication] should produce error"
         );
     }
@@ -876,14 +980,20 @@ timeout = 10
     fn tools_allow_field_validates() {
         let toml = "[tools]\nallow = [\"*\"]";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "tools.allow should be a valid field, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "tools.allow should be a valid field, got: {problems:?}"
+        );
     }
 
     #[test]
     fn tools_deny_field_validates() {
         let toml = "[tools]\ndeny = [\"shell\"]";
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "tools.deny should be a valid field, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "tools.deny should be a valid field, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -891,7 +1001,9 @@ timeout = 10
         let toml = "[tools]\nallow = \"not an array\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.allow should produce TypeError"
         );
     }
@@ -920,7 +1032,10 @@ timeout_policy = "reject"
 message_ttl_secs = 86400
 "#;
         let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(problems.is_empty(), "valid config with all sections should produce no errors, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "valid config with all sections should produce no errors, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -928,7 +1043,9 @@ message_ttl_secs = 86400
         let toml = "[tools]\nsearch = \"http://localhost\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
-            problems.iter().any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.search should produce TypeError"
         );
     }

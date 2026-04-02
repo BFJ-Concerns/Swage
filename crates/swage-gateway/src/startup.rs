@@ -327,6 +327,7 @@ fn build_tool_dispatcher(
         file_search::FileSearchTool,
         file_write::FileWriteTool,
         memory::MemoryTool,
+        plugin::discover_plugin_tools,
         shell::ShellTool,
         url_fetch::UrlFetchTool,
         web_search::WebSearchTool,
@@ -367,13 +368,23 @@ fn build_tool_dispatcher(
         Arc::new(MemoryTool),
     ];
 
-    // Sub-dispatcher: base tools only, python_execute excluded to prevent
+    let plugin_tools = resolve_plugin_directory(config)
+        .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))
+        .unwrap_or_else(|| (vec![], vec![]));
+    for warning in &plugin_tools.1 {
+        warn!("{warning}");
+    }
+
+    let mut non_python_tools = base_tools;
+    non_python_tools.extend(plugin_tools.0.iter().cloned());
+
+    // Sub-dispatcher: all non-python tools, excluding python_execute to prevent
     // recursive invocation through the python_execute tool.
     let sub_dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
-        base_tools.iter().cloned(),
+        non_python_tools.iter().cloned(),
     ));
 
-    let mut all_tools = base_tools;
+    let mut all_tools = non_python_tools;
 
     match swage_python::runtime::PythonRuntime::new(None) {
         Ok(runtime) => {
@@ -391,12 +402,25 @@ fn build_tool_dispatcher(
     }
 
     info!(
-        "Registered {} built-in tool(s), workspace root: {}",
+        "Registered {} tool(s), workspace root: {}",
         all_tools.len(),
         workspace_root.display(),
     );
 
     crate::tool::ToolDispatcher::allow_all(all_tools)
+}
+
+fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<PathBuf> {
+    let directory = config.tools.plugin_directory.as_ref()?;
+    let path = PathBuf::from(directory);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        swage_config::discovery::resolve_root()
+            .ok()
+            .map(|root| root.join(path.clone()))
+            .or(Some(path))
+    }
 }
 
 /// Create the LLM provider from resolved configuration.
@@ -576,5 +600,46 @@ mod tests {
                 .is_some(),
             "delegate tool should be registered with the built-in dispatcher",
         );
+    }
+
+    #[test]
+    fn build_tool_dispatcher_registers_plugin_tools_from_configured_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = temp_dir.path().join("plugins").join("echo-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "name": "echo_plugin",
+                "description": "Echo plugin",
+                "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+                "executable": "run.py"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("run.py"),
+            "#!/usr/bin/env python3\nprint('{}')\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(plugin_dir.join("run.py")).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(plugin_dir.join("run.py"), perms).unwrap();
+        }
+
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.plugin_directory = Some(temp_dir.path().join("plugins").display().to_string());
+
+        let dispatcher = build_tool_dispatcher(
+            &config,
+            storage as Arc<dyn swage_storage::store::Storage>,
+        );
+
+        assert!(dispatcher.registry().get("echo_plugin").is_some());
     }
 }

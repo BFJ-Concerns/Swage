@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use swage_core::ApprovalTimeoutPolicy;
 use crate::model::{
-    ContextConfig, HitlConfig, LogLevel, ModelPricing, ObservabilityConfig, OutputConfig,
-    PricingConfig, Protocol, RequireApprovalEntry, ResolvedConfig, SearchProviderConfig,
-    ServerConfig, ProviderConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig, SandboxConfig,
-    LifecycleConfig, LoggingConfig,
+    ContextConfig, HitlConfig, LifecycleConfig, LogLevel, LoggingConfig, ModelPricing,
+    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderConfig,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use swage_core::ApprovalTimeoutPolicy;
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -96,6 +96,7 @@ pub struct PartialObservabilityConfig {
 pub struct PartialToolConfig {
     pub shell_timeout_secs: Option<u64>,
     pub max_output_bytes: Option<usize>,
+    pub plugin_directory: Option<Option<String>>,
     pub search: Option<Option<SearchProviderConfig>>,
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
@@ -210,7 +211,11 @@ impl From<ResolvedConfig> for PartialConfig {
                 budget: Some(r.context.budget),
             }),
             pricing: Some(PartialPricingConfig {
-                models: if r.pricing.models.is_empty() { None } else { Some(r.pricing.models) },
+                models: if r.pricing.models.is_empty() {
+                    None
+                } else {
+                    Some(r.pricing.models)
+                },
             }),
             observability: Some(PartialObservabilityConfig {
                 force_on: Some(r.observability.force_on),
@@ -218,6 +223,7 @@ impl From<ResolvedConfig> for PartialConfig {
             tools: Some(PartialToolConfig {
                 shell_timeout_secs: Some(r.tools.shell_timeout_secs),
                 max_output_bytes: Some(r.tools.max_output_bytes),
+                plugin_directory: Some(r.tools.plugin_directory),
                 search: Some(r.tools.search),
                 allow: Some(r.tools.permissions.allow),
                 deny: Some(r.tools.permissions.deny),
@@ -240,13 +246,23 @@ impl From<ResolvedConfig> for PartialConfig {
                     targets: if r.communication.context_transfer.targets.is_empty() {
                         None
                     } else {
-                        Some(r.communication.context_transfer.targets.into_iter().map(|(k, v)| {
-                            (k, PartialContextTransferTargetConfig {
-                                mode: Some(v.mode),
-                                allowed_fields: Some(v.allowed_fields),
-                                summary_budget: v.summary_budget,
-                            })
-                        }).collect())
+                        Some(
+                            r.communication
+                                .context_transfer
+                                .targets
+                                .into_iter()
+                                .map(|(k, v)| {
+                                    (
+                                        k,
+                                        PartialContextTransferTargetConfig {
+                                            mode: Some(v.mode),
+                                            allowed_fields: Some(v.allowed_fields),
+                                            summary_budget: v.summary_budget,
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        )
                     },
                 }),
                 message_ttl_secs: Some(r.communication.message_ttl_secs),
@@ -291,19 +307,25 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             host: o.host.or(b.host),
             port: o.port.or(b.port),
         }),
-        provider: merge_section(base.provider, overlay.provider, |b, o| PartialProviderConfig {
-            protocol: o.protocol.or(b.protocol),
-            model: o.model.or(b.model),
-            api_key_env: o.api_key_env.or(b.api_key_env),
+        provider: merge_section(base.provider, overlay.provider, |b, o| {
+            PartialProviderConfig {
+                protocol: o.protocol.or(b.protocol),
+                model: o.model.or(b.model),
+                api_key_env: o.api_key_env.or(b.api_key_env),
+            }
         }),
-        workspace: merge_section(base.workspace, overlay.workspace, |b, o| PartialWorkspaceConfig {
-            path: o.path.or(b.path),
+        workspace: merge_section(base.workspace, overlay.workspace, |b, o| {
+            PartialWorkspaceConfig {
+                path: o.path.or(b.path),
+            }
         }),
         sandbox: merge_section(base.sandbox, overlay.sandbox, |b, o| PartialSandboxConfig {
             enabled: o.enabled.or(b.enabled),
         }),
-        lifecycle: merge_section(base.lifecycle, overlay.lifecycle, |b, o| PartialLifecycleConfig {
-            idle_timeout: o.idle_timeout.or(b.idle_timeout),
+        lifecycle: merge_section(base.lifecycle, overlay.lifecycle, |b, o| {
+            PartialLifecycleConfig {
+                idle_timeout: o.idle_timeout.or(b.idle_timeout),
+            }
         }),
         logging: merge_section(base.logging, overlay.logging, |b, o| PartialLoggingConfig {
             level: o.level.or(b.level),
@@ -319,15 +341,15 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             if let Some(overlay_models) = o.models {
                 merged.extend(overlay_models);
             }
-            PartialPricingConfig { models: Some(merged) }
+            PartialPricingConfig {
+                models: Some(merged),
+            }
         }),
-        observability: merge_section(
-            base.observability,
-            overlay.observability,
-            |b, o| PartialObservabilityConfig {
+        observability: merge_section(base.observability, overlay.observability, |b, o| {
+            PartialObservabilityConfig {
                 force_on: o.force_on.or(b.force_on),
-            },
-        ),
+            }
+        }),
         tools: merge_section(base.tools, overlay.tools, |b, o| {
             // Scalar fields: overlay wins when present, otherwise base.
             // Permission fields (allow, deny): overlay REPLACES base entirely.
@@ -342,6 +364,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialToolConfig {
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
+                plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
                 allow: o.allow.or(b.allow),
                 deny: o.deny.or(b.deny),
@@ -360,39 +383,31 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             timeout: o.timeout.or(b.timeout),
             timeout_policy: o.timeout_policy.or(b.timeout_policy),
         }),
-        communication: merge_section(
-            base.communication,
-            overlay.communication,
-            |b, o| {
-                let ct = merge_section(
-                    b.context_transfer,
-                    o.context_transfer,
-                    |bt, ot| {
-                        // Targets merge map-style: overlay entry replaces base entry
-                        // for the same key; base entries absent from overlay survive.
-                        let targets = match (bt.targets, ot.targets) {
-                            (Some(mut base_t), Some(overlay_t)) => {
-                                base_t.extend(overlay_t);
-                                Some(base_t)
-                            }
-                            (base_t, overlay_t) => overlay_t.or(base_t),
-                        };
-                        PartialContextTransferConfig {
-                            mode: ot.mode.or(bt.mode),
-                            // Replacement semantics — overlay list replaces base.
-                            allowed_fields: ot.allowed_fields.or(bt.allowed_fields),
-                            summary_budget: ot.summary_budget.or(bt.summary_budget),
-                            targets,
-                        }
-                    },
-                );
-                PartialCommunicationConfig {
-                    context_transfer: ct,
-                    message_ttl_secs: o.message_ttl_secs.or(b.message_ttl_secs),
-                    expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
+        communication: merge_section(base.communication, overlay.communication, |b, o| {
+            let ct = merge_section(b.context_transfer, o.context_transfer, |bt, ot| {
+                // Targets merge map-style: overlay entry replaces base entry
+                // for the same key; base entries absent from overlay survive.
+                let targets = match (bt.targets, ot.targets) {
+                    (Some(mut base_t), Some(overlay_t)) => {
+                        base_t.extend(overlay_t);
+                        Some(base_t)
+                    }
+                    (base_t, overlay_t) => overlay_t.or(base_t),
+                };
+                PartialContextTransferConfig {
+                    mode: ot.mode.or(bt.mode),
+                    // Replacement semantics — overlay list replaces base.
+                    allowed_fields: ot.allowed_fields.or(bt.allowed_fields),
+                    summary_budget: ot.summary_budget.or(bt.summary_budget),
+                    targets,
                 }
-            },
-        ),
+            });
+            PartialCommunicationConfig {
+                context_transfer: ct,
+                message_ttl_secs: o.message_ttl_secs.or(b.message_ttl_secs),
+                expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
+            }
+        }),
     }
 }
 
@@ -402,7 +417,9 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
 /// An empty chain yields an empty `PartialConfig` (all defaults will be
 /// applied by `resolve`).
 pub fn merge_chain(configs: Vec<PartialConfig>) -> PartialConfig {
-    configs.into_iter().fold(PartialConfig::default(), merge_partial)
+    configs
+        .into_iter()
+        .fold(PartialConfig::default(), merge_partial)
 }
 
 /// Resolve a `PartialConfig` into a `ResolvedConfig` by filling any absent
@@ -459,6 +476,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             ToolConfig {
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 max_output_bytes: t.max_output_bytes.unwrap_or(dt.max_output_bytes),
+                plugin_directory: t.plugin_directory.unwrap_or(dt.plugin_directory),
                 // Double-option: outer None → default (None), Some(x) → use x.
                 search: t.search.unwrap_or(dt.search),
                 permissions: ToolPermissionConfig {
@@ -482,9 +500,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             }
         },
         pricing: {
-            let models = partial.pricing
-                .and_then(|p| p.models)
-                .unwrap_or_default();
+            let models = partial.pricing.and_then(|p| p.models).unwrap_or_default();
             PricingConfig { models }
         },
         observability: {
@@ -516,13 +532,23 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let resolved_fields = ct.allowed_fields.unwrap_or(dc.allowed_fields);
             let resolved_budget = ct.summary_budget.or(dc.summary_budget);
 
-            let targets = ct.targets.unwrap_or_default().into_iter().map(|(k, v)| {
-                (k, ContextTransferTargetConfig {
-                    mode: v.mode.unwrap_or(resolved_mode.clone()),
-                    allowed_fields: v.allowed_fields.unwrap_or_else(|| resolved_fields.clone()),
-                    summary_budget: v.summary_budget.or(resolved_budget),
+            let targets = ct
+                .targets
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        ContextTransferTargetConfig {
+                            mode: v.mode.unwrap_or(resolved_mode.clone()),
+                            allowed_fields: v
+                                .allowed_fields
+                                .unwrap_or_else(|| resolved_fields.clone()),
+                            summary_budget: v.summary_budget.or(resolved_budget),
+                        },
+                    )
                 })
-            }).collect();
+                .collect();
 
             CommunicationConfig {
                 message_ttl_secs: c.message_ttl_secs.unwrap_or(86400),
@@ -593,8 +619,16 @@ mod tests {
         let overlay = partial_with_server_port(4000);
         let merged = merge_partial(base, overlay);
         let server = merged.server.expect("server section should exist");
-        assert_eq!(server.host.as_deref(), Some("127.0.0.1"), "host from base should survive");
-        assert_eq!(server.port, Some(4000), "port from overlay should be present");
+        assert_eq!(
+            server.host.as_deref(),
+            Some("127.0.0.1"),
+            "host from base should survive"
+        );
+        assert_eq!(
+            server.port,
+            Some(4000),
+            "port from overlay should be present"
+        );
     }
 
     #[test]
@@ -615,7 +649,9 @@ mod tests {
         assert_eq!(server.host.as_deref(), Some("10.0.0.1"));
 
         // Provider from overlay should be present
-        let provider = merged.provider.expect("provider from overlay should be present");
+        let provider = merged
+            .provider
+            .expect("provider from overlay should be present");
         assert_eq!(provider.model.as_deref(), Some("gpt-4o"));
     }
 
@@ -638,12 +674,20 @@ mod tests {
 
         // Agent overrides global's port
         let server = merged.server.expect("server should exist");
-        assert_eq!(server.host.as_deref(), Some("10.0.0.1"), "host from global survives");
+        assert_eq!(
+            server.host.as_deref(),
+            Some("10.0.0.1"),
+            "host from global survives"
+        );
         assert_eq!(server.port, Some(4000), "agent overrides global port");
 
         // Project's model survives
         let provider = merged.provider.expect("provider should exist");
-        assert_eq!(provider.model.as_deref(), Some("claude-opus"), "project model survives");
+        assert_eq!(
+            provider.model.as_deref(),
+            Some("claude-opus"),
+            "project model survives"
+        );
     }
 
     #[test]
@@ -657,7 +701,9 @@ mod tests {
 
         let server = merged.server.expect("server from global should survive");
         assert_eq!(server.port, Some(5000));
-        let provider = merged.provider.expect("provider from agent should be present");
+        let provider = merged
+            .provider
+            .expect("provider from agent should be present");
         assert_eq!(provider.model.as_deref(), Some("foo"));
     }
 
@@ -671,7 +717,10 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolve(partial);
-        assert_eq!(resolved.server.host, "192.168.1.1", "should use partial host");
+        assert_eq!(
+            resolved.server.host, "192.168.1.1",
+            "should use partial host"
+        );
         assert_eq!(resolved.server.port, 8080, "should use partial port");
     }
 
@@ -739,7 +788,11 @@ mod tests {
         };
         let merged = merge_partial(base, overlay);
         let ctx = merged.context.unwrap();
-        assert_eq!(ctx.assembly.as_deref(), Some("base-assembly"), "assembly from base survives");
+        assert_eq!(
+            ctx.assembly.as_deref(),
+            Some("base-assembly"),
+            "assembly from base survives"
+        );
         assert_eq!(ctx.timeout, Some(30), "timeout from overlay present");
     }
 
@@ -833,7 +886,10 @@ mod tests {
         let merged = merge_chain(vec![global, agent]);
         let resolved = resolve(merged);
 
-        assert_eq!(resolved.tools.permissions.allow, vec!["read_file".to_string()]);
+        assert_eq!(
+            resolved.tools.permissions.allow,
+            vec!["read_file".to_string()]
+        );
         // Deny from global survives because agent didn't specify deny.
         assert_eq!(resolved.tools.permissions.deny, vec!["shell".to_string()]);
     }
@@ -847,7 +903,10 @@ mod tests {
         let resolved = resolve(merged);
 
         // Agent's deny completely replaces global's deny.
-        assert_eq!(resolved.tools.permissions.deny, vec!["web_search".to_string()]);
+        assert_eq!(
+            resolved.tools.permissions.deny,
+            vec!["web_search".to_string()]
+        );
     }
 
     #[test]
@@ -858,7 +917,10 @@ mod tests {
 
         let mut agent_bundles = HashMap::new();
         // Override the "read_only" bundle, leave "write" from global.
-        agent_bundles.insert("read_only".to_string(), vec!["file_read".into(), "web_search".into()]);
+        agent_bundles.insert(
+            "read_only".to_string(),
+            vec!["file_read".into(), "web_search".into()],
+        );
 
         let global = PartialConfig {
             tools: Some(PartialToolConfig {
@@ -911,8 +973,14 @@ mod tests {
         let merged = merge_chain(vec![global, agent]);
         let resolved = resolve(merged);
 
-        assert_eq!(resolved.tools.shell_timeout_secs, 120, "agent overrides global");
-        assert_eq!(resolved.tools.max_output_bytes, 200_000, "global survives when agent absent");
+        assert_eq!(
+            resolved.tools.shell_timeout_secs, 120,
+            "agent overrides global"
+        );
+        assert_eq!(
+            resolved.tools.max_output_bytes, 200_000,
+            "global survives when agent absent"
+        );
     }
 
     #[test]
@@ -996,7 +1064,10 @@ mod tests {
 
         let resolved = resolve(merge_chain(vec![global, project, agent]));
         // Agent's values win at every level.
-        assert_eq!(resolved.output.schema, Some(serde_json::json!({"type": "object"})));
+        assert_eq!(
+            resolved.output.schema,
+            Some(serde_json::json!({"type": "object"}))
+        );
         assert_eq!(resolved.output.max_retries, 1);
     }
 
@@ -1024,7 +1095,11 @@ mod tests {
         let merged = merge_partial(base, overlay);
         let hitl = merged.hitl.unwrap();
         assert_eq!(hitl.timeout, Some(120), "overlay timeout should win");
-        assert_eq!(hitl.timeout_policy, Some(ApprovalTimeoutPolicy::Reject), "base policy should survive");
+        assert_eq!(
+            hitl.timeout_policy,
+            Some(ApprovalTimeoutPolicy::Reject),
+            "base policy should survive"
+        );
     }
 
     #[test]
@@ -1052,8 +1127,15 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolve(merge_chain(vec![global, project, agent]));
-        assert_eq!(resolved.hitl.timeout, 600, "project timeout wins over global");
-        assert_eq!(resolved.hitl.timeout_policy, ApprovalTimeoutPolicy::Interrupt, "agent policy wins");
+        assert_eq!(
+            resolved.hitl.timeout, 600,
+            "project timeout wins over global"
+        );
+        assert_eq!(
+            resolved.hitl.timeout_policy,
+            ApprovalTimeoutPolicy::Interrupt,
+            "agent policy wins"
+        );
     }
 
     #[test]
@@ -1061,7 +1143,11 @@ mod tests {
         use swage_core::ApprovalTimeoutPolicy;
         let resolved = resolve(PartialConfig::default());
         assert_eq!(resolved.hitl.timeout, 300, "default HITL timeout is 300");
-        assert_eq!(resolved.hitl.timeout_policy, ApprovalTimeoutPolicy::Reject, "default policy is Reject");
+        assert_eq!(
+            resolved.hitl.timeout_policy,
+            ApprovalTimeoutPolicy::Reject,
+            "default policy is Reject"
+        );
     }
 
     #[test]
@@ -1114,7 +1200,11 @@ mod tests {
         let tools = merged.tools.unwrap();
         assert_eq!(tools.shell_timeout_secs, Some(60), "overlay scalar wins");
         let ra = tools.require_approval.unwrap();
-        assert_eq!(ra[0].tool_name(), "write_file", "base require_approval survives");
+        assert_eq!(
+            ra[0].tool_name(),
+            "write_file",
+            "base require_approval survives"
+        );
     }
 
     #[test]
@@ -1132,11 +1222,14 @@ mod tests {
                     summary_budget: Some(1024),
                     targets: Some({
                         let mut m = std::collections::HashMap::new();
-                        m.insert("agent-b".into(), PartialContextTransferTargetConfig {
-                            mode: None, // should inherit Summary
-                            allowed_fields: Some(vec!["system".into()]), // overrides
-                            summary_budget: None, // should inherit 1024
-                        });
+                        m.insert(
+                            "agent-b".into(),
+                            PartialContextTransferTargetConfig {
+                                mode: None,                                  // should inherit Summary
+                                allowed_fields: Some(vec!["system".into()]), // overrides
+                                summary_budget: None,                        // should inherit 1024
+                            },
+                        );
                         m
                     }),
                 }),
@@ -1181,7 +1274,10 @@ mod tests {
         };
         let resolved = resolve(partial);
         assert_eq!(resolved.tools.permissions.require_approval.len(), 1);
-        assert_eq!(resolved.tools.permissions.require_approval[0].tool_name(), "shell_exec");
+        assert_eq!(
+            resolved.tools.permissions.require_approval[0].tool_name(),
+            "shell_exec"
+        );
     }
 
     // --- ResolvedConfig → PartialConfig round-trip ---
@@ -1220,6 +1316,9 @@ mod tests {
         let resolved = resolve(merged);
 
         assert_eq!(resolved.server.port, 9000, "base port should survive");
-        assert_eq!(resolved.provider.model, "overlay-model", "overlay should win");
+        assert_eq!(
+            resolved.provider.model, "overlay-model",
+            "overlay should win"
+        );
     }
 }

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
 
 // ---------------------------------------------------------------------------
@@ -165,6 +165,8 @@ pub struct ToolConfig {
     pub shell_timeout_secs: u64,
     /// Output truncation threshold (bytes) applied to all tool results.
     pub max_output_bytes: usize,
+    /// Optional plugin directory scanned at gateway startup.
+    pub plugin_directory: Option<String>,
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
     /// Tool permission rules — controls which tools an agent may invoke.
@@ -178,6 +180,7 @@ impl Default for ToolConfig {
         Self {
             shell_timeout_secs: 30,
             max_output_bytes: 100_000,
+            plugin_directory: None,
             search: None,
             permissions: ToolPermissionConfig::default(),
         }
@@ -236,7 +239,7 @@ impl PricingConfig {
     /// Returns `None` if no pricing is configured for `model`.
     pub fn compute_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> Option<i64> {
         let pricing = self.models.get(model)?;
-        let input_cost  = (input_tokens  as i64) * pricing.input_price_per_mtok  / 1_000_000;
+        let input_cost = (input_tokens as i64) * pricing.input_price_per_mtok / 1_000_000;
         let output_cost = (output_tokens as i64) * pricing.output_price_per_mtok / 1_000_000;
         Some(input_cost + output_cost)
     }
@@ -340,7 +343,6 @@ impl RequireApprovalEntry {
         }
     }
 }
-
 
 // Re-exported from swage-core — single definition for both config and wire format.
 // The core type uses `serde(rename_all = "snake_case")` which is equivalent to
@@ -481,11 +483,11 @@ pub enum HierarchyLevel {
 impl std::fmt::Display for HierarchyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
-            Self::Global  => "Global",
-            Self::Lens    => "Lens",
+            Self::Global => "Global",
+            Self::Lens => "Lens",
             Self::Project => "Project",
-            Self::Team    => "Team",
-            Self::Agent   => "Agent",
+            Self::Team => "Team",
+            Self::Agent => "Agent",
         };
         write!(f, "{name}")
     }
@@ -558,6 +560,7 @@ mod tests {
         let cfg = ToolConfig::default();
         assert_eq!(cfg.shell_timeout_secs, 30);
         assert_eq!(cfg.max_output_bytes, 100_000);
+        assert_eq!(cfg.plugin_directory, None);
         assert_eq!(cfg.search, None);
     }
 
@@ -578,6 +581,7 @@ mod tests {
         let cfg = ResolvedConfig::default();
         assert_eq!(cfg.tools.shell_timeout_secs, 30);
         assert_eq!(cfg.tools.max_output_bytes, 100_000);
+        assert_eq!(cfg.tools.plugin_directory, None);
         assert_eq!(cfg.tools.search, None);
     }
 
@@ -644,7 +648,10 @@ mod tests {
         // input:  1_000_000 * 300  / 1_000_000 = 300
         // output:   500_000 * 1500 / 1_000_000 = 750
         // total: 1050
-        assert_eq!(cfg.compute_cost("test-model", 1_000_000, 500_000), Some(1050));
+        assert_eq!(
+            cfg.compute_cost("test-model", 1_000_000, 500_000),
+            Some(1050)
+        );
     }
 
     #[test]
@@ -652,7 +659,10 @@ mod tests {
         let mut cfg = PricingConfig::default();
         cfg.models.insert(
             "m".to_string(),
-            ModelPricing { input_price_per_mtok: 300, output_price_per_mtok: 1500 },
+            ModelPricing {
+                input_price_per_mtok: 300,
+                output_price_per_mtok: 1500,
+            },
         );
         assert_eq!(cfg.compute_cost("m", 0, 0), Some(0));
     }
@@ -681,7 +691,8 @@ mod tests {
     fn observability_config_toml_round_trip() {
         let original = ObservabilityConfig { force_on: true };
         let serialised = toml::to_string(&original).expect("serialise failed");
-        let restored: ObservabilityConfig = toml::from_str(&serialised).expect("deserialise failed");
+        let restored: ObservabilityConfig =
+            toml::from_str(&serialised).expect("deserialise failed");
         assert!(restored.force_on);
     }
 
@@ -691,7 +702,9 @@ mod tests {
     fn require_approval_entry_from_plain_string() {
         // TOML requires top-level tables, so use a wrapper for array entries.
         #[derive(Debug, Deserialize)]
-        struct W { items: Vec<RequireApprovalEntry> }
+        struct W {
+            items: Vec<RequireApprovalEntry>,
+        }
         let w: W = toml::from_str(r#"items = ["write_file"]"#).unwrap();
         assert_eq!(w.items.len(), 1);
         assert_eq!(w.items[0].tool_name(), "write_file");
@@ -713,7 +726,12 @@ timeout_policy = "interrupt"
 "#;
         let entry: RequireApprovalEntry = toml::from_str(toml_str).unwrap();
         assert_eq!(entry.tool_name(), "execute_command");
-        if let RequireApprovalEntry::WithOptions { timeout, timeout_policy, .. } = &entry {
+        if let RequireApprovalEntry::WithOptions {
+            timeout,
+            timeout_policy,
+            ..
+        } = &entry
+        {
             assert_eq!(*timeout, Some(600));
             assert_eq!(*timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
         } else {
@@ -729,7 +747,12 @@ timeout_policy = "reject"
 "#;
         let entry: RequireApprovalEntry = toml::from_str(toml_str).unwrap();
         assert_eq!(entry.tool_name(), "deploy");
-        if let RequireApprovalEntry::WithOptions { timeout, timeout_policy, .. } = &entry {
+        if let RequireApprovalEntry::WithOptions {
+            timeout,
+            timeout_policy,
+            ..
+        } = &entry
+        {
             assert!(timeout.is_none());
             assert_eq!(*timeout_policy, Some(ApprovalTimeoutPolicy::Reject));
         } else {
@@ -904,6 +927,7 @@ timeout_policy = "reject"
         let original = ToolConfig {
             shell_timeout_secs: 60,
             max_output_bytes: 50_000,
+            plugin_directory: Some("plugins".into()),
             search: None,
             permissions: ToolPermissionConfig {
                 allow: vec!["echo".into()],
@@ -950,7 +974,9 @@ timeout_policy = "reject"
     #[test]
     fn output_config_toml_round_trip_with_schema() {
         let original = OutputConfig {
-            schema: Some(serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}})),
+            schema: Some(
+                serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+            ),
             max_retries: 5,
         };
         // OutputConfig uses JSON for schema — round-trip through JSON (TOML can't
@@ -981,9 +1007,7 @@ timeout_policy = "reject"
             allow: vec!["*".into()],
             deny: vec![],
             bundles: HashMap::new(),
-            require_approval: vec![
-                RequireApprovalEntry::Simple("write_file".to_string()),
-            ],
+            require_approval: vec![RequireApprovalEntry::Simple("write_file".to_string())],
         };
         let serialised = toml::to_string(&original).expect("serialise failed");
         let restored: ToolPermissionConfig =
@@ -999,13 +1023,11 @@ timeout_policy = "reject"
             allow: vec!["*".into()],
             deny: vec![],
             bundles: HashMap::new(),
-            require_approval: vec![
-                RequireApprovalEntry::WithOptions {
-                    tool: "execute_command".to_string(),
-                    timeout: Some(600),
-                    timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
-                },
-            ],
+            require_approval: vec![RequireApprovalEntry::WithOptions {
+                tool: "execute_command".to_string(),
+                timeout: Some(600),
+                timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
+            }],
         };
         let json = serde_json::to_string(&original).expect("serialise failed");
         let restored: ToolPermissionConfig =
@@ -1044,7 +1066,12 @@ timeout_policy = "reject"
         let json = r#"{"tool":"execute_command","timeout":600,"timeout_policy":"interrupt"}"#;
         let entry: RequireApprovalEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.tool_name(), "execute_command");
-        if let RequireApprovalEntry::WithOptions { timeout, timeout_policy, .. } = &entry {
+        if let RequireApprovalEntry::WithOptions {
+            timeout,
+            timeout_policy,
+            ..
+        } = &entry
+        {
             assert_eq!(*timeout, Some(600));
             assert_eq!(*timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
         } else {
@@ -1058,7 +1085,12 @@ timeout_policy = "reject"
         let json = r#"{"tool":"shell"}"#;
         let entry: RequireApprovalEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.tool_name(), "shell");
-        if let RequireApprovalEntry::WithOptions { timeout, timeout_policy, .. } = entry {
+        if let RequireApprovalEntry::WithOptions {
+            timeout,
+            timeout_policy,
+            ..
+        } = entry
+        {
             assert!(timeout.is_none());
             assert!(timeout_policy.is_none());
         } else {
@@ -1124,7 +1156,10 @@ timeout_policy = "reject"
     #[test]
     fn resolved_config_default_includes_hitl_defaults() {
         let cfg = ResolvedConfig::default();
-        assert_eq!(cfg.hitl.timeout, 300, "default HITL timeout should be 300 seconds");
+        assert_eq!(
+            cfg.hitl.timeout, 300,
+            "default HITL timeout should be 300 seconds"
+        );
         assert_eq!(
             cfg.hitl.timeout_policy,
             ApprovalTimeoutPolicy::Reject,
@@ -1137,18 +1172,15 @@ timeout_policy = "reject"
         let mut models = std::collections::HashMap::new();
         models.insert(
             "my-model".to_string(),
-            ModelPricing { input_price_per_mtok: 100, output_price_per_mtok: 200 },
+            ModelPricing {
+                input_price_per_mtok: 100,
+                output_price_per_mtok: 200,
+            },
         );
         let original = PricingConfig { models };
         let serialised = toml::to_string(&original).expect("serialise failed");
         let restored: PricingConfig = toml::from_str(&serialised).expect("deserialise failed");
-        assert_eq!(
-            restored.models["my-model"].input_price_per_mtok,
-            100,
-        );
-        assert_eq!(
-            restored.models["my-model"].output_price_per_mtok,
-            200,
-        );
+        assert_eq!(restored.models["my-model"].input_price_per_mtok, 100,);
+        assert_eq!(restored.models["my-model"].output_price_per_mtok, 200,);
     }
 }

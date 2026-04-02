@@ -15,6 +15,7 @@ pub mod url_fetch;
 pub mod python_execute;
 pub mod python_dispatch;
 pub mod memory;
+pub mod plugin;
 
 // Re-export the canonical Tool trait, ToolRegistry, and ToolDispatcher from swage-tool.
 // These replace the local definitions that previously lived in this file.
