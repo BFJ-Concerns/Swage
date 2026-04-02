@@ -63,6 +63,7 @@ pub mod skill;
 pub mod startup;
 pub mod state;
 pub mod subscription;
+pub mod topology;
 pub mod tool;
 pub mod tool_executor;
 pub mod turn;

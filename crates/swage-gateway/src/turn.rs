@@ -60,7 +60,7 @@ use crate::{
 /// When instructions are empty the `PromptsElement` produces no messages.
 /// When `memory_content` is empty the `MemoryElement` produces no messages
 /// but is still present in the vec so custom assemblies can reference it.
-fn build_assembly_elements(
+pub(crate) fn build_assembly_elements(
     instructions: &str,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
@@ -96,7 +96,7 @@ fn build_assembly_elements(
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
+pub(crate) fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
     let memory_dir = swage_root
         .join("projects")
         .join(project_slug)
@@ -134,7 +134,7 @@ fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
     parts.join("\n\n")
 }
 
-fn build_approval_registrar(
+pub(crate) fn build_approval_registrar(
     approval_channels: Arc<
         std::sync::Mutex<
             std::collections::HashMap<
@@ -198,7 +198,7 @@ fn build_permission_config(
     }
 }
 
-fn build_gateway_dispatcher(
+pub(crate) fn build_gateway_dispatcher(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
@@ -226,7 +226,7 @@ fn build_gateway_dispatcher(
     )))
 }
 
-fn build_agent_config(
+pub(crate) fn build_agent_config(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
@@ -239,13 +239,13 @@ fn build_agent_config(
 }
 
 #[derive(Clone)]
-struct GatewayDelegationHandler {
+pub(crate) struct GatewayDelegationHandler {
     state: AppState,
     active_delegations: swage_agent::ActiveDelegations,
 }
 
 impl GatewayDelegationHandler {
-    fn new(state: AppState) -> Self {
+    pub(crate) fn new(state: AppState) -> Self {
         Self {
             state,
             active_delegations: swage_agent::active_delegations(),

@@ -21,6 +21,7 @@ swage-safety = { path = "../swage-safety" }
 swage-context = { path = "../swage-context" }
 swage-client = { path = "../swage-client" }
 swage-tui = { path = "../swage-tui" }
+swage-topology = { path = "../swage-topology" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }

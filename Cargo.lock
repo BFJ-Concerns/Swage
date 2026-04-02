@@ -2692,6 +2692,7 @@ dependencies = [
  "swage-sandbox",
  "swage-storage",
  "swage-tool",
+ "swage-topology",
  "swage-tui",
  "tempfile",
  "thiserror 2.0.18",

@@ -1,0 +1,1093 @@
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use swage_agent::{AgentBuilder, AgentError, AgentEvent, TurnRequest};
+use swage_context::tokeniser::TiktokenTokeniser;
+use swage_core::{ChatMessage, Role, StorageError};
+use swage_storage::model::{
+    NewEdgeEvaluation, NewMessage, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
+    NewTopologyRun, NodeExecutionState, Team, TopologyRunState,
+};
+use swage_storage::store::ThreadStore;
+use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind};
+
+use crate::state::AppState;
+use crate::turn::{
+    GatewayDelegationHandler, build_agent_config, build_assembly_elements,
+    build_gateway_dispatcher, load_project_memory,
+};
+use crate::websocket::ServerEvent;
+
+#[derive(Debug, Error)]
+pub enum TopologyEngineError {
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
+    Agent(#[from] AgentError),
+    #[error("project {project_id} for team {team_id} was not found")]
+    TeamProjectMissing { team_id: Uuid, project_id: Uuid },
+    #[error("session {session_id} was not found")]
+    SessionMissing { session_id: Uuid },
+    #[error("session {session_id} does not belong to team project {project_id}")]
+    SessionProjectMismatch { session_id: Uuid, project_id: Uuid },
+    #[error("topology graph is invalid at runtime: {0}")]
+    InvalidGraph(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologyExecutionRequest {
+    pub team: Team,
+    pub graph: TopologyGraph,
+    pub initial_input: serde_json::Value,
+    pub session_id: Option<Uuid>,
+    pub source_turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalNodeResult {
+    pub node_id: String,
+    pub output_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologyExecutionResult {
+    pub topology_run_id: Uuid,
+    pub session_id: Uuid,
+    pub final_output: serde_json::Value,
+    pub terminal_results: Vec<TerminalNodeResult>,
+}
+
+#[derive(Clone)]
+pub struct TopologyExecutor {
+    state: AppState,
+}
+
+impl TopologyExecutor {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+
+    pub async fn execute(
+        &self,
+        request: TopologyExecutionRequest,
+    ) -> Result<TopologyExecutionResult, TopologyEngineError> {
+        let project = self
+            .state
+            .project_store
+            .get(request.team.project_id)
+            .await?
+            .ok_or(TopologyEngineError::TeamProjectMissing {
+                team_id: request.team.id,
+                project_id: request.team.project_id,
+            })?;
+
+        let session_id = self
+            .ensure_run_session(&request.team, request.session_id)
+            .await?;
+
+        let topology_run = self
+            .state
+            .storage
+            .create_topology_run(NewTopologyRun {
+                team_id: request.team.id,
+                session_id,
+                source_turn_id: request.source_turn_id,
+                state: TopologyRunState::Running,
+                final_output: None,
+                error_message: None,
+            })
+            .await?;
+
+        let node_map: HashMap<String, TopologyNode> = request
+            .graph
+            .nodes
+            .iter()
+            .cloned()
+            .map(|node| (node.id.clone(), node))
+            .collect();
+        let concurrency_limit = request
+            .graph
+            .budget
+            .max_concurrency
+            .map(|value| value.max(1) as usize)
+            .unwrap_or(usize::MAX);
+        let run_cancel_token = CancellationToken::new();
+        let mut visit_counts: HashMap<String, u32> = HashMap::new();
+        let mut pending = VecDeque::from([PendingActivation {
+            node_id: request.graph.entry_node_id.clone(),
+            input_json: request.initial_input,
+        }]);
+        let mut active = JoinSet::new();
+        let mut terminal_results = Vec::new();
+        let mut run_failed = None::<String>;
+        let mut total_tokens_consumed = 0u64;
+
+        while !pending.is_empty() || !active.is_empty() {
+            while active.len() < concurrency_limit && !pending.is_empty() {
+                let activation = pending.pop_front().expect("pending activation exists");
+                let node = node_map
+                    .get(&activation.node_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        TopologyEngineError::InvalidGraph(format!(
+                            "node '{}' disappeared during execution",
+                            activation.node_id
+                        ))
+                    })?;
+
+                let visit_count = visit_counts.entry(node.id.clone()).or_default();
+                *visit_count += 1;
+                if let Some(limit) = node.iteration_limit {
+                    if *visit_count > limit {
+                        run_failed = Some(format!(
+                            "node '{}' exceeded iteration limit {}",
+                            node.id, limit
+                        ));
+                        run_cancel_token.cancel();
+                        break;
+                    }
+                }
+
+                let state = self.state.clone();
+                let team = request.team.clone();
+                let project = project.clone();
+                let topology_run_id = topology_run.id;
+                let cancel_token = run_cancel_token.child_token();
+                active.spawn(async move {
+                    execute_node(
+                        state,
+                        project,
+                        team,
+                        session_id,
+                        topology_run_id,
+                        node,
+                        activation.input_json,
+                        cancel_token,
+                    )
+                    .await
+                });
+            }
+
+            if run_failed.is_some() {
+                break;
+            }
+
+            let Some(joined) = active.join_next().await else {
+                continue;
+            };
+
+            let completed = match joined {
+                Ok(result) => match result {
+                    Ok(output) => output,
+                    Err(error) => {
+                        run_failed = Some(error.to_string());
+                        run_cancel_token.cancel();
+                        break;
+                    }
+                },
+                Err(join_error) => {
+                    run_failed = Some(format!("topology node task panicked: {join_error}"));
+                    run_cancel_token.cancel();
+                    break;
+                }
+            };
+
+            if let Some(max_total_tokens) = request.graph.budget.max_total_tokens {
+                let node_tokens = completed.input_tokens as u64 + completed.output_tokens as u64;
+                total_tokens_consumed = total_tokens_consumed
+                    .checked_add(node_tokens)
+                    .ok_or_else(|| {
+                        TopologyEngineError::InvalidGraph(
+                            "node token accounting overflowed unexpectedly".into(),
+                        )
+                    })?;
+
+                if total_tokens_consumed > max_total_tokens {
+                    run_failed = Some(format!(
+                        "topology token budget exceeded: {} > {}",
+                        total_tokens_consumed, max_total_tokens
+                    ));
+                    run_cancel_token.cancel();
+                    break;
+                }
+            }
+
+            let outgoing_edges: Vec<_> = request
+                .graph
+                .edges
+                .iter()
+                .filter(|edge| edge.source_node_id == completed.node_id)
+                .cloned()
+                .collect();
+
+            let next_activations = match evaluate_edges(
+                &self.state,
+                topology_run.id,
+                &request.graph,
+                &completed,
+                outgoing_edges,
+            )
+            .await
+            {
+                Ok(next_activations) => next_activations,
+                Err(error) => {
+                    run_failed = Some(error.to_string());
+                    run_cancel_token.cancel();
+                    break;
+                }
+            };
+
+            if next_activations.is_empty() {
+                terminal_results.push(TerminalNodeResult {
+                    node_id: completed.node_id,
+                    output_json: completed.output_json,
+                });
+            } else {
+                for activation in next_activations {
+                    pending.push_back(activation);
+                }
+            }
+        }
+
+        run_cancel_token.cancel();
+        while active.join_next().await.is_some() {}
+
+        if let Some(error_message) = run_failed {
+            self.state
+                .storage
+                .update_topology_run(
+                    topology_run.id,
+                    TopologyRunState::Failed,
+                    None,
+                    Some(&error_message),
+                )
+                .await?;
+            return Err(TopologyEngineError::InvalidGraph(error_message));
+        }
+
+        let final_output = match terminal_results.as_slice() {
+            [single] => single.output_json.clone(),
+            many => serde_json::Value::Array(
+                many.iter()
+                    .map(|result| {
+                        serde_json::json!({
+                            "node_id": result.node_id,
+                            "output": result.output_json,
+                        })
+                    })
+                    .collect(),
+            ),
+        };
+
+        self.state
+            .storage
+            .update_topology_run(
+                topology_run.id,
+                TopologyRunState::Completed,
+                Some(&final_output),
+                None,
+            )
+            .await?;
+
+        Ok(TopologyExecutionResult {
+            topology_run_id: topology_run.id,
+            session_id,
+            final_output,
+            terminal_results,
+        })
+    }
+
+    async fn ensure_run_session(
+        &self,
+        team: &Team,
+        session_id: Option<Uuid>,
+    ) -> Result<Uuid, TopologyEngineError> {
+        match session_id {
+            Some(session_id) => {
+                let session = self
+                    .state
+                    .storage
+                    .get_session(session_id)
+                    .await?
+                    .ok_or(TopologyEngineError::SessionMissing { session_id })?;
+                if session.project_id != team.project_id {
+                    return Err(TopologyEngineError::SessionProjectMismatch {
+                        session_id,
+                        project_id: team.project_id,
+                    });
+                }
+                Ok(session_id)
+            }
+            None => Ok(self
+                .state
+                .storage
+                .create_session(NewSession {
+                    project_id: team.project_id,
+                    agent_id: team.entry_agent_id.clone(),
+                })
+                .await?
+                .id),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingActivation {
+    node_id: String,
+    input_json: serde_json::Value,
+}
+
+#[derive(Debug)]
+struct NodeCompletion {
+    node_id: String,
+    node_execution_id: Uuid,
+    output_json: serde_json::Value,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+async fn execute_node(
+    state: AppState,
+    project: swage_storage::model::Project,
+    team: Team,
+    session_id: Uuid,
+    topology_run_id: Uuid,
+    node: TopologyNode,
+    input_json: serde_json::Value,
+    cancel_token: CancellationToken,
+) -> Result<NodeCompletion, TopologyEngineError> {
+    let node_execution = state
+        .storage
+        .create_node_execution(NewNodeExecution {
+            topology_run_id,
+            node_id: node.id.clone(),
+            node_kind: match node.kind {
+                TopologyNodeKind::Llm => "llm".into(),
+                TopologyNodeKind::Deterministic => "deterministic".into(),
+                TopologyNodeKind::Continuation => "continuation".into(),
+            },
+            agent_id: node.agent_id.clone(),
+            task_name: node.task_name.clone(),
+            state: NodeExecutionState::Running,
+            input_json: Some(input_json.clone()),
+            output_json: None,
+            error_message: None,
+        })
+        .await?;
+
+    let result = match node.kind {
+        TopologyNodeKind::Deterministic => execute_deterministic_node(&node, &input_json),
+        TopologyNodeKind::Llm | TopologyNodeKind::Continuation => {
+            let agent_id = node
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| team.entry_agent_id.clone());
+            execute_agent_node(
+                &state,
+                &project,
+                &team,
+                session_id,
+                &node,
+                &agent_id,
+                &input_json,
+                cancel_token,
+            )
+            .await
+        }
+    };
+
+    match result {
+        Ok(node_result) => {
+            state
+                .storage
+                .update_node_execution(
+                    node_execution.id,
+                    NodeExecutionState::Completed,
+                    Some(&node_result.output_json),
+                    None,
+                )
+                .await?;
+
+            for retry in node_result.retries {
+                state
+                    .storage
+                    .create_node_retry(NewNodeRetry {
+                        node_execution_id: node_execution.id,
+                        attempt_number: retry.attempt_number,
+                        failure_kind: retry.failure_kind,
+                        error_message: retry.error_message,
+                        recovery_guidance: retry.recovery_guidance,
+                    })
+                    .await?;
+            }
+
+            Ok(NodeCompletion {
+                node_id: node.id,
+                node_execution_id: node_execution.id,
+                output_json: node_result.output_json,
+                input_tokens: node_result.input_tokens,
+                output_tokens: node_result.output_tokens,
+            })
+        }
+        Err(error) => {
+            state
+                .storage
+                .update_node_execution(
+                    node_execution.id,
+                    NodeExecutionState::Failed,
+                    None,
+                    Some(&error.to_string()),
+                )
+                .await?;
+            Err(error)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AgentNodeResult {
+    output_json: serde_json::Value,
+    input_tokens: u32,
+    output_tokens: u32,
+    retries: Vec<NodeRetryRecord>,
+}
+
+#[derive(Debug)]
+struct NodeRetryRecord {
+    attempt_number: i32,
+    failure_kind: String,
+    error_message: String,
+    recovery_guidance: Option<String>,
+}
+
+async fn execute_agent_node(
+    state: &AppState,
+    project: &swage_storage::model::Project,
+    team: &Team,
+    session_id: Uuid,
+    node: &TopologyNode,
+    agent_id: &str,
+    input_json: &serde_json::Value,
+    cancel_token: CancellationToken,
+) -> Result<AgentNodeResult, TopologyEngineError> {
+    let thread = ThreadStore::create(
+        state.storage.as_ref(),
+        NewThread {
+            session_id,
+            agent_id: agent_id.to_string(),
+        },
+    )
+    .await?;
+
+    state
+        .storage
+        .create_message(NewMessage {
+            thread_id: thread.id,
+            role: Role::User.to_string(),
+            content: render_node_input(node, input_json),
+            position: 0,
+            agent_id: agent_id.to_string(),
+        })
+        .await?;
+
+    let config = resolve_node_config(state, project, team, agent_id);
+    let stored_history = state.storage.list_messages_by_thread(thread.id).await?;
+    let history_messages: Vec<ChatMessage> = stored_history
+        .into_iter()
+        .map(|message| {
+            let role = match message.role.as_str() {
+                "assistant" => Role::Assistant,
+                "system" => Role::System,
+                _ => Role::User,
+            };
+            ChatMessage::new(role, message.content)
+        })
+        .collect();
+
+    let swage_root_opt: Option<PathBuf> = swage_config::discovery::resolve_root().ok();
+    let memory_content = swage_root_opt
+        .as_deref()
+        .map(|root| load_project_memory(root, &project.slug))
+        .unwrap_or_default();
+
+    let assembly_search_paths: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
+        .as_ref()
+        .map(|root| {
+            let project_dir = root.join("projects").join(&project.slug);
+            let agent_dir = project_dir.join("agents").join(agent_id);
+            let mut levels = vec![
+                (swage_config::HierarchyLevel::Global, root.clone()),
+                (swage_config::HierarchyLevel::Project, project_dir),
+            ];
+            if agent_dir.is_dir() {
+                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
+            }
+            levels
+        })
+        .unwrap_or_default();
+    let search_level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = assembly_search_paths
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect();
+
+    let elements = build_assembly_elements(
+        &config.instructions,
+        vec![],
+        history_messages,
+        memory_content,
+        project.name.clone(),
+    );
+    let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+    let output = swage_context::assembly::assemble(
+        &elements,
+        &config.context,
+        &tokeniser,
+        &search_level_refs,
+        state.provider.as_ref(),
+        Some(&swage_python::ConcreteAssemblyRunner),
+    )
+    .await;
+
+    let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let dispatcher = build_gateway_dispatcher(state, &config, silent_ws_tx);
+    let agent_config = build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
+    let agent = AgentBuilder::new()
+        .config(agent_config)
+        .provider(state.provider.clone())
+        .storage(state.storage.clone())
+        .tool_dispatcher(dispatcher)
+        .approval_registrar(crate::turn::build_approval_registrar(
+            state.approval_channels.clone(),
+        ))
+        .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
+        .project_id(project.id)
+        .context_transfer_config(config.communication.context_transfer.clone())
+        .build()?;
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let outbound = agent
+        .process_turn_streaming(
+            TurnRequest {
+                session_id,
+                thread_id: thread.id,
+                user_message: render_node_input(node, input_json),
+                assembled_context: output.messages,
+                parent_turn_id: None,
+                cancellation_token: cancel_token,
+            },
+            event_tx,
+        )
+        .await;
+
+    let mut turn_id = None;
+    let mut retries = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            AgentEvent::TurnStarted { turn_id: current_turn_id } => turn_id = Some(current_turn_id),
+            AgentEvent::OutputSchemaRetry { attempt, errors, .. } => {
+                retries.push(NodeRetryRecord {
+                    attempt_number: attempt as i32,
+                    failure_kind: "output_schema".into(),
+                    error_message: errors
+                        .into_iter()
+                        .map(|error| {
+                            if error.path.is_empty() {
+                                error.message
+                            } else {
+                                format!("{}: {}", error.path, error.message)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    recovery_guidance: Some("Return valid JSON matching the node schema".into()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let outbound = outbound?;
+    if let Some(turn_id) = turn_id {
+        if let Some(ref output) = outbound.structured_output {
+            state.storage.update_structured_output(turn_id, output).await?;
+        }
+        if let Some(cost) = state.config.pricing.compute_cost(
+            &config.provider.model,
+            outbound.input_tokens,
+            outbound.output_tokens,
+        ) {
+            state.storage.update_cost(turn_id, cost).await?;
+        }
+    }
+    state.storage.update_activity(session_id).await?;
+
+    Ok(AgentNodeResult {
+        output_json: outbound
+            .structured_output
+            .clone()
+            .or_else(|| serde_json::from_str::<serde_json::Value>(&outbound.response).ok())
+            .unwrap_or_else(|| serde_json::json!({ "response": outbound.response })),
+        input_tokens: outbound.input_tokens,
+        output_tokens: outbound.output_tokens,
+        retries,
+    })
+}
+
+fn execute_deterministic_node(
+    node: &TopologyNode,
+    input_json: &serde_json::Value,
+) -> Result<AgentNodeResult, TopologyEngineError> {
+    let handler_name = node
+        .handler_name
+        .as_deref()
+        .ok_or_else(|| TopologyEngineError::InvalidGraph(format!(
+            "deterministic node '{}' is missing a handler_name",
+            node.id
+        )))?;
+
+    let output_json = match handler_name {
+        "identity" => input_json.clone(),
+        "collect-results" => match input_json {
+            serde_json::Value::Array(items) => serde_json::json!({ "results": items }),
+            other => serde_json::json!({ "result": other }),
+        },
+        other => {
+            return Err(TopologyEngineError::InvalidGraph(format!(
+                "unknown deterministic handler '{other}'"
+            )))
+        }
+    };
+
+    Ok(AgentNodeResult {
+        output_json,
+        input_tokens: 0,
+        output_tokens: 0,
+        retries: vec![],
+    })
+}
+
+fn resolve_node_config(
+    state: &AppState,
+    project: &swage_storage::model::Project,
+    team: &Team,
+    agent_id: &str,
+) -> swage_config::ResolvedConfig {
+    swage_config::load_resolved_config_for_team(&project.slug, &team.name, agent_id)
+        .or_else(|_| swage_config::load_resolved_config(&project.slug, agent_id))
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                project = %project.slug,
+                team = %team.name,
+                agent_id,
+                error = %error,
+                "failed to load node config, using startup config"
+            );
+            state.config.clone()
+        })
+}
+
+fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> String {
+    let task_prefix = node
+        .task_name
+        .as_ref()
+        .map(|task_name| format!("Task: {task_name}\n\n"))
+        .unwrap_or_default();
+
+    match input_json {
+        serde_json::Value::String(text) if task_prefix.is_empty() => text.clone(),
+        serde_json::Value::String(text) => format!("{task_prefix}Input:\n{text}"),
+        value => format!(
+            "{task_prefix}Input JSON:\n{}",
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        ),
+    }
+}
+
+async fn evaluate_edges(
+    state: &AppState,
+    topology_run_id: Uuid,
+    graph: &TopologyGraph,
+    completed: &NodeCompletion,
+    edges: Vec<swage_topology::TopologyEdge>,
+) -> Result<Vec<PendingActivation>, TopologyEngineError> {
+    let mut activations = Vec::new();
+    let max_fan_out = graph.budget.max_fan_out.unwrap_or(u32::MAX) as usize;
+
+    for edge in edges {
+        match &edge.routing {
+            EdgeRouting::Unconditional | EdgeRouting::Fork => {
+                state
+                    .storage
+                    .create_edge_evaluation(NewEdgeEvaluation {
+                        topology_run_id,
+                        source_node_execution_id: completed.node_execution_id,
+                        edge_id: edge.id.clone(),
+                        target_node_id: edge.target_node_id.clone(),
+                        condition_expression: None,
+                        matched: true,
+                        payload_json: Some(completed.output_json.clone()),
+                    })
+                    .await?;
+                activations.push(PendingActivation {
+                    node_id: edge.target_node_id.clone(),
+                    input_json: completed.output_json.clone(),
+                });
+            }
+            EdgeRouting::Condition { field_path, equals } => {
+                let actual = extract_field_value(&completed.output_json, field_path);
+                let matched = actual == Some(equals);
+                state
+                    .storage
+                    .create_edge_evaluation(NewEdgeEvaluation {
+                        topology_run_id,
+                        source_node_execution_id: completed.node_execution_id,
+                        edge_id: edge.id.clone(),
+                        target_node_id: edge.target_node_id.clone(),
+                        condition_expression: Some(format!("{field_path} == {equals}")),
+                        matched,
+                        payload_json: actual.cloned(),
+                    })
+                    .await?;
+                if matched {
+                    activations.push(PendingActivation {
+                        node_id: edge.target_node_id.clone(),
+                        input_json: completed.output_json.clone(),
+                    });
+                }
+            }
+            EdgeRouting::FanOut { items_field } => {
+                let Some(items) = extract_field_value(&completed.output_json, items_field)
+                    .and_then(|value| value.as_array())
+                else {
+                    return Err(TopologyEngineError::InvalidGraph(format!(
+                        "fan-out edge '{}' expected array field '{}' at runtime",
+                        edge.id, items_field
+                    )));
+                };
+
+                if items.len() > max_fan_out {
+                    return Err(TopologyEngineError::InvalidGraph(format!(
+                        "fan-out edge '{}' produced {} items, exceeding limit {}",
+                        edge.id,
+                        items.len(),
+                        max_fan_out
+                    )));
+                }
+
+                if items.is_empty() {
+                    state
+                        .storage
+                        .create_edge_evaluation(NewEdgeEvaluation {
+                            topology_run_id,
+                            source_node_execution_id: completed.node_execution_id,
+                            edge_id: edge.id.clone(),
+                            target_node_id: edge.target_node_id.clone(),
+                            condition_expression: Some(format!("fan_out {items_field}")),
+                            matched: false,
+                            payload_json: Some(serde_json::Value::Array(vec![])),
+                        })
+                        .await?;
+                }
+
+                for item in items {
+                    state
+                        .storage
+                        .create_edge_evaluation(NewEdgeEvaluation {
+                            topology_run_id,
+                            source_node_execution_id: completed.node_execution_id,
+                            edge_id: edge.id.clone(),
+                            target_node_id: edge.target_node_id.clone(),
+                            condition_expression: Some(format!("fan_out {items_field}")),
+                            matched: true,
+                            payload_json: Some(item.clone()),
+                        })
+                        .await?;
+                    activations.push(PendingActivation {
+                        node_id: edge.target_node_id.clone(),
+                        input_json: item.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(activations)
+}
+
+fn extract_field_value<'a>(
+    value: &'a serde_json::Value,
+    field_path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in field_path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+
+    use swage_storage::model::{NewProject, NewTeam};
+    use swage_storage::store::ProjectStore;
+    use swage_storage::store::TeamStore;
+
+    use super::*;
+    use crate::lifecycle::ActivityTracker;
+    use crate::turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider};
+
+    fn make_state(provider: Arc<dyn swage_provider::LlmProvider>) -> (AppState, Arc<MockStorage>) {
+        let storage = Arc::new(MockStorage::new());
+        let (broadcast, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            provider,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            sandbox: None,
+            activity_tracker: Arc::new(ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: CancellationToken::new(),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        };
+        (state, storage)
+    }
+
+    fn schema(properties: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+        })
+    }
+
+    #[tokio::test]
+    async fn executes_conditional_topology_and_persists_trace() {
+        let provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"decision\":\"review\",\"draft\":\"hello\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 6,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"result\":\"approved\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 8,
+                    output_tokens: 4,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+        ]));
+        let (state, storage) = make_state(provider);
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "topology-project".into(),
+                slug: "topology-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "analysis".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into(), "reviewer".into()],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(4),
+                max_concurrency: Some(2),
+                max_total_tokens: Some(100),
+            },
+            nodes: vec![
+                TopologyNode {
+                    id: "plan".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("planner".into()),
+                    task_name: Some("draft-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "decision": {"type": "string"},
+                        "draft": {"type": "string"}
+                    }))),
+                    iteration_limit: None,
+                },
+                TopologyNode {
+                    id: "review".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("reviewer".into()),
+                    task_name: Some("review-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "result": {"type": "string"}
+                    }))),
+                    iteration_limit: None,
+                },
+            ],
+            edges: vec![swage_topology::TopologyEdge {
+                id: "plan-to-review".into(),
+                source_node_id: "plan".into(),
+                target_node_id: "review".into(),
+                routing: EdgeRouting::Condition {
+                    field_path: "decision".into(),
+                    equals: serde_json::json!("review"),
+                },
+            }],
+        };
+
+        let executor = TopologyExecutor::new(state.clone());
+        let result = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_output, serde_json::json!({"result": "approved"}));
+        let runs = state.storage.list_topology_runs_by_team(team.id).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Completed);
+        let executions = state
+            .storage
+            .list_node_executions_by_run(result.topology_run_id)
+            .await
+            .unwrap();
+        assert_eq!(executions.len(), 2);
+        let edges = state
+            .storage
+            .list_edge_evaluations_by_run(result.topology_run_id)
+            .await
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(edges[0].matched);
+    }
+
+    #[tokio::test]
+    async fn fan_out_limit_failure_marks_run_failed() {
+        let provider = Arc::new(MockProvider::new(vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"items\":[1,2,3]}".into(),
+            },
+            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+            }),
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]));
+        let (state, storage) = make_state(provider);
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "fanout-project".into(),
+                slug: "fanout-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "fanout-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into(), "worker".into()],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(2),
+                max_concurrency: Some(2),
+                max_total_tokens: Some(100),
+            },
+            nodes: vec![
+                TopologyNode {
+                    id: "plan".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("planner".into()),
+                    task_name: Some("draft-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "items": {"type": "array"}
+                    }))),
+                    iteration_limit: None,
+                },
+                TopologyNode {
+                    id: "worker".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("worker".into()),
+                    task_name: Some("review-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "result": {"type": "string"}
+                    }))),
+                    iteration_limit: None,
+                },
+            ],
+            edges: vec![swage_topology::TopologyEdge {
+                id: "fan".into(),
+                source_node_id: "plan".into(),
+                target_node_id: "worker".into(),
+                routing: EdgeRouting::FanOut {
+                    items_field: "items".into(),
+                },
+            }],
+        };
+
+        let executor = TopologyExecutor::new(state.clone());
+        let error = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect_err("fan-out should fail");
+
+        assert!(error.to_string().contains("fan-out"));
+        let runs = state.storage.list_topology_runs_by_team(team.id).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Failed);
+    }
+}
