@@ -11,6 +11,7 @@ use uuid::Uuid;
 use swage_agent::{AgentBuilder, AgentError, AgentEvent, TurnRequest};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::{ChatMessage, Role, StorageError};
+use swage_hook::{HookEvent, HookRegistry};
 use swage_storage::model::{
     NewEdgeEvaluation, NewMessage, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
     NewTopologyRun, NodeExecutionState, Team, TopologyRunState,
@@ -67,11 +68,20 @@ pub struct TopologyExecutionResult {
 #[derive(Clone)]
 pub struct TopologyExecutor {
     state: AppState,
+    hook_registry: Option<Arc<HookRegistry>>,
 }
 
 impl TopologyExecutor {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            hook_registry: None,
+        }
+    }
+
+    pub fn with_hook_registry(mut self, hook_registry: Arc<HookRegistry>) -> Self {
+        self.hook_registry = Some(hook_registry);
+        self
     }
 
     pub async fn execute(
@@ -104,6 +114,16 @@ impl TopologyExecutor {
                 error_message: None,
             })
             .await?;
+
+        dispatch_hook(
+            self.hook_registry.as_ref(),
+            HookEvent::TopologyStart {
+                topology_run_id: topology_run.id.to_string(),
+                team_id: request.team.id.to_string(),
+                session_id: session_id.to_string(),
+            },
+        )
+        .await;
 
         let node_map: HashMap<String, TopologyNode> = request
             .graph
@@ -160,6 +180,7 @@ impl TopologyExecutor {
                 let project = project.clone();
                 let topology_run_id = topology_run.id;
                 let cancel_token = run_cancel_token.child_token();
+                let hook_registry = self.hook_registry.clone();
                 active.spawn(async move {
                     execute_node(
                         state,
@@ -169,6 +190,7 @@ impl TopologyExecutor {
                         topology_run_id,
                         node,
                         activation.input_json,
+                        hook_registry,
                         cancel_token,
                     )
                     .await
@@ -233,6 +255,7 @@ impl TopologyExecutor {
                 &request.graph,
                 &completed,
                 outgoing_edges,
+                self.hook_registry.as_ref(),
             )
             .await
             {
@@ -269,6 +292,16 @@ impl TopologyExecutor {
                     Some(&error_message),
                 )
                 .await?;
+            dispatch_hook(
+                self.hook_registry.as_ref(),
+                HookEvent::TopologyEnd {
+                    topology_run_id: topology_run.id.to_string(),
+                    team_id: request.team.id.to_string(),
+                    session_id: session_id.to_string(),
+                    success: false,
+                },
+            )
+            .await;
             return Err(TopologyEngineError::InvalidGraph(error_message));
         }
 
@@ -295,6 +328,17 @@ impl TopologyExecutor {
                 None,
             )
             .await?;
+
+        dispatch_hook(
+            self.hook_registry.as_ref(),
+            HookEvent::TopologyEnd {
+                topology_run_id: topology_run.id.to_string(),
+                team_id: request.team.id.to_string(),
+                session_id: session_id.to_string(),
+                success: true,
+            },
+        )
+        .await;
 
         Ok(TopologyExecutionResult {
             topology_run_id: topology_run.id,
@@ -361,6 +405,7 @@ async fn execute_node(
     topology_run_id: Uuid,
     node: TopologyNode,
     input_json: serde_json::Value,
+    hook_registry: Option<Arc<HookRegistry>>,
     cancel_token: CancellationToken,
 ) -> Result<NodeCompletion, TopologyEngineError> {
     let node_execution = state
@@ -381,6 +426,17 @@ async fn execute_node(
             error_message: None,
         })
         .await?;
+
+    dispatch_hook(
+        hook_registry.as_ref(),
+        HookEvent::NodeStart {
+            topology_run_id: topology_run_id.to_string(),
+            node_execution_id: node_execution.id.to_string(),
+            node_id: node.id.clone(),
+            agent_id: node.agent_id.clone(),
+        },
+    )
+    .await;
 
     let result = match node.kind {
         TopologyNodeKind::Deterministic => execute_deterministic_node(&node, &input_json),
@@ -428,6 +484,18 @@ async fn execute_node(
                     .await?;
             }
 
+            dispatch_hook(
+                hook_registry.as_ref(),
+                HookEvent::NodeEnd {
+                    topology_run_id: topology_run_id.to_string(),
+                    node_execution_id: node_execution.id.to_string(),
+                    node_id: node.id.clone(),
+                    success: true,
+                    output: Some(node_result.output_json.clone()),
+                },
+            )
+            .await;
+
             Ok(NodeCompletion {
                 node_id: node.id,
                 node_execution_id: node_execution.id,
@@ -446,6 +514,17 @@ async fn execute_node(
                     Some(&error.to_string()),
                 )
                 .await?;
+            dispatch_hook(
+                hook_registry.as_ref(),
+                HookEvent::NodeEnd {
+                    topology_run_id: topology_run_id.to_string(),
+                    node_execution_id: node_execution.id.to_string(),
+                    node_id: node.id,
+                    success: false,
+                    output: None,
+                },
+            )
+            .await;
             Err(error)
         }
     }
@@ -716,6 +795,7 @@ async fn evaluate_edges(
     graph: &TopologyGraph,
     completed: &NodeCompletion,
     edges: Vec<swage_topology::TopologyEdge>,
+    hook_registry: Option<&Arc<HookRegistry>>,
 ) -> Result<Vec<PendingActivation>, TopologyEngineError> {
     let mut activations = Vec::new();
     let max_fan_out = graph.budget.max_fan_out.unwrap_or(u32::MAX) as usize;
@@ -796,6 +876,17 @@ async fn evaluate_edges(
                         .await?;
                 }
 
+                dispatch_hook(
+                    hook_registry,
+                    HookEvent::FanOutSpawn {
+                        topology_run_id: topology_run_id.to_string(),
+                        source_node_execution_id: completed.node_execution_id.to_string(),
+                        edge_id: edge.id.clone(),
+                        branch_count: items.len() as u32,
+                    },
+                )
+                .await;
+
                 for item in items {
                     state
                         .storage
@@ -814,6 +905,17 @@ async fn evaluate_edges(
                         input_json: item.clone(),
                     });
                 }
+
+                dispatch_hook(
+                    hook_registry,
+                    HookEvent::FanOutCollect {
+                        topology_run_id: topology_run_id.to_string(),
+                        source_node_execution_id: completed.node_execution_id.to_string(),
+                        edge_id: edge.id.clone(),
+                        branch_count: items.len() as u32,
+                    },
+                )
+                .await;
             }
         }
     }
@@ -832,6 +934,13 @@ fn extract_field_value<'a>(
     Some(current)
 }
 
+async fn dispatch_hook(hook_registry: Option<&Arc<HookRegistry>>, event: HookEvent) {
+    let Some(hook_registry) = hook_registry else {
+        return;
+    };
+    let _ = hook_registry.dispatch(event).await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -839,6 +948,8 @@ mod tests {
 
     use tokio::sync::Mutex;
 
+    use async_trait::async_trait;
+    use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
     use swage_storage::model::{NewProject, NewTeam};
     use swage_storage::store::ProjectStore;
     use swage_storage::store::TeamStore;
@@ -872,6 +983,25 @@ mod tests {
             "type": "object",
             "properties": properties,
         })
+    }
+
+    struct RecordingHook {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Hook for RecordingHook {
+        fn name(&self) -> &str {
+            "recording-topology-hook"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            self.events
+                .lock()
+                .unwrap()
+                .push(event.event_name().to_string());
+            HookOutcome::Continue
+        }
     }
 
     #[tokio::test]
@@ -1089,5 +1219,86 @@ mod tests {
         let runs = state.storage.list_topology_runs_by_team(team.id).await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].state, TopologyRunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn topology_lifecycle_hooks_fire_for_run_and_nodes() {
+        let provider = Arc::new(MultiRoundMockProvider::new(vec![vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"result\":\"ok\"}".into(),
+            },
+            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+            }),
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]]));
+        let (state, storage) = make_state(provider);
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "hook-project".into(),
+                slug: "hook-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "hook-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(1),
+                max_concurrency: Some(1),
+                max_total_tokens: Some(20),
+            },
+            nodes: vec![TopologyNode {
+                id: "plan".into(),
+                kind: TopologyNodeKind::Llm,
+                agent_id: Some("planner".into()),
+                task_name: Some("draft-plan".into()),
+                handler_name: None,
+                output_schema: Some(schema(serde_json::json!({
+                    "result": {"type": "string"}
+                }))),
+                iteration_limit: None,
+            }],
+            edges: vec![],
+        };
+
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(RecordingHook {
+            events: recorded.clone(),
+        })));
+
+        let executor = TopologyExecutor::new(state.clone()).with_hook_registry(Arc::new(hook_registry));
+        executor
+            .execute(TopologyExecutionRequest {
+                team,
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let events = recorded.lock().unwrap().clone();
+        assert!(events.contains(&"TopologyStart".to_string()));
+        assert!(events.contains(&"NodeStart".to_string()));
+        assert!(events.contains(&"NodeEnd".to_string()));
+        assert!(events.contains(&"TopologyEnd".to_string()));
     }
 }

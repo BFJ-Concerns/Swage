@@ -305,6 +305,12 @@ impl Hook for RecordingHook {
             HookEvent::PostToolUse { .. } => "PostToolUse",
             HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
+            HookEvent::TopologyStart { .. } => "TopologyStart",
+            HookEvent::TopologyEnd { .. } => "TopologyEnd",
+            HookEvent::NodeStart { .. } => "NodeStart",
+            HookEvent::NodeEnd { .. } => "NodeEnd",
+            HookEvent::FanOutSpawn { .. } => "FanOutSpawn",
+            HookEvent::FanOutCollect { .. } => "FanOutCollect",
         };
         self.events.lock().unwrap().push(label.to_string());
         HookOutcome::Continue
