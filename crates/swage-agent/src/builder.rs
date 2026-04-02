@@ -289,6 +289,25 @@ mod tests {
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
+        async fn create_branch(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<swage_storage::ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+        async fn list_branches_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_branch(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]

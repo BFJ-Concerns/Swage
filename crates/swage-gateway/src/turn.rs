@@ -1195,6 +1195,7 @@ pub(crate) mod tests {
     pub(crate) struct InMemoryDb {
         pub(crate) projects: HashMap<Uuid, Project>,
         pub(crate) teams: HashMap<Uuid, Team>,
+        pub(crate) thread_branches: Vec<swage_storage::ThreadBranch>,
         pub(crate) topology_runs: HashMap<Uuid, TopologyRun>,
         pub(crate) node_executions: HashMap<Uuid, NodeExecution>,
         pub(crate) edge_evaluations: Vec<EdgeEvaluation>,
@@ -1735,6 +1736,95 @@ pub(crate) mod tests {
 
         async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
             Ok(self.db.lock().await.threads.remove(&id).is_some())
+        }
+
+        async fn create_branch(
+            &self,
+            parent_thread_id: Uuid,
+            branched_from_message_id: Uuid,
+        ) -> Result<swage_storage::ThreadBranch, StorageError> {
+            let mut db = self.db.lock().await;
+            let parent = db.threads.get(&parent_thread_id).cloned().ok_or(StorageError::NotFound {
+                entity: "Thread".into(),
+                id: parent_thread_id.to_string(),
+            })?;
+            let source_position = db
+                .messages
+                .iter()
+                .find(|message| message.id == branched_from_message_id && message.thread_id == parent_thread_id)
+                .map(|message| message.position)
+                .ok_or(StorageError::NotFound {
+                    entity: "Message".into(),
+                    id: branched_from_message_id.to_string(),
+                })?;
+            let branch = swage_storage::ThreadBranch {
+                child_thread_id: Uuid::new_v4(),
+                parent_thread_id,
+                branched_from_message_id,
+                created_at: chrono::Utc::now(),
+            };
+            db.threads.insert(
+                branch.child_thread_id,
+                Thread {
+                    id: branch.child_thread_id,
+                    session_id: parent.session_id,
+                    agent_id: parent.agent_id,
+                    state: ThreadState::Idle,
+                    created_at: branch.created_at,
+                    updated_at: branch.created_at,
+                },
+            );
+            let messages_to_copy: Vec<_> = db
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.thread_id == parent_thread_id && message.position <= source_position
+                })
+                .cloned()
+                .collect();
+            for message in messages_to_copy {
+                let message_id = Uuid::new_v4();
+                db.messages.push(swage_storage::Message {
+                    id: message_id,
+                    thread_id: branch.child_thread_id,
+                    role: message.role,
+                    content: message.content,
+                    position: message.position,
+                    agent_id: message.agent_id,
+                    tool_call_id: message.tool_call_id,
+                    tool_name: message.tool_name,
+                    created_at: message.created_at,
+                });
+            }
+            db.thread_branches.push(branch.clone());
+            Ok(branch)
+        }
+
+        async fn list_branches_by_session(
+            &self,
+            session_id: Uuid,
+        ) -> Result<Vec<swage_storage::ThreadBranch>, StorageError> {
+            let db = self.db.lock().await;
+            Ok(db
+                .thread_branches
+                .iter()
+                .filter(|branch| db.threads.get(&branch.child_thread_id).map(|thread| thread.session_id == session_id).unwrap_or(false))
+                .cloned()
+                .collect())
+        }
+
+        async fn get_branch(
+            &self,
+            child_thread_id: Uuid,
+        ) -> Result<Option<swage_storage::ThreadBranch>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .thread_branches
+                .iter()
+                .find(|branch| branch.child_thread_id == child_thread_id)
+                .cloned())
         }
     }
 

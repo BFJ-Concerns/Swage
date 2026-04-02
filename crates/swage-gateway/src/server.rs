@@ -110,6 +110,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/topology-runs/:id",
             get(handlers::get_topology_run),
         )
+        .route(
+            "/api/conversations/:id/branches",
+            get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
+        )
+        .route(
+            "/api/threads/:id",
+            get(handlers::get_thread_detail),
+        )
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))

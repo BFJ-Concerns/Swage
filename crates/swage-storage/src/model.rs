@@ -305,6 +305,15 @@ pub struct Thread {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Branch lineage connecting a child thread to its source thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadBranch {
+    pub child_thread_id: Uuid,
+    pub parent_thread_id: Uuid,
+    pub branched_from_message_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A skill that is currently active for a session.
 ///
 /// Skills are activated by name and persist until explicitly deactivated or

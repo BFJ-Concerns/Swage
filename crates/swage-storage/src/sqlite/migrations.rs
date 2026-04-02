@@ -29,6 +29,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("009_teams", CREATE_TEAMS),
         ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
         ("011_approval_memory", CREATE_APPROVAL_MEMORY),
+        ("012_thread_branches", CREATE_THREAD_BRANCHES),
     ]
 }
 
@@ -334,6 +335,18 @@ const CREATE_APPROVAL_MEMORY: &str = "
     );
 
     CREATE INDEX IF NOT EXISTS idx_approval_memory_session_id ON approval_memory(session_id);
+";
+
+/// Branch lineage for conversation threads.
+const CREATE_THREAD_BRANCHES: &str = "
+    CREATE TABLE IF NOT EXISTS thread_branches (
+        child_thread_id          TEXT NOT NULL PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+        parent_thread_id         TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        branched_from_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        created_at               TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_thread_branches_parent_thread_id ON thread_branches(parent_thread_id);
 ";
 
 /// Apply all pending migrations to `conn`.

@@ -14,11 +14,12 @@ use swage_core::GatewayError;
 use crate::{
     error::ApiError,
     service::{
-        ConversationDetail, ConversationResponse, ConversationService, ConversationSummary,
+        ConversationBranchResponse, ConversationDetail, ConversationResponse,
+        ConversationService, ConversationSummary, ConversationThreadDetail,
         CreateProjectRequest, CreateTeamRequest, ProjectListResponse, ProjectResponse,
         ProjectService, TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
         TopologyRunResponse, TopologyRunService, UpdateProjectRequest, UpdateTeamRequest,
-        CreateTopologyRunRequest,
+        CreateTopologyRunRequest, CreateConversationBranchRequest,
     },
     state::AppState,
 };
@@ -239,6 +240,37 @@ pub async fn delete_team(
     let svc = TeamService::new(state.storage, state.project_store);
     svc.delete_team(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/conversations/:id/branches` — create a branch thread.
+pub async fn create_conversation_branch(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    Json(req): Json<CreateConversationBranchRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let svc = ConversationService::new(state.storage, state.project_store);
+    let resp = svc.create_branch(session_id, req).await?;
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /api/conversations/:id/branches` — list branches in a conversation.
+pub async fn list_conversation_branches(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<Vec<ConversationBranchResponse>>, ApiError> {
+    let svc = ConversationService::new(state.storage, state.project_store);
+    let resp = svc.list_branches(session_id).await?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/threads/:id` — fetch a single thread with messages and lineage.
+pub async fn get_thread_detail(
+    State(state): State<AppState>,
+    Path(thread_id): Path<Uuid>,
+) -> Result<Json<ConversationThreadDetail>, ApiError> {
+    let svc = ConversationService::new(state.storage, state.project_store);
+    let resp = svc.get_thread_detail(thread_id).await?;
+    Ok(Json(resp))
 }
 
 /// `POST /api/teams/:id/runs` — validate and execute a topology run.
@@ -1106,7 +1138,7 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::store::{ProjectStore, SessionStore, Storage, TeamStore};
+    use swage_storage::store::{MessageStore, ProjectStore, SessionStore, Storage, TeamStore};
 
     use super::*;
     use crate::{
@@ -2177,6 +2209,115 @@ def build_topology():
         let body = body_json(resp).await;
         assert_eq!(body["run"]["id"].as_str().unwrap(), run_id);
         assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_conversation_branches_creates_independent_thread_copy() {
+        let (router, storage) = make_router();
+
+        let create_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let create_body = body_json(create_resp).await;
+        let session_id: Uuid = create_body["id"].as_str().unwrap().parse().unwrap();
+
+        let threads = swage_storage::ThreadStore::list_by_session(storage.as_ref(), session_id)
+            .await
+            .unwrap();
+        let parent_thread_id = threads[0].id;
+        let first = storage
+            .create_message(swage_storage::model::NewMessage {
+                thread_id: parent_thread_id,
+                role: "user".into(),
+                content: "hello".into(),
+                position: 0,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_message(swage_storage::model::NewMessage {
+                thread_id: parent_thread_id,
+                role: "assistant".into(),
+                content: "draft".into(),
+                position: 1,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+
+        let branch_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/conversations/{session_id}/branches"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "thread_id": parent_thread_id,
+                            "from_message_id": first.id,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(branch_resp.status(), StatusCode::CREATED);
+        let branch_body = body_json(branch_resp).await;
+        let child_thread_id: Uuid = branch_body["child_thread_id"].as_str().unwrap().parse().unwrap();
+
+        storage
+            .create_message(swage_storage::model::NewMessage {
+                thread_id: parent_thread_id,
+                role: "user".into(),
+                content: "parent continues".into(),
+                position: 2,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+
+        let thread_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/threads/{child_thread_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(thread_resp.status(), StatusCode::OK);
+        let thread_body = body_json(thread_resp).await;
+        let branch_messages = thread_body["messages"].as_array().unwrap();
+        assert_eq!(branch_messages.len(), 1);
+        assert_eq!(branch_messages[0]["content"], "hello");
+
+        let branches_resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/conversations/{session_id}/branches"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(branches_resp.status(), StatusCode::OK);
+        let branches_body = body_json(branches_resp).await;
+        assert_eq!(branches_body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

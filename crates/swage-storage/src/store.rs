@@ -8,7 +8,7 @@ use crate::model::{
     NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage, NewNodeExecution,
     NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
     NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team, Thread,
-    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -266,6 +266,22 @@ pub trait ThreadStore: Send + Sync {
 
     /// Delete a thread. Returns `true` if it existed and was removed.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Create a branch from `parent_thread_id` at `branched_from_message_id`.
+    async fn create_branch(
+        &self,
+        parent_thread_id: Uuid,
+        branched_from_message_id: Uuid,
+    ) -> Result<ThreadBranch, StorageError>;
+
+    /// List branch lineage rows for a session ordered by creation time.
+    async fn list_branches_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ThreadBranch>, StorageError>;
+
+    /// Fetch the branch lineage row for a child thread, if it is a branch.
+    async fn get_branch(&self, child_thread_id: Uuid) -> Result<Option<ThreadBranch>, StorageError>;
 }
 
 /// Store for per-session skill activation state.
@@ -735,6 +751,22 @@ mod tests {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_branch(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+        async fn list_branches_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_branch(&self, _: Uuid) -> Result<Option<ThreadBranch>, StorageError> {
             unimplemented!()
         }
     }

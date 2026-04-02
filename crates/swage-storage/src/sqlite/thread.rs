@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewThread, Thread, ThreadState};
+use crate::model::{NewThread, Thread, ThreadBranch, ThreadState};
 use crate::sqlite::SqliteStorage;
 use crate::store::ThreadStore;
 
@@ -37,6 +37,20 @@ fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         state,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
+    })
+}
+
+fn row_to_branch(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadBranch> {
+    let child_thread_id: String = row.get(0)?;
+    let parent_thread_id: String = row.get(1)?;
+    let branched_from_message_id: String = row.get(2)?;
+    let created: String = row.get(3)?;
+
+    Ok(ThreadBranch {
+        child_thread_id: parse_uuid(&child_thread_id)?,
+        parent_thread_id: parse_uuid(&parent_thread_id)?,
+        branched_from_message_id: parse_uuid(&branched_from_message_id)?,
+        created_at: parse_dt(&created)?,
     })
 }
 
@@ -187,6 +201,140 @@ impl ThreadStore for SqliteStorage {
         })
         .await
     }
+
+    async fn create_branch(
+        &self,
+        parent_thread_id: Uuid,
+        branched_from_message_id: Uuid,
+    ) -> Result<ThreadBranch, StorageError> {
+        let parent = self.get(parent_thread_id).await?.ok_or(StorageError::NotFound {
+            entity: "Thread".into(),
+            id: parent_thread_id.to_string(),
+        })?;
+
+        let source_position = self
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT position FROM messages WHERE id = ?1 AND thread_id = ?2",
+                    params![branched_from_message_id.to_string(), parent_thread_id.to_string()],
+                    |row| row.get::<_, i32>(0),
+                )
+                .optional()
+            })
+            .await?
+            .ok_or(StorageError::NotFound {
+                entity: "Message".into(),
+                id: branched_from_message_id.to_string(),
+            })?;
+
+        self.with_conn(move |conn| {
+            let child_thread_id = Uuid::new_v4();
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+
+            conn.execute(
+                "INSERT INTO threads (id, session_id, agent_id, state, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![
+                    child_thread_id.to_string(),
+                    parent.session_id.to_string(),
+                    &parent.agent_id,
+                    ThreadState::Idle.to_string(),
+                    &now_str,
+                ],
+            )?;
+
+            let mut stmt = conn.prepare(
+                "SELECT role, content, position, agent_id, tool_call_id, tool_name, created_at
+                 FROM messages
+                 WHERE thread_id = ?1 AND position <= ?2
+                 ORDER BY position ASC",
+            )?;
+            let rows = stmt.query_map(
+                params![parent_thread_id.to_string(), source_position],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i32>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )?;
+
+            for row in rows {
+                let (role, content, position, agent_id, tool_call_id, tool_name, created_at) = row?;
+                conn.execute(
+                    "INSERT INTO messages (id, thread_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        child_thread_id.to_string(),
+                        role,
+                        content,
+                        position,
+                        agent_id,
+                        tool_call_id,
+                        tool_name,
+                        created_at,
+                    ],
+                )?;
+            }
+
+            conn.execute(
+                "INSERT INTO thread_branches (child_thread_id, parent_thread_id, branched_from_message_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    child_thread_id.to_string(),
+                    parent_thread_id.to_string(),
+                    branched_from_message_id.to_string(),
+                    &now_str,
+                ],
+            )?;
+
+            Ok(ThreadBranch {
+                child_thread_id,
+                parent_thread_id,
+                branched_from_message_id,
+                created_at: now,
+            })
+        })
+        .await
+    }
+
+    async fn list_branches_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ThreadBranch>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tb.child_thread_id, tb.parent_thread_id, tb.branched_from_message_id, tb.created_at
+                 FROM thread_branches tb
+                 INNER JOIN threads child ON child.id = tb.child_thread_id
+                 WHERE child.session_id = ?1
+                 ORDER BY tb.created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![session_id.to_string()], row_to_branch)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
+
+    async fn get_branch(&self, child_thread_id: Uuid) -> Result<Option<ThreadBranch>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT child_thread_id, parent_thread_id, branched_from_message_id, created_at
+                 FROM thread_branches WHERE child_thread_id = ?1",
+                params![child_thread_id.to_string()],
+                row_to_branch,
+            )
+            .optional()
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,8 +343,9 @@ impl ThreadStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::NewMessage;
     use crate::model::{NewProject, NewSession};
-    use crate::store::{ProjectStore, SessionStore};
+    use crate::store::{MessageStore, ProjectStore, SessionStore};
 
     use super::*;
 
@@ -395,6 +544,78 @@ mod tests {
             matches!(result, Err(StorageError::NotFound { .. })),
             "update on missing thread should return NotFound, got: {result:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_copies_messages_and_records_lineage() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id)).await.unwrap();
+
+        let first = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                role: "user".into(),
+                content: "hello".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                role: "assistant".into(),
+                content: "world".into(),
+                position: 1,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+
+        let branch = storage.create_branch(parent.id, first.id).await.unwrap();
+        let copied = storage.list_messages_by_thread(branch.child_thread_id).await.unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].content, "hello");
+
+        let fetched = storage.get_branch(branch.child_thread_id).await.unwrap().unwrap();
+        assert_eq!(fetched.parent_thread_id, parent.id);
+        assert_eq!(fetched.branched_from_message_id, first.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_branches_by_session_returns_session_branches_only() {
+        let (storage, _, session_id) = make_session().await;
+        let parent_a = ThreadStore::create(&storage, new_thread(session_id)).await.unwrap();
+        let parent_b = ThreadStore::create(&storage, new_thread(session_id)).await.unwrap();
+
+        let msg_a = storage
+            .create_message(NewMessage {
+                thread_id: parent_a.id,
+                role: "user".into(),
+                content: "a".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let msg_b = storage
+            .create_message(NewMessage {
+                thread_id: parent_b.id,
+                role: "user".into(),
+                content: "b".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+
+        let branch_a = storage.create_branch(parent_a.id, msg_a.id).await.unwrap();
+        let branch_b = storage.create_branch(parent_b.id, msg_b.id).await.unwrap();
+
+        let branches = storage.list_branches_by_session(session_id).await.unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().any(|branch| branch.child_thread_id == branch_a.child_thread_id));
+        assert!(branches.iter().any(|branch| branch.child_thread_id == branch_b.child_thread_id));
     }
 
     // --- Cascade delete ---

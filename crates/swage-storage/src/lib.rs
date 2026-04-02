@@ -9,8 +9,8 @@ pub use model::{
     EdgeEvaluation, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
     NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam,
     NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-    NodeRetry, Project, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState,
+    NodeRetry, Project, Session, Team, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{

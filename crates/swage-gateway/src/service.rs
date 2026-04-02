@@ -9,7 +9,7 @@ use serde_json::Value as JsonValue;
 use swage_storage::{
     model::{
         EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry,
-        Team, TopologyRun, TurnState,
+        Team, Thread, ThreadBranch, TopologyRun, TurnState,
     },
     store::{ProjectStore, Storage},
 };
@@ -49,6 +49,34 @@ pub struct ConversationDetail {
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub messages: Vec<MessageView>,
+}
+
+/// Branch metadata for a child thread within a conversation.
+#[derive(Debug, Serialize)]
+pub struct ConversationBranchResponse {
+    pub child_thread_id: Uuid,
+    pub parent_thread_id: Uuid,
+    pub branched_from_message_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request body for creating a branch from a thread/message pair.
+#[derive(Debug, Deserialize)]
+pub struct CreateConversationBranchRequest {
+    pub thread_id: Uuid,
+    pub from_message_id: Uuid,
+}
+
+/// Detailed view of a single thread within a conversation.
+#[derive(Debug, Serialize)]
+pub struct ConversationThreadDetail {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub state: String,
+    pub messages: Vec<MessageView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<ConversationBranchResponse>,
 }
 
 /// A tool call that occurred within a turn, as surfaced by the conversation API.
@@ -353,6 +381,94 @@ impl ConversationService {
 
         self.storage.delete_session(id).await?;
         Ok(())
+    }
+
+    /// Create a branch thread from a message within an existing conversation.
+    pub async fn create_branch(
+        &self,
+        session_id: Uuid,
+        req: CreateConversationBranchRequest,
+    ) -> Result<ConversationBranchResponse, GatewayError> {
+        self.storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+
+        let thread = self
+            .storage
+            .get(req.thread_id)
+            .await?
+            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
+                entity: "thread".into(),
+                id: req.thread_id.to_string(),
+            }))?;
+        if thread.session_id != session_id {
+            return Err(GatewayError::ValidationError(
+                "thread does not belong to this conversation".into(),
+            ));
+        }
+
+        let branch = self
+            .storage
+            .create_branch(req.thread_id, req.from_message_id)
+            .await?;
+
+        Ok(thread_branch_to_response(branch))
+    }
+
+    /// List branches created within a conversation.
+    pub async fn list_branches(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ConversationBranchResponse>, GatewayError> {
+        self.storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+
+        self.storage
+            .list_branches_by_session(session_id)
+            .await
+            .map(|branches| branches.into_iter().map(thread_branch_to_response).collect())
+            .map_err(GatewayError::Storage)
+    }
+
+    /// Fetch a single thread with its copied history and branch metadata.
+    pub async fn get_thread_detail(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<ConversationThreadDetail, GatewayError> {
+        let thread = self
+            .storage
+            .get(thread_id)
+            .await?
+            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
+                entity: "thread".into(),
+                id: thread_id.to_string(),
+            }))?;
+
+        let messages = self.storage.list_messages_by_thread(thread.id).await?;
+        let turns = self.storage.list_turns_by_thread(thread.id).await?;
+        let turn_state = turns.last().map(|turn| turn.state.clone()).unwrap_or(TurnState::Completed);
+        let branch = self.storage.get_branch(thread.id).await?;
+
+        Ok(ConversationThreadDetail {
+            id: thread.id,
+            session_id: thread.session_id,
+            agent_id: thread.agent_id,
+            state: thread.state.to_string(),
+            messages: messages
+                .into_iter()
+                .map(|message| MessageView {
+                    role: message.role,
+                    content: message.content,
+                    timestamp: message.created_at,
+                    turn_state: turn_state.clone(),
+                    tool_calls: vec![],
+                })
+                .collect(),
+            branch: branch.map(thread_branch_to_response),
+        })
     }
 
     // ---------------------------------------------------------------------------
@@ -1081,6 +1197,15 @@ fn node_retry_to_response(retry: NodeRetry) -> NodeRetryResponse {
         error_message: retry.error_message,
         recovery_guidance: retry.recovery_guidance,
         created_at: retry.created_at,
+    }
+}
+
+fn thread_branch_to_response(branch: ThreadBranch) -> ConversationBranchResponse {
+    ConversationBranchResponse {
+        child_thread_id: branch.child_thread_id,
+        parent_thread_id: branch.parent_thread_id,
+        branched_from_message_id: branch.branched_from_message_id,
+        created_at: branch.created_at,
     }
 }
 
