@@ -292,11 +292,11 @@ impl AgentMessageStore for SqliteStorage {
     ) -> Result<u64, StorageError> {
         self.with_conn(move |conn| {
             // Intentional safe fallback: if max_age overflows chrono's Duration,
-            // max_value makes the cutoff saturate to DateTime::MIN — no messages
-            // match the predicate, so expiration is a no-op. This is preferable
-            // to panicking on an unreachable conversion error.
+            // Duration::MAX makes the cutoff saturate to DateTime::MIN — no
+            // messages match the predicate, so expiration is a no-op. This is
+            // preferable to panicking on an unreachable conversion error.
             let chrono_age = chrono::Duration::from_std(max_age)
-                .unwrap_or(chrono::Duration::max_value());
+                .unwrap_or(chrono::Duration::MAX);
             let cutoff = Utc::now() - chrono_age;
             let cutoff_str = cutoff.to_rfc3339();
 
