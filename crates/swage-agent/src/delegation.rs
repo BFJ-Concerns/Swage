@@ -195,19 +195,21 @@ impl DelegationExecutor {
             .context_transfer_config(target_context_transfer_config);
 
         let agent = builder.build()?;
-
         // Register the cancellation token so handle_cancel can interrupt
         // this delegation by message ID. The RAII guard ensures the entry is
         // removed even if this future is dropped mid-execution.
         let delegation_id = delegate_msg.id;
         {
             let mut active = self.active_delegations.write().await;
-            active.insert(delegation_id, ActiveDelegation {
-                session_id: session.id,
-                thread_id: thread.id,
-                recipient_agent_id: delegate_msg.recipient_agent_id.clone(),
-                cancel_token: cancel_token.clone(),
-            });
+            active.insert(
+                delegation_id,
+                ActiveDelegation {
+                    session_id: session.id,
+                    thread_id: thread.id,
+                    recipient_agent_id: delegate_msg.recipient_agent_id.clone(),
+                    cancel_token: cancel_token.clone(),
+                },
+            );
         }
         let _guard = DelegationGuard {
             delegations: self.active_delegations.clone(),
@@ -235,14 +237,12 @@ impl DelegationExecutor {
         while event_rx.try_recv().is_ok() {}
 
         // 6. Create Result or failure message — only the payload differs.
-        let send_result = |payload| {
-            NewAgentMessage {
-                sender_agent_id: delegate_msg.recipient_agent_id.clone(),
-                recipient_agent_id: delegate_msg.sender_agent_id.clone(),
-                kind: MessageKind::Result,
-                correlation_id: Some(delegate_msg.id),
-                payload,
-            }
+        let send_result = |payload| NewAgentMessage {
+            sender_agent_id: delegate_msg.recipient_agent_id.clone(),
+            recipient_agent_id: delegate_msg.sender_agent_id.clone(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate_msg.id),
+            payload,
         };
 
         match result {
