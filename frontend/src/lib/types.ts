@@ -86,7 +86,7 @@ export interface ConversationResponse {
 }
 
 // -------------------------------------------------------------------------
-// WebSocket event types (mirror gateway's wire protocol)
+// WebSocket event types (the subset currently modelled by the web client)
 // -------------------------------------------------------------------------
 
 /** Client → Server events. */

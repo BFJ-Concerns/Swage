@@ -243,16 +243,23 @@ describe("server event dispatch", () => {
     expect(received).toHaveLength(0);
   });
 
-  it("ignores malformed JSON frames silently", () => {
+  it("surfaces malformed JSON frames as an error event", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    client.onEvent(() => {
-      throw new Error("should not dispatch");
-    });
+    const statuses: string[] = [];
+    const received: ServerEvent[] = [];
+    client.onStatusChange((status) => statuses.push(status));
+    client.onEvent((event) => received.push(event));
 
     client.connect("conv-abc");
     latestWs().simulateOpen();
 
     expect(() => latestWs().simulateRawMessage("not-json{{")).not.toThrow();
+    expect(statuses).toContain("error");
+    expect(received).toContainEqual({
+      type: "error",
+      code: "invalid_frame",
+      message: "Received a malformed WebSocket frame from the gateway.",
+    });
   });
 });
 

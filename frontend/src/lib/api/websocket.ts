@@ -143,7 +143,13 @@ export function createWebSocketClient(
         }
         // Unknown event types fall through silently — forward-compatible.
       } catch {
-        // Malformed JSON frame — discard without surfacing an error.
+        emitStatus("error");
+        const frameError: ServerEvent = {
+          type: "error",
+          code: "invalid_frame",
+          message: "Received a malformed WebSocket frame from the gateway.",
+        };
+        for (const handler of eventHandlers) handler(frameError);
       }
     };
 
