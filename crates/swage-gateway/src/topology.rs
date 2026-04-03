@@ -32,6 +32,10 @@ pub enum TopologyEngineError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error("topology hook blocked {event}: {reason}")]
+    HookBlocked { event: String, reason: String },
+    #[error("topology hook requested approval for {event}: {prompt}")]
+    HookApprovalRequested { event: String, prompt: String },
     #[error("project {project_id} for team {team_id} was not found")]
     TeamProjectMissing { team_id: Uuid, project_id: Uuid },
     #[error("session {session_id} was not found")]
@@ -115,7 +119,7 @@ impl TopologyExecutor {
             })
             .await?;
 
-        dispatch_hook(
+        if let Err(error) = dispatch_hook(
             self.hook_registry.as_ref(),
             HookEvent::TopologyStart {
                 topology_run_id: topology_run.id.to_string(),
@@ -123,7 +127,29 @@ impl TopologyExecutor {
                 session_id: session_id.to_string(),
             },
         )
-        .await;
+        .await
+        {
+            let error_message = error.to_string();
+            self.state
+                .storage
+                .update_topology_run(
+                    topology_run.id,
+                    TopologyRunState::Failed,
+                    None,
+                    Some(&error_message),
+                )
+                .await?;
+            broadcast_topology_event(
+                &self.state,
+                ServerEvent::TopologyRunCompleted {
+                    session_id,
+                    topology_run_id: topology_run.id,
+                    success: false,
+                    final_output: None,
+                },
+            );
+            return Err(error);
+        }
         broadcast_topology_event(
             &self.state,
             ServerEvent::TopologyRunStarted {
@@ -298,7 +324,7 @@ impl TopologyExecutor {
                     Some(&error_message),
                 )
                 .await?;
-            dispatch_hook(
+            if let Err(error) = dispatch_hook(
                 self.hook_registry.as_ref(),
                 HookEvent::TopologyEnd {
                     topology_run_id: topology_run.id.to_string(),
@@ -307,7 +333,10 @@ impl TopologyExecutor {
                     success: false,
                 },
             )
-            .await;
+            .await
+            {
+                tracing::warn!(error = %error, "topology end hook outcome could not be enforced after failure");
+            }
             broadcast_topology_event(
                 &self.state,
                 ServerEvent::TopologyRunCompleted {
@@ -344,7 +373,7 @@ impl TopologyExecutor {
             )
             .await?;
 
-        dispatch_hook(
+        if let Err(error) = dispatch_hook(
             self.hook_registry.as_ref(),
             HookEvent::TopologyEnd {
                 topology_run_id: topology_run.id.to_string(),
@@ -353,7 +382,10 @@ impl TopologyExecutor {
                 success: true,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!(error = %error, "topology end hook outcome could not be enforced after success");
+        }
         broadcast_topology_event(
             &self.state,
             ServerEvent::TopologyRunCompleted {
@@ -460,7 +492,7 @@ async fn execute_node(
             agent_id: node.agent_id.clone(),
         },
     )
-    .await;
+    .await?;
     broadcast_topology_event(
         &state,
         ServerEvent::TopologyNodeStarted {
@@ -527,7 +559,7 @@ async fn execute_node(
                     output: Some(node_result.output_json.clone()),
                 },
             )
-            .await;
+            .await?;
             broadcast_topology_event(
                 &state,
                 ServerEvent::TopologyNodeCompleted {
@@ -568,7 +600,7 @@ async fn execute_node(
                     output: None,
                 },
             )
-            .await;
+            .await?;
             broadcast_topology_event(
                 &state,
                 ServerEvent::TopologyNodeCompleted {
@@ -714,6 +746,7 @@ async fn execute_agent_node(
                 user_message: render_node_input(node, input_json),
                 assembled_context: output.messages,
                 parent_turn_id: None,
+                existing_turn_id: None,
                 cancellation_token: cancel_token,
             },
             event_tx,
@@ -946,7 +979,7 @@ async fn evaluate_edges(
                         branch_count: items.len() as u32,
                     },
                 )
-                .await;
+                .await?;
 
                 for item in items {
                     state
@@ -976,7 +1009,7 @@ async fn evaluate_edges(
                         branch_count: items.len() as u32,
                     },
                 )
-                .await;
+                .await?;
             }
         }
     }
@@ -995,33 +1028,33 @@ fn extract_field_value<'a>(
     Some(current)
 }
 
-async fn dispatch_hook(hook_registry: Option<&Arc<HookRegistry>>, event: HookEvent) {
+async fn dispatch_hook(
+    hook_registry: Option<&Arc<HookRegistry>>,
+    event: HookEvent,
+) -> Result<(), TopologyEngineError> {
     let Some(hook_registry) = hook_registry else {
-        return;
+        return Ok(());
     };
     let event_name = event.event_name().to_string();
     match hook_registry.dispatch(event).await {
-        HookOutcome::Continue => {}
+        HookOutcome::Continue => Ok(()),
         HookOutcome::ContinueModified(modified) => {
             tracing::warn!(
                 original_event = event_name,
                 modified_event = modified.event_name(),
                 "topology hooks returned a modified event that the executor does not apply"
             );
+            Ok(())
         }
-        HookOutcome::Block(reason) => {
-            tracing::warn!(
-                event = event_name,
-                %reason,
-                "topology hooks blocked an event but topology execution continued"
-            );
-        }
+        HookOutcome::Block(reason) => Err(TopologyEngineError::HookBlocked {
+            event: event_name,
+            reason,
+        }),
         HookOutcome::RequestApproval { prompt, .. } => {
-            tracing::warn!(
-                event = event_name,
-                %prompt,
-                "topology hooks requested approval but topology execution continued"
-            );
+            Err(TopologyEngineError::HookApprovalRequested {
+                event: event_name,
+                prompt,
+            })
         }
     }
 }
@@ -1090,6 +1123,48 @@ mod tests {
                 .unwrap()
                 .push(event.event_name().to_string());
             HookOutcome::Continue
+        }
+    }
+
+    struct BlockOnEventHook {
+        event_name: &'static str,
+    }
+
+    #[async_trait]
+    impl Hook for BlockOnEventHook {
+        fn name(&self) -> &str {
+            "block-topology-event"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            if event.event_name() == self.event_name {
+                HookOutcome::Block(format!("blocked {}", self.event_name))
+            } else {
+                HookOutcome::Continue
+            }
+        }
+    }
+
+    struct ApprovalOnEventHook {
+        event_name: &'static str,
+    }
+
+    #[async_trait]
+    impl Hook for ApprovalOnEventHook {
+        fn name(&self) -> &str {
+            "approve-topology-event"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            if event.event_name() == self.event_name {
+                HookOutcome::RequestApproval {
+                    prompt: format!("approve {}", self.event_name),
+                    context: None,
+                    timeout: None,
+                }
+            } else {
+                HookOutcome::Continue
+            }
         }
     }
 
@@ -1401,5 +1476,168 @@ mod tests {
         assert!(events.contains(&"NodeStart".to_string()));
         assert!(events.contains(&"NodeEnd".to_string()));
         assert!(events.contains(&"TopologyEnd".to_string()));
+    }
+
+    #[tokio::test]
+    async fn blocking_topology_start_hook_fails_the_run() {
+        let provider = Arc::new(MockProvider::new(vec![swage_core::StreamChunk::Done {
+            finish_reason: Some(swage_core::FinishReason::Stop),
+        }]));
+        let (state, storage) = make_state(provider);
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "blocked-topology-project".into(),
+                slug: "blocked-topology-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "hook-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(1),
+                max_concurrency: Some(1),
+                max_total_tokens: Some(20),
+            },
+            nodes: vec![TopologyNode {
+                id: "plan".into(),
+                kind: TopologyNodeKind::Llm,
+                agent_id: Some("planner".into()),
+                task_name: Some("draft-plan".into()),
+                handler_name: None,
+                output_schema: Some(schema(serde_json::json!({
+                    "result": {"type": "string"}
+                }))),
+                iteration_limit: None,
+            }],
+            edges: vec![],
+        };
+
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(BlockOnEventHook {
+            event_name: "TopologyStart",
+        })));
+
+        let executor =
+            TopologyExecutor::new(state.clone()).with_hook_registry(Arc::new(hook_registry));
+        let error = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect_err("TopologyStart block should fail the run");
+
+        assert!(matches!(error, TopologyEngineError::HookBlocked { .. }));
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn approval_requesting_node_start_hook_fails_the_run() {
+        let provider = Arc::new(MockProvider::new(vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"result\":\"ok\"}".into(),
+            },
+            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+            }),
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]));
+        let (state, storage) = make_state(provider);
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "approval-topology-project".into(),
+                slug: "approval-topology-project".into(),
+                workspace_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "hook-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(1),
+                max_concurrency: Some(1),
+                max_total_tokens: Some(20),
+            },
+            nodes: vec![TopologyNode {
+                id: "plan".into(),
+                kind: TopologyNodeKind::Llm,
+                agent_id: Some("planner".into()),
+                task_name: Some("draft-plan".into()),
+                handler_name: None,
+                output_schema: Some(schema(serde_json::json!({
+                    "result": {"type": "string"}
+                }))),
+                iteration_limit: None,
+            }],
+            edges: vec![],
+        };
+
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(ApprovalOnEventHook {
+            event_name: "NodeStart",
+        })));
+
+        let executor =
+            TopologyExecutor::new(state.clone()).with_hook_registry(Arc::new(hook_registry));
+        let error = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect_err("NodeStart approval request should fail the run");
+
+        assert!(matches!(
+            error,
+            TopologyEngineError::InvalidGraph(ref message)
+                if message.contains("topology hook requested approval")
+        ));
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Failed);
     }
 }

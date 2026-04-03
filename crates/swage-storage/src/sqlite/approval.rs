@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -35,18 +35,11 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
 }
 
-fn parse_str<T: std::str::FromStr>(
-    s: &str,
-    col: usize,
-) -> rusqlite::Result<T>
+fn parse_str<T: std::str::FromStr>(s: &str, col: usize) -> rusqlite::Result<T>
 where
     T::Err: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
 {
@@ -133,6 +126,8 @@ impl ApprovalStore for SqliteStorage {
         &self,
         approval: NewApprovalRequest,
     ) -> Result<ApprovalRequest, StorageError> {
+        approval.validate()?;
+
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -148,14 +143,18 @@ impl ApprovalStore for SqliteStorage {
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(ParseError(e.to_string()))))?;
+                .map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(ParseError(e.to_string())))
+                })?;
 
             let context_text = approval
                 .context
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(ParseError(e.to_string()))))?;
+                .map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(ParseError(e.to_string())))
+                })?;
 
             conn.execute(
                 "INSERT INTO approval_requests
@@ -370,7 +369,7 @@ mod tests {
     use crate::model::{ApprovalKind, ApprovalState, NewApprovalRequest, NewProject, NewSession};
     use crate::sqlite::SqliteStorage;
     use crate::store::{ApprovalStore, ProjectStore, SessionStore};
-    use swage_core::ApprovalTimeoutPolicy;
+    use swage_core::{ApprovalTimeoutPolicy, StorageError};
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -380,7 +379,11 @@ mod tests {
     /// storage instance plus the newly created turn's id.
     async fn make_turn(storage: &SqliteStorage) -> Uuid {
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
@@ -445,7 +448,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = make_turn(&storage).await;
 
-        let created = storage.create_approval(tool_request(turn_id)).await.unwrap();
+        let created = storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
         assert_eq!(created.turn_id, turn_id);
         assert_eq!(created.agent_id, "test-agent");
         assert_eq!(created.kind, ApprovalKind::Tool);
@@ -489,7 +495,10 @@ mod tests {
         assert_eq!(b_pending.len(), 1, "agent-b should have 1 pending request");
 
         let c_pending = storage.list_pending_by_agent("agent-c").await.unwrap();
-        assert!(c_pending.is_empty(), "unknown agent should have no pending requests");
+        assert!(
+            c_pending.is_empty(),
+            "unknown agent should have no pending requests"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -497,8 +506,14 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = make_turn(&storage).await;
 
-        storage.create_approval(tool_request(turn_id)).await.unwrap();
-        storage.create_approval(tool_request(turn_id)).await.unwrap();
+        storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
+        storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
 
         let all = storage.list_all_pending().await.unwrap();
         assert_eq!(all.len(), 2);
@@ -511,25 +526,37 @@ mod tests {
     async fn update_approval_state_approves_pending_request() {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = make_turn(&storage).await;
-        let req = storage.create_approval(tool_request(turn_id)).await.unwrap();
+        let req = storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
 
         let updated = storage
             .update_approval_state(req.id, ApprovalState::Approved, Some("lgtm"))
             .await
             .unwrap();
-        assert!(updated, "should return true when transitioning from Pending");
+        assert!(
+            updated,
+            "should return true when transitioning from Pending"
+        );
 
         let fetched = storage.get_approval(req.id).await.unwrap().unwrap();
         assert_eq!(fetched.state, ApprovalState::Approved);
         assert_eq!(fetched.decision_reason.as_deref(), Some("lgtm"));
-        assert!(fetched.decided_at.is_some(), "decided_at should be set after decision");
+        assert!(
+            fetched.decided_at.is_some(),
+            "decided_at should be set after decision"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_approval_state_returns_false_on_concurrent_decision() {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = make_turn(&storage).await;
-        let req = storage.create_approval(tool_request(turn_id)).await.unwrap();
+        let req = storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
 
         // First decision succeeds.
         let first = storage
@@ -543,7 +570,10 @@ mod tests {
             .update_approval_state(req.id, ApprovalState::Rejected, Some("too late"))
             .await
             .unwrap();
-        assert!(!second, "second decision should return false (already decided)");
+        assert!(
+            !second,
+            "second decision should return false (already decided)"
+        );
 
         // State must still be Approved — the second attempt must not overwrite.
         let fetched = storage.get_approval(req.id).await.unwrap().unwrap();
@@ -555,8 +585,14 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = make_turn(&storage).await;
 
-        let req = storage.create_approval(tool_request(turn_id)).await.unwrap();
-        storage.create_approval(tool_request(turn_id)).await.unwrap(); // stays Pending
+        let req = storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
+        storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap(); // stays Pending
 
         // Decide the first.
         storage
@@ -565,7 +601,11 @@ mod tests {
             .unwrap();
 
         let pending = storage.list_all_pending().await.unwrap();
-        assert_eq!(pending.len(), 1, "decided request should not appear in list_all_pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "decided request should not appear in list_all_pending"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -574,7 +614,10 @@ mod tests {
         let turn_id = make_turn(&storage).await;
 
         // Create a pending request.
-        let req = storage.create_approval(tool_request(turn_id)).await.unwrap();
+        let req = storage
+            .create_approval(tool_request(turn_id))
+            .await
+            .unwrap();
         assert_eq!(req.state, ApprovalState::Pending);
 
         // Delete the parent turn — the FK cascade removes the row, but we
@@ -656,17 +699,64 @@ mod tests {
 
         let fetched = storage.get_approval(created.id).await.unwrap().unwrap();
         assert_eq!(fetched.hook_name.as_deref(), Some("pre_exec"));
-        assert_eq!(
-            fetched.context,
-            Some(serde_json::json!({"step": "init"}))
-        );
+        assert_eq!(fetched.context, Some(serde_json::json!({"step": "init"})));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_approval_rejects_tool_request_with_hook_metadata() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let turn_id = make_turn(&storage).await;
+
+        let result = storage
+            .create_approval(NewApprovalRequest {
+                turn_id,
+                agent_id: "test-agent".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: None,
+                tool_arguments: None,
+                hook_name: Some("pre_exec".to_string()),
+                prompt: "Approve?".to_string(),
+                context: None,
+                timeout_at: Utc::now() + chrono::Duration::seconds(30),
+                timeout_policy: ApprovalTimeoutPolicy::Reject,
+            })
+            .await;
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_approval_rejects_hook_request_without_source_metadata() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let turn_id = make_turn(&storage).await;
+
+        let result = storage
+            .create_approval(NewApprovalRequest {
+                turn_id,
+                agent_id: "test-agent".to_string(),
+                kind: ApprovalKind::Hook,
+                tool_name: None,
+                tool_arguments: Some(serde_json::json!({"command": "ls"})),
+                hook_name: None,
+                prompt: "Approve?".to_string(),
+                context: None,
+                timeout_at: Utc::now() + chrono::Duration::seconds(30),
+                timeout_policy: ApprovalTimeoutPolicy::Reject,
+            })
+            .await;
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn remember_approval_round_trips_by_session_tool_and_fingerprint() {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
@@ -677,35 +767,47 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!storage
-            .has_approval_memory(session.id, "shell", "fp:123")
-            .await
-            .unwrap());
+        assert!(
+            !storage
+                .has_approval_memory(session.id, "shell", "fp:123")
+                .await
+                .unwrap()
+        );
 
         storage
             .remember_approval(session.id, "shell", "fp:123")
             .await
             .unwrap();
 
-        assert!(storage
-            .has_approval_memory(session.id, "shell", "fp:123")
-            .await
-            .unwrap());
-        assert!(!storage
-            .has_approval_memory(session.id, "shell", "fp:456")
-            .await
-            .unwrap());
-        assert!(!storage
-            .has_approval_memory(session.id, "file_read", "fp:123")
-            .await
-            .unwrap());
+        assert!(
+            storage
+                .has_approval_memory(session.id, "shell", "fp:123")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .has_approval_memory(session.id, "shell", "fp:456")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .has_approval_memory(session.id, "file_read", "fp:123")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn approval_memory_cascades_with_session_delete() {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
@@ -720,16 +822,20 @@ mod tests {
             .remember_approval(session.id, "shell", "fp:123")
             .await
             .unwrap();
-        assert!(storage
-            .has_approval_memory(session.id, "shell", "fp:123")
-            .await
-            .unwrap());
+        assert!(
+            storage
+                .has_approval_memory(session.id, "shell", "fp:123")
+                .await
+                .unwrap()
+        );
 
         storage.delete_session(session.id).await.unwrap();
 
-        assert!(!storage
-            .has_approval_memory(session.id, "shell", "fp:123")
-            .await
-            .unwrap());
+        assert!(
+            !storage
+                .has_approval_memory(session.id, "shell", "fp:123")
+                .await
+                .unwrap()
+        );
     }
 }

@@ -635,8 +635,8 @@ pub async fn submit_turn(
 
     // Create a placeholder turn in Pending state — visible to the poller
     // immediately. The agent will create its own internal turn record during
-    // processing; after completion we mirror the result onto this placeholder
-    // so the REST client's poll resolves correctly.
+    // processing; the background turn loop reuses this pending turn so the REST
+    // poller and turn list see one stable lifecycle record.
     let turn = state
         .storage
         .create_turn(NewTurn {
@@ -670,13 +670,14 @@ pub async fn submit_turn(
         // Drain events in background so the channel never fills.
         tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-        let result = crate::turn::process_turn(
+        let result = crate::turn::process_turn_with_existing_turn(
             &bg_state,
             session_id,
             message,
             ws_tx,
             subscription,
             output_schema,
+            Some(turn_id),
         )
         .await;
 
@@ -1099,22 +1100,51 @@ pub async fn decide_approval(
                 Some(a) if a.state != swage_storage::model::ApprovalState::Pending => Err(
                     ApiError::conflict(format!("approval {} already {}", approval_id, a.state)),
                 ),
-                Some(_) => {
+                Some(a) => {
                     // Pending in storage with no live channel — persist the
                     // decision so the approval record reflects the outcome.
+                    // Because there is no live channel, the original waiting
+                    // agent no longer exists; interrupt the stranded turn so
+                    // the conversation is not left permanently in-progress.
                     match state
                         .storage
                         .update_approval_state(approval_id, new_state, req.reason.as_deref())
                         .await
                     {
-                        Ok(true) => Ok((
-                            StatusCode::OK,
-                            Json(serde_json::json!({
-                                "approval_id": approval_id,
-                                "decision": outcome.as_str(),
-                                "note": "no live channel; decision persisted to storage",
-                            })),
-                        )),
+                        Ok(true) => {
+                            let note = match state
+                                .storage
+                                .update_turn_state(
+                                    a.turn_id,
+                                    swage_storage::TurnState::Interrupted,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    "no live channel; decision persisted and stranded turn interrupted"
+                                        .to_string()
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        approval_id = %approval_id,
+                                        turn_id = %a.turn_id,
+                                        %error,
+                                        "persisted recovered approval decision but failed to interrupt stranded turn"
+                                    );
+                                    "no live channel; decision persisted, but interrupting the stranded turn failed"
+                                        .to_string()
+                                }
+                            };
+
+                            Ok((
+                                StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "approval_id": approval_id,
+                                    "decision": outcome.as_str(),
+                                    "note": note,
+                                })),
+                            ))
+                        }
                         Ok(false) => Err(ApiError::conflict(format!(
                             "approval {} already resolved",
                             approval_id,
@@ -1259,9 +1289,187 @@ mod tests {
         (build_router(state), storage)
     }
 
+    async fn spawn_live_server(
+        provider: Arc<dyn LlmProvider>,
+        storage: Arc<MockStorage>,
+    ) -> (String, tokio::task::JoinHandle<()>, Arc<MockStorage>) {
+        let (router, storage) = make_router_with_provider(provider, storage);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test router");
+        });
+        (format!("http://{address}"), server, storage)
+    }
+
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gateway_client_async_rest_helpers_cover_live_gateway_routes() {
+        use swage_client::http::GatewayClient;
+        use swage_core::{FinishReason, StreamChunk, TokenUsage};
+        use swage_storage::model::{ApprovalKind, NewApprovalRequest, NewTurn, TurnState};
+        use swage_storage::store::{ApprovalStore, SessionStore, ThreadStore, TurnStore};
+
+        let provider = Arc::new(MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "Hello from the async route".to_string(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 12,
+                output_tokens: 5,
+            }),
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]));
+        let storage = Arc::new(MockStorage::new());
+        let (base_url, server, storage) =
+            spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
+
+        let client = GatewayClient::new(&base_url);
+        let conversation = client
+            .create_conversation()
+            .await
+            .expect("create conversation through live gateway");
+
+        let turn_id = client
+            .submit_turn(conversation.id, "hello", None)
+            .await
+            .expect("submit async turn");
+
+        let poll = {
+            let mut completed = None;
+            for _ in 0..50 {
+                let current = client.poll_turn(turn_id).await.expect("poll turn");
+                let state = current["state"].as_str().expect("poll state string");
+                if matches!(state, "completed" | "failed" | "interrupted") {
+                    completed = Some(current);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            completed.expect("turn should reach a terminal state")
+        };
+        assert_eq!(poll["turn_id"], turn_id.to_string());
+        assert_eq!(poll["state"], "completed");
+        assert_eq!(poll["assistant_response"], "Hello from the async route");
+
+        let turns = client
+            .list_turns(conversation.id, None, None)
+            .await
+            .expect("list turns through live gateway");
+        let turn_rows = turns["turns"].as_array().expect("turn list array");
+        assert_eq!(
+            turn_rows.len(),
+            1,
+            "async REST path should surface one turn record"
+        );
+        assert_eq!(turn_rows[0]["turn_id"], turn_id.to_string());
+
+        let sent_message = client
+            .send_agent_message(
+                "agent-a",
+                "agent-b",
+                "delegate",
+                None,
+                serde_json::json!({ "task": "summarise" }),
+            )
+            .await
+            .expect("send agent message through live gateway");
+        let message_id = sent_message["id"]
+            .as_str()
+            .expect("message id string")
+            .parse::<Uuid>()
+            .expect("message id uuid");
+        let message_status = client
+            .get_message_status(message_id)
+            .await
+            .expect("query message status");
+        assert_eq!(message_status["status"], "pending");
+
+        let session = storage
+            .get_session(conversation.id)
+            .await
+            .expect("get session")
+            .expect("session exists");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("list session threads")
+            .into_iter()
+            .next()
+            .expect("default thread exists");
+        let approval_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::AwaitingApproval,
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create approval turn");
+        let approval = storage
+            .create_approval(NewApprovalRequest {
+                turn_id: approval_turn.id,
+                agent_id: "gateway".to_string(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("shell".to_string()),
+                tool_arguments: Some(serde_json::json!({ "command": "ls" })),
+                hook_name: None,
+                prompt: "Allow shell?".to_string(),
+                context: None,
+                timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .expect("create approval");
+
+        let approvals = client
+            .list_approvals(Some("gateway"))
+            .await
+            .expect("list approvals through live gateway");
+        let approval_rows = approvals["approvals"]
+            .as_array()
+            .expect("approval list array");
+        assert!(
+            approval_rows
+                .iter()
+                .any(|row| row["id"] == approval.id.to_string()),
+            "approval list should include the seeded approval"
+        );
+
+        let decision = client
+            .decide_approval(approval.id, "approved", Some("looks safe"))
+            .await
+            .expect("decide approval through live gateway");
+        assert_eq!(decision["approval_id"], approval.id.to_string());
+        assert_eq!(decision["decision"], "approved");
+
+        let stored_approval = storage
+            .get_approval(approval.id)
+            .await
+            .expect("get approval")
+            .expect("approval exists");
+        assert_eq!(
+            stored_approval.state,
+            swage_storage::model::ApprovalState::Approved
+        );
+        let recovered_turn = storage
+            .get_turn(approval_turn.id)
+            .await
+            .expect("get approval turn")
+            .expect("approval turn exists");
+        assert_eq!(recovered_turn.state, TurnState::Interrupted);
+
+        server.abort();
     }
 
     // -----------------------------------------------------------------------

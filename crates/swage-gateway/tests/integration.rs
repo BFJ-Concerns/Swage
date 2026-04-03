@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
@@ -26,12 +26,12 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, shutdown::recover_orphaned_turns, state::AppState};
 use swage_provider::LlmProvider;
-use swage_tool;
 use swage_storage::{
+    SqliteStorage,
     model::{NewThread, NewTurn, TurnState},
     store::ProjectStore,
-    SqliteStorage,
 };
+use swage_tool;
 
 // ---------------------------------------------------------------------------
 // Mock providers
@@ -52,16 +52,20 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    fn model_id(&self) -> &str { "mock-model" }
+    fn model_id(&self) -> &str {
+        "mock-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -92,16 +96,20 @@ impl ChannelProvider {
 
 #[async_trait]
 impl LlmProvider for ChannelProvider {
-    fn model_id(&self) -> &str { "channel-model" }
+    fn model_id(&self) -> &str {
+        "channel-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -133,8 +141,12 @@ struct EchoTool;
 
 #[async_trait]
 impl swage_gateway::tool::Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echo the input back" }
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo the input back"
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -217,15 +229,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 
 // Type aliases for the split WebSocket halves.
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 /// Connect to a conversation's WebSocket endpoint and split into writer/reader.
@@ -298,7 +306,9 @@ async fn conversation_lifecycle_with_streaming() {
         StreamChunk::Delta {
             content: "!".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]);
     let (router, addr, _storage) = start_test_server(provider).await;
 
@@ -343,12 +353,7 @@ async fn conversation_lifecycle_with_streaming() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 5. Get the conversation — verify messages are persisted.
-    let (status, body) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::OK);
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
@@ -364,21 +369,11 @@ async fn conversation_lifecycle_with_streaming() {
     assert!(convs[0]["message_preview"].is_string());
 
     // 7. Delete the conversation.
-    let (status, _) = http(
-        &router,
-        "DELETE",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, _) = http(&router, "DELETE", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // 8. Verify it's gone.
-    let (status, _) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, _) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -434,12 +429,7 @@ async fn stream_cancellation_preserves_partial_response() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Verify partial response via HTTP.
-    let (_, body) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     let messages = body["messages"].as_array().unwrap();
     assert!(
         messages.len() >= 1,
@@ -472,7 +462,11 @@ async fn stream_cancellation_preserves_partial_response() {
     })
     .await
     .unwrap();
-    tx2.send(StreamChunk::Done { finish_reason: None }).await.unwrap();
+    tx2.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
     drop(tx2);
 
     let event = ws_recv_until(&mut ws_read2, |e| e["type"] == "turn_complete").await;
@@ -489,7 +483,10 @@ async fn stream_cancellation_preserves_partial_response() {
 ///   with the interrupted turn visible.
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_recovery_marks_orphaned_turns() {
-    use swage_storage::{NewSession, store::{ProjectStore, SessionStore, ThreadStore, TurnStore}};
+    use swage_storage::{
+        NewSession,
+        store::{ProjectStore, SessionStore, ThreadStore, TurnStore},
+    };
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
@@ -504,10 +501,13 @@ async fn startup_recovery_marks_orphaned_turns() {
         })
         .await
         .unwrap();
-    let thread_orphan = ThreadStore::create(&*storage, NewThread {
-        session_id: session_orphan.id,
-        agent_id: "gateway".to_string(),
-    })
+    let thread_orphan = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session_orphan.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
     .await
     .unwrap();
     let turn_orphan = storage
@@ -528,10 +528,13 @@ async fn startup_recovery_marks_orphaned_turns() {
         })
         .await
         .unwrap();
-    let thread_ok = ThreadStore::create(&*storage, NewThread {
-        session_id: session_ok.id,
-        agent_id: "gateway".to_string(),
-    })
+    let thread_ok = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session_ok.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
     .await
     .unwrap();
     let turn_ok = storage
@@ -549,7 +552,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .unwrap();
 
     // Run recovery.
-    let count = recover_orphaned_turns(&*storage).await.unwrap();
+    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
     assert_eq!(count, 1, "only 1 orphaned turn should be recovered");
 
     // Verify the orphaned turn is now Interrupted.
@@ -561,7 +564,7 @@ async fn startup_recovery_marks_orphaned_turns() {
     assert_eq!(turn.state, TurnState::Completed);
 
     // Recovery is idempotent — running again should find nothing.
-    let count = recover_orphaned_turns(&*storage).await.unwrap();
+    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
     assert_eq!(count, 0, "no orphans should remain");
 }
 
@@ -612,7 +615,11 @@ async fn reject_message_during_active_turn() {
     assert_eq!(event["code"], "turn_in_progress");
 
     // Complete the first turn.
-    tx1.send(StreamChunk::Done { finish_reason: None }).await.unwrap();
+    tx1.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
     drop(tx1);
     let event = ws_recv_until(&mut ws_read, |e| e["type"] == "turn_complete").await;
     assert_eq!(event["type"], "turn_complete");
@@ -628,7 +635,11 @@ async fn reject_message_during_active_turn() {
     })
     .await
     .unwrap();
-    tx2.send(StreamChunk::Done { finish_reason: None }).await.unwrap();
+    tx2.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
     drop(tx2);
 
     let event = ws_recv_until(&mut ws_read, |e| e["type"] == "turn_complete").await;
@@ -658,7 +669,9 @@ async fn conversation_history_includes_tool_calls_field() {
         StreamChunk::Delta {
             content: "Done.".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]);
     let (router, addr, _) = start_test_server(provider).await;
 
@@ -680,12 +693,7 @@ async fn conversation_history_includes_tool_calls_field() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Fetch conversation detail via HTTP.
-    let (status, body) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::OK);
 
     let messages = body["messages"].as_array().unwrap();
@@ -730,7 +738,7 @@ async fn tool_execution_round_trip_with_persistence() {
 
     // Build a dispatcher with the echo tool so the execution loop can find it.
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>,
+        Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>
     ]);
     let (router, addr, _) = start_test_server_with_dispatcher(provider, dispatcher).await;
 
@@ -757,7 +765,11 @@ async fn tool_execution_round_trip_with_persistence() {
     })
     .await
     .unwrap();
-    tx2.send(StreamChunk::Done { finish_reason: None }).await.unwrap();
+    tx2.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
     drop(tx2);
 
     // Round 1: model emits text then a tool_use block.
@@ -770,8 +782,14 @@ async fn tool_execution_round_trip_with_persistence() {
         call_id: "call_001".into(),
         name: "echo".into(),
         arguments: json!({"text": "hello from tool"}),
-    }).await.unwrap();
-    tx1.send(StreamChunk::Done { finish_reason: None }).await.unwrap();
+    })
+    .await
+    .unwrap();
+    tx1.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
     drop(tx1);
 
     // Collect all events.
@@ -805,12 +823,7 @@ async fn tool_execution_round_trip_with_persistence() {
     drop(ws_read);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::OK);
 
     let messages = body["messages"].as_array().unwrap();

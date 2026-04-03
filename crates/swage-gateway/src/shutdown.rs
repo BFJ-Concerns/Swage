@@ -28,6 +28,7 @@
 //! shutdown_active_turns(&state).await;
 //! ```
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::time;
@@ -36,7 +37,7 @@ use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
 use swage_storage::model::{ApprovalState, TurnState};
-use swage_storage::store::Storage;
+use swage_storage::store::{ProjectStore, Storage};
 
 use crate::state::AppState;
 
@@ -172,26 +173,48 @@ pub async fn shutdown_active_turns(state: &AppState) {
     }
 }
 
-/// Transition all in-progress turns for the gateway agent to Interrupted.
+/// Transition all in-progress turns to Interrupted.
 ///
 /// Runs at startup — before the server begins accepting connections — to clean
-/// up turns left dangling by a previous unclean shutdown.
+/// up turns left dangling by a previous unclean shutdown, including delegated
+/// child turns that run under their own agent IDs.
 ///
 /// Returns the number of turns recovered.
-pub async fn recover_orphaned_turns(storage: &dyn Storage) -> Result<usize, StorageError> {
-    // "gateway" is the agent_id used by the embedded single-agent mode.
-    let orphans = storage.find_in_progress_by_agent("gateway").await?;
-    let count = orphans.len();
+pub async fn recover_orphaned_turns(
+    storage: &dyn Storage,
+    project_store: &dyn ProjectStore,
+) -> Result<usize, StorageError> {
+    let mut recovered_turn_ids = HashSet::new();
 
-    for turn in &orphans {
-        warn!(
-            "Recovered orphaned turn {} for thread {}",
-            turn.id, turn.thread_id,
-        );
-        storage.update_turn_state(turn.id, TurnState::Interrupted).await?;
+    for project in project_store.list_all().await? {
+        for session in storage.list_by_project(project.id).await? {
+            for thread in storage.list_by_session(session.id).await? {
+                for turn in storage.list_turns_by_thread(thread.id).await? {
+                    if !matches!(
+                        turn.state,
+                        TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating
+                    ) {
+                        continue;
+                    }
+                    if !recovered_turn_ids.insert(turn.id) {
+                        continue;
+                    }
+
+                    warn!(
+                        agent_id = %turn.agent_id,
+                        turn_id = %turn.id,
+                        thread_id = %turn.thread_id,
+                        "Recovered orphaned turn from a previous shutdown"
+                    );
+                    storage
+                        .update_turn_state(turn.id, TurnState::Interrupted)
+                        .await?;
+                }
+            }
+        }
     }
 
-    Ok(count)
+    Ok(recovered_turn_ids.len())
 }
 
 /// Counts returned by [`recover_expired_approvals`].
@@ -297,13 +320,13 @@ pub async fn recover_expired_approvals(
     counts.orphaned_cleaned = storage.cleanup_orphaned_approvals().await?;
 
     // Expire stale agent messages that outlived their TTL during downtime.
-    match storage
-        .expire_stale_messages(message_ttl)
-        .await
-    {
+    match storage.expire_stale_messages(message_ttl).await {
         Ok(0) => {}
         Ok(n) => {
-            info!(expired = n, "expired stale agent messages during startup recovery");
+            info!(
+                expired = n,
+                "expired stale agent messages during startup recovery"
+            );
         }
         Err(e) => {
             warn!(error = %e, "failed to expire stale agent messages during startup");
@@ -415,16 +438,28 @@ mod tests {
     async fn recovery_marks_in_progress_interrupted_leaves_completed_untouched() {
         let storage = make_storage(2, 0, 1).await;
 
-        let count = recover_orphaned_turns(&*storage)
+        let count = recover_orphaned_turns(&*storage, &*storage)
             .await
             .expect("recovery should not fail");
 
         assert_eq!(count, 2, "should report 2 recovered turns");
 
         let db = storage.db.lock().await;
-        let n_interrupted = db.turns.values().filter(|t| t.state == TurnState::Interrupted).count();
-        let n_completed = db.turns.values().filter(|t| t.state == TurnState::Completed).count();
-        let n_processing = db.turns.values().filter(|t| t.state == TurnState::Processing).count();
+        let n_interrupted = db
+            .turns
+            .values()
+            .filter(|t| t.state == TurnState::Interrupted)
+            .count();
+        let n_completed = db
+            .turns
+            .values()
+            .filter(|t| t.state == TurnState::Completed)
+            .count();
+        let n_processing = db
+            .turns
+            .values()
+            .filter(|t| t.state == TurnState::Processing)
+            .count();
 
         assert_eq!(n_interrupted, 2, "2 orphaned turns should be Interrupted");
         assert_eq!(n_completed, 1, "Completed turn should be unchanged");
@@ -435,7 +470,7 @@ mod tests {
     async fn recovery_with_no_orphans_returns_zero() {
         let storage = Arc::new(MockStorage::new());
 
-        let count = recover_orphaned_turns(&*storage)
+        let count = recover_orphaned_turns(&*storage, &*storage)
             .await
             .expect("recovery should not fail on empty storage");
 
@@ -446,18 +481,68 @@ mod tests {
     async fn recovery_marks_delegating_turns_interrupted() {
         let storage = make_storage(0, 1, 0).await;
 
-        let count = recover_orphaned_turns(&*storage)
+        let count = recover_orphaned_turns(&*storage, &*storage)
             .await
             .expect("recovery should not fail");
 
         assert_eq!(count, 1, "delegating turn should be recovered");
 
         let db = storage.db.lock().await;
-        let n_interrupted = db.turns.values().filter(|t| t.state == TurnState::Interrupted).count();
-        let n_delegating = db.turns.values().filter(|t| t.state == TurnState::Delegating).count();
+        let n_interrupted = db
+            .turns
+            .values()
+            .filter(|t| t.state == TurnState::Interrupted)
+            .count();
+        let n_delegating = db
+            .turns
+            .values()
+            .filter(|t| t.state == TurnState::Delegating)
+            .count();
 
-        assert_eq!(n_interrupted, 1, "delegating turn should become Interrupted");
+        assert_eq!(
+            n_interrupted, 1,
+            "delegating turn should become Interrupted"
+        );
         assert_eq!(n_delegating, 0, "no turns should remain Delegating");
+    }
+
+    #[tokio::test]
+    async fn recovery_interrupts_orphaned_turns_for_non_gateway_agents() {
+        let storage = Arc::new(MockStorage::new());
+        let project = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "reviewer".to_string(),
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "reviewer".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let delegated_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "reviewer".to_string(),
+                state: TurnState::Delegating,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let count = recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert_eq!(count, 1, "delegated agent turn should be recovered");
+        let recovered = storage.get_turn(delegated_turn.id).await.unwrap().unwrap();
+        assert_eq!(recovered.state, TurnState::Interrupted);
     }
 
     // -----------------------------------------------------------------------
@@ -469,10 +554,7 @@ mod tests {
 
     /// Helper: create an in-memory SqliteStorage with a single session and
     /// thread, returning `(storage, thread_id)`.
-    async fn make_sqlite_with_thread() -> (
-        Arc<swage_storage::SqliteStorage>,
-        uuid::Uuid,
-    ) {
+    async fn make_sqlite_with_thread() -> (Arc<swage_storage::SqliteStorage>, uuid::Uuid) {
         use swage_storage::model::{NewSession, NewThread};
         use swage_storage::store::{ProjectStore, SessionStore};
 
@@ -542,9 +624,9 @@ mod tests {
     /// turn should transition back to Processing for continued agent execution.
     #[tokio::test(flavor = "multi_thread")]
     async fn expired_reject_policy_resets_turn_to_processing() {
+        use swage_core::ApprovalTimeoutPolicy;
         use swage_storage::model::{ApprovalState, TurnState};
         use swage_storage::store::{ApprovalStore, TurnStore};
-        use swage_core::ApprovalTimeoutPolicy;
 
         let (storage, thread_id) = make_sqlite_with_thread().await;
 
@@ -553,10 +635,9 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Reject).await;
 
-        let counts =
-            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
-                .await
-                .expect("recovery should not fail");
+        let counts = recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+            .await
+            .expect("recovery should not fail");
 
         // Approval must be Expired.
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
@@ -575,9 +656,9 @@ mod tests {
     /// the turn should become Interrupted (no further agent execution).
     #[tokio::test(flavor = "multi_thread")]
     async fn expired_interrupt_policy_sets_turn_to_interrupted() {
+        use swage_core::ApprovalTimeoutPolicy;
         use swage_storage::model::{ApprovalState, TurnState};
         use swage_storage::store::{ApprovalStore, TurnStore};
-        use swage_core::ApprovalTimeoutPolicy;
 
         let (storage, thread_id) = make_sqlite_with_thread().await;
 
@@ -585,10 +666,9 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, past, ApprovalTimeoutPolicy::Interrupt).await;
 
-        let counts =
-            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
-                .await
-                .expect("recovery should not fail");
+        let counts = recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+            .await
+            .expect("recovery should not fail");
 
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
         assert_eq!(approval.state, ApprovalState::Expired);
@@ -603,9 +683,9 @@ mod tests {
     /// An approval still within its timeout window must be left untouched.
     #[tokio::test(flavor = "multi_thread")]
     async fn non_expired_approval_is_left_pending() {
+        use swage_core::ApprovalTimeoutPolicy;
         use swage_storage::model::{ApprovalState, TurnState};
         use swage_storage::store::{ApprovalStore, TurnStore};
-        use swage_core::ApprovalTimeoutPolicy;
 
         let (storage, thread_id) = make_sqlite_with_thread().await;
 
@@ -614,10 +694,9 @@ mod tests {
         let (turn_id, approval_id) =
             seed_approval(&storage, thread_id, future, ApprovalTimeoutPolicy::Reject).await;
 
-        let counts =
-            recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
-                .await
-                .expect("recovery should not fail");
+        let counts = recover_expired_approvals(&*storage, swage_agent::DEFAULT_MESSAGE_TTL)
+            .await
+            .expect("recovery should not fail");
 
         let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
         assert_eq!(
@@ -642,10 +721,9 @@ mod tests {
     async fn no_pending_approvals_returns_zero_counts() {
         let storage = swage_storage::SqliteStorage::in_memory().unwrap();
 
-        let counts =
-            recover_expired_approvals(&storage, swage_agent::DEFAULT_MESSAGE_TTL)
-                .await
-                .expect("recovery on empty storage should not fail");
+        let counts = recover_expired_approvals(&storage, swage_agent::DEFAULT_MESSAGE_TTL)
+            .await
+            .expect("recovery on empty storage should not fail");
 
         assert_eq!(counts.rejected_by_timeout, 0);
         assert_eq!(counts.interrupted_by_timeout, 0);

@@ -224,6 +224,7 @@ impl DelegationExecutor {
             user_message: task_description.to_string(),
             assembled_context,
             parent_turn_id: Some(sender_turn_id),
+            existing_turn_id: None,
             cancellation_token: cancel_token.clone(),
         };
 
@@ -276,8 +277,7 @@ impl DelegationExecutor {
                 // Also fail the original delegate message.
                 self.router
                     .fail_message(delegate_msg.id, &e.to_string())
-                    .await
-                    .ok();
+                    .await?;
 
                 Ok(result_msg)
             }

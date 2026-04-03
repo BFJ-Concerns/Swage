@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::{MessageStatus, StorageError};
@@ -33,7 +33,11 @@ impl std::error::Error for ParseError {}
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(ParseError(e.to_string())))
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(ParseError(e.to_string())),
+        )
     })
 }
 
@@ -41,18 +45,30 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(ParseError(e.to_string())))
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(ParseError(e.to_string())),
+            )
         })
 }
 
 fn parse_json(text: &str, col: usize) -> rusqlite::Result<serde_json::Value> {
     serde_json::from_str(text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(ParseError(e.to_string())))
+        rusqlite::Error::FromSqlConversionFailure(
+            col,
+            rusqlite::types::Type::Text,
+            Box::new(ParseError(e.to_string())),
+        )
     })
 }
 
 fn parse_error(col: usize, msg: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(ParseError(msg)))
+    rusqlite::Error::FromSqlConversionFailure(
+        col,
+        rusqlite::types::Type::Text,
+        Box::new(ParseError(msg)),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -74,22 +90,12 @@ fn row_to_agent_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessag
     let delivered_at_str: Option<String> = row.get(9)?;
 
     let id = parse_uuid(&id)?;
-    let correlation_id = correlation_id_str
-        .as_deref()
-        .map(parse_uuid)
-        .transpose()?;
+    let correlation_id = correlation_id_str.as_deref().map(parse_uuid).transpose()?;
     let payload = parse_json(&payload_str, 5)?;
-    let kind = kind_str
-        .parse()
-        .map_err(|e: String| parse_error(3, e))?;
-    let status = status_str
-        .parse()
-        .map_err(|e: String| parse_error(6, e))?;
+    let kind = kind_str.parse().map_err(|e: String| parse_error(3, e))?;
+    let status = status_str.parse().map_err(|e: String| parse_error(6, e))?;
     let created_at = parse_dt(&created_at_str)?;
-    let delivered_at = delivered_at_str
-        .as_deref()
-        .map(parse_dt)
-        .transpose()?;
+    let delivered_at = delivered_at_str.as_deref().map(parse_dt).transpose()?;
 
     Ok(AgentMessage {
         id,
@@ -115,6 +121,8 @@ impl AgentMessageStore for SqliteStorage {
         &self,
         msg: NewAgentMessage,
     ) -> Result<AgentMessage, StorageError> {
+        msg.validate()?;
+
         // Pre-serialise outside the closure — serde errors are not rusqlite errors.
         let payload_str = serde_json::to_string(&msg.payload)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -160,18 +168,15 @@ impl AgentMessageStore for SqliteStorage {
 
     async fn get_agent_message(&self, id: Uuid) -> Result<Option<AgentMessage>, StorageError> {
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
+            let mut stmt = conn.prepare(
+                "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
                             payload, status, failure_reason, created_at, delivered_at
                      FROM agent_messages WHERE id = ?1",
-                )
-                ?;
+            )?;
 
             let result = stmt
                 .query_row(params![id.to_string()], row_to_agent_message)
-                .optional()
-                ?;
+                .optional()?;
 
             Ok(result)
         })
@@ -184,19 +189,15 @@ impl AgentMessageStore for SqliteStorage {
     ) -> Result<Vec<AgentMessage>, StorageError> {
         let agent_id = agent_id.to_string();
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
+            let mut stmt = conn.prepare(
+                "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
                             payload, status, failure_reason, created_at, delivered_at
                      FROM agent_messages
                      WHERE recipient_agent_id = ?1 AND status = 'pending'
                      ORDER BY created_at ASC",
-                )
-                ?;
+            )?;
 
-            let rows = stmt
-                .query_map(params![&agent_id], row_to_agent_message)
-                ?;
+            let rows = stmt.query_map(params![&agent_id], row_to_agent_message)?;
 
             let mut messages = Vec::new();
             for row in rows {
@@ -223,19 +224,12 @@ impl AgentMessageStore for SqliteStorage {
 
         self.with_conn(move |conn| {
             // Only transition from 'pending' — prevents duplicate delivery.
-            let rows = conn
-                .execute(
-                    "UPDATE agent_messages
+            let rows = conn.execute(
+                "UPDATE agent_messages
                      SET status = ?1, failure_reason = ?2, delivered_at = ?3
                      WHERE id = ?4 AND status = 'pending'",
-                    params![
-                        &status_str,
-                        &failure_reason,
-                        &delivered_at,
-                        id.to_string(),
-                    ],
-                )
-                ?;
+                params![&status_str, &failure_reason, &delivered_at, id.to_string(),],
+            )?;
 
             Ok(rows > 0)
         })
@@ -263,19 +257,15 @@ impl AgentMessageStore for SqliteStorage {
         correlation_id: Uuid,
     ) -> Result<Vec<AgentMessage>, StorageError> {
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
+            let mut stmt = conn.prepare(
+                "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
                             payload, status, failure_reason, created_at, delivered_at
                      FROM agent_messages
                      WHERE correlation_id = ?1
                      ORDER BY created_at ASC",
-                )
-                ?;
+            )?;
 
-            let rows = stmt
-                .query_map(params![correlation_id.to_string()], row_to_agent_message)
-                ?;
+            let rows = stmt.query_map(params![correlation_id.to_string()], row_to_agent_message)?;
 
             let mut messages = Vec::new();
             for row in rows {
@@ -295,19 +285,16 @@ impl AgentMessageStore for SqliteStorage {
             // Duration::MAX makes the cutoff saturate to DateTime::MIN — no
             // messages match the predicate, so expiration is a no-op. This is
             // preferable to panicking on an unreachable conversion error.
-            let chrono_age = chrono::Duration::from_std(max_age)
-                .unwrap_or(chrono::Duration::MAX);
+            let chrono_age = chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
             let cutoff = Utc::now() - chrono_age;
             let cutoff_str = cutoff.to_rfc3339();
 
-            let rows = conn
-                .execute(
-                    "UPDATE agent_messages
+            let rows = conn.execute(
+                "UPDATE agent_messages
                      SET status = 'failed', failure_reason = 'delivery timeout'
                      WHERE status = 'pending' AND created_at < ?1",
-                    params![&cutoff_str],
-                )
-                ?;
+                params![&cutoff_str],
+            )?;
 
             Ok(rows as u64)
         })
@@ -533,6 +520,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn create_agent_message_rejects_result_without_correlation_id() {
+        let storage = make_storage().await;
+
+        let result = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-b".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: None,
+                payload: serde_json::json!({"output": "done"}),
+            })
+            .await;
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_agent_message_rejects_delegate_with_correlation_id() {
+        let storage = make_storage().await;
+
+        let result = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: Some(Uuid::new_v4()),
+                payload: serde_json::json!({"task": "work"}),
+            })
+            .await;
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn update_payload_persists_new_value() {
         let storage = make_storage().await;
         let msg = storage.create_agent_message(delegate_msg()).await.unwrap();
@@ -550,7 +571,10 @@ mod tests {
 
         let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
         assert_eq!(updated.payload, new_payload);
-        assert_eq!(updated.payload["_thread_id"], "deadbeef-0000-0000-0000-000000000001");
+        assert_eq!(
+            updated.payload["_thread_id"],
+            "deadbeef-0000-0000-0000-000000000001"
+        );
         // Original fields preserved.
         assert_eq!(updated.payload["task"], "summarise report");
     }

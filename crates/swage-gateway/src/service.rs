@@ -108,7 +108,10 @@ pub struct MessageView {
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
-    /// State of the last turn in the thread this message belongs to.
+    /// Latest turn state observed while building this conversation view.
+    ///
+    /// Today this value is shared across every returned message in the session,
+    /// rather than being attributed per message or per thread.
     pub turn_state: TurnState,
     /// Tool calls that occurred in this message's turn.
     ///

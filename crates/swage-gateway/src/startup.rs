@@ -65,7 +65,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let raw_storage = open_storage(&db_path);
 
     // Step 5: Recover orphaned turns from a previous unclean shutdown.
-    match crate::shutdown::recover_orphaned_turns(&*raw_storage).await {
+    match crate::shutdown::recover_orphaned_turns(&*raw_storage, &*raw_storage).await {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
         Err(e) => {

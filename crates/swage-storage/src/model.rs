@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use swage_core::StorageError;
 use uuid::Uuid;
 
 /// Turn lifecycle state.
@@ -458,6 +459,39 @@ pub struct NewApprovalRequest {
     pub timeout_policy: swage_core::ApprovalTimeoutPolicy,
 }
 
+impl NewApprovalRequest {
+    pub fn validate(&self) -> Result<(), StorageError> {
+        match self.kind {
+            ApprovalKind::Tool => {
+                if self.tool_name.is_none() {
+                    return Err(StorageError::ConstraintViolation(
+                        "tool approvals require tool_name".into(),
+                    ));
+                }
+                if self.hook_name.is_some() {
+                    return Err(StorageError::ConstraintViolation(
+                        "tool approvals must not set hook_name".into(),
+                    ));
+                }
+            }
+            ApprovalKind::Hook => {
+                if self.hook_name.is_none() && self.tool_name.is_none() {
+                    return Err(StorageError::ConstraintViolation(
+                        "hook approvals require hook_name or tool_name".into(),
+                    ));
+                }
+                if self.tool_arguments.is_some() && self.tool_name.is_none() {
+                    return Err(StorageError::ConstraintViolation(
+                        "hook approvals must not set tool_arguments without tool_name".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent messages — inter-agent communication
 // ---------------------------------------------------------------------------
@@ -504,6 +538,33 @@ pub struct NewAgentMessage {
     /// Required for Result and Cancel; None for Delegate and Notify.
     pub correlation_id: Option<Uuid>,
     pub payload: serde_json::Value,
+}
+
+impl NewAgentMessage {
+    pub fn validate(&self) -> Result<(), StorageError> {
+        match self.kind {
+            swage_core::MessageKind::Result | swage_core::MessageKind::Cancel => {
+                if self.correlation_id.is_none() {
+                    return Err(StorageError::ConstraintViolation(format!(
+                        "{} messages require correlation_id",
+                        self.kind
+                    )));
+                }
+            }
+            swage_core::MessageKind::Delegate
+            | swage_core::MessageKind::Notify
+            | swage_core::MessageKind::Shutdown => {
+                if self.correlation_id.is_some() {
+                    return Err(StorageError::ConstraintViolation(format!(
+                        "{} messages must not set correlation_id",
+                        self.kind
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A team — the organisational unit for multi-agent orchestration.

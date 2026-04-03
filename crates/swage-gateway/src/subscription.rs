@@ -17,7 +17,8 @@ use crate::websocket::ServerEvent;
 ///
 /// Each channel gates a distinct class of extended events. Clients that do
 /// not subscribe to a channel receive only the baseline event stream
-/// (tokens, errors, turn completion, cancellation, shutdown).
+/// (core turn lifecycle plus always-delivered skill, approval, delegation,
+/// topology, and terminal error events).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObservabilityChannel {
     /// Context assembly reports and token-usage-enriched turn completions.

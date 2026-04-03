@@ -94,18 +94,53 @@ impl Agent {
         let thread_id = request.thread_id;
         let user_message = request.user_message;
         let parent_turn_id = request.parent_turn_id;
+        let existing_turn_id = request.existing_turn_id;
         let cancel_token = request.cancellation_token;
 
-        // 1. Create turn in Pending state — records intent before any work begins.
-        let turn = self
-            .storage
-            .create_turn(NewTurn {
-                thread_id,
-                agent_id: self.config.agent_id.clone(),
-                state: TurnState::Pending,
-                parent_turn_id,
-            })
-            .await?;
+        // 1. Create a Pending turn (or reuse a pre-created placeholder) before
+        // any work begins so the lifecycle is recorded durably.
+        let turn = if let Some(existing_turn_id) = existing_turn_id {
+            let turn = self
+                .storage
+                .get_turn(existing_turn_id)
+                .await?
+                .ok_or_else(|| {
+                    AgentError::InvalidConfig(format!(
+                        "existing turn {existing_turn_id} was not found"
+                    ))
+                })?;
+
+            if turn.thread_id != thread_id {
+                return Err(AgentError::InvalidConfig(format!(
+                    "existing turn {} belongs to thread {}, expected {}",
+                    turn.id, turn.thread_id, thread_id
+                )));
+            }
+            if turn.agent_id != self.config.agent_id {
+                return Err(AgentError::InvalidConfig(format!(
+                    "existing turn {} belongs to agent {}, expected {}",
+                    turn.id, turn.agent_id, self.config.agent_id
+                )));
+            }
+            if turn.state != TurnState::Pending {
+                return Err(AgentError::InvalidConfig(format!(
+                    "existing turn {} must be pending, found {}",
+                    turn.id, turn.state
+                )));
+            }
+
+            turn
+        } else {
+            self
+                .storage
+                .create_turn(NewTurn {
+                    thread_id,
+                    agent_id: self.config.agent_id.clone(),
+                    state: TurnState::Pending,
+                    parent_turn_id,
+                })
+                .await?
+        };
 
         // 2. Emit TurnStarted — gateway can show "processing…" to the client.
         let _ = event_tx.send(AgentEvent::TurnStarted { turn_id: turn.id });
@@ -4374,6 +4409,7 @@ mod process_turn_streaming_tests {
             user_message: "Hello, agent!".into(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -4455,6 +4491,50 @@ mod process_turn_streaming_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn process_turn_streaming_reuses_existing_pending_turn() {
+        let (storage, project_id) = setup_storage().await;
+        let provider = Arc::new(ChunkProvider::text("ok"));
+        let mut agent = make_agent(storage.clone(), provider);
+        agent.create_session(project_id).await.expect("create session");
+        let session_id = agent.active_session_id.unwrap();
+        let thread_id = agent.active_thread_id.unwrap();
+
+        let existing_turn = storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "test-agent".into(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create pending turn");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let req = TurnRequest {
+            session_id,
+            thread_id,
+            user_message: "Hello, agent!".into(),
+            assembled_context: vec![],
+            parent_turn_id: None,
+            existing_turn_id: Some(existing_turn.id),
+            cancellation_token: CancellationToken::new(),
+        };
+
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("streaming should succeed");
+
+        assert_eq!(result.turn_id, existing_turn.id);
+        let turns = TurnStore::list_turns_by_thread(storage.as_ref(), thread_id)
+            .await
+            .expect("list turns");
+        assert_eq!(turns.len(), 1, "reused turn should avoid creating a duplicate");
+        assert_eq!(turns[0].id, existing_turn.id);
+        assert_eq!(turns[0].state, TurnState::Completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn thread_returns_to_idle_after_success() {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("ok"));
@@ -4494,6 +4574,7 @@ mod process_turn_streaming_tests {
             user_message: "cancelled".into(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: cancel,
         };
 

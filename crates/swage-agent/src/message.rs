@@ -138,10 +138,22 @@ mod outbound_message_tests {
         let json = serde_json::to_string(&msg).expect("serialise");
         assert!(json.contains("\"response\""), "missing response field");
         assert!(json.contains("\"turn_id\""), "missing turn_id field");
-        assert!(json.contains("\"input_tokens\""), "missing input_tokens field");
-        assert!(json.contains("\"output_tokens\""), "missing output_tokens field");
-        assert!(json.contains("\"tool_calls_count\""), "missing tool_calls_count field");
-        assert!(json.contains("\"structured_output\""), "missing structured_output field");
+        assert!(
+            json.contains("\"input_tokens\""),
+            "missing input_tokens field"
+        );
+        assert!(
+            json.contains("\"output_tokens\""),
+            "missing output_tokens field"
+        );
+        assert!(
+            json.contains("\"tool_calls_count\""),
+            "missing tool_calls_count field"
+        );
+        assert!(
+            json.contains("\"structured_output\""),
+            "missing structured_output field"
+        );
     }
 
     #[test]
@@ -170,7 +182,10 @@ mod outbound_message_tests {
             ..sample()
         };
         let json = serde_json::to_string(&msg).expect("serialise");
-        assert!(json.contains("\"structured_output\""), "field should be present");
+        assert!(
+            json.contains("\"structured_output\""),
+            "field should be present"
+        );
 
         let decoded: OutboundMessage = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(decoded.structured_output, Some(payload));
@@ -191,8 +206,9 @@ mod outbound_message_tests {
 ///
 /// The gateway pre-assembles context from the context engine and passes it here,
 /// so the agent does not rebuild context from thread history in the streaming path.
-/// The user message is already persisted by the gateway — the agent creates the
-/// turn record but does NOT store the user message again.
+/// The user message is already persisted by the gateway. The agent creates the
+/// turn record by default, but callers may also supply a pre-created pending
+/// turn to reuse (for example, the async REST polling path).
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
     /// Target session for this turn.
@@ -207,6 +223,9 @@ pub struct TurnRequest {
     /// Optional parent turn for delegation chain tracking. `None` for
     /// user-initiated turns; `Some(sender_turn_id)` for delegated turns.
     pub parent_turn_id: Option<Uuid>,
+    /// Optional pre-created Pending turn to reuse instead of creating a fresh
+    /// turn record inside the agent runtime.
+    pub existing_turn_id: Option<Uuid>,
     /// Cooperative cancellation token — the gateway signals this when the client
     /// disconnects or a shutdown is requested.
     pub cancellation_token: CancellationToken,
@@ -225,6 +244,7 @@ mod turn_request_tests {
             user_message: "hello".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         assert_eq!(req.user_message, "hello");
@@ -240,6 +260,7 @@ mod turn_request_tests {
             user_message: "test".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         // A non-nil UUID means it was actually provided.
@@ -254,6 +275,7 @@ mod turn_request_tests {
             user_message: "clone me".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         let cloned = req.clone();
@@ -272,6 +294,7 @@ mod turn_request_tests {
             user_message: "cancel test".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: token.clone(),
         };
         token.cancel();
@@ -286,6 +309,7 @@ mod turn_request_tests {
             user_message: "debug".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
+            existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
         let s = format!("{:?}", req);

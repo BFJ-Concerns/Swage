@@ -262,7 +262,7 @@ pub enum ServerEvent {
         context: Option<serde_json::Value>,
         /// ISO 8601 timestamp after which the approval is considered expired.
         timeout_at: String,
-        /// Policy applied on expiry: `"allow"` or `"deny"`.
+        /// Policy applied on expiry: `"reject"` or `"interrupt"`.
         timeout_policy: String,
     },
     /// The approval decision has been recorded and forwarded to the agent.
@@ -285,7 +285,7 @@ pub enum ServerEvent {
     ApprovalExpired {
         /// Identifier of the expired approval request.
         approval_id: String,
-        /// Policy that was applied: `"allow"` or `"deny"`.
+        /// Policy that was applied: `"reject"` or `"interrupt"`.
         timeout_policy: String,
     },
     /// A submitted approval decision was rejected by the server.
@@ -444,10 +444,9 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                     }
                 }
 
-                // Server-wide broadcast events (Shutdown). Always delivered —
-                // no subscription check needed here since the rules in
-                // SubscriptionState::should_deliver already require delivery
-                // for Shutdown regardless of subscription state.
+                // Server-wide broadcast events (Shutdown plus session-scoped
+                // topology progress). Delivery filtering happens here via the
+                // session matcher rather than via per-connection subscriptions.
                 result = bcast_rx.recv() => {
                     match result {
                         Ok(event) => {
@@ -583,49 +582,54 @@ fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> boo
     }
 }
 
-/// Discover skills available to a session (fail-open).
+/// Discover skills available to a session.
 ///
 /// Resolves the Swage root, looks up the session's project slug and agent id,
 /// builds the config hierarchy, and delegates to [`crate::skill::SkillManager`].
-/// On any failure (missing root, unknown session, storage error) it logs a
-/// warning and returns an empty skill set so the caller can degrade gracefully.
+/// Infrastructure failures are returned to the caller so slash-command and
+/// explicit activation flows can surface the real problem instead of treating
+/// the outage as an empty skill catalogue.
 async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
-) -> Vec<swage_config::skill::SkillDefinition> {
+) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {
     use swage_storage::store::ProjectStore;
 
     // Fetch session to get project_id and agent_id.
     let session = match state.storage.get_session(session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            tracing::warn!(%session_id, "session not found during skill discovery");
-            return Vec::new();
+            return Err(format!(
+                "skill discovery failed: session {session_id} was not found"
+            ));
         }
         Err(e) => {
-            tracing::warn!(%session_id, error = %e, "storage error during skill discovery");
-            return Vec::new();
+            return Err(format!(
+                "skill discovery failed while loading session {session_id}: {e}"
+            ));
         }
     };
 
     // Fetch project to get the slug used in path construction.
     let project = match state.project_store.get(session.project_id).await {
         Ok(Some(p)) => p,
+        Err(e) => {
+            return Err(format!(
+                "skill discovery failed while loading project {} for session {session_id}: {e}",
+                session.project_id
+            ));
+        }
         _ => {
-            tracing::warn!(%session_id, project_id = %session.project_id, "project not found during skill discovery");
-            return Vec::new();
+            return Err(format!(
+                "skill discovery failed: project {} for session {session_id} was not found",
+                session.project_id
+            ));
         }
     };
 
     // Resolve the Swage root directory.
-    let root = match swage_config::discovery::resolve_root() {
-        Ok(r) => r,
-        Err(e) => {
-            // Missing root is expected in development environments — not a fatal error.
-            tracing::debug!(%session_id, "skill discovery skipped: {e}");
-            return Vec::new();
-        }
-    };
+    let root = swage_config::discovery::resolve_root()
+        .map_err(|e| format!("skill discovery failed for session {session_id}: {e}"))?;
 
     // Build hierarchy paths that mirror load_resolved_config_from.
     let project_dir = root.join("projects").join(&project.slug);
@@ -633,7 +637,7 @@ async fn discover_available_for_session(
 
     let (skills, _warnings) =
         crate::skill::SkillManager::discover_available(&root, &project_dir, Some(&agent_dir));
-    skills
+    Ok(skills)
 }
 
 /// Parse and dispatch a raw text frame from the client.
@@ -679,7 +683,17 @@ async fn dispatch_client_message(
                     skill_name,
                     remaining_text,
                 } => {
-                    let available = discover_available_for_session(state, session_id).await;
+                    let available = match discover_available_for_session(state, session_id).await {
+                        Ok(available) => available,
+                        Err(message) => {
+                            tracing::warn!(%session_id, %message, "skill discovery failed");
+                            let _ = tx.send(ServerEvent::Error {
+                                code: error_codes::INTERNAL_ERROR.to_string(),
+                                message,
+                            });
+                            return;
+                        }
+                    };
                     let is_known = available.iter().any(|s| s.name == skill_name);
 
                     if is_known {
@@ -798,7 +812,17 @@ async fn dispatch_client_message(
         }
 
         ClientEvent::ActivateSkill { name } => {
-            let available = discover_available_for_session(state, session_id).await;
+            let available = match discover_available_for_session(state, session_id).await {
+                Ok(available) => available,
+                Err(message) => {
+                    tracing::warn!(%session_id, skill = %name, %message, "skill discovery failed");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message,
+                    });
+                    return;
+                }
+            };
             let tok = TiktokenTokeniser::new(&state.config.provider.model);
 
             match SkillManager::activate(
@@ -843,7 +867,17 @@ async fn dispatch_client_message(
         }
 
         ClientEvent::DeactivateSkill { name } => {
-            let available = discover_available_for_session(state, session_id).await;
+            let available = match discover_available_for_session(state, session_id).await {
+                Ok(available) => available,
+                Err(message) => {
+                    tracing::warn!(%session_id, skill = %name, %message, "skill discovery failed");
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        message,
+                    });
+                    return;
+                }
+            };
 
             match SkillManager::deactivate(session_id, &name, &available, state.storage.as_ref())
                 .await
@@ -1437,12 +1471,64 @@ mod tests {
     // Skill dispatch tests [5cpd]
     // -----------------------------------------------------------------------
 
+    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn activate_skill_with_missing_session_surfaces_discovery_error() {
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
+
+        let json = r#"{"type":"activate_skill","name":"ghost-skill"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an event");
+        match event {
+            ServerEvent::Error { code, message } => {
+                assert_eq!(code, error_codes::INTERNAL_ERROR);
+                assert!(message.contains("skill discovery failed"));
+                assert!(message.contains("session"));
+            }
+            other => panic!("expected Error event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_command_with_missing_session_surfaces_discovery_error() {
+        let state = make_empty_state();
+        let session_id = Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
+
+        let json = r#"{"type":"send_message","content":"/code-review"}"#;
+        dispatch_client_message(json, &state, session_id, tx, sub).await;
+
+        let event = rx.recv().await.expect("should receive an event");
+        match event {
+            ServerEvent::Error { code, message } => {
+                assert_eq!(code, error_codes::INTERNAL_ERROR);
+                assert!(message.contains("skill discovery failed"));
+                assert!(message.contains("session"));
+            }
+            other => panic!("expected Error event, got: {other:?}"),
+        }
+    }
+
     /// ActivateSkill for an unknown skill name sends a skill_not_found error event.
     ///
     /// The mock storage has no skill root on disk, so discover_available returns
     /// an empty set, causing SkillManager::activate to return NotFound.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
+        let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let swage_home = tempfile::TempDir::new().expect("temp swage home");
+        unsafe { std::env::set_var("SWAGE_HOME", swage_home.path()) };
+
         let (state, session_id) = make_state_with_session().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
@@ -1462,14 +1548,20 @@ mod tests {
             }
             other => panic!("expected Error event, got: {other:?}"),
         }
+
+        unsafe { std::env::remove_var("SWAGE_HOME") };
     }
 
     /// DeactivateSkill for a skill not in available (and not in storage) sends SkillDeactivated.
     ///
     /// Since the skill is not in the available set there's no agent-level check,
     /// and storage.deactivate_skill is a no-op that returns Ok(false) → success.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn deactivate_skill_event_sends_skill_deactivated() {
+        let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let swage_home = tempfile::TempDir::new().expect("temp swage home");
+        unsafe { std::env::set_var("SWAGE_HOME", swage_home.path()) };
+
         let (state, session_id) = make_state_with_session().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
@@ -1484,6 +1576,8 @@ mod tests {
             matches!(event, ServerEvent::SkillDeactivated { name } if name == "code-review"),
             "expected SkillDeactivated event",
         );
+
+        unsafe { std::env::remove_var("SWAGE_HOME") };
     }
 
     /// A plain (non-slash) SendMessage still dispatches normally — no skill events.
@@ -1787,7 +1881,7 @@ mod tests {
             prompt: "Allow shell execution?".to_string(),
             context: Some(serde_json::json!({"risk": "high"})),
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
-            timeout_policy: "deny".to_string(),
+            timeout_policy: "reject".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_required");
@@ -1800,7 +1894,7 @@ mod tests {
         assert_eq!(json["prompt"], "Allow shell execution?");
         assert_eq!(json["context"]["risk"], "high");
         assert_eq!(json["timeout_at"], "2026-01-01T00:00:00Z");
-        assert_eq!(json["timeout_policy"], "deny");
+        assert_eq!(json["timeout_policy"], "reject");
     }
 
     #[test]
@@ -1815,7 +1909,7 @@ mod tests {
             prompt: "Proceed?".to_string(),
             context: None,
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
-            timeout_policy: "allow".to_string(),
+            timeout_policy: "interrupt".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_required");
@@ -1867,12 +1961,12 @@ mod tests {
     fn server_event_approval_expired_serialises() {
         let event = ServerEvent::ApprovalExpired {
             approval_id: "apr_05".to_string(),
-            timeout_policy: "deny".to_string(),
+            timeout_policy: "reject".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_expired");
         assert_eq!(json["approval_id"], "apr_05");
-        assert_eq!(json["timeout_policy"], "deny");
+        assert_eq!(json["timeout_policy"], "reject");
     }
 
     #[test]

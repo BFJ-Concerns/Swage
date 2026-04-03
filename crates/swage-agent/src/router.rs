@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use swage_core::{MessageKind, MessageStatus};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_storage::Storage;
 use swage_storage::model::{AgentMessage, NewAgentMessage};
 use swage_storage::store::AgentMessageStore;
-use swage_storage::Storage;
 
 use crate::error::AgentError;
 
@@ -38,22 +38,9 @@ impl MessageRouter {
     /// 2. Dispatches MessageSend hook — if blocked, returns error.
     /// 3. For Notify: not persisted (at-most-once semantics).
     /// 4. For durable kinds: persists via AgentMessageStore.
-    pub async fn send_message(
-        &self,
-        msg: NewAgentMessage,
-    ) -> Result<AgentMessage, AgentError> {
-        // Validate: correlation_id is required on Result and Cancel messages.
-        match msg.kind {
-            MessageKind::Result | MessageKind::Cancel => {
-                if msg.correlation_id.is_none() {
-                    return Err(AgentError::InvalidConfig(format!(
-                        "{} message requires a correlation_id",
-                        msg.kind,
-                    )));
-                }
-            }
-            _ => {}
-        }
+    pub async fn send_message(&self, msg: NewAgentMessage) -> Result<AgentMessage, AgentError> {
+        msg.validate()
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
 
         // Dispatch MessageSend hook — may block message creation.
         if let Some(ref registry) = self.hook_registry {
@@ -235,7 +222,12 @@ mod tests {
         let msg = router.send_message(delegate_msg()).await.unwrap();
         router.deliver_message(&msg).await.unwrap();
 
-        let updated = router.storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        let updated = router
+            .storage
+            .get_agent_message(msg.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.status, MessageStatus::Delivered);
         assert!(updated.delivered_at.is_some());
     }
@@ -244,9 +236,17 @@ mod tests {
     async fn fail_message_transitions_to_failed() {
         let router = make_router().await;
         let msg = router.send_message(delegate_msg()).await.unwrap();
-        router.fail_message(msg.id, "agent not found").await.unwrap();
+        router
+            .fail_message(msg.id, "agent not found")
+            .await
+            .unwrap();
 
-        let updated = router.storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        let updated = router
+            .storage
+            .get_agent_message(msg.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.status, MessageStatus::Failed);
         assert_eq!(updated.failure_reason.as_deref(), Some("agent not found"));
     }

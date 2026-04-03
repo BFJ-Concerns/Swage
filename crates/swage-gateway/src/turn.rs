@@ -277,19 +277,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                 ))
             })?;
 
-        let target_resolved =
-            match swage_config::load_resolved_config(&project.slug, target_agent_id) {
-                Ok(config) => config,
-                Err(error) => {
-                    tracing::warn!(
-                        project = %project.slug,
-                        target_agent_id,
-                        error = %error,
-                        "failed to load target agent config, using startup config for delegation"
-                    );
-                    self.state.config.clone()
-                }
-            };
+        let target_resolved = swage_config::load_resolved_config(&project.slug, target_agent_id)
+            .map_err(|error| {
+                AgentError::InvalidConfig(format!(
+                    "failed to load config for delegated agent '{target_agent_id}' in project '{}': {error}",
+                    project.slug
+                ))
+            })?;
 
         let target_agent_config =
             build_agent_config(target_agent_id.to_string(), &target_resolved, None);
@@ -381,11 +375,6 @@ impl DelegationHandler for GatewayDelegationHandler {
 // span so all log entries within the turn share the same turn_id and
 // session_id. turn_id is Empty at span creation and recorded once the
 // Turn record exists.
-#[tracing::instrument(
-    name = "turn",
-    skip(state, content, ws_tx, subscription),
-    fields(turn_id = tracing::field::Empty),
-)]
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
@@ -393,6 +382,32 @@ pub async fn process_turn(
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
+) -> Result<(), GatewayError> {
+    process_turn_with_existing_turn(
+        state,
+        session_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx, subscription),
+    fields(turn_id = tracing::field::Empty),
+)]
+pub(crate) async fn process_turn_with_existing_turn(
+    state: &AppState,
+    session_id: Uuid,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    existing_turn_id: Option<Uuid>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the session's thread. The gateway creates one thread per
     // session in create_conversation / create_session_in_project.
@@ -678,6 +693,7 @@ pub async fn process_turn(
         user_message: content,
         assembled_context: assembled_messages,
         parent_turn_id: None,
+        existing_turn_id,
         cancellation_token: cancel_token,
     };
 
@@ -1052,11 +1068,12 @@ pub(crate) mod tests {
     use swage_provider::LlmProvider;
     use swage_storage::{
         model::{
-            ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, EdgeEvaluation,
-            Message, NewApprovalRequest, NewEdgeEvaluation, NewMessage, NewNodeExecution,
-            NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-            NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team, Thread,
-            ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+            ActiveSkillRecord, AgentMessage, ApprovalKind, ApprovalRequest, ApprovalState,
+            EdgeEvaluation, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
+            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
+            NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
+            Project, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
+            TopologyRunState, Turn, TurnState,
         },
         store::{
             ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, SessionStore,
@@ -1084,11 +1101,14 @@ pub(crate) mod tests {
     }
 
     impl SwageHomeGuard {
-        fn isolate() -> Self {
+        fn set_to(path: impl AsRef<std::path::Path>) -> Self {
             let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // Safety: test-only env mutation; set_var is unsafe in edition 2024.
-            unsafe { std::env::set_var("SWAGE_HOME", "/tmp/swage_nonexistent_test_root") };
+            unsafe { std::env::set_var("SWAGE_HOME", path.as_ref()) };
             Self { _lock: lock }
+        }
+
+        fn isolate() -> Self {
+            Self::set_to("/tmp/swage_nonexistent_test_root")
         }
     }
 
@@ -1251,6 +1271,7 @@ pub(crate) mod tests {
         pub(crate) tool_calls: Vec<ToolCallRecord>,
         pub(crate) snapshots: HashMap<Uuid, String>,
         pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
+        pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
     }
 
     impl MockStorage {
@@ -2408,45 +2429,129 @@ pub(crate) mod tests {
     impl swage_storage::store::AgentMessageStore for MockStorage {
         async fn create_agent_message(
             &self,
-            _: swage_storage::model::NewAgentMessage,
-        ) -> Result<swage_storage::model::AgentMessage, StorageError> {
-            unimplemented!()
+            msg: NewAgentMessage,
+        ) -> Result<AgentMessage, StorageError> {
+            msg.validate()?;
+
+            let now = chrono::Utc::now();
+            let record = AgentMessage {
+                id: Uuid::new_v4(),
+                sender_agent_id: msg.sender_agent_id,
+                recipient_agent_id: msg.recipient_agent_id,
+                kind: msg.kind,
+                correlation_id: msg.correlation_id,
+                payload: msg.payload,
+                status: swage_core::MessageStatus::Pending,
+                failure_reason: None,
+                created_at: now,
+                delivered_at: None,
+            };
+            self.db
+                .lock()
+                .await
+                .agent_messages
+                .insert(record.id, record.clone());
+            Ok(record)
         }
-        async fn get_agent_message(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<swage_storage::model::AgentMessage>, StorageError> {
-            unimplemented!()
+        async fn get_agent_message(&self, id: Uuid) -> Result<Option<AgentMessage>, StorageError> {
+            Ok(self.db.lock().await.agent_messages.get(&id).cloned())
         }
         async fn list_pending_for_agent(
             &self,
-            _: &str,
-        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
-            unimplemented!()
+            agent_id: &str,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            let mut messages: Vec<_> = self
+                .db
+                .lock()
+                .await
+                .agent_messages
+                .values()
+                .filter(|message| {
+                    message.recipient_agent_id == agent_id
+                        && message.status == swage_core::MessageStatus::Pending
+                })
+                .cloned()
+                .collect();
+            messages.sort_by_key(|message| message.created_at);
+            Ok(messages)
         }
         async fn update_agent_message_status(
             &self,
-            _: Uuid,
-            _: swage_core::MessageStatus,
-            _: Option<&str>,
+            id: Uuid,
+            status: swage_core::MessageStatus,
+            failure_reason: Option<&str>,
         ) -> Result<bool, StorageError> {
-            unimplemented!()
+            let mut db = self.db.lock().await;
+            let Some(message) = db.agent_messages.get_mut(&id) else {
+                return Ok(false);
+            };
+            if message.status != swage_core::MessageStatus::Pending {
+                return Ok(false);
+            }
+
+            message.status = status.clone();
+            message.failure_reason = failure_reason.map(str::to_string);
+            message.delivered_at = if status == swage_core::MessageStatus::Delivered {
+                Some(chrono::Utc::now())
+            } else {
+                None
+            };
+            Ok(true)
         }
         async fn update_agent_message_payload(
             &self,
-            _: Uuid,
-            _: serde_json::Value,
+            id: Uuid,
+            payload: serde_json::Value,
         ) -> Result<(), StorageError> {
-            unimplemented!()
+            let mut db = self.db.lock().await;
+            let message = db
+                .agent_messages
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "agent_message".into(),
+                    id: id.to_string(),
+                })?;
+            message.payload = payload;
+            Ok(())
         }
         async fn list_by_correlation(
             &self,
-            _: Uuid,
-        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
-            unimplemented!()
+            correlation_id: Uuid,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            let mut messages: Vec<_> = self
+                .db
+                .lock()
+                .await
+                .agent_messages
+                .values()
+                .filter(|message| message.correlation_id == Some(correlation_id))
+                .cloned()
+                .collect();
+            messages.sort_by_key(|message| message.created_at);
+            Ok(messages)
         }
-        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
-            unimplemented!()
+        async fn expire_stale_messages(
+            &self,
+            max_age: std::time::Duration,
+        ) -> Result<u64, StorageError> {
+            let now = chrono::Utc::now();
+            let mut db = self.db.lock().await;
+            let mut expired = 0;
+            for message in db.agent_messages.values_mut() {
+                if message.status != swage_core::MessageStatus::Pending {
+                    continue;
+                }
+                let Ok(age) = now.signed_duration_since(message.created_at).to_std() else {
+                    continue;
+                };
+                if age > max_age {
+                    message.status = swage_core::MessageStatus::Failed;
+                    message.failure_reason = Some("delivery timeout".into());
+                    message.delivered_at = None;
+                    expired += 1;
+                }
+            }
+            Ok(expired)
         }
     }
 
@@ -3160,8 +3265,6 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
-        let _guard = SwageHomeGuard::isolate();
-
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let project = storage
@@ -3221,6 +3324,11 @@ pub(crate) mod tests {
             child_round,
             parent_resume_round,
         ]));
+
+        let swage_home = tempfile::TempDir::new().expect("temp swage home");
+        std::fs::create_dir_all(swage_home.path().join("projects/default/agents/agent-b"))
+            .expect("create delegated agent directory");
+        let _guard = SwageHomeGuard::set_to(swage_home.path());
 
         let dispatcher =
             crate::tool::ToolDispatcher::allow_all(vec![
