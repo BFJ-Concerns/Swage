@@ -182,7 +182,10 @@ impl GoogleProvider {
         } else {
             "generateContent"
         };
-        format!("{}/v1beta/models/{}:{}?key=REDACTED", base_url, model, endpoint)
+        format!(
+            "{}/v1beta/models/{}:{}?key=REDACTED",
+            base_url, model, endpoint
+        )
     }
 
     /// Extract system messages from the conversation and return them as
@@ -193,7 +196,9 @@ impl GoogleProvider {
 
         for msg in messages {
             if msg.role == Role::System {
-                let text: String = msg.content.iter()
+                let text: String = msg
+                    .content
+                    .iter()
                     .filter_map(|p| match p {
                         ContentPart::Text { text } => Some(text.as_str()),
                         _ => None,
@@ -226,80 +231,85 @@ impl GoogleProvider {
 
     /// Convert non-system ChatMessages to Gemini contents array.
     fn convert_messages(messages: &[&ChatMessage]) -> Vec<GeminiContent> {
-        messages.iter().map(|msg| {
-            let role = match msg.role {
-                Role::User | Role::Tool => "user",
-                Role::Assistant => "model",
-                Role::System => "user", // Should not happen — system is extracted
-            };
+        messages
+            .iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    Role::User | Role::Tool => "user",
+                    Role::Assistant => "model",
+                    Role::System => "user", // Should not happen — system is extracted
+                };
 
-            let mut parts = Vec::new();
+                let mut parts = Vec::new();
 
-            // Tool result messages produce function_response parts.
-            if msg.role == Role::Tool {
-                if let Some(ref call_id) = msg.tool_call_id {
-                    let text: String = msg.content.iter()
-                        .filter_map(|p| match p {
-                            ContentPart::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    parts.push(GeminiPart {
-                        text: None,
-                        function_call: None,
-                        function_response: Some(GeminiFunctionResponse {
-                            name: call_id.clone(),
-                            response: serde_json::json!({ "result": text }),
-                        }),
-                    });
-                }
-            } else {
-                // Regular text parts.
-                for part in &msg.content {
-                    match part {
-                        ContentPart::Text { text } => {
-                            if !text.is_empty() {
-                                parts.push(GeminiPart {
-                                    text: Some(text.clone()),
-                                    function_call: None,
-                                    function_response: None,
-                                });
-                            }
-                        }
-                        _ => {} // Image URLs not yet supported for Gemini.
-                    }
-                }
-
-                // Assistant messages may include tool calls as function_call parts.
-                if let Some(ref calls) = msg.tool_calls {
-                    for tc in calls {
+                // Tool result messages produce function_response parts.
+                if msg.role == Role::Tool {
+                    if let Some(ref call_id) = msg.tool_call_id {
+                        let text: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|p| match p {
+                                ContentPart::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
                         parts.push(GeminiPart {
                             text: None,
-                            function_call: Some(GeminiFunctionCall {
-                                name: tc.name.clone(),
-                                args: tc.arguments.clone(),
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: call_id.clone(),
+                                response: serde_json::json!({ "result": text }),
                             }),
-                            function_response: None,
                         });
                     }
+                } else {
+                    // Regular text parts.
+                    for part in &msg.content {
+                        match part {
+                            ContentPart::Text { text } => {
+                                if !text.is_empty() {
+                                    parts.push(GeminiPart {
+                                        text: Some(text.clone()),
+                                        function_call: None,
+                                        function_response: None,
+                                    });
+                                }
+                            }
+                            _ => {} // Image URLs not yet supported for Gemini.
+                        }
+                    }
+
+                    // Assistant messages may include tool calls as function_call parts.
+                    if let Some(ref calls) = msg.tool_calls {
+                        for tc in calls {
+                            parts.push(GeminiPart {
+                                text: None,
+                                function_call: Some(GeminiFunctionCall {
+                                    name: tc.name.clone(),
+                                    args: tc.arguments.clone(),
+                                }),
+                                function_response: None,
+                            });
+                        }
+                    }
                 }
-            }
 
-            // Ensure at least one part — Gemini rejects empty content.
-            if parts.is_empty() {
-                parts.push(GeminiPart {
-                    text: Some(String::new()),
-                    function_call: None,
-                    function_response: None,
-                });
-            }
+                // Ensure at least one part — Gemini rejects empty content.
+                if parts.is_empty() {
+                    parts.push(GeminiPart {
+                        text: Some(String::new()),
+                        function_call: None,
+                        function_response: None,
+                    });
+                }
 
-            GeminiContent {
-                role: Some(role.to_string()),
-                parts,
-            }
-        }).collect()
+                GeminiContent {
+                    role: Some(role.to_string()),
+                    parts,
+                }
+            })
+            .collect()
     }
 
     /// Build the request body for a text-only completion.
@@ -347,22 +357,31 @@ impl GoogleProvider {
         };
 
         // Convert tool definitions to Gemini function declarations.
-        let declarations: Vec<GeminiFunctionDeclaration> = request.tool_definitions.iter()
+        let declarations: Vec<GeminiFunctionDeclaration> = request
+            .tool_definitions
+            .iter()
             .filter_map(|def| {
                 let name = def.get("name")?.as_str()?.to_string();
                 let description = def.get("description")?.as_str()?.to_string();
-                let parameters = def.get("parameters")
+                let parameters = def
+                    .get("parameters")
                     .or_else(|| def.get("input_schema"))
                     .cloned()
                     .unwrap_or(serde_json::json!({"type": "object"}));
-                Some(GeminiFunctionDeclaration { name, description, parameters })
+                Some(GeminiFunctionDeclaration {
+                    name,
+                    description,
+                    parameters,
+                })
             })
             .collect();
 
         let tools = if declarations.is_empty() {
             Vec::new()
         } else {
-            vec![GeminiTool { function_declarations: declarations }]
+            vec![GeminiTool {
+                function_declarations: declarations,
+            }]
         };
 
         GenerateContentRequest {
@@ -385,11 +404,12 @@ impl GoogleProvider {
     }
 
     /// Parse a Gemini response into a CompletionResponse.
-    fn parse_response(response: &GenerateContentResponse) -> Result<(String, Vec<ToolCall>, FinishReason), ProviderError> {
-        let candidate = response.candidates.first()
-            .ok_or_else(|| ProviderError::InvalidResponse(
-                "no candidates in response".to_string(),
-            ))?;
+    fn parse_response(
+        response: &GenerateContentResponse,
+    ) -> Result<(String, Vec<ToolCall>, FinishReason), ProviderError> {
+        let candidate = response.candidates.first().ok_or_else(|| {
+            ProviderError::InvalidResponse("no candidates in response".to_string())
+        })?;
 
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -411,9 +431,7 @@ impl GoogleProvider {
             }
         }
 
-        let finish_reason = Self::parse_finish_reason(
-            candidate.finish_reason.as_deref(),
-        );
+        let finish_reason = Self::parse_finish_reason(candidate.finish_reason.as_deref());
 
         // If there are tool calls but finish_reason isn't already ToolUse,
         // override it — Gemini uses STOP even when issuing function calls.
@@ -428,7 +446,14 @@ impl GoogleProvider {
 
     /// Parse a streaming SSE event from the Gemini API.
     fn parse_stream_event(data: &str) -> Option<StreamChunk> {
-        let response: GenerateContentResponse = serde_json::from_str(data).ok()?;
+        let response: GenerateContentResponse = match serde_json::from_str(data) {
+            Ok(response) => response,
+            Err(error) => {
+                return Some(StreamChunk::Error {
+                    message: format!("failed to parse Gemini SSE payload: {error}"),
+                });
+            }
+        };
 
         // Check for function calls first.
         if let Some(candidate) = response.candidates.first() {
@@ -447,7 +472,9 @@ impl GoogleProvider {
                 for part in &content.parts {
                     if let Some(ref text) = part.text {
                         if !text.is_empty() {
-                            return Some(StreamChunk::Delta { content: text.clone() });
+                            return Some(StreamChunk::Delta {
+                                content: text.clone(),
+                            });
                         }
                     }
                 }
@@ -456,7 +483,9 @@ impl GoogleProvider {
             // Check for finish reason with no content.
             if let Some(ref reason) = candidate.finish_reason {
                 let finish = Self::parse_finish_reason(Some(reason));
-                return Some(StreamChunk::Done { finish_reason: Some(finish) });
+                return Some(StreamChunk::Done {
+                    finish_reason: Some(finish),
+                });
             }
         }
 
@@ -486,8 +515,7 @@ impl LlmProvider for GoogleProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let model = request.model.as_deref()
-            .unwrap_or(&self.config.model);
+        let model = request.model.as_deref().unwrap_or(&self.config.model);
         let url = self.build_url(model, false);
         let body = self.build_request(&request);
 
@@ -506,7 +534,9 @@ impl LlmProvider for GoogleProvider {
             return Err(crate::http::map_http_error(status, body_text, None));
         }
 
-        let gemini_response: GenerateContentResponse = response.json().await
+        let gemini_response: GenerateContentResponse = response
+            .json()
+            .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
         let (content, _tool_calls, finish_reason) = Self::parse_response(&gemini_response)?;
@@ -525,8 +555,7 @@ impl LlmProvider for GoogleProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
-        let model = request.model.as_deref()
-            .unwrap_or(&self.config.model);
+        let model = request.model.as_deref().unwrap_or(&self.config.model);
         let url = self.build_url(model, false);
         let body = self.build_tool_request(&request);
 
@@ -545,7 +574,9 @@ impl LlmProvider for GoogleProvider {
             return Err(crate::http::map_http_error(status, body_text, None));
         }
 
-        let gemini_response: GenerateContentResponse = response.json().await
+        let gemini_response: GenerateContentResponse = response
+            .json()
+            .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
         let (content, tool_calls, finish_reason) = Self::parse_response(&gemini_response)?;
@@ -565,7 +596,9 @@ impl LlmProvider for GoogleProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let model = request.model.as_deref()
+        let model = request
+            .model
+            .as_deref()
             .unwrap_or(&self.config.model)
             .to_string();
         let url = self.build_url(&model, true);
@@ -636,7 +669,8 @@ impl LlmProvider for GoogleProvider {
                     buffer = buffer[idx + 2..].to_string();
 
                     // Extract data lines from the SSE block.
-                    let data: String = block.lines()
+                    let data: String = block
+                        .lines()
                         .filter_map(|line| {
                             if let Some(val) = line.strip_prefix("data:") {
                                 Some(val.strip_prefix(' ').unwrap_or(val))
@@ -746,7 +780,9 @@ mod tests {
             arguments: serde_json::json!({"query": "rust"}),
         }]);
         let converted = GoogleProvider::convert_messages(&[&msg]);
-        let fc = converted[0].parts.iter()
+        let fc = converted[0]
+            .parts
+            .iter()
             .find(|p| p.function_call.is_some())
             .and_then(|p| p.function_call.as_ref())
             .unwrap();
@@ -758,9 +794,11 @@ mod tests {
 
     #[test]
     fn build_request_separates_system_instruction() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::new("key", "gemini-pro", "https://generativelanguage.googleapis.com"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
         let request = CompletionRequest {
             messages: vec![
                 ChatMessage::new(Role::System, "Be helpful"),
@@ -775,14 +813,19 @@ mod tests {
         let body = provider.build_request(&request);
         assert!(body.system_instruction.is_some());
         assert_eq!(body.contents.len(), 1); // Only user message.
-        assert_eq!(body.generation_config.as_ref().unwrap().max_output_tokens, Some(100));
+        assert_eq!(
+            body.generation_config.as_ref().unwrap().max_output_tokens,
+            Some(100)
+        );
     }
 
     #[test]
     fn build_tool_request_includes_function_declarations() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::new("key", "gemini-pro", "https://generativelanguage.googleapis.com"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
         let request = ToolCompletionRequest {
             messages: vec![ChatMessage::new(Role::User, "search")],
             model: None,
@@ -806,9 +849,11 @@ mod tests {
 
     #[test]
     fn build_url_includes_api_key_as_query_param() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::new("test-key", "gemini-pro", "https://generativelanguage.googleapis.com"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "test-key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
         let url = provider.build_url("gemini-pro", false);
         assert!(url.contains("key=test-key"));
         assert!(url.contains(":generateContent"));
@@ -817,9 +862,11 @@ mod tests {
 
     #[test]
     fn build_url_streaming_uses_stream_endpoint() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::new("test-key", "gemini-pro", "https://generativelanguage.googleapis.com"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "test-key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
         let url = provider.build_url("gemini-pro", true);
         assert!(url.contains(":streamGenerateContent"));
         assert!(url.contains("alt=sse"));
@@ -840,17 +887,26 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_stop() {
-        assert_eq!(GoogleProvider::parse_finish_reason(Some("STOP")), FinishReason::Stop);
+        assert_eq!(
+            GoogleProvider::parse_finish_reason(Some("STOP")),
+            FinishReason::Stop
+        );
     }
 
     #[test]
     fn parse_finish_reason_max_tokens() {
-        assert_eq!(GoogleProvider::parse_finish_reason(Some("MAX_TOKENS")), FinishReason::Length);
+        assert_eq!(
+            GoogleProvider::parse_finish_reason(Some("MAX_TOKENS")),
+            FinishReason::Length
+        );
     }
 
     #[test]
     fn parse_finish_reason_safety() {
-        assert_eq!(GoogleProvider::parse_finish_reason(Some("SAFETY")), FinishReason::ContentFilter);
+        assert_eq!(
+            GoogleProvider::parse_finish_reason(Some("SAFETY")),
+            FinishReason::ContentFilter
+        );
     }
 
     #[test]
@@ -863,8 +919,14 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_unknown_variant() {
-        assert_eq!(GoogleProvider::parse_finish_reason(Some("OTHER")), FinishReason::Unknown);
-        assert_eq!(GoogleProvider::parse_finish_reason(None), FinishReason::Unknown);
+        assert_eq!(
+            GoogleProvider::parse_finish_reason(Some("OTHER")),
+            FinishReason::Unknown
+        );
+        assert_eq!(
+            GoogleProvider::parse_finish_reason(None),
+            FinishReason::Unknown
+        );
     }
 
     // --- Response parsing ---
@@ -979,7 +1041,9 @@ mod tests {
         let chunk = GoogleProvider::parse_stream_event(data);
         assert!(matches!(
             chunk,
-            Some(StreamChunk::Done { finish_reason: Some(FinishReason::Stop) })
+            Some(StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop)
+            })
         ));
     }
 
@@ -995,6 +1059,15 @@ mod tests {
         assert!(matches!(
             chunk,
             Some(StreamChunk::Usage(usage)) if usage.input_tokens == 20 && usage.output_tokens == 10
+        ));
+    }
+
+    #[test]
+    fn parse_stream_event_reports_malformed_payload() {
+        let chunk = GoogleProvider::parse_stream_event("{not-json");
+        assert!(matches!(
+            chunk,
+            Some(StreamChunk::Error { message }) if message.contains("failed to parse Gemini SSE payload")
         ));
     }
 
@@ -1018,7 +1091,9 @@ mod tests {
         let response: GenerateContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.candidates.len(), 1);
         assert_eq!(
-            response.candidates[0].content.as_ref().unwrap().parts[0].text.as_deref(),
+            response.candidates[0].content.as_ref().unwrap().parts[0]
+                .text
+                .as_deref(),
             Some("Hi"),
         );
         assert_eq!(response.usage_metadata.unwrap().prompt_token_count, 5);
@@ -1042,7 +1117,9 @@ mod tests {
         }"#;
         let response: GenerateContentResponse = serde_json::from_str(json).unwrap();
         let fc = &response.candidates[0].content.as_ref().unwrap().parts[0]
-            .function_call.as_ref().unwrap();
+            .function_call
+            .as_ref()
+            .unwrap();
         assert_eq!(fc.name, "search");
         assert_eq!(fc.args["query"], "rust");
     }
@@ -1051,9 +1128,11 @@ mod tests {
 
     #[test]
     fn model_id_returns_configured_model() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::new("key", "gemini-1.5-pro", "https://example.com"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-1.5-pro",
+            "https://example.com",
+        ));
         assert_eq!(provider.model_id(), "gemini-1.5-pro");
     }
 
@@ -1061,9 +1140,10 @@ mod tests {
 
     #[test]
     fn keyless_url_has_empty_key_param() {
-        let provider = GoogleProvider::from_config(
-            ProviderConfig::keyless("gemini-pro", "https://localhost:8080"),
-        );
+        let provider = GoogleProvider::from_config(ProviderConfig::keyless(
+            "gemini-pro",
+            "https://localhost:8080",
+        ));
         let url = provider.build_url("gemini-pro", false);
         assert!(url.contains("key="));
         // No panic, just empty key.

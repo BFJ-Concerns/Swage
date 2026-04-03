@@ -119,7 +119,8 @@ impl ToolDispatcher for GatewayToolDispatcher {
             parent_call_id: Some(self.parent_call_id.clone()),
         };
         let _ = self.handle.block_on(
-            self.handle.spawn(async move { storage.create_tool_call(new_call).await }),
+            self.handle
+                .spawn(async move { storage.create_tool_call(new_call).await }),
         );
 
         // Dispatch the tool call through the full pipeline.
@@ -138,6 +139,8 @@ impl ToolDispatcher for GatewayToolDispatcher {
                     working_directory,
                     allowed_paths: vec![],
                     user_info: None,
+                    call_id: None,
+                    turn_id: None,
                 };
                 dispatcher
                     .dispatch(&tool_name_owned, arguments, &ctx, "gateway-dispatcher")
@@ -148,7 +151,10 @@ impl ToolDispatcher for GatewayToolDispatcher {
 
         let (output, is_error) = match exec {
             Ok(tool_output) => (
-                tool_output.result["output"].as_str().unwrap_or("").to_string(),
+                tool_output.result["output"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
                 false,
             ),
             Err(e) => (e.to_string(), true),
@@ -171,7 +177,10 @@ impl ToolDispatcher for GatewayToolDispatcher {
         // Persist the completed result.
         self.update_result(&call_id, &output, status, duration_ms, false, None);
 
-        DispatchResult { content: output, is_error }
+        DispatchResult {
+            content: output,
+            is_error,
+        }
     }
 }
 
@@ -224,9 +233,11 @@ mod tests {
     use uuid::Uuid;
 
     use swage_core::ToolError;
-    use swage_storage::model::{NewProject, NewSession, NewThread, NewTurn, TurnState};
-    use swage_storage::store::{ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore};
     use swage_storage::SqliteStorage;
+    use swage_storage::model::{NewProject, NewSession, NewThread, NewTurn, TurnState};
+    use swage_storage::store::{
+        ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+    };
     use swage_tool::context::ToolContext;
     use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
@@ -290,7 +301,7 @@ mod tests {
 
     fn dispatcher_with_echo() -> Arc<SwageToolDispatcher> {
         Arc::new(SwageToolDispatcher::allow_all(vec![
-            Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>,
+            Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>
         ]))
     }
 
@@ -330,17 +341,27 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = ProjectStore::create(
             &storage,
-            NewProject { name: "test".into(), slug: "test".into(), workspace_path: None },
+            NewProject {
+                name: "test".into(),
+                slug: "test".into(),
+                workspace_path: None,
+            },
         )
         .await
         .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "gateway".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
         let thread = ThreadStore::create(
             &storage,
-            NewThread { session_id: session.id, agent_id: "gateway".to_string() },
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -371,11 +392,10 @@ mod tests {
             "py_01",
         ));
 
-        let result = tokio::task::spawn_blocking(move || {
-            d.dispatch("echo", json!({"text": "hello world"}))
-        })
-        .await
-        .unwrap();
+        let result =
+            tokio::task::spawn_blocking(move || d.dispatch("echo", json!({"text": "hello world"})))
+                .await
+                .unwrap();
 
         assert!(!result.is_error);
         assert_eq!(result.content, "hello world");
@@ -394,14 +414,15 @@ mod tests {
             "py_02",
         ));
 
-        let result = tokio::task::spawn_blocking(move || {
-            d.dispatch("nonexistent", json!({}))
-        })
-        .await
-        .unwrap();
+        let result = tokio::task::spawn_blocking(move || d.dispatch("nonexistent", json!({})))
+            .await
+            .unwrap();
 
         assert!(result.is_error);
-        assert!(result.content.contains("nonexistent"), "error message should name the tool");
+        assert!(
+            result.content.contains("nonexistent"),
+            "error message should name the tool"
+        );
     }
 
     /// ToolStart event must carry the parent's call_id.
@@ -422,10 +443,17 @@ mod tests {
             .unwrap();
 
         let events = collect_events(&mut rx);
-        let start = events.iter().find(|e| matches!(e, ServerEvent::ToolStart { .. }));
+        let start = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolStart { .. }));
         assert!(start.is_some(), "expected a ToolStart event");
 
-        if let Some(ServerEvent::ToolStart { tool, parent_call_id, .. }) = start {
+        if let Some(ServerEvent::ToolStart {
+            tool,
+            parent_call_id,
+            ..
+        }) = start
+        {
             assert_eq!(tool, "echo");
             assert_eq!(parent_call_id.as_deref(), Some("python_001"));
         }
@@ -449,10 +477,18 @@ mod tests {
             .unwrap();
 
         let events = collect_events(&mut rx);
-        let end = events.iter().find(|e| matches!(e, ServerEvent::ToolEnd { .. }));
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolEnd { .. }));
         assert!(end.is_some(), "expected a ToolEnd event");
 
-        if let Some(ServerEvent::ToolEnd { tool, status, parent_call_id, .. }) = end {
+        if let Some(ServerEvent::ToolEnd {
+            tool,
+            status,
+            parent_call_id,
+            ..
+        }) = end
+        {
             assert_eq!(tool, "echo");
             assert_eq!(status, "success");
             assert_eq!(parent_call_id.as_deref(), Some("python_002"));
@@ -478,7 +514,10 @@ mod tests {
             .await
             .unwrap();
 
-        let records = storage_check.list_tool_calls_by_turn(turn_id).await.unwrap();
+        let records = storage_check
+            .list_tool_calls_by_turn(turn_id)
+            .await
+            .unwrap();
         assert_eq!(records.len(), 1, "expected one tool call record");
         let r = &records[0];
         assert_eq!(r.tool, "echo");
@@ -509,7 +548,10 @@ mod tests {
         .await
         .unwrap();
 
-        let records = storage_check.list_tool_calls_by_turn(turn_id).await.unwrap();
+        let records = storage_check
+            .list_tool_calls_by_turn(turn_id)
+            .await
+            .unwrap();
         assert_eq!(records.len(), 2, "both calls should be persisted");
         // Records are ordered by position ASC.
         assert_eq!(records[0].position, 0);
@@ -520,21 +562,28 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_failing_tool_returns_error_result() {
         let sub_dispatcher = Arc::new(SwageToolDispatcher::allow_all(vec![
-            Arc::new(FailingTool) as Arc<dyn swage_tool::tool::Tool>,
+            Arc::new(FailingTool) as Arc<dyn swage_tool::tool::Tool>
         ]));
         let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let d = Arc::new(make_dispatcher(sub_dispatcher, tx, storage, Uuid::new_v4(), "py_fail"));
+        let d = Arc::new(make_dispatcher(
+            sub_dispatcher,
+            tx,
+            storage,
+            Uuid::new_v4(),
+            "py_fail",
+        ));
 
-        let result =
-            tokio::task::spawn_blocking(move || d.dispatch("failing", json!({})))
-                .await
-                .unwrap();
+        let result = tokio::task::spawn_blocking(move || d.dispatch("failing", json!({})))
+            .await
+            .unwrap();
 
         assert!(result.is_error);
 
         let events = collect_events(&mut rx);
-        let end = events.iter().find(|e| matches!(e, ServerEvent::ToolEnd { .. }));
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolEnd { .. }));
         assert!(end.is_some());
         if let Some(ServerEvent::ToolEnd { status, .. }) = end {
             assert_eq!(status, "error");
@@ -556,7 +605,9 @@ mod tests {
         // Build a sub-dispatcher that registers "echo" but explicitly denies it.
         // This simulates an agent config where shell (or any tool) is blocked.
         let mut registry = swage_tool::registry::ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>).unwrap();
+        registry
+            .register_builtin(Arc::new(EchoTool) as Arc<dyn swage_tool::tool::Tool>)
+            .unwrap();
         let restricted_dispatcher = Arc::new(SwageToolDispatcher::new(
             Arc::new(registry),
             PermissionConfig {
@@ -615,12 +666,14 @@ mod tests {
 
         let events = collect_events(&mut rx);
         assert!(
-            events.iter().any(|e| matches!(e, ServerEvent::ToolStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::ToolStart { .. })),
             "expected ToolStart even for unknown tool"
         );
-        let error_end = events.iter().find(|e| {
-            matches!(e, ServerEvent::ToolEnd { status, .. } if status == "error")
-        });
+        let error_end = events
+            .iter()
+            .find(|e| matches!(e, ServerEvent::ToolEnd { status, .. } if status == "error"));
         assert!(error_end.is_some(), "expected ToolEnd with error status");
 
         // The error end must also carry parent_call_id.

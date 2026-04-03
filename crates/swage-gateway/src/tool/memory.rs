@@ -37,7 +37,10 @@ fn validate_file_name(name: &str) -> Option<String> {
             "file name '{name}' is invalid: must not contain path separators or '..'"
         ));
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Some(format!(
             "file name '{name}' is invalid: only alphanumeric characters, \
              hyphens, and underscores are allowed"
@@ -90,12 +93,13 @@ impl Tool for MemoryTool {
         // Convention: {working_directory}/.swage/memory
         let memory_dir: PathBuf = ctx.working_directory().join(".swage").join("memory");
 
-        let operation = params["operation"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "Missing required argument: operation".to_owned(),
-            })?;
+        let operation =
+            params["operation"]
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidParameters {
+                    name: self.name().to_owned(),
+                    message: "Missing required argument: operation".to_owned(),
+                })?;
 
         match operation {
             "read" => self.read(&memory_dir, &params).await,
@@ -114,11 +118,7 @@ impl MemoryTool {
     // read
     // -----------------------------------------------------------------------
 
-    async fn read(
-        &self,
-        memory_dir: &Path,
-        params: &Value,
-    ) -> Result<Value, ToolError> {
+    async fn read(&self, memory_dir: &Path, params: &Value) -> Result<Value, ToolError> {
         match params["file"].as_str() {
             Some(name) => {
                 // Read a specific named file.
@@ -310,6 +310,8 @@ mod tests {
             working_directory: dir.path().to_path_buf(),
             allowed_paths: vec![],
             user_info: None,
+            call_id: None,
+            turn_id: None,
         }
     }
 
@@ -340,11 +342,26 @@ mod tests {
     #[test]
     fn invalid_file_names_rejected() {
         assert!(validate_file_name("").is_some(), "empty should be rejected");
-        assert!(validate_file_name("../etc/passwd").is_some(), ".. should be rejected");
-        assert!(validate_file_name("foo/bar").is_some(), "slash should be rejected");
-        assert!(validate_file_name("foo\\bar").is_some(), "backslash should be rejected");
-        assert!(validate_file_name("foo.bar").is_some(), "dot should be rejected");
-        assert!(validate_file_name("hello world").is_some(), "space should be rejected");
+        assert!(
+            validate_file_name("../etc/passwd").is_some(),
+            ".. should be rejected"
+        );
+        assert!(
+            validate_file_name("foo/bar").is_some(),
+            "slash should be rejected"
+        );
+        assert!(
+            validate_file_name("foo\\bar").is_some(),
+            "backslash should be rejected"
+        );
+        assert!(
+            validate_file_name("foo.bar").is_some(),
+            "dot should be rejected"
+        );
+        assert!(
+            validate_file_name("hello world").is_some(),
+            "space should be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -364,7 +381,10 @@ mod tests {
             .unwrap();
 
         let output = result["output"].as_str().unwrap();
-        assert!(output.contains("notes.md"), "confirmation should mention the file");
+        assert!(
+            output.contains("notes.md"),
+            "confirmation should mention the file"
+        );
 
         let written = std::fs::read_to_string(memory_dir(&dir).join("notes.md")).unwrap();
         assert_eq!(written, "# My Notes\n\nHello!");
@@ -522,7 +542,12 @@ mod tests {
             .execute(json!({ "operation": "read" }), &ctx)
             .await
             .unwrap();
-        assert!(result["output"].as_str().unwrap().contains("No memory files"));
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("No memory files")
+        );
     }
 
     #[tokio::test]
@@ -534,7 +559,12 @@ mod tests {
             .execute(json!({ "operation": "read" }), &ctx)
             .await
             .unwrap();
-        assert!(result["output"].as_str().unwrap().contains("does not exist"));
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("does not exist")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -569,7 +599,12 @@ mod tests {
             .execute(json!({ "operation": "list" }), &ctx)
             .await
             .unwrap();
-        assert!(result["output"].as_str().unwrap().contains("No memory files"));
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("No memory files")
+        );
     }
 
     #[tokio::test]
@@ -581,7 +616,12 @@ mod tests {
             .execute(json!({ "operation": "list" }), &ctx)
             .await
             .unwrap();
-        assert!(result["output"].as_str().unwrap().contains("does not exist"));
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("does not exist")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -592,10 +632,7 @@ mod tests {
     async fn missing_operation_returns_error() {
         let dir = TempDir::new().unwrap();
         let ctx = ctx_with_root(&dir);
-        let err = MemoryTool
-            .execute(json!({}), &ctx)
-            .await
-            .unwrap_err();
+        let err = MemoryTool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 

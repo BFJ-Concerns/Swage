@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use swage_core::ToolError;
 use swage_safety::LeakDetector;
@@ -146,6 +146,8 @@ fn test_context() -> MockToolContext {
         working_directory: PathBuf::from("/tmp/test"),
         allowed_paths: vec![PathBuf::from("/tmp/test")],
         user_info: None,
+        call_id: None,
+        turn_id: None,
     }
 }
 
@@ -442,10 +444,7 @@ async fn dispatch_rate_limits_after_threshold() {
         let result = dispatcher
             .dispatch("counter", json!({}), &ctx, "test-agent")
             .await;
-        assert!(
-            result.is_ok(),
-            "call {i} should succeed within rate limit"
-        );
+        assert!(result.is_ok(), "call {i} should succeed within rate limit");
     }
 
     // Third call should be rate-limited.

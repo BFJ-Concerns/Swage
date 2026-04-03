@@ -210,51 +210,64 @@ impl OpenAiProvider {
 
     /// Convert `ChatMessage` list to OpenAI wire format.
     fn convert_messages(messages: &[ChatMessage]) -> Vec<OpenAiMessage> {
-        messages.iter().map(|msg| {
-            let role = match msg.role {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "tool",
-            };
+        messages
+            .iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    Role::System => "system",
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => "tool",
+                };
 
-            // Extract plain text from content parts.
-            let content_text: String = msg.content.iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
+                // Extract plain text from content parts.
+                let content_text: String = msg
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
 
-            let content = if content_text.is_empty() { None } else { Some(content_text) };
+                let content = if content_text.is_empty() {
+                    None
+                } else {
+                    Some(content_text)
+                };
 
-            // Convert tool calls if present (assistant messages).
-            let tool_calls = msg.tool_calls.as_ref().map(|calls| {
-                calls.iter().map(|tc| OpenAiToolCall {
-                    id: tc.call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: OpenAiFunctionCall {
-                        name: tc.name.clone(),
-                        arguments: serde_json::to_string(&tc.arguments)
-                            .unwrap_or_default(),
-                    },
-                }).collect()
-            });
+                // Convert tool calls if present (assistant messages).
+                let tool_calls = msg.tool_calls.as_ref().map(|calls| {
+                    calls
+                        .iter()
+                        .map(|tc| OpenAiToolCall {
+                            id: tc.call_id.clone(),
+                            call_type: "function".to_string(),
+                            function: OpenAiFunctionCall {
+                                name: tc.name.clone(),
+                                arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                            },
+                        })
+                        .collect()
+                });
 
-            OpenAiMessage {
-                role: role.to_string(),
-                content,
-                name: msg.name.clone(),
-                tool_call_id: msg.tool_call_id.clone(),
-                tool_calls,
-            }
-        }).collect()
+                OpenAiMessage {
+                    role: role.to_string(),
+                    content,
+                    name: msg.name.clone(),
+                    tool_call_id: msg.tool_call_id.clone(),
+                    tool_calls,
+                }
+            })
+            .collect()
     }
 
     /// Build the request body for a text-only completion.
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> ChatCompletionsRequest {
-        let model = request.model.as_deref()
+        let model = request
+            .model
+            .as_deref()
             .unwrap_or(&self.config.model)
             .to_string();
 
@@ -275,16 +288,21 @@ impl OpenAiProvider {
         request: &ToolCompletionRequest,
         stream: bool,
     ) -> ChatCompletionsRequest {
-        let model = request.model.as_deref()
+        let model = request
+            .model
+            .as_deref()
             .unwrap_or(&self.config.model)
             .to_string();
 
         // Convert JSON tool definitions to OpenAI wire format.
-        let tools: Vec<OpenAiTool> = request.tool_definitions.iter()
+        let tools: Vec<OpenAiTool> = request
+            .tool_definitions
+            .iter()
             .filter_map(|def| {
                 let name = def.get("name")?.as_str()?.to_string();
                 let description = def.get("description")?.as_str()?.to_string();
-                let parameters = def.get("parameters")
+                let parameters = def
+                    .get("parameters")
                     .or_else(|| def.get("input_schema"))
                     .cloned()
                     .unwrap_or(serde_json::json!({"type": "object"}));
@@ -325,17 +343,20 @@ impl OpenAiProvider {
     /// Parse tool calls from an OpenAI response, normalising JSON string
     /// arguments into structured JSON.
     fn parse_tool_calls(calls: &[OpenAiToolCall]) -> Vec<ToolCall> {
-        calls.iter().map(|tc| {
-            // OpenAI sends arguments as a JSON string — parse it into a Value.
-            let arguments = serde_json::from_str(&tc.function.arguments)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        calls
+            .iter()
+            .map(|tc| {
+                // OpenAI sends arguments as a JSON string — parse it into a Value.
+                let arguments = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-            ToolCall {
-                call_id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                arguments,
-            }
-        }).collect()
+                ToolCall {
+                    call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments,
+                }
+            })
+            .collect()
     }
 
     /// Parse a streaming SSE event into a StreamChunk.
@@ -343,7 +364,14 @@ impl OpenAiProvider {
         event: &SseEvent,
         tool_acc: &mut ToolCallAccumulator,
     ) -> Option<StreamChunk> {
-        let chunk: StreamingChunk = serde_json::from_str(&event.data).ok()?;
+        let chunk: StreamingChunk = match serde_json::from_str(&event.data) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return Some(StreamChunk::Error {
+                    message: format!("failed to parse OpenAI SSE payload: {error}"),
+                });
+            }
+        };
 
         // Usage information may arrive in a chunk with empty choices (e.g. the
         // final chunk from OpenAI when stream_options.include_usage is set).
@@ -369,13 +397,17 @@ impl OpenAiProvider {
                     });
                 }
 
-                return Some(StreamChunk::Done { finish_reason: Some(finish) });
+                return Some(StreamChunk::Done {
+                    finish_reason: Some(finish),
+                });
             }
 
             // Text delta.
             if let Some(ref content) = choice.delta.content {
                 if !content.is_empty() {
-                    return Some(StreamChunk::Delta { content: content.clone() });
+                    return Some(StreamChunk::Delta {
+                        content: content.clone(),
+                    });
                 }
             }
         }
@@ -445,15 +477,18 @@ impl ToolCallAccumulator {
 
     /// Drain all accumulated tool calls, returning them as complete ToolCalls.
     fn take(&mut self) -> Vec<ToolCall> {
-        self.calls.drain(..).map(|acc| {
-            let arguments = serde_json::from_str(&acc.arguments)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-            ToolCall {
-                call_id: acc.id,
-                name: acc.name,
-                arguments,
-            }
-        }).collect()
+        self.calls
+            .drain(..)
+            .map(|acc| {
+                let arguments = serde_json::from_str(&acc.arguments)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                ToolCall {
+                    call_id: acc.id,
+                    name: acc.name,
+                    arguments,
+                }
+            })
+            .collect()
     }
 }
 
@@ -477,10 +512,10 @@ impl LlmProvider for OpenAiProvider {
         let response: ChatCompletionsResponse =
             client.post_json("/chat/completions", &body).await?;
 
-        let choice = response.choices.into_iter().next()
-            .ok_or_else(|| ProviderError::InvalidResponse(
-                "no choices in response".to_string(),
-            ))?;
+        let choice =
+            response.choices.into_iter().next().ok_or_else(|| {
+                ProviderError::InvalidResponse("no choices in response".to_string())
+            })?;
 
         let usage = response.usage.unwrap_or(Usage {
             prompt_tokens: 0,
@@ -491,9 +526,7 @@ impl LlmProvider for OpenAiProvider {
             content: choice.message.content.unwrap_or_default(),
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
-            finish_reason: Self::parse_finish_reason(
-                choice.finish_reason.as_deref(),
-            ),
+            finish_reason: Self::parse_finish_reason(choice.finish_reason.as_deref()),
             cost: None,
         })
     }
@@ -508,17 +541,19 @@ impl LlmProvider for OpenAiProvider {
         let response: ChatCompletionsResponse =
             client.post_json("/chat/completions", &body).await?;
 
-        let choice = response.choices.into_iter().next()
-            .ok_or_else(|| ProviderError::InvalidResponse(
-                "no choices in response".to_string(),
-            ))?;
+        let choice =
+            response.choices.into_iter().next().ok_or_else(|| {
+                ProviderError::InvalidResponse("no choices in response".to_string())
+            })?;
 
         let usage = response.usage.unwrap_or(Usage {
             prompt_tokens: 0,
             completion_tokens: 0,
         });
 
-        let tool_calls = choice.message.tool_calls
+        let tool_calls = choice
+            .message
+            .tool_calls
             .as_deref()
             .map(Self::parse_tool_calls)
             .unwrap_or_default();
@@ -527,9 +562,7 @@ impl LlmProvider for OpenAiProvider {
             content: choice.message.content.unwrap_or_default(),
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
-            finish_reason: Self::parse_finish_reason(
-                choice.finish_reason.as_deref(),
-            ),
+            finish_reason: Self::parse_finish_reason(choice.finish_reason.as_deref()),
             cost: None,
             tool_calls,
         })
@@ -662,9 +695,11 @@ mod tests {
 
     #[test]
     fn build_request_uses_model_from_request_when_present() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("key", "default-model", "http://localhost"),
-        );
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "key",
+            "default-model",
+            "http://localhost",
+        ));
         let request = CompletionRequest {
             messages: vec![],
             model: Some("custom-model".into()),
@@ -680,9 +715,8 @@ mod tests {
 
     #[test]
     fn build_request_falls_back_to_config_model() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("key", "gpt-4o", "http://localhost"),
-        );
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
             messages: vec![],
             model: None,
@@ -697,9 +731,8 @@ mod tests {
 
     #[test]
     fn build_request_sets_stream_flag() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("key", "model", "http://localhost"),
-        );
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
         let request = CompletionRequest {
             messages: vec![],
             model: None,
@@ -719,9 +752,8 @@ mod tests {
 
     #[test]
     fn build_tool_request_converts_definitions() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("key", "gpt-4o", "http://localhost"),
-        );
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = ToolCompletionRequest {
             messages: vec![ChatMessage::new(Role::User, "search for rust")],
             model: None,
@@ -748,17 +780,26 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_stop() {
-        assert_eq!(OpenAiProvider::parse_finish_reason(Some("stop")), FinishReason::Stop);
+        assert_eq!(
+            OpenAiProvider::parse_finish_reason(Some("stop")),
+            FinishReason::Stop
+        );
     }
 
     #[test]
     fn parse_finish_reason_length() {
-        assert_eq!(OpenAiProvider::parse_finish_reason(Some("length")), FinishReason::Length);
+        assert_eq!(
+            OpenAiProvider::parse_finish_reason(Some("length")),
+            FinishReason::Length
+        );
     }
 
     #[test]
     fn parse_finish_reason_tool_calls() {
-        assert_eq!(OpenAiProvider::parse_finish_reason(Some("tool_calls")), FinishReason::ToolUse);
+        assert_eq!(
+            OpenAiProvider::parse_finish_reason(Some("tool_calls")),
+            FinishReason::ToolUse
+        );
     }
 
     #[test]
@@ -771,7 +812,10 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_null_maps_to_unknown() {
-        assert_eq!(OpenAiProvider::parse_finish_reason(None), FinishReason::Unknown);
+        assert_eq!(
+            OpenAiProvider::parse_finish_reason(None),
+            FinishReason::Unknown
+        );
     }
 
     // --- Tool call parsing ---
@@ -873,9 +917,11 @@ mod tests {
 
     #[test]
     fn headers_include_authorization_when_key_present() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("sk-test-key", "model", "http://localhost"),
-        );
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "sk-test-key",
+            "model",
+            "http://localhost",
+        ));
         let headers = provider.build_headers();
         let auth = headers.get("authorization").unwrap().to_str().unwrap();
         assert_eq!(auth, "Bearer sk-test-key");
@@ -883,9 +929,10 @@ mod tests {
 
     #[test]
     fn headers_omit_authorization_when_keyless() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::keyless("llama3", "http://localhost:11434"),
-        );
+        let provider = OpenAiProvider::from_config(ProviderConfig::keyless(
+            "llama3",
+            "http://localhost:11434",
+        ));
         let headers = provider.build_headers();
         assert!(headers.get("authorization").is_none());
     }
@@ -894,9 +941,11 @@ mod tests {
 
     #[test]
     fn model_id_returns_configured_model() {
-        let provider = OpenAiProvider::from_config(
-            ProviderConfig::new("key", "gpt-4o-mini", "http://localhost"),
-        );
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "key",
+            "gpt-4o-mini",
+            "http://localhost",
+        ));
         assert_eq!(provider.model_id(), "gpt-4o-mini");
     }
 
@@ -923,7 +972,9 @@ mod tests {
         let chunk = OpenAiProvider::parse_stream_event(&event, &mut acc);
         assert!(matches!(
             chunk,
-            Some(StreamChunk::Done { finish_reason: Some(FinishReason::Stop) })
+            Some(StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop)
+            })
         ));
     }
 
@@ -952,6 +1003,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parse_stream_event_reports_malformed_payload() {
+        let event = SseEvent {
+            event_type: None,
+            data: "{not-json".into(),
+        };
+        let mut acc = ToolCallAccumulator::new();
+        let chunk = OpenAiProvider::parse_stream_event(&event, &mut acc);
+        assert!(matches!(
+            chunk,
+            Some(StreamChunk::Error { message }) if message.contains("failed to parse OpenAI SSE payload")
+        ));
+    }
+
     // --- Response parsing (via serde) ---
 
     #[test]
@@ -966,7 +1031,10 @@ mod tests {
         }"#;
         let response: ChatCompletionsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.choices.len(), 1);
-        assert_eq!(response.choices[0].message.content.as_deref(), Some("Hello!"));
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("Hello!")
+        );
         assert_eq!(response.usage.unwrap().prompt_tokens, 10);
     }
 

@@ -143,8 +143,8 @@ impl Tool for PythonExecuteTool {
         // Read the per-invocation context from the task-local.
         // If it's not set (shouldn't happen in normal flow), fall back to
         // a no-op dispatcher that can't emit WebSocket events or persist.
-        let dispatcher: Arc<dyn swage_python::dispatch::ToolDispatcher> =
-            match PYTHON_CONTEXT.try_with(|py_ctx| {
+        let dispatcher: Arc<dyn swage_python::dispatch::ToolDispatcher> = match PYTHON_CONTEXT
+            .try_with(|py_ctx| {
                 Arc::new(GatewayToolDispatcher::new(
                     Arc::clone(&self.sub_dispatcher),
                     tokio::runtime::Handle::current(),
@@ -155,18 +155,20 @@ impl Tool for PythonExecuteTool {
                     working_dir.clone(),
                 )) as Arc<dyn swage_python::dispatch::ToolDispatcher>
             }) {
-                Ok(d) => d,
-                Err(_) => {
-                    warn!("python_execute invoked without PYTHON_CONTEXT — sub-tool calls will not emit events");
-                    // Fall back to a stub that still dispatches tools but
-                    // without WebSocket events or storage persistence.
-                    Arc::new(FallbackDispatcher {
-                        sub_dispatcher: Arc::clone(&self.sub_dispatcher),
-                        working_directory: working_dir,
-                        handle: tokio::runtime::Handle::current(),
-                    }) as Arc<dyn swage_python::dispatch::ToolDispatcher>
-                }
-            };
+            Ok(d) => d,
+            Err(_) => {
+                warn!(
+                    "python_execute invoked without PYTHON_CONTEXT — sub-tool calls will not emit events"
+                );
+                // Fall back to a stub that still dispatches tools but
+                // without WebSocket events or storage persistence.
+                Arc::new(FallbackDispatcher {
+                    sub_dispatcher: Arc::clone(&self.sub_dispatcher),
+                    working_directory: working_dir,
+                    handle: tokio::runtime::Handle::current(),
+                }) as Arc<dyn swage_python::dispatch::ToolDispatcher>
+            }
+        };
 
         // Run the Python code on a blocking thread. execute_code internally
         // spawns its own thread, but we wrap it in spawn_blocking so we
@@ -233,6 +235,8 @@ impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
                     working_directory,
                     allowed_paths: vec![],
                     user_info: None,
+                    call_id: None,
+                    turn_id: None,
                 };
                 sub_dispatcher
                     .dispatch(&tool_name_owned, arguments, &ctx, "python-fallback")
@@ -242,7 +246,10 @@ impl swage_python::dispatch::ToolDispatcher for FallbackDispatcher {
 
         match exec {
             Ok(tool_output) => swage_python::dispatch::DispatchResult {
-                content: tool_output.result["output"].as_str().unwrap_or("").to_string(),
+                content: tool_output.result["output"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
                 is_error: false,
             },
             Err(e) => swage_python::dispatch::DispatchResult {
@@ -269,13 +276,11 @@ mod tests {
     use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
     fn make_tool() -> PythonExecuteTool {
-        let runtime = Arc::new(
-            PythonRuntime::new(None).expect("system Python should be available in dev"),
-        );
+        let runtime =
+            Arc::new(PythonRuntime::new(None).expect("system Python should be available in dev"));
         // Empty sub-dispatcher — tests that execute Python don't call gateway tools.
         let sub_dispatcher = Arc::new(SwageToolDispatcher::allow_all(vec![]));
-        let storage =
-            Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
 
         PythonExecuteTool::new(runtime, Duration::from_secs(5), sub_dispatcher, storage)
     }
@@ -298,11 +303,17 @@ mod tests {
     async fn execute_simple_print() {
         let tool = make_tool();
         let result = tool
-            .execute(serde_json::json!({ "code": "print('hello from python')" }), &ctx())
+            .execute(
+                serde_json::json!({ "code": "print('hello from python')" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(
-            result["output"].as_str().unwrap().contains("hello from python"),
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("hello from python"),
             "expected Python output, got: {}",
             result["output"]
         );
@@ -341,7 +352,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result["output"].as_str().unwrap().contains("ZeroDivisionError"),
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("ZeroDivisionError"),
             "expected ZeroDivisionError, got: {}",
             result["output"]
         );

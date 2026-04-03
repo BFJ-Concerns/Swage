@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-
 /// Information about the user who initiated the current session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserInfo {
@@ -36,13 +35,17 @@ pub trait ToolContext: Send + Sync {
     /// Available when the tool is dispatched as part of an LLM tool-use round.
     /// Tools that spawn sub-tool calls (e.g. python_execute) use this as the
     /// parent_call_id for nesting.
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 
     /// The turn_id for the currently executing turn.
     ///
     /// Available when the dispatcher is invoked from within an agent turn.
     /// Used by tools that need to persist auxiliary records against the turn.
-    fn turn_id(&self) -> Option<uuid::Uuid> { None }
+    fn turn_id(&self) -> Option<uuid::Uuid> {
+        None
+    }
 }
 
 /// A serialisable snapshot of a ToolContext.
@@ -56,6 +59,8 @@ pub struct SerializableToolContext {
     pub working_directory: PathBuf,
     pub allowed_paths: Vec<PathBuf>,
     pub user_info: Option<UserInfo>,
+    pub call_id: Option<String>,
+    pub turn_id: Option<uuid::Uuid>,
 }
 
 impl SerializableToolContext {
@@ -67,6 +72,8 @@ impl SerializableToolContext {
             working_directory: ctx.working_directory().to_owned(),
             allowed_paths: ctx.allowed_paths().to_owned(),
             user_info: ctx.user_info().cloned(),
+            call_id: ctx.call_id().map(ToOwned::to_owned),
+            turn_id: ctx.turn_id(),
         }
     }
 }
@@ -91,6 +98,14 @@ impl ToolContext for SerializableToolContext {
     fn user_info(&self) -> Option<&UserInfo> {
         self.user_info.as_ref()
     }
+
+    fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
+    }
+
+    fn turn_id(&self) -> Option<uuid::Uuid> {
+        self.turn_id
+    }
 }
 
 /// A concrete ToolContext for unit testing.
@@ -104,6 +119,8 @@ pub struct MockToolContext {
     pub working_directory: PathBuf,
     pub allowed_paths: Vec<PathBuf>,
     pub user_info: Option<UserInfo>,
+    pub call_id: Option<String>,
+    pub turn_id: Option<uuid::Uuid>,
 }
 
 impl MockToolContext {
@@ -115,6 +132,8 @@ impl MockToolContext {
             working_directory: PathBuf::from("/tmp"),
             allowed_paths: vec![],
             user_info: None,
+            call_id: None,
+            turn_id: None,
         }
     }
 }
@@ -139,6 +158,14 @@ impl ToolContext for MockToolContext {
     fn user_info(&self) -> Option<&UserInfo> {
         self.user_info.as_ref()
     }
+
+    fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
+    }
+
+    fn turn_id(&self) -> Option<uuid::Uuid> {
+        self.turn_id
+    }
 }
 
 #[cfg(test)]
@@ -157,10 +184,10 @@ mod tests {
             user_info: Some(UserInfo {
                 id: "u-42".to_string(),
                 name: "Alice".to_string(),
-                metadata: HashMap::from([
-                    ("role".to_string(), Value::String("admin".to_string())),
-                ]),
+                metadata: HashMap::from([("role".to_string(), Value::String("admin".to_string()))]),
             }),
+            call_id: Some("call-123".to_string()),
+            turn_id: Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap()),
         }
     }
 
@@ -194,8 +221,7 @@ mod tests {
         let snap = SerializableToolContext::from_context(&mock);
 
         let json = serde_json::to_string(&snap).expect("serialise");
-        let restored: SerializableToolContext =
-            serde_json::from_str(&json).expect("deserialise");
+        let restored: SerializableToolContext = serde_json::from_str(&json).expect("deserialise");
 
         assert_eq!(restored.agent_id, "agent-1");
         assert_eq!(restored.session_id, "sess-abc");
@@ -204,6 +230,11 @@ mod tests {
             PathBuf::from("/home/user/project")
         );
         assert_eq!(restored.allowed_paths.len(), 2);
+        assert_eq!(restored.call_id.as_deref(), Some("call-123"));
+        assert_eq!(
+            restored.turn_id,
+            Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap())
+        );
 
         let user = restored.user_info.expect("user_info round-trips");
         assert_eq!(user.id, "u-42");
@@ -218,6 +249,11 @@ mod tests {
 
         assert_eq!(dyn_ctx.agent_id(), "agent-1");
         assert_eq!(dyn_ctx.session_id(), "sess-abc");
+        assert_eq!(dyn_ctx.call_id(), Some("call-123"));
+        assert_eq!(
+            dyn_ctx.turn_id(),
+            Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap())
+        );
     }
 
     #[test]
