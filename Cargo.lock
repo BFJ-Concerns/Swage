@@ -2824,6 +2824,7 @@ dependencies = [
 name = "swage-tui"
 version = "0.2603.2200"
 dependencies = [
+ "axum",
  "chrono",
  "crossterm",
  "futures",

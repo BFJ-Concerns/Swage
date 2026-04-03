@@ -97,11 +97,11 @@ pub fn render(frame: &mut Frame, params: &RenderParams<'_>) {
     conversation::render_conversation(
         frame,
         regions.conversation_area,
-        &state.messages,
-        &state.streaming_buffer,
-        state.is_streaming,
-        &state.active_tools,
-        state.scroll_offset,
+        state.messages(),
+        state.streaming_buffer(),
+        state.is_streaming(),
+        state.active_tools(),
+        state.scroll_offset(),
     );
 
     // Context inspector (optional right panel).
@@ -151,8 +151,8 @@ pub(crate) fn calculate_layout(
 
     // Main vertical split: status (top), middle, input (bottom).
     let v_chunks = Layout::vertical([
-        Constraint::Length(1),           // status bar
-        Constraint::Fill(1),             // conversation + optional inspector
+        Constraint::Length(1),            // status bar
+        Constraint::Fill(1),              // conversation + optional inspector
         Constraint::Length(input_height), // input area
     ])
     .split(area);
@@ -193,7 +193,10 @@ mod tests {
     use uuid::Uuid;
 
     fn default_project() -> ProjectInfo {
-        ProjectInfo { id: Uuid::new_v4(), name: "TestProject".to_string() }
+        ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "TestProject".to_string(),
+        }
     }
 
     // ---- compute_input_height -------------------------------------------
@@ -273,7 +276,10 @@ mod tests {
         let total = regions.status_area.height
             + regions.conversation_area.height
             + regions.input_area.height;
-        assert_eq!(total, area.height, "status + conversation + input should fill terminal height");
+        assert_eq!(
+            total, area.height,
+            "status + conversation + input should fill terminal height"
+        );
     }
 
     #[test]
@@ -323,7 +329,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_with_standard_terminal() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());
@@ -341,7 +347,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_with_inspector_open() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());
@@ -359,7 +365,7 @@ mod tests {
 
     #[test]
     fn render_shows_resize_prompt_on_small_terminal() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(60, 20); // below 80×24
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());
@@ -388,7 +394,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_with_project_selector_open() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());
@@ -407,7 +413,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_when_disconnected() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());
@@ -427,7 +433,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_with_multiline_input() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let conv_state = ConversationState::new(default_project());

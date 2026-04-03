@@ -7,13 +7,33 @@
 use crate::event::{AppEvent, EventHandler};
 use crate::gateway::{ConnectionManager, ConnectionState};
 use crate::keybindings::{AppAction, map_key_event};
-use crate::state::{ContextReport, ContextSection, ConversationState, DisplayMessage, ProjectInfo};
+use crate::state::{ContextReport, ContextSection, ConversationState, ProjectInfo};
 use crate::ui::input::InputState;
 use crate::ui::project_selector::ProjectSelectorState;
-use crate::ui::{RenderParams, render};
-use chrono::Utc;
+use crate::ui::{RenderParams, calculate_layout, compute_input_height, render};
 use swage_client::error::ClientError;
 use swage_client::websocket::ServerEvent;
+
+#[derive(Debug, Clone, Copy)]
+struct PendingReconnect {
+    attempt: u32,
+    next_attempt_at: tokio::time::Instant,
+}
+
+impl PendingReconnect {
+    fn immediate() -> Self {
+        Self {
+            attempt: 0,
+            next_attempt_at: tokio::time::Instant::now(),
+        }
+    }
+
+    fn schedule_retry(&mut self) {
+        let delay = crate::gateway::backoff_delay(self.attempt);
+        self.attempt += 1;
+        self.next_attempt_at = tokio::time::Instant::now() + delay;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // App
@@ -36,6 +56,7 @@ pub struct App {
     pub project_selector: ProjectSelectorState,
     /// True while the application event loop should keep running.
     pub is_running: bool,
+    pending_reconnect: Option<PendingReconnect>,
 }
 
 impl App {
@@ -52,14 +73,33 @@ impl App {
             show_inspector: false,
             project_selector: ProjectSelectorState::new(),
             is_running: true,
+            pending_reconnect: None,
         }
+    }
+
+    fn queue_reconnect(&mut self) {
+        self.connection.begin_reconnect();
+        self.pending_reconnect = Some(PendingReconnect::immediate());
+    }
+
+    fn conversation_viewport(
+        &self,
+        terminal_area: ratatui::layout::Rect,
+    ) -> Option<(usize, usize)> {
+        let input_height = compute_input_height(&self.input);
+        let regions = calculate_layout(terminal_area, input_height, self.show_inspector)?;
+        Some((
+            regions.conversation_area.width.saturating_sub(2) as usize,
+            regions.conversation_area.height.saturating_sub(2) as usize,
+        ))
     }
 
     // --- Sync state mutations (no I/O) ------------------------------------
 
     /// Apply a synchronous action to the application state.
     ///
-    /// Actions that require async I/O (`SendMessage`, project confirmation)
+    /// Actions that require async I/O (`SendMessage`, `NewConversation`,
+    /// project confirmation) or live viewport dimensions (scroll-down actions)
     /// are handled directly in the event loop and do not come through here.
     pub fn dispatch_action(&mut self, action: AppAction) {
         match action {
@@ -72,20 +112,11 @@ impl App {
             AppAction::MoveCursorRight => self.input.move_cursor_right(),
             AppAction::ToggleMultiLine => self.input.is_multi_line = !self.input.is_multi_line,
             AppAction::ScrollUp => self.state.scroll_up(1),
-            AppAction::ScrollDown => self.state.scroll_down(1, 20),
+            AppAction::ScrollDown => {}
             // Use a larger step for page scroll — keeps some context visible.
             AppAction::ScrollPageUp => self.state.scroll_up(10),
-            AppAction::ScrollPageDown => self.state.scroll_down(10, 20),
-            // TODO NewConversation must also reset the backend session
-            // priority: high | tags: review:branch-era-02-delivery
-            // state.clear() erases the local display but ConnectionManager::conversation_id
-            // still points at the old session. The next send_message reuses that session,
-            // so the model sees the full previous history and both turns are persisted
-            // together. Fix: this action requires async I/O (like SendMessage) and should
-            // be handled in event_loop — clear state.conversation_id and call
-            // connection.reconnect() (or disconnect + reconnect) to create a fresh session.
-            // ---
-            AppAction::NewConversation => self.state.clear(),
+            AppAction::ScrollPageDown => {}
+            AppAction::NewConversation => {}
             AppAction::OpenProjectSelector => self.project_selector.show(),
             // SendMessage requires async I/O — handled in event_loop.
             AppAction::SendMessage => {}
@@ -162,15 +193,34 @@ impl App {
         // Attempt an initial connection. Display an inline error if it fails
         // but keep running — the user can type once the gateway starts.
         if let Err(e) = self.connection.connect().await {
-            self.state.messages.push(DisplayMessage {
-                role: "error".to_string(),
-                content: format!("Gateway connection failed: {e}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            self.state
+                .push_local_message("error", format!("Gateway connection failed: {e}"));
+            self.queue_reconnect();
+        } else {
+            self.state
+                .set_conversation_id(self.connection.conversation_id());
         }
 
         while self.is_running {
+            if let Some(reconnect) = self.pending_reconnect.as_mut() {
+                if tokio::time::Instant::now() >= reconnect.next_attempt_at {
+                    match self.connection.connect().await {
+                        Ok(()) => {
+                            self.pending_reconnect = None;
+                            self.state
+                                .set_conversation_id(self.connection.conversation_id());
+                            self.state
+                                .push_local_message("system", "Reconnected to gateway");
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, attempt = reconnect.attempt, "gateway reconnect attempt failed");
+                            self.connection.begin_reconnect();
+                            reconnect.schedule_retry();
+                        }
+                    }
+                }
+            }
+
             // ---- Render the current frame ----
             let conn_state = self.connection.connection_state();
             terminal.draw(|frame| {
@@ -214,17 +264,17 @@ impl App {
                                                     // before switching projects so the display reflects the
                                                     // fresh session rather than the previous one.
                                                     self.state.clear();
-                                                    self.state.set_project(project)
+                                                    self.state.set_project(project);
+                                                    self.state.set_conversation_id(
+                                                        self.connection.conversation_id(),
+                                                    );
+                                                    self.pending_reconnect = None;
                                                 }
                                                 Err(e) => {
-                                                    self.state.messages.push(DisplayMessage {
-                                                        role: "error".to_string(),
-                                                        content: format!(
-                                                            "Project switch failed: {e}"
-                                                        ),
-                                                        timestamp: Utc::now(),
-                                                        tool_calls: vec![],
-                                                    });
+                                                    self.state.push_local_message(
+                                                        "error",
+                                                        format!("Project switch failed: {e}"),
+                                                    );
                                                 }
                                             }
                                         }
@@ -240,22 +290,61 @@ impl App {
                                 if action == AppAction::SendMessage {
                                     if !self.input.is_empty() {
                                         let text = self.input.take_text();
-                                        self.state.messages.push(DisplayMessage {
-                                            role: "user".to_string(),
-                                            content: text.clone(),
-                                            timestamp: Utc::now(),
-                                            tool_calls: vec![],
-                                        });
+                                        self.state.push_local_message("user", text.clone());
                                         if let Err(e) =
                                             self.connection.send_message(text).await
                                         {
-                                            self.state.messages.push(DisplayMessage {
-                                                role: "error".to_string(),
-                                                content: format!("Send failed: {e}"),
-                                                timestamp: Utc::now(),
-                                                tool_calls: vec![],
-                                            });
+                                            self.state.push_local_message(
+                                                "error",
+                                                format!("Send failed: {e}"),
+                                            );
                                         }
+                                    }
+                                } else if action == AppAction::NewConversation {
+                                    match self.connection.start_new_conversation().await {
+                                        Ok(()) => {
+                                            self.pending_reconnect = None;
+                                            self.state.clear();
+                                            self.state.set_conversation_id(
+                                                self.connection.conversation_id(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            self.state.push_local_message(
+                                                "error",
+                                                format!("New conversation failed: {e}"),
+                                            );
+                                        }
+                                    }
+                                } else if matches!(
+                                    action,
+                                    AppAction::ScrollDown | AppAction::ScrollPageDown
+                                ) {
+                                    if let Some((visible_width, visible_height)) =
+                                        self.conversation_viewport({
+                                            let size = terminal.size()?;
+                                            ratatui::layout::Rect::new(0, 0, size.width, size.height)
+                                        })
+                                    {
+                                        let amount = if action == AppAction::ScrollDown {
+                                            1
+                                        } else {
+                                            visible_height.max(1)
+                                        };
+                                        self.state.scroll_down(
+                                            amount,
+                                            visible_width,
+                                            visible_height,
+                                        );
+                                    }
+                                } else if action == AppAction::ScrollPageUp {
+                                    if let Some((_, visible_height)) =
+                                        self.conversation_viewport({
+                                            let size = terminal.size()?;
+                                            ratatui::layout::Rect::new(0, 0, size.width, size.height)
+                                        })
+                                    {
+                                        self.state.scroll_up(visible_height.max(1));
                                     }
                                 } else {
                                     self.dispatch_action(action);
@@ -291,28 +380,21 @@ impl App {
                                 self.connection.disconnect().await;
                             }
                         }
-                        // TODO No reconnection attempt after WebSocket close — TUI dead-ends
-                        // priority: high | tags: correctness, review:branch-era-02-delivery
-                        // On a clean WebSocket close the app disconnects and the gateway arm
-                        // transitions to `pending()` indefinitely. `ConnectionManager::reconnect_with_backoff`
-                        // exists but is never called here. The user must restart the TUI to recover
-                        // from any transient gateway restart or network blip.
-                        // Fix: spawn a reconnection task (or call `reconnect_with_backoff` inline)
-                        // when the clean-close branch fires.
-                        // ---
                         Ok(None) => {
                             // Clean WebSocket close — gateway disconnected.
                             self.connection.disconnect().await;
+                            self.state
+                                .push_local_message("system", "Connection lost — retrying…");
+                            self.queue_reconnect();
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "WebSocket error");
-                            self.state.messages.push(DisplayMessage {
-                                role: "error".to_string(),
-                                content: format!("Connection error: {e}"),
-                                timestamp: Utc::now(),
-                                tool_calls: vec![],
-                            });
+                            self.state.push_local_message(
+                                "error",
+                                format!("Connection error: {e}"),
+                            );
                             self.connection.disconnect().await;
+                            self.queue_reconnect();
                         }
                     }
                 }
@@ -388,49 +470,28 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         }
 
         ServerEvent::Shutdown { reason } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Gateway shutting down — {reason}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Gateway shutting down — {reason}"));
             EventOutcome::Shutdown
         }
 
         ServerEvent::Error { message, .. } => {
-            state.messages.push(DisplayMessage {
-                role: "error".to_string(),
-                content: message,
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("error", message);
             EventOutcome::Continue
         }
 
         ServerEvent::Cancelled {} => {
             // The user cancelled the turn — discard any partial streamed content.
-            state.streaming_buffer.clear();
-            state.is_streaming = false;
+            state.cancel_streaming();
             EventOutcome::Continue
         }
 
         ServerEvent::SkillActivated { display_name, .. } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Skill activated: {display_name}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Skill activated: {display_name}"));
             EventOutcome::Continue
         }
 
         ServerEvent::SkillDeactivated { name } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Skill deactivated: {name}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Skill deactivated: {name}"));
             EventOutcome::Continue
         }
 
@@ -442,12 +503,7 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         ServerEvent::DelegationStarted {
             target_agent_id, ..
         } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Delegating to agent: {target_agent_id}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Delegating to agent: {target_agent_id}"));
             EventOutcome::Continue
         }
 
@@ -457,52 +513,33 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             ..
         } => {
             let status = if success { "succeeded" } else { "failed" };
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Delegation to {target_agent_id} {status}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message(
+                "system",
+                format!("Delegation to {target_agent_id} {status}"),
+            );
             EventOutcome::Continue
         }
 
         ServerEvent::ApprovalRequired { prompt, .. } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Approval required: {prompt}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Approval required: {prompt}"));
             EventOutcome::Continue
         }
 
         ServerEvent::ApprovalConfirmed { decision, .. } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: format!("Approval {decision}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", format!("Approval {decision}"));
             EventOutcome::Continue
         }
 
         ServerEvent::ApprovalExpired { .. } => {
-            state.messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: "Approval request expired".to_string(),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message("system", "Approval request expired");
             EventOutcome::Continue
         }
 
         ServerEvent::ApprovalDecisionError { error, message, .. } => {
-            state.messages.push(DisplayMessage {
-                role: "error".to_string(),
-                content: format!("Approval decision failed ({error}): {message}"),
-                timestamp: Utc::now(),
-                tool_calls: vec![],
-            });
+            state.push_local_message(
+                "error",
+                format!("Approval decision failed ({error}): {message}"),
+            );
             EventOutcome::Continue
         }
     }
@@ -574,8 +611,8 @@ mod tests {
                 content: "hello".to_string(),
             },
         );
-        assert_eq!(state.streaming_buffer, "hello");
-        assert!(state.is_streaming);
+        assert_eq!(state.streaming_buffer(), "hello");
+        assert!(state.is_streaming());
         assert_eq!(outcome, EventOutcome::Continue);
     }
 
@@ -594,7 +631,7 @@ mod tests {
                 content: " bar".to_string(),
             },
         );
-        assert_eq!(state.streaming_buffer, "foo bar");
+        assert_eq!(state.streaming_buffer(), "foo bar");
     }
 
     // --- ToolStart / ToolEnd ---
@@ -611,9 +648,9 @@ mod tests {
                 parent_call_id: None,
             },
         );
-        assert_eq!(state.active_tools.len(), 1);
-        assert_eq!(state.active_tools[0].call_id, "tc-1");
-        assert_eq!(state.active_tools[0].name, "read_file");
+        assert_eq!(state.active_tools().len(), 1);
+        assert_eq!(state.active_tools()[0].call_id, "tc-1");
+        assert_eq!(state.active_tools()[0].name, "read_file");
     }
 
     #[test]
@@ -641,7 +678,7 @@ mod tests {
                 parent_call_id: None,
             },
         );
-        assert!(state.active_tools.is_empty());
+        assert!(state.active_tools().is_empty());
     }
 
     // --- TurnComplete ---
@@ -666,11 +703,11 @@ mod tests {
                 structured_output: None,
             },
         );
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].content, "Result.");
-        assert_eq!(state.messages[0].role, "assistant");
-        assert!(state.streaming_buffer.is_empty());
-        assert!(!state.is_streaming);
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].content, "Result.");
+        assert_eq!(state.messages()[0].role, "assistant");
+        assert!(state.streaming_buffer().is_empty());
+        assert!(!state.is_streaming());
         assert_eq!(state.input_tokens, Some(50));
         assert_eq!(state.output_tokens, Some(10));
         assert_eq!(outcome, EventOutcome::Continue);
@@ -744,9 +781,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Shutdown);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("idle timeout"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("idle timeout"));
     }
 
     // --- Error ---
@@ -762,9 +799,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "error");
-        assert_eq!(state.messages[0].content, "API key missing");
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "error");
+        assert_eq!(state.messages()[0].content, "API key missing");
     }
 
     // --- Cancelled ---
@@ -778,11 +815,11 @@ mod tests {
                 content: "partial...".to_string(),
             },
         );
-        assert!(state.is_streaming);
+        assert!(state.is_streaming());
         let outcome = handle_server_event(&mut state, ServerEvent::Cancelled {});
         assert_eq!(outcome, EventOutcome::Continue);
-        assert!(state.streaming_buffer.is_empty());
-        assert!(!state.is_streaming);
+        assert!(state.streaming_buffer().is_empty());
+        assert!(!state.is_streaming());
     }
 
     // --- SkillActivated ---
@@ -800,9 +837,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("My Skill"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("My Skill"));
     }
 
     // --- SkillDeactivated ---
@@ -817,9 +854,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("old-skill"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("old-skill"));
     }
 
     // --- Delegation and approval lifecycle ---
@@ -836,9 +873,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("reviewer"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("reviewer"));
     }
 
     #[test]
@@ -854,9 +891,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("succeeded"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("succeeded"));
     }
 
     #[test]
@@ -878,9 +915,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("Allow shell?"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("Allow shell?"));
     }
 
     #[test]
@@ -895,9 +932,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("approved"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("approved"));
     }
 
     #[test]
@@ -911,9 +948,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "system");
-        assert!(state.messages[0].content.contains("expired"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "system");
+        assert!(state.messages()[0].content.contains("expired"));
     }
 
     #[test]
@@ -929,9 +966,9 @@ mod tests {
             },
         );
         assert_eq!(outcome, EventOutcome::Continue);
-        assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, "error");
-        assert!(state.messages[0].content.contains("already_decided"));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].role, "error");
+        assert!(state.messages()[0].content.contains("already_decided"));
     }
 
     // --- App construction ---
@@ -1035,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_new_conversation_clears_messages() {
+    fn dispatch_new_conversation_is_handled_in_event_loop() {
         use crate::keybindings::AppAction;
         let project = ProjectInfo {
             id: Uuid::new_v4(),
@@ -1049,9 +1086,9 @@ mod tests {
                 reason: "test".to_string(),
             },
         );
-        assert!(!app.state.messages.is_empty());
+        assert!(!app.state.messages().is_empty());
         app.dispatch_action(AppAction::NewConversation);
-        assert!(app.state.messages.is_empty());
+        assert!(!app.state.messages().is_empty());
     }
 
     // --- SkillAlreadyActive ---
@@ -1067,7 +1104,7 @@ mod tests {
         );
         assert_eq!(outcome, EventOutcome::Continue);
         // No notification message — it's a no-op from the user's perspective.
-        assert!(state.messages.is_empty());
+        assert!(state.messages().is_empty());
     }
 
     // --- parse_context_report ---

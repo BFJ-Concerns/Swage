@@ -87,28 +87,20 @@ impl ConnectionManager {
         self.client.health().await?;
 
         // Resume an existing conversation or create a fresh one.
-        let conv_id = if let Some(id) = self.conversation_id {
-            id
+        let (conv_id, should_store_conversation_id) = if let Some(id) = self.conversation_id {
+            (id, false)
         } else {
             let conv = self.client.create_conversation().await?;
-            self.conversation_id = Some(conv.id);
-            conv.id
+            (conv.id, true)
         };
 
         let ws = GatewayWebSocket::connect(&self.url, conv_id).await?;
-        self.finish_connect(ws).await
+        self.finish_connect(ws).await?;
+        if should_store_conversation_id {
+            self.conversation_id = Some(conv_id);
+        }
+        Ok(())
     }
-
-    // TODO Add unit tests for connect_for_project
-    // tags: test-coverage, review:branch-era-02-delivery
-    // connect_for_project is the code path exercised when the user switches
-    // projects in the TUI's project selector overlay. It differs from connect()
-    // in that it always creates a new conversation and sets project_id. Neither
-    // the happy-path (correct project_id stored, state → Connected) nor the
-    // error path (health check failure, conversation creation failure) are tested.
-    // Gateway integration tests cover the REST side; this client path needs its
-    // own test, e.g. via a mock GatewayClient.
-    // ---
 
     /// Like `connect()`, but creates the conversation inside a specific project.
     ///
@@ -117,13 +109,33 @@ impl ConnectionManager {
     /// the project selector overlay.
     pub async fn connect_for_project(&mut self, project_id: Uuid) -> Result<(), ClientError> {
         self.client.health().await?;
-        self.project_id = Some(project_id);
 
         let conv = self.client.create_project_conversation(project_id).await?;
+        let ws = GatewayWebSocket::connect(&self.url, conv.id).await?;
+        self.finish_connect(ws).await?;
+        self.project_id = Some(project_id);
         self.conversation_id = Some(conv.id);
+        Ok(())
+    }
+
+    /// Starts a fresh conversation while preserving the current project scope.
+    ///
+    /// This replaces the active WebSocket only after the new conversation is
+    /// successfully created and subscribed, so a failure does not discard the
+    /// existing live session.
+    pub async fn start_new_conversation(&mut self) -> Result<(), ClientError> {
+        self.client.health().await?;
+
+        let conv = if let Some(project_id) = self.project_id {
+            self.client.create_project_conversation(project_id).await?
+        } else {
+            self.client.create_conversation().await?
+        };
 
         let ws = GatewayWebSocket::connect(&self.url, conv.id).await?;
-        self.finish_connect(ws).await
+        self.finish_connect(ws).await?;
+        self.conversation_id = Some(conv.id);
+        Ok(())
     }
 
     /// Subscribes the WebSocket to observability channels, stores it, and marks
@@ -145,6 +157,11 @@ impl ConnectionManager {
     pub async fn disconnect(&mut self) {
         self.ws = None;
         self.state = ConnectionState::Disconnected;
+    }
+
+    pub fn begin_reconnect(&mut self) {
+        self.ws = None;
+        self.state = ConnectionState::Reconnecting;
     }
 
     /// Attempts to reconnect with bounded exponential backoff.
@@ -202,10 +219,12 @@ impl ConnectionManager {
     /// Used by `next_event()` and `send_message()` to avoid duplicating the
     /// identical `None` arm in each match.
     fn ws_required(&mut self) -> Result<&mut GatewayWebSocket, ClientError> {
-        self.ws.as_mut().ok_or_else(|| ClientError::WebSocketFailed {
-            address: self.url.clone(),
-            message: "WebSocket is not connected".to_string(),
-        })
+        self.ws
+            .as_mut()
+            .ok_or_else(|| ClientError::WebSocketFailed {
+                address: self.url.clone(),
+                message: "WebSocket is not connected".to_string(),
+            })
     }
 
     /// Reads the next typed event from the WebSocket stream.
@@ -220,7 +239,9 @@ impl ConnectionManager {
     ///
     /// Returns `ClientError::WebSocketFailed` if the WebSocket is not open.
     pub async fn send_message(&mut self, content: String) -> Result<(), ClientError> {
-        self.ws_required()?.send(ClientEvent::SendMessage { content }).await
+        self.ws_required()?
+            .send(ClientEvent::SendMessage { content })
+            .await
     }
 }
 
@@ -246,6 +267,123 @@ pub(crate) fn backoff_delay(attempt: u32) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Path, State, WebSocketUpgrade},
+        http::StatusCode,
+        response::IntoResponse,
+        routing::{get, post},
+    };
+    use chrono::Utc;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestGatewayState {
+        health_status: StatusCode,
+        project_session_status: StatusCode,
+        project_requests: Arc<Mutex<Vec<Uuid>>>,
+        created_conversations: Arc<Mutex<Vec<Uuid>>>,
+        websocket_conversations: Arc<Mutex<Vec<Uuid>>>,
+    }
+
+    impl TestGatewayState {
+        fn ok() -> Self {
+            Self {
+                health_status: StatusCode::OK,
+                project_session_status: StatusCode::CREATED,
+                project_requests: Arc::new(Mutex::new(Vec::new())),
+                created_conversations: Arc::new(Mutex::new(Vec::new())),
+                websocket_conversations: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    async fn health(State(state): State<TestGatewayState>) -> impl IntoResponse {
+        if state.health_status == StatusCode::OK {
+            (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+        } else {
+            (
+                state.health_status,
+                Json(serde_json::json!({ "error": "unavailable" })),
+            )
+                .into_response()
+        }
+    }
+
+    async fn create_project_conversation(
+        State(state): State<TestGatewayState>,
+        Path(project_id): Path<Uuid>,
+    ) -> impl IntoResponse {
+        if state.project_session_status != StatusCode::CREATED {
+            return (
+                state.project_session_status,
+                Json(serde_json::json!({ "error": "cannot create conversation" })),
+            )
+                .into_response();
+        }
+
+        let conversation_id = Uuid::new_v4();
+        state.project_requests.lock().unwrap().push(project_id);
+        state
+            .created_conversations
+            .lock()
+            .unwrap()
+            .push(conversation_id);
+
+        (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "id": conversation_id,
+                "project_id": project_id,
+                "created_at": Utc::now(),
+                "last_activity": Utc::now(),
+            })),
+        )
+            .into_response()
+    }
+
+    async fn websocket_route(
+        State(state): State<TestGatewayState>,
+        Path(conversation_id): Path<Uuid>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        ws.on_upgrade(move |mut socket| async move {
+            state
+                .websocket_conversations
+                .lock()
+                .unwrap()
+                .push(conversation_id);
+            let _ = socket.recv().await;
+        })
+    }
+
+    async fn spawn_test_gateway(
+        state: TestGatewayState,
+    ) -> (String, tokio::task::JoinHandle<()>, TestGatewayState) {
+        let router = Router::new()
+            .route("/api/health", get(health))
+            .route(
+                "/api/projects/:project_id/sessions",
+                post(create_project_conversation),
+            )
+            .route(
+                "/api/conversations/:conversation_id/ws",
+                get(websocket_route),
+            )
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test gateway listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+
+        (format!("http://{address}"), server, state)
+    }
 
     // --- Construction ---
 
@@ -303,6 +441,103 @@ mod tests {
         let mut mgr = ConnectionManager::new("http://127.0.0.1:3000".to_string());
         mgr.disconnect().await;
         assert_eq!(mgr.connection_state(), ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn begin_reconnect_sets_reconnecting_state() {
+        let mut mgr = ConnectionManager::new("http://127.0.0.1:3000".to_string());
+        mgr.begin_reconnect();
+        assert_eq!(mgr.connection_state(), ConnectionState::Reconnecting);
+    }
+
+    #[tokio::test]
+    async fn connect_for_project_creates_project_scoped_conversation() {
+        let (base_url, server, state) = spawn_test_gateway(TestGatewayState::ok()).await;
+        let project_id = Uuid::new_v4();
+        let mut mgr = ConnectionManager::new(base_url);
+
+        mgr.connect_for_project(project_id)
+            .await
+            .expect("connect_for_project should succeed");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(mgr.connection_state(), ConnectionState::Connected);
+        assert_eq!(
+            state.project_requests.lock().unwrap().as_slice(),
+            &[project_id]
+        );
+        let created = state.created_conversations.lock().unwrap().clone();
+        assert_eq!(created.len(), 1);
+        assert_eq!(mgr.conversation_id(), Some(created[0]));
+        assert_eq!(
+            state.websocket_conversations.lock().unwrap().as_slice(),
+            &[created[0]]
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connect_for_project_propagates_health_check_failure() {
+        let mut state = TestGatewayState::ok();
+        state.health_status = StatusCode::SERVICE_UNAVAILABLE;
+        let (base_url, server, _) = spawn_test_gateway(state).await;
+        let project_id = Uuid::new_v4();
+        let mut mgr = ConnectionManager::new(base_url);
+
+        let result = mgr.connect_for_project(project_id).await;
+
+        assert!(result.is_err());
+        assert_eq!(mgr.connection_state(), ConnectionState::Disconnected);
+        assert!(mgr.conversation_id().is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connect_for_project_propagates_conversation_creation_failure() {
+        let mut state = TestGatewayState::ok();
+        state.project_session_status = StatusCode::INTERNAL_SERVER_ERROR;
+        let (base_url, server, state) = spawn_test_gateway(state).await;
+        let project_id = Uuid::new_v4();
+        let mut mgr = ConnectionManager::new(base_url);
+
+        let result = mgr.connect_for_project(project_id).await;
+
+        assert!(result.is_err());
+        assert_eq!(mgr.connection_state(), ConnectionState::Disconnected);
+        assert!(mgr.conversation_id().is_none());
+        assert!(state.websocket_conversations.lock().unwrap().is_empty());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn start_new_conversation_replaces_existing_project_conversation() {
+        let (base_url, server, state) = spawn_test_gateway(TestGatewayState::ok()).await;
+        let project_id = Uuid::new_v4();
+        let mut mgr = ConnectionManager::new(base_url);
+
+        mgr.connect_for_project(project_id)
+            .await
+            .expect("initial project connection should succeed");
+        let first_conversation_id = mgr.conversation_id().expect("first conversation id");
+
+        mgr.start_new_conversation()
+            .await
+            .expect("starting a new conversation should succeed");
+        let second_conversation_id = mgr.conversation_id().expect("second conversation id");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_ne!(first_conversation_id, second_conversation_id);
+        let created = state.created_conversations.lock().unwrap().clone();
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0], first_conversation_id);
+        assert_eq!(created[1], second_conversation_id);
+
+        server.abort();
     }
 
     // --- reconnect_with_backoff cancellation ---

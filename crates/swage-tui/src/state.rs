@@ -59,35 +59,19 @@ pub struct ProjectInfo {
 // ConversationState
 // ---------------------------------------------------------------------------
 
-// TODO Restrict pub fields to those that are genuinely read-only for the renderer
-// tags: types, review:branch-era-02-delivery
-// The doc says "all state mutations flow through methods" but most fields are `pub`,
-// meaning callers can bypass method invariants:
-//   - `scroll_offset` can be set past content bounds, bypassing the clamping in
-//     scroll_up() and scroll_down().
-//   - `is_streaming` can be set to true without populating `streaming_buffer`,
-//     leaving the two fields inconsistent.
-//   - `active_tools` and `messages` can be mutated directly, bypassing the
-//     start_tool/end_tool/complete_turn protocol.
-// The private `completed_tools` field correctly hides the queue-flush semantics;
-// the same approach should be applied to the fields that have method invariants.
-// Fields that are genuinely read-only for the renderer (model_name, conversation_id,
-// context_report, active_project, input_tokens, output_tokens) could remain pub.
-// ---
-
 /// The single source of truth for everything the TUI displays.
 ///
 /// All state changes go through methods here — the rendering layer reads
 /// fields directly but never mutates them.
 pub struct ConversationState {
     /// Committed messages from the conversation history.
-    pub messages: Vec<DisplayMessage>,
+    messages: Vec<DisplayMessage>,
     /// Tokens arriving during the current streaming turn.
-    pub streaming_buffer: String,
+    streaming_buffer: String,
     /// Tool calls currently in progress (awaiting `end_tool`).
-    pub active_tools: Vec<ActiveTool>,
+    active_tools: Vec<ActiveTool>,
     /// Scroll position within the conversation area (line index from top).
-    pub scroll_offset: usize,
+    scroll_offset: usize,
     /// Latest context assembly report from the gateway, if any.
     pub context_report: Option<ContextReport>,
     /// Project this conversation belongs to.
@@ -99,7 +83,7 @@ pub struct ConversationState {
     /// Output token count from the most recently completed turn.
     pub output_tokens: Option<u32>,
     /// True while a streaming turn is in progress.
-    pub is_streaming: bool,
+    is_streaming: bool,
     /// Gateway conversation ID, set when a conversation is opened or resumed.
     pub conversation_id: Option<Uuid>,
     /// Tool calls completed during the current turn, queued for `complete_turn`
@@ -126,6 +110,48 @@ impl ConversationState {
             conversation_id: None,
             completed_tools: Vec::new(),
         }
+    }
+
+    pub fn messages(&self) -> &[DisplayMessage] {
+        &self.messages
+    }
+
+    pub fn streaming_buffer(&self) -> &str {
+        &self.streaming_buffer
+    }
+
+    pub fn active_tools(&self) -> &[ActiveTool] {
+        &self.active_tools
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.is_streaming
+    }
+
+    pub fn conversation_id(&self) -> Option<Uuid> {
+        self.conversation_id
+    }
+
+    pub fn set_conversation_id(&mut self, conversation_id: Option<Uuid>) {
+        self.conversation_id = conversation_id;
+    }
+
+    pub fn push_local_message(&mut self, role: impl Into<String>, content: impl Into<String>) {
+        self.messages.push(DisplayMessage {
+            role: role.into(),
+            content: content.into(),
+            timestamp: Utc::now(),
+            tool_calls: vec![],
+        });
+    }
+
+    pub fn cancel_streaming(&mut self) {
+        self.streaming_buffer.clear();
+        self.is_streaming = false;
     }
 
     /// Appends a streaming token to the buffer and marks the turn as active.
@@ -222,21 +248,12 @@ impl ConversationState {
     ///
     /// `visible_height` is the number of lines the viewport can show; it is
     /// used to prevent scrolling past the last line of content.
-    pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
-        // TODO Scroll limit underestimates content height — blocks reading long messages
-        // priority: high | tags: correctness, review:branch-era-02-delivery
-        // `content_lines` counts one line per message, but each message can span many
-        // rendered lines due to role labels, internal newlines, and word-wrap applied
-        // by the `Paragraph` widget. `max_offset` is clamped too low, preventing the
-        // user from scrolling to the end of any response that exceeds viewport height.
-        // Fix: sum the rendered line count for each message (accounting for wrapping and
-        // newlines) rather than using `messages.len()` as a proxy.
-        // ---
-        // Estimate total content lines from message count plus the streaming
-        // buffer (1 line if non-empty). Widget renderers may use a finer
-        // measure, but this is sufficient to prevent runaway scrolling.
-        let content_lines = self.messages.len()
-            + if self.streaming_buffer.is_empty() { 0 } else { 1 };
+    pub fn scroll_down(&mut self, amount: usize, visible_width: usize, visible_height: usize) {
+        if visible_width == 0 || visible_height == 0 {
+            return;
+        }
+
+        let content_lines = self.total_rendered_lines(visible_width);
         let max_offset = content_lines.saturating_sub(visible_height);
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
     }
@@ -259,6 +276,73 @@ impl ConversationState {
         self.output_tokens = None;
         self.is_streaming = false;
     }
+
+    fn total_rendered_lines(&self, visible_width: usize) -> usize {
+        let mut total = self
+            .messages
+            .iter()
+            .map(|message| rendered_message_lines(message, visible_width))
+            .sum();
+
+        if self.is_streaming {
+            total += wrapped_line_count(&role_label_text("assistant"), visible_width);
+            let streaming_with_cursor = format!("{}▌", self.streaming_buffer);
+            for line in streaming_with_cursor.lines() {
+                total += wrapped_line_count(line, visible_width);
+            }
+            for tool in &self.active_tools {
+                total += wrapped_line_count(&active_tool_text(tool), visible_width);
+            }
+        }
+
+        total
+    }
+}
+
+fn rendered_message_lines(message: &DisplayMessage, visible_width: usize) -> usize {
+    let mut total = wrapped_line_count(&role_label_text(&message.role), visible_width);
+
+    for line in message.content.lines() {
+        total += wrapped_line_count(line, visible_width);
+    }
+
+    for tool_call in &message.tool_calls {
+        total += wrapped_line_count(&tool_call_text(tool_call), visible_width);
+    }
+
+    // Blank separator between messages.
+    total + 1
+}
+
+fn wrapped_line_count(text: &str, visible_width: usize) -> usize {
+    if visible_width == 0 {
+        return 0;
+    }
+
+    let char_count = text.chars().count().max(1);
+    (char_count + visible_width - 1) / visible_width
+}
+
+fn role_label_text(role: &str) -> String {
+    match role {
+        "user" => "You:".to_string(),
+        "assistant" => "Assistant:".to_string(),
+        other => format!("{other}:"),
+    }
+}
+
+fn tool_call_text(tool_call: &DisplayToolCall) -> String {
+    match tool_call.status.as_str() {
+        "success" => match tool_call.duration_ms {
+            Some(ms) => format!("[{}: success {}ms]", tool_call.name, ms),
+            None => format!("[{}: success]", tool_call.name),
+        },
+        _ => format!("[{}: error]", tool_call.name),
+    }
+}
+
+fn active_tool_text(tool: &ActiveTool) -> String {
+    format!("[{}: running]", tool.name)
 }
 
 #[cfg(test)]
@@ -423,7 +507,10 @@ mod tests {
     fn update_context_report_stores_report() {
         let mut state = ConversationState::new(default_project());
         let report = ContextReport {
-            sections: vec![ContextSection { name: "system".to_string(), token_count: 200 }],
+            sections: vec![ContextSection {
+                name: "system".to_string(),
+                token_count: 200,
+            }],
             total_tokens: 200,
             budget_tokens: Some(4096),
         };
@@ -437,7 +524,10 @@ mod tests {
     #[test]
     fn set_project_updates_active_project() {
         let mut state = ConversationState::new(default_project());
-        let new_project = ProjectInfo { id: Uuid::new_v4(), name: "New Project".to_string() };
+        let new_project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "New Project".to_string(),
+        };
         let new_id = new_project.id;
         state.set_project(new_project);
         assert_eq!(state.active_project.id, new_id);
@@ -490,14 +580,16 @@ mod tests {
                 tool_calls: vec![],
             });
         }
-        state.scroll_down(3, 5);
+        state.scroll_down(3, 80, 5);
         assert_eq!(state.scroll_offset, 3);
     }
 
     #[test]
     fn scroll_down_clamps_at_content_end() {
         let mut state = ConversationState::new(default_project());
-        // 10 messages, viewport height 5 → max_offset = 5.
+        // 10 short messages at width 80 render as 3 lines each
+        // (role label + content + separator), so 30 total lines.
+        // Viewport height 5 → max_offset = 25.
         for i in 0..10 {
             state.messages.push(DisplayMessage {
                 role: "user".to_string(),
@@ -506,8 +598,23 @@ mod tests {
                 tool_calls: vec![],
             });
         }
-        state.scroll_down(100, 5);
-        assert_eq!(state.scroll_offset, 5);
+        state.scroll_down(100, 80, 5);
+        assert_eq!(state.scroll_offset, 25);
+    }
+
+    #[test]
+    fn scroll_down_accounts_for_wrapped_message_height() {
+        let mut state = ConversationState::new(default_project());
+        state.messages.push(DisplayMessage {
+            role: "assistant".to_string(),
+            content: "abcdefghij".to_string(),
+            timestamp: Utc::now(),
+            tool_calls: vec![],
+        });
+
+        state.scroll_down(10, 4, 3);
+
+        assert_eq!(state.scroll_offset, 4);
     }
 
     // --- clear ---

@@ -168,9 +168,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState, is_
         Text::from(input_state.text.as_str())
     };
 
-    let mut paragraph = Paragraph::new(content)
-        .block(block)
-        .style(content_style);
+    let mut paragraph = Paragraph::new(content).block(block).style(content_style);
 
     if input_state.is_multi_line && !is_disabled {
         // Word-wrap long lines in multi-line mode.
@@ -181,7 +179,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState, is_
 
     // Position the terminal cursor when the input is active.
     if !is_disabled && inner.width > 0 && inner.height > 0 {
-        let (row, col) = cursor_row_col(input_state);
+        let (row, col) = cursor_row_col(input_state, inner.width as usize);
         let x = inner.x.saturating_add(col as u16);
         let y = inner.y.saturating_add(row as u16);
         // Guard: only show the cursor if it falls within the visible inner area.
@@ -197,35 +195,34 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState, is_
 /// logical line index and `col` is the char offset within that line. This
 /// does not account for word-wrap reflow — it reflects the underlying logical
 /// structure rather than the rendered layout.
-// TODO Cursor position ignores word-wrap — hidden or misplaced on long lines
-// priority: normal | tags: correctness, review:branch-era-02-delivery
-// `cursor_row_col` returns logical (row, col) without accounting for wrapping applied
-// by the `Wrap { trim: false }` `Paragraph`. When a typed line exceeds the widget
-// width, the col coordinate overruns the visible area, placing the terminal cursor
-// outside the widget or beyond the right edge of the screen.
-// Fix: compute the rendered (row, col) by dividing the logical col by the inner
-// widget width to find the wrapped row offset, as ratatui applies hard wrapping.
-// ---
-fn cursor_row_col(input_state: &InputState) -> (usize, usize) {
-    if !input_state.is_multi_line {
+/// structure rather than the rendered layout.
+fn cursor_row_col(input_state: &InputState, visible_width: usize) -> (usize, usize) {
+    if !input_state.is_multi_line || visible_width == 0 {
         return (0, input_state.cursor_position);
     }
 
     let mut remaining = input_state.cursor_position;
-    for (row, line) in input_state.text.split('\n').enumerate() {
+    let mut rendered_row = 0;
+    for line in input_state.text.split('\n') {
         let line_len = line.chars().count();
         if remaining <= line_len {
-            return (row, remaining);
+            return (
+                rendered_row + (remaining / visible_width),
+                remaining % visible_width,
+            );
         }
         // +1 to account for the '\n' character that split consumed.
         remaining -= line_len + 1;
+        rendered_row += line_len / visible_width + 1;
     }
 
     // Cursor is past the end of the last line — shouldn't occur in normal
     // usage since cursor_position is always <= text.chars().count(), but
     // clamp gracefully.
-    let total_lines = input_state.text.split('\n').count();
-    (total_lines.saturating_sub(1), remaining)
+    (
+        rendered_row + (remaining / visible_width),
+        remaining % visible_width,
+    )
 }
 
 // ---- Tests ---------------------------------------------------------------
@@ -422,7 +419,7 @@ mod tests {
             cursor_position: 3,
             is_multi_line: false,
         };
-        assert_eq!(cursor_row_col(&state), (0, 3));
+        assert_eq!(cursor_row_col(&state, 10), (0, 3));
     }
 
     #[test]
@@ -432,7 +429,7 @@ mod tests {
             cursor_position: 3, // in "hello", column 3
             is_multi_line: true,
         };
-        assert_eq!(cursor_row_col(&state), (0, 3));
+        assert_eq!(cursor_row_col(&state, 10), (0, 3));
     }
 
     #[test]
@@ -442,7 +439,7 @@ mod tests {
             cursor_position: 7, // 5 chars + '\n' + 1 into "world"
             is_multi_line: true,
         };
-        assert_eq!(cursor_row_col(&state), (1, 1));
+        assert_eq!(cursor_row_col(&state, 10), (1, 1));
     }
 
     #[test]
@@ -453,14 +450,24 @@ mod tests {
             cursor_position: 3,
             is_multi_line: true,
         };
-        assert_eq!(cursor_row_col(&state), (1, 0));
+        assert_eq!(cursor_row_col(&state, 10), (1, 0));
+    }
+
+    #[test]
+    fn cursor_row_col_wraps_long_multiline_lines() {
+        let state = InputState {
+            text: "abcdef".to_string(),
+            cursor_position: 5,
+            is_multi_line: true,
+        };
+        assert_eq!(cursor_row_col(&state, 4), (1, 1));
     }
 
     // ---- render tests -------------------------------------------------------
 
     #[test]
     fn render_input_does_not_panic_with_normal_state() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = InputState::new();
@@ -473,7 +480,7 @@ mod tests {
 
     #[test]
     fn render_input_does_not_panic_when_disabled() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = InputState::new();
@@ -484,7 +491,7 @@ mod tests {
 
     #[test]
     fn render_input_does_not_panic_in_multiline_mode() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = InputState::new();
@@ -498,7 +505,7 @@ mod tests {
 
     #[test]
     fn render_input_normal_shows_message_title() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = InputState::new();
@@ -520,7 +527,7 @@ mod tests {
 
     #[test]
     fn render_input_multiline_shows_multiline_title() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = InputState::new();
@@ -543,7 +550,7 @@ mod tests {
 
     #[test]
     fn render_input_disabled_shows_disconnected_placeholder() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = InputState::new();
