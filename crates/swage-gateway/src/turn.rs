@@ -83,22 +83,13 @@ pub(crate) fn build_assembly_elements(
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
+pub(crate) async fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
     let memory_dir = swage_root
         .join("projects")
         .join(project_slug)
         .join("memory");
 
-    // TODO Synchronous filesystem reads in `load_project_memory` block async executor
-    // priority: normal | tags: performance, review:branch-era-02-delivery
-    // `std::fs::read_dir` and `std::fs::read_to_string` are synchronous and block the
-    // Tokio worker thread for the duration of each disk operation. `load_project_memory`
-    // is called inside the async `process_turn` path on every turn. For projects with
-    // many or large memory files this degrades gateway responsiveness under load.
-    // Fix: replace with `tokio::fs::read_dir` / `tokio::fs::read_to_string` or wrap
-    // in `tokio::task::spawn_blocking`.
-    // ---
-    let entries = match std::fs::read_dir(&memory_dir) {
+    let mut entries = match tokio::fs::read_dir(&memory_dir).await {
         Ok(rd) => rd,
         // Missing directory is the common case for new projects.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
@@ -113,24 +104,41 @@ pub(crate) fn load_project_memory(swage_root: &Path, project_slug: &str) -> Stri
     };
 
     // Collect .md paths and sort alphabetically so loading order is stable.
-    let mut paths: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("md"))
-        .collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                    paths.push(path);
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(
+                    path = %memory_dir.display(),
+                    %error,
+                    "failed to enumerate project memory directory"
+                );
+                return String::new();
+            }
+        }
+    }
     paths.sort();
 
-    let parts: Vec<String> = paths
-        .into_iter()
-        .filter_map(|path| match std::fs::read_to_string(&path) {
-            Ok(content) => Some(content),
+    let mut parts = Vec::new();
+    for path in paths {
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                if !content.trim().is_empty() {
+                    parts.push(content);
+                }
+            }
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "failed to read project memory file");
-                None
             }
-        })
-        .filter(|s| !s.trim().is_empty())
-        .collect();
+        }
+    }
 
     parts.join("\n\n")
 }
@@ -580,10 +588,10 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     // Load project memory from the filesystem. Returns an empty string when
     // no memory directory or files exist — MemoryElement handles empty content.
-    let memory_content = swage_root_opt
-        .as_deref()
-        .map(|root| load_project_memory(root, &project_slug))
-        .unwrap_or_default();
+    let memory_content = match swage_root_opt.as_deref() {
+        Some(root) => load_project_memory(root, &project_slug).await,
+        None => String::new(),
+    };
 
     // Build the assembly search hierarchy for locating Python assembly files.
     // Collected as owned PathBufs first so references can be formed safely
@@ -4586,11 +4594,11 @@ pub(crate) mod tests {
 
     /// load_project_memory returns an empty string when the project has no
     /// memory directory.
-    #[test]
-    fn load_project_memory_returns_empty_when_dir_absent() {
+    #[tokio::test]
+    async fn load_project_memory_returns_empty_when_dir_absent() {
         let dir = tempfile::tempdir().unwrap();
         // No memory directory created — the helper should not panic.
-        let result = load_project_memory(dir.path(), "no-such-project");
+        let result = load_project_memory(dir.path(), "no-such-project").await;
         assert!(
             result.is_empty(),
             "should return empty string when memory dir is absent"
@@ -4599,8 +4607,8 @@ pub(crate) mod tests {
 
     /// load_project_memory reads all .md files from the memory directory and
     /// joins them in alphabetical filename order.
-    #[test]
-    fn load_project_memory_concatenates_md_files_alphabetically() {
+    #[tokio::test]
+    async fn load_project_memory_concatenates_md_files_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
         let memory_dir = dir
             .path()
@@ -4615,7 +4623,7 @@ pub(crate) mod tests {
         // Non-.md file must not be included.
         std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
 
-        let result = load_project_memory(dir.path(), "my-project");
+        let result = load_project_memory(dir.path(), "my-project").await;
 
         assert!(
             result.contains("First file content"),
@@ -4640,8 +4648,8 @@ pub(crate) mod tests {
     }
 
     /// load_project_memory skips files with only whitespace content.
-    #[test]
-    fn load_project_memory_skips_empty_files() {
+    #[tokio::test]
+    async fn load_project_memory_skips_empty_files() {
         let dir = tempfile::tempdir().unwrap();
         let memory_dir = dir
             .path()
@@ -4653,7 +4661,7 @@ pub(crate) mod tests {
         std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
         std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
 
-        let result = load_project_memory(dir.path(), "my-project");
+        let result = load_project_memory(dir.path(), "my-project").await;
 
         assert!(result.contains("Real content"));
         assert!(

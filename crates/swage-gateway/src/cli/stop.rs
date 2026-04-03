@@ -73,10 +73,7 @@ async fn graceful_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
             GRACEFUL_SHUTDOWN_TIMEOUT.as_secs()
         );
         Err(ClientError::GatewayNotRunning {
-            reason: format!(
-                "PID {} did not exit after shutdown request",
-                meta.pid
-            ),
+            reason: format!("PID {} did not exit after shutdown request", meta.pid),
         })
     }
 }
@@ -89,7 +86,10 @@ async fn force_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
 
     if kill_result != 0 {
         let err = std::io::Error::last_os_error();
-        eprintln!("Failed to send SIGTERM to gateway (PID {}): {err}", meta.pid);
+        eprintln!(
+            "Failed to send SIGTERM to gateway (PID {}): {err}",
+            meta.pid
+        );
         return Err(ClientError::MetadataIo { source: err });
     }
 
@@ -151,16 +151,20 @@ fn is_pid_dead(pid: u32) -> bool {
             }
         }
     }
-    // TODO `is_pid_dead` always returns false on non-Linux — stop times out on macOS
-    // priority: high | tags: correctness, review:branch-era-02-delivery
-    // The non-Linux stub unconditionally returns `false` (process alive). When the
-    // gateway stops successfully on macOS, `wait_for_exit` never sees the process as
-    // dead and times out, causing `gateway stop` to report failure even though the
-    // gateway exited cleanly. Fix: use `kill -0 pid` (POSIX) or `sysctl kern.proc`
-    // on macOS to check process liveness, or convert to a `tokio::select!` that
-    // races the HTTP shutdown against a PID-file absence check.
-    // ---
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // SAFETY: `kill(pid, 0)` does not send a signal; it only queries
+        // process existence and permission. ESRCH means the PID is gone.
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        if result == 0 {
+            return false;
+        }
+
+        let err = std::io::Error::last_os_error();
+        matches!(err.raw_os_error(), Some(libc::ESRCH))
+    }
+
+    #[cfg(all(not(unix), not(target_os = "linux")))]
     {
         let _ = pid;
         false

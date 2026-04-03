@@ -677,10 +677,10 @@ async fn execute_agent_node(
         .collect();
 
     let swage_root_opt: Option<PathBuf> = swage_config::discovery::resolve_root().ok();
-    let memory_content = swage_root_opt
-        .as_deref()
-        .map(|root| load_project_memory(root, &project.slug))
-        .unwrap_or_default();
+    let memory_content = match swage_root_opt.as_deref() {
+        Some(root) => load_project_memory(root, &project.slug).await,
+        None => String::new(),
+    };
 
     let assembly_search_paths: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
         .as_ref()

@@ -4,8 +4,8 @@
 //! set) or to the appropriate CLI handler for gateway lifecycle management and
 //! shell completions.
 
-use swage_gateway::cli::{Cli, Command, GatewayCommand};
 use clap::{CommandFactory, Parser};
+use swage_gateway::cli::{Cli, Command, GatewayCommand};
 
 #[tokio::main]
 async fn main() {
@@ -14,25 +14,28 @@ async fn main() {
     // --server-mode is set when we re-exec ourselves as a background daemon.
     // Skip all CLI dispatch and run the gateway directly.
     if cli.server_mode {
-        swage_gateway::startup::run_gateway(None, None, None).await;
+        let (port, host, config) = match &cli.command {
+            Some(Command::Gateway(args)) => match &args.command {
+                GatewayCommand::Start(start_args) => (
+                    start_args.port,
+                    start_args.host.clone(),
+                    start_args.config.clone(),
+                ),
+                _ => (None, None, None),
+            },
+            _ => (None, None, None),
+        };
+        swage_gateway::startup::run_gateway(port, host, config).await;
         return;
     }
 
     let result = match cli.command {
         Some(Command::Gateway(args)) => match args.command {
-            GatewayCommand::Start(start_args) => {
-                swage_gateway::cli::start::run(&start_args).await
-            }
-            GatewayCommand::Stop(stop_args) => {
-                swage_gateway::cli::stop::run(&stop_args).await
-            }
-            GatewayCommand::Status => {
-                swage_gateway::cli::status::run().await
-            }
+            GatewayCommand::Start(start_args) => swage_gateway::cli::start::run(&start_args).await,
+            GatewayCommand::Stop(stop_args) => swage_gateway::cli::stop::run(&stop_args).await,
+            GatewayCommand::Status => swage_gateway::cli::status::run().await,
         },
-        Some(Command::Tui(tui_args)) => {
-            swage_gateway::cli::tui::run(&tui_args).await
-        }
+        Some(Command::Tui(tui_args)) => swage_gateway::cli::tui::run(&tui_args).await,
         Some(Command::Completions(comp_args)) => {
             swage_gateway::cli::completions::run(&comp_args);
             Ok(())
@@ -92,6 +95,34 @@ mod tests {
         let cli = Cli::try_parse_from(["swage", "--server-mode"]).unwrap();
         assert!(cli.server_mode);
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn server_mode_accepts_embedded_gateway_start_args() {
+        let cli = Cli::try_parse_from([
+            "swage",
+            "--server-mode",
+            "gateway",
+            "start",
+            "--port",
+            "8080",
+            "--host",
+            "0.0.0.0",
+            "--config",
+            "/tmp/swage.toml",
+        ])
+        .unwrap();
+        assert!(cli.server_mode);
+
+        let Some(Command::Gateway(gw)) = cli.command else {
+            panic!("expected Gateway command");
+        };
+        let GatewayCommand::Start(args) = gw.command else {
+            panic!("expected Start subcommand");
+        };
+        assert_eq!(args.port, Some(8080));
+        assert_eq!(args.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(args.config.as_deref(), Some("/tmp/swage.toml"));
     }
 
     #[test]

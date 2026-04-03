@@ -195,15 +195,7 @@ impl CompactionExecutor {
         pending: Vec<PendingCompaction>,
         provider: &(dyn LlmProvider + '_),
     ) -> Vec<CompactionResult> {
-        // TODO Hardcoded "gpt-4" tokeniser produces wrong counts for o200k-based models
-        // priority: normal | tags: correctness, review:branch-era-02-delivery
-        // `TiktokenTokeniser::new("gpt-4")` always uses the cl100k_base encoding.
-        // Models such as GPT-4o use o200k_base, which has a different vocabulary —
-        // token counts will be inaccurate, leading to budget violations or over-truncation
-        // when the session is configured for such a model.
-        // Fix: thread the model name through `execute_pending` and derive the tokeniser from it.
-        // ---
-        let tokeniser = TiktokenTokeniser::new("gpt-4");
+        let tokeniser = TiktokenTokeniser::new(provider.model_id());
         let compactor = TruncationCompactor::new();
 
         // Build one future per intent and drive them all concurrently.
@@ -255,8 +247,7 @@ async fn execute_single(
                 };
             }
             // Messages exceed budget — run LLM-backed extraction.
-            let extractor =
-                crate::structured_extraction::StructuredExtractionCompactor::new();
+            let extractor = crate::structured_extraction::StructuredExtractionCompactor::new();
             match extractor
                 .extract(&intent.messages, intent.budget, provider, tokeniser)
                 .await
@@ -307,8 +298,7 @@ async fn execute_single(
                     intent,
                 },
                 Err(e) => {
-                    let failure =
-                        format!("delta_summarise failed: {e}; fell back to truncation");
+                    let failure = format!("delta_summarise failed: {e}; fell back to truncation");
                     let (compacted, _) =
                         compactor.compact(intent.messages.clone(), intent.budget, tokeniser);
                     CompactionResult {
@@ -324,8 +314,7 @@ async fn execute_single(
         "selective_evict" => {
             // Selective eviction always runs the LLM — it removes specific low-value
             // messages regardless of budget, rather than trimming to a size target.
-            let eviction_compactor =
-                crate::selective_eviction::SelectiveEvictionCompactor::new();
+            let eviction_compactor = crate::selective_eviction::SelectiveEvictionCompactor::new();
             match eviction_compactor
                 .compact(&intent.messages, provider, tokeniser)
                 .await
@@ -337,8 +326,7 @@ async fn execute_single(
                     intent,
                 },
                 Err(e) => {
-                    let failure =
-                        format!("selective_evict failed: {e}; fell back to truncation");
+                    let failure = format!("selective_evict failed: {e}; fell back to truncation");
                     let (compacted, _) =
                         compactor.compact(intent.messages.clone(), intent.budget, tokeniser);
                     CompactionResult {
@@ -403,7 +391,6 @@ fn find_protected_start(messages: &[ChatMessage]) -> usize {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,7 +451,9 @@ mod tests {
 
         // Old messages should be gone.
         assert!(!result.iter().any(|m| m.role == Role::User
-            && m.content.iter().any(|p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("First")))));
+            && m.content.iter().any(
+                |p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("First"))
+            )));
 
         // System message must remain.
         assert!(result.iter().any(|m| m.role == Role::System));
@@ -481,7 +470,10 @@ mod tests {
         let compactor = TruncationCompactor::new();
         let t = tokeniser();
         let msgs = vec![
-            make(Role::System, "Critical system instructions that must never be lost."),
+            make(
+                Role::System,
+                "Critical system instructions that must never be lost.",
+            ),
             make(Role::User, "Old user turn"),
             make(Role::Assistant, "Old assistant turn"),
             make(Role::User, "Recent turn"),
@@ -509,12 +501,18 @@ mod tests {
             make(Role::User, "First user message"),
             make(Role::Assistant, "First assistant reply"),
             make(Role::User, "Most recent user message — protect this"),
-            make(Role::Assistant, "Most recent assistant reply — protect this"),
+            make(
+                Role::Assistant,
+                "Most recent assistant reply — protect this",
+            ),
         ];
         // Budget so tight that only the recent pair can fit.
         let just_recent = vec![
             make(Role::User, "Most recent user message — protect this"),
-            make(Role::Assistant, "Most recent assistant reply — protect this"),
+            make(
+                Role::Assistant,
+                "Most recent assistant reply — protect this",
+            ),
         ];
         let budget = t.count_messages(&just_recent) + 2;
 
@@ -585,10 +583,7 @@ mod tests {
     fn token_counts_in_record_are_nonzero_for_non_empty_input() {
         let compactor = TruncationCompactor::new();
         let t = tokeniser();
-        let msgs = vec![
-            make(Role::User, "Hello"),
-            make(Role::Assistant, "Hi there"),
-        ];
+        let msgs = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi there")];
         let (_, record) = compactor.compact(msgs, 10_000, &t);
 
         // The tokeniser (not character arithmetic) produces a real estimate.
@@ -602,12 +597,14 @@ mod tests {
 
     mod executor_tests {
         use super::*;
-        use swage_core::{CompletionRequest, CompletionResponse, FinishReason, ProviderError,
-                         ToolCompletionRequest, ToolCompletionResponse, StreamChunk};
-        use swage_provider::LlmProvider;
         use async_trait::async_trait;
         use futures::Stream;
         use std::pin::Pin;
+        use swage_core::{
+            CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use swage_provider::LlmProvider;
 
         /// A provider that always returns an error — used to verify fallback behaviour.
         struct FailingProvider;
@@ -619,7 +616,9 @@ mod tests {
 
         #[async_trait]
         impl LlmProvider for SuccessProvider {
-            fn model_id(&self) -> &str { "success-mock" }
+            fn model_id(&self) -> &str {
+                "success-mock"
+            }
 
             async fn complete(
                 &self,
@@ -654,7 +653,9 @@ mod tests {
 
         #[async_trait]
         impl LlmProvider for FailingProvider {
-            fn model_id(&self) -> &str { "failing-mock" }
+            fn model_id(&self) -> &str {
+                "failing-mock"
+            }
 
             async fn complete(
                 &self,
@@ -688,10 +689,7 @@ mod tests {
         async fn execute_pending_returns_results_for_truncation_strategy() {
             let executor = CompactionExecutor::new();
             let provider = FailingProvider;
-            let msgs = vec![
-                make(Role::User, "Hello"),
-                make(Role::Assistant, "Hi"),
-            ];
+            let msgs = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi")];
 
             let pending = vec![PendingCompaction {
                 element_name: "history".to_string(),
@@ -732,8 +730,10 @@ mod tests {
             assert_eq!(results.len(), 1);
             // Unknown strategy — must fall back to truncation.
             assert_eq!(results[0].actual_strategy, "truncation");
-            assert!(results[0].failure_reason.is_some(),
-                "failure_reason should explain why truncation was used");
+            assert!(
+                results[0].failure_reason.is_some(),
+                "failure_reason should explain why truncation was used"
+            );
         }
 
         #[tokio::test]
@@ -804,10 +804,15 @@ mod tests {
             assert_eq!(results.len(), 1);
             // Short-circuit: within budget → strategy label preserved, no failure.
             assert_eq!(results[0].actual_strategy, "structured_extract");
-            assert!(results[0].failure_reason.is_none(),
-                "no failure expected when messages fit within budget");
-            assert_eq!(results[0].compacted.len(), msgs.len(),
-                "messages should be returned unchanged");
+            assert!(
+                results[0].failure_reason.is_none(),
+                "no failure expected when messages fit within budget"
+            );
+            assert_eq!(
+                results[0].compacted.len(),
+                msgs.len(),
+                "messages should be returned unchanged"
+            );
         }
 
         #[tokio::test]
@@ -816,7 +821,10 @@ mod tests {
             let executor = CompactionExecutor::new();
             let provider = FailingProvider;
             let msgs = vec![
-                make(Role::User, "Some message with enough text to exceed a tiny budget"),
+                make(
+                    Role::User,
+                    "Some message with enough text to exceed a tiny budget",
+                ),
                 make(Role::Assistant, "A reply that also adds to the token count"),
             ];
 
@@ -833,8 +841,10 @@ mod tests {
             assert_eq!(results.len(), 1);
             // LLM call failed → fell back to truncation.
             assert_eq!(results[0].actual_strategy, "truncation");
-            assert!(results[0].failure_reason.is_some(),
-                "failure_reason must describe the extraction error");
+            assert!(
+                results[0].failure_reason.is_some(),
+                "failure_reason must describe the extraction error"
+            );
         }
 
         // ── delta_summarise strategy ──────────────────────────────────────────
@@ -844,10 +854,7 @@ mod tests {
             // Messages fit within budget — short-circuit, no LLM call.
             let executor = CompactionExecutor::new();
             let provider = FailingProvider; // not called in this path
-            let msgs = vec![
-                make(Role::User, "Hello"),
-                make(Role::Assistant, "Hi"),
-            ];
+            let msgs = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi")];
 
             let pending = vec![PendingCompaction {
                 element_name: "history".to_string(),
@@ -871,8 +878,14 @@ mod tests {
             let executor = CompactionExecutor::new();
             let provider = FailingProvider;
             let msgs = vec![
-                make(Role::User, "Message with enough text to exceed a tiny budget for sure"),
-                make(Role::Assistant, "Reply with enough text to also exceed the budget"),
+                make(
+                    Role::User,
+                    "Message with enough text to exceed a tiny budget for sure",
+                ),
+                make(
+                    Role::Assistant,
+                    "Reply with enough text to also exceed the budget",
+                ),
             ];
 
             let pending = vec![PendingCompaction {
@@ -897,10 +910,7 @@ mod tests {
             // Provider returns an empty eviction list (nothing to remove) — strategy succeeds.
             let executor = CompactionExecutor::new();
             let provider = SuccessProvider { response: "[]" }; // no evictions
-            let msgs = vec![
-                make(Role::User, "Hello"),
-                make(Role::Assistant, "Hi"),
-            ];
+            let msgs = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi")];
 
             let pending = vec![PendingCompaction {
                 element_name: "history".to_string(),
@@ -923,10 +933,7 @@ mod tests {
             // LLM call fails → fall back to truncation.
             let executor = CompactionExecutor::new();
             let provider = FailingProvider;
-            let msgs = vec![
-                make(Role::User, "Hello"),
-                make(Role::Assistant, "Hi"),
-            ];
+            let msgs = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi")];
 
             let pending = vec![PendingCompaction {
                 element_name: "history".to_string(),

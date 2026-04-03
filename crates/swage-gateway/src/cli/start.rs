@@ -7,7 +7,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use swage_client::{error::ClientError, http::GatewayClient, runtime::RuntimeMetadata};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 use crate::cli::StartArgs;
 
@@ -26,8 +26,7 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
         Ok(meta) if meta.is_stale() => {
             // Metadata file exists but the recorded PID is dead — crashed gateway.
             eprintln!("Cleaning up stale metadata...");
-            RuntimeMetadata::remove()
-                .map_err(|e| ClientError::MetadataIo { source: e })?;
+            RuntimeMetadata::remove().map_err(|e| ClientError::MetadataIo { source: e })?;
         }
         Ok(meta) => {
             // PID is alive — the gateway is already running.
@@ -77,13 +76,11 @@ fn spawn_background_gateway(
     host: Option<&str>,
     config: Option<&str>,
 ) -> Result<(), ClientError> {
-    let binary = std::env::current_exe()
-        .map_err(|e| ClientError::MetadataIo { source: e })?;
+    let binary = std::env::current_exe().map_err(|e| ClientError::MetadataIo { source: e })?;
 
     let log_path = gateway_log_path();
     if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ClientError::MetadataIo { source: e })?;
+        std::fs::create_dir_all(parent).map_err(|e| ClientError::MetadataIo { source: e })?;
     }
 
     let log_file = std::fs::OpenOptions::new()
@@ -111,7 +108,8 @@ fn spawn_background_gateway(
         cmd.process_group(0);
     }
 
-    cmd.spawn().map_err(|e| ClientError::MetadataIo { source: e })?;
+    cmd.spawn()
+        .map_err(|e| ClientError::MetadataIo { source: e })?;
 
     Ok(())
 }
@@ -163,7 +161,10 @@ pub(crate) fn gateway_log_path() -> PathBuf {
 
 /// Builds the argument list for spawning the binary in server mode.
 ///
-/// Always starts with `--server-mode`, followed by any provided overrides.
+/// Always starts with `--server-mode gateway start`, followed by any provided
+/// overrides, so the spawned process reuses the same `StartArgs` parser as the
+/// foreground CLI path.
+///
 /// This is a pure function — extracted so tests can verify the args without
 /// actually spawning a process.
 pub(crate) fn build_spawn_args(
@@ -171,18 +172,11 @@ pub(crate) fn build_spawn_args(
     host: Option<String>,
     config: Option<String>,
 ) -> Vec<String> {
-    // TODO Background daemon spawn args are unrecognised by the top-level parser
-    // priority: high | tags: correctness, review:branch-era-02-delivery
-    // `build_spawn_args` places `--port`, `--host`, and `--config` at the top level
-    // (e.g. `swage --server-mode --port 8080`), but those flags belong to the
-    // `gateway start` subcommand in `StartArgs`. Clap rejects them as unknown
-    // arguments, so the child process exits with a parse error before reaching the
-    // `--server-mode` branch. Any `swage gateway start --port X` invocation silently
-    // fails to launch the daemon with the requested overrides.
-    // Fix: either add the override flags to `Cli` directly and read them in `main.rs`,
-    // or pass the config via the environment rather than re-parsing argv.
-    // ---
-    let mut args = vec!["--server-mode".to_string()];
+    let mut args = vec![
+        "--server-mode".to_string(),
+        "gateway".to_string(),
+        "start".to_string(),
+    ];
     if let Some(p) = port {
         args.push("--port".to_string());
         args.push(p.to_string());
@@ -221,7 +215,7 @@ mod tests {
     #[test]
     fn spawn_args_with_no_overrides_contains_only_server_mode() {
         let args = build_spawn_args(None, None, None);
-        assert_eq!(args, vec!["--server-mode"]);
+        assert_eq!(args, vec!["--server-mode", "gateway", "start"]);
     }
 
     // Port flag is added when provided.
@@ -259,9 +253,14 @@ mod tests {
         );
         let expected = vec![
             "--server-mode",
-            "--port", "9090",
-            "--host", "127.0.0.1",
-            "--config", "/tmp/cfg.toml",
+            "gateway",
+            "start",
+            "--port",
+            "9090",
+            "--host",
+            "127.0.0.1",
+            "--config",
+            "/tmp/cfg.toml",
         ];
         assert_eq!(args, expected);
     }
