@@ -199,6 +199,25 @@ export function createStreamingStore(
           // in-flight when the error occurred.
           break;
 
+        case "output_schema_failed": {
+          preservePartialResponse();
+          const details = event.errors
+            .map((error) =>
+              error.path
+                ? `${error.path}: ${error.message}`
+                : error.message,
+            )
+            .join("; ");
+          turnError = {
+            code: "output_schema_failed",
+            message: details
+              ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
+              : `Structured output validation failed after ${event.attempts} attempts.`,
+          };
+          isStreaming = false;
+          break;
+        }
+
         case "cancelled":
           // User-initiated cancel. Preserve partial content (they may want
           // to read what was generated before they stopped it).

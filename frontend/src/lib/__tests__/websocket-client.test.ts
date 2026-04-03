@@ -228,6 +228,28 @@ describe("server event dispatch", () => {
     expect(received[0]).toEqual({ type: "turn_complete", turn_id: "t-42" });
   });
 
+  it("passes output_schema_failed events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({
+      type: "output_schema_failed",
+      turn_id: "t-42",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    expect(received[0]).toEqual({
+      type: "output_schema_failed",
+      turn_id: "t-42",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+  });
+
   it("ignores unknown event types silently (forward-compat for future events)", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
     const received: ServerEvent[] = [];

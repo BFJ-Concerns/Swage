@@ -46,6 +46,7 @@ const BACKOFF_FACTOR = 2;
 const KNOWN_EVENT_TYPES = new Set([
   "token",
   "turn_complete",
+  "output_schema_failed",
   "error",
   "cancelled",
   "tool_start",

@@ -98,8 +98,7 @@ impl RuntimeMetadata {
 
     fn load_from(path: &Path) -> io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     fn remove_at(path: &Path) -> io::Result<()> {
@@ -200,7 +199,10 @@ mod tests {
             meta.save().unwrap();
             RuntimeMetadata::remove().unwrap();
             let path = RuntimeMetadata::metadata_path();
-            assert!(!path.exists(), "metadata file should not exist after remove");
+            assert!(
+                !path.exists(),
+                "metadata file should not exist after remove"
+            );
         });
     }
 
@@ -276,10 +278,7 @@ mod tests {
 
     #[test]
     fn is_stale_returns_false_for_current_process() {
-        let meta = RuntimeMetadata::new(
-            std::process::id(),
-            "http://127.0.0.1:3000".to_string(),
-        );
+        let meta = RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string());
         assert!(!meta.is_stale(), "current process should not be stale");
     }
 

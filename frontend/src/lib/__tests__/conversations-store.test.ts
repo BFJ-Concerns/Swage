@@ -114,7 +114,9 @@ describe("loadConversations", () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockRejectedValueOnce(new Error("network error"));
 
-    await expect(store.loadConversations()).rejects.toThrow("network error");
+    await expect(store.loadConversations("proj-1")).rejects.toThrow(
+      "network error",
+    );
     expect(store.isLoading).toBe(false);
   });
 });

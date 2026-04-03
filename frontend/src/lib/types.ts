@@ -72,8 +72,17 @@ export interface MessageView {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
-  turn_state: "completed" | "interrupted" | "failed" | "in_progress";
-  // Present only on assistant messages that invoked tools.
+  turn_state:
+    | "pending"
+    | "processing"
+    | "completed"
+    | "failed"
+    | "interrupted"
+    | "awaiting_approval"
+    | "delegating";
+  // Present on every message in the conversation API; empty when no tool calls
+  // were recorded for that message. Kept optional here so local client-created
+  // message objects do not need to synthesise it eagerly.
   tool_calls?: ToolCallView[];
 }
 
@@ -99,6 +108,11 @@ export type ClientEvent =
   | { type: "unsubscribe"; channels: string[] };
 
 /** Server → Client events. */
+export interface SchemaValidationError {
+  path: string;
+  message: string;
+}
+
 export type ServerEvent =
   | { type: "token"; content: string }
   | { type: "turn_complete"; turn_id: string }
@@ -133,6 +147,12 @@ export type ServerEvent =
       type: "context_assembled";
       turn_id: string;
       report: Record<string, unknown>;
+    }
+  | {
+      type: "output_schema_failed";
+      turn_id: string;
+      attempts: number;
+      errors: SchemaValidationError[];
     }
   // Fired by the gateway before it shuts down. Clients should surface this as
   // a disconnection notice; the WebSocket will close shortly after.

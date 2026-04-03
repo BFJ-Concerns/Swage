@@ -671,6 +671,51 @@ describe("shutdown events", () => {
 });
 
 // ---------------------------------------------------------------------------
+// output_schema_failed events
+// ---------------------------------------------------------------------------
+
+describe("output_schema_failed events", () => {
+  it("sets isStreaming to false and records a protocol-facing turn error", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      turn_id: "t-1",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    expect(store.isStreaming).toBe(false);
+    expect(store.turnError).toEqual({
+      code: "output_schema_failed",
+      message:
+        "Structured output validation failed after 3 attempts: /answer: is required",
+    });
+  });
+
+  it("preserves partial response in the conversation store", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      turn_id: "t-1",
+      attempts: 2,
+      errors: [{ path: "", message: "response was not valid JSON" }],
+    });
+
+    const assistantMessages = conv
+      .getMessages()
+      .filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].content).toBe("partial");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // context_assembled events
 // ---------------------------------------------------------------------------
 

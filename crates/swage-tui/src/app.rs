@@ -7,9 +7,7 @@
 use crate::event::{AppEvent, EventHandler};
 use crate::gateway::{ConnectionManager, ConnectionState};
 use crate::keybindings::{AppAction, map_key_event};
-use crate::state::{
-    ContextReport, ContextSection, ConversationState, DisplayMessage, ProjectInfo,
-};
+use crate::state::{ContextReport, ContextSection, ConversationState, DisplayMessage, ProjectInfo};
 use crate::ui::input::InputState;
 use crate::ui::project_selector::ProjectSelectorState;
 use crate::ui::{RenderParams, render};
@@ -123,11 +121,7 @@ impl App {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
-            let _ = execute!(
-                std::io::stdout(),
-                LeaveAlternateScreen,
-                DisableMouseCapture,
-            );
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture,);
             default_hook(info);
         }));
 
@@ -154,9 +148,7 @@ impl App {
 
     async fn event_loop(
         &mut self,
-        terminal: &mut ratatui::Terminal<
-            ratatui::backend::CrosstermBackend<std::io::Stdout>,
-        >,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crossterm::event::{Event as TermEvent, KeyCode};
         use std::time::Duration;
@@ -367,12 +359,21 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
-        ServerEvent::ToolEnd { call_id, status, duration_ms, .. } => {
+        ServerEvent::ToolEnd {
+            call_id,
+            status,
+            duration_ms,
+            ..
+        } => {
             state.end_tool(&call_id, status, duration_ms);
             EventOutcome::Continue
         }
 
-        ServerEvent::TurnComplete { input_tokens, output_tokens, .. } => {
+        ServerEvent::TurnComplete {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
             // Model name is not carried by TurnComplete — it comes from
             // configuration or a ContextAssembled event. Pass None here; the
             // caller may set it separately once known.
@@ -438,7 +439,9 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         ServerEvent::SkillAlreadyActive { .. } => EventOutcome::Continue,
 
         // Inter-agent communication events.
-        ServerEvent::DelegationStarted { target_agent_id, .. } => {
+        ServerEvent::DelegationStarted {
+            target_agent_id, ..
+        } => {
             state.messages.push(DisplayMessage {
                 role: "system".to_string(),
                 content: format!("Delegating to agent: {target_agent_id}"),
@@ -448,7 +451,11 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
-        ServerEvent::DelegationCompleted { target_agent_id, success, .. } => {
+        ServerEvent::DelegationCompleted {
+            target_agent_id,
+            success,
+            ..
+        } => {
             let status = if success { "succeeded" } else { "failed" };
             state.messages.push(DisplayMessage {
                 role: "system".to_string(),
@@ -516,9 +523,7 @@ fn parse_context_report(report: &serde_json::Value) -> ContextReport {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    let budget_tokens = report
-        .get("budget")
-        .and_then(|v| v.as_u64());
+    let budget_tokens = report.get("budget").and_then(|v| v.as_u64());
 
     let sections = report
         .get("elements")
@@ -534,7 +539,11 @@ fn parse_context_report(report: &serde_json::Value) -> ContextReport {
         })
         .unwrap_or_default();
 
-    ContextReport { sections, total_tokens, budget_tokens }
+    ContextReport {
+        sections,
+        total_tokens,
+        budget_tokens,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +570,9 @@ mod tests {
         let mut state = make_state();
         let outcome = handle_server_event(
             &mut state,
-            ServerEvent::Token { content: "hello".to_string() },
+            ServerEvent::Token {
+                content: "hello".to_string(),
+            },
         );
         assert_eq!(state.streaming_buffer, "hello");
         assert!(state.is_streaming);
@@ -571,8 +582,18 @@ mod tests {
     #[test]
     fn multiple_token_events_accumulate() {
         let mut state = make_state();
-        handle_server_event(&mut state, ServerEvent::Token { content: "foo".to_string() });
-        handle_server_event(&mut state, ServerEvent::Token { content: " bar".to_string() });
+        handle_server_event(
+            &mut state,
+            ServerEvent::Token {
+                content: "foo".to_string(),
+            },
+        );
+        handle_server_event(
+            &mut state,
+            ServerEvent::Token {
+                content: " bar".to_string(),
+            },
+        );
         assert_eq!(state.streaming_buffer, "foo bar");
     }
 
@@ -628,7 +649,12 @@ mod tests {
     #[test]
     fn turn_complete_flushes_buffer_to_message() {
         let mut state = make_state();
-        handle_server_event(&mut state, ServerEvent::Token { content: "Result.".to_string() });
+        handle_server_event(
+            &mut state,
+            ServerEvent::Token {
+                content: "Result.".to_string(),
+            },
+        );
         let turn_id = Uuid::new_v4();
         let outcome = handle_server_event(
             &mut state,
@@ -670,9 +696,15 @@ mod tests {
         });
         handle_server_event(
             &mut state,
-            ServerEvent::ContextAssembled { turn_id: Uuid::new_v4(), report: report_json },
+            ServerEvent::ContextAssembled {
+                turn_id: Uuid::new_v4(),
+                report: report_json,
+            },
         );
-        let report = state.context_report.as_ref().expect("context_report should be set");
+        let report = state
+            .context_report
+            .as_ref()
+            .expect("context_report should be set");
         assert_eq!(report.total_tokens, 450);
         assert_eq!(report.budget_tokens, Some(4096));
         assert_eq!(report.sections.len(), 2);
@@ -689,7 +721,10 @@ mod tests {
         let report_json = json!({ "total_tokens": 99 });
         handle_server_event(
             &mut state,
-            ServerEvent::ContextAssembled { turn_id: Uuid::new_v4(), report: report_json },
+            ServerEvent::ContextAssembled {
+                turn_id: Uuid::new_v4(),
+                report: report_json,
+            },
         );
         let report = state.context_report.as_ref().unwrap();
         assert_eq!(report.total_tokens, 99);
@@ -704,7 +739,9 @@ mod tests {
         let mut state = make_state();
         let outcome = handle_server_event(
             &mut state,
-            ServerEvent::Shutdown { reason: "idle timeout".to_string() },
+            ServerEvent::Shutdown {
+                reason: "idle timeout".to_string(),
+            },
         );
         assert_eq!(outcome, EventOutcome::Shutdown);
         assert_eq!(state.messages.len(), 1);
@@ -735,7 +772,12 @@ mod tests {
     #[test]
     fn cancelled_clears_streaming_buffer() {
         let mut state = make_state();
-        handle_server_event(&mut state, ServerEvent::Token { content: "partial...".to_string() });
+        handle_server_event(
+            &mut state,
+            ServerEvent::Token {
+                content: "partial...".to_string(),
+            },
+        );
         assert!(state.is_streaming);
         let outcome = handle_server_event(&mut state, ServerEvent::Cancelled {});
         assert_eq!(outcome, EventOutcome::Continue);
@@ -770,7 +812,9 @@ mod tests {
         let mut state = make_state();
         let outcome = handle_server_event(
             &mut state,
-            ServerEvent::SkillDeactivated { name: "old-skill".to_string() },
+            ServerEvent::SkillDeactivated {
+                name: "old-skill".to_string(),
+            },
         );
         assert_eq!(outcome, EventOutcome::Continue);
         assert_eq!(state.messages.len(), 1);
@@ -778,14 +822,132 @@ mod tests {
         assert!(state.messages[0].content.contains("old-skill"));
     }
 
+    // --- Delegation and approval lifecycle ---
+
+    #[test]
+    fn delegation_started_adds_system_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::DelegationStarted {
+                parent_turn_id: Uuid::new_v4(),
+                child_turn_id: Uuid::new_v4(),
+                target_agent_id: "reviewer".to_string(),
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "system");
+        assert!(state.messages[0].content.contains("reviewer"));
+    }
+
+    #[test]
+    fn delegation_completed_adds_success_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::DelegationCompleted {
+                parent_turn_id: Uuid::new_v4(),
+                child_turn_id: Uuid::new_v4(),
+                target_agent_id: "reviewer".to_string(),
+                success: true,
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "system");
+        assert!(state.messages[0].content.contains("succeeded"));
+    }
+
+    #[test]
+    fn approval_required_adds_system_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::ApprovalRequired {
+                approval_id: Uuid::new_v4(),
+                turn_id: Uuid::new_v4(),
+                agent_id: "gateway".to_string(),
+                kind: "tool".to_string(),
+                tool_name: Some("shell".to_string()),
+                tool_arguments: Some(json!({ "command": "ls" })),
+                prompt: "Allow shell?".to_string(),
+                context: Some(json!({ "cwd": "/tmp" })),
+                timeout_at: "2026-01-01T00:00:00Z".to_string(),
+                timeout_policy: "reject".to_string(),
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "system");
+        assert!(state.messages[0].content.contains("Allow shell?"));
+    }
+
+    #[test]
+    fn approval_confirmed_adds_system_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::ApprovalConfirmed {
+                approval_id: Uuid::new_v4(),
+                decision: "approved".to_string(),
+                reason: Some("looks safe".to_string()),
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "system");
+        assert!(state.messages[0].content.contains("approved"));
+    }
+
+    #[test]
+    fn approval_expired_adds_system_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::ApprovalExpired {
+                approval_id: Uuid::new_v4(),
+                timeout_policy: "interrupt".to_string(),
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "system");
+        assert!(state.messages[0].content.contains("expired"));
+    }
+
+    #[test]
+    fn approval_decision_error_adds_error_message() {
+        let mut state = make_state();
+        let outcome = handle_server_event(
+            &mut state,
+            ServerEvent::ApprovalDecisionError {
+                approval_id: "bad-id".to_string(),
+                error: "already_decided".to_string(),
+                message: "Approval was already resolved.".to_string(),
+                current_state: Some("approved".to_string()),
+            },
+        );
+        assert_eq!(outcome, EventOutcome::Continue);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, "error");
+        assert!(state.messages[0].content.contains("already_decided"));
+    }
+
     // --- App construction ---
 
     #[test]
     fn app_new_constructs_with_disconnected_state() {
         use crate::gateway::ConnectionState;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let app = App::new("http://127.0.0.1:3000", project);
-        assert_eq!(app.connection.connection_state(), ConnectionState::Disconnected);
+        assert_eq!(
+            app.connection.connection_state(),
+            ConnectionState::Disconnected
+        );
         assert!(app.is_running);
         assert!(!app.show_inspector);
     }
@@ -795,7 +957,10 @@ mod tests {
     #[test]
     fn dispatch_quit_sets_is_running_false() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         app.dispatch_action(AppAction::Quit);
         assert!(!app.is_running);
@@ -804,7 +969,10 @@ mod tests {
     #[test]
     fn dispatch_toggle_inspector_toggles_flag() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         assert!(!app.show_inspector);
         app.dispatch_action(AppAction::ToggleInspector);
@@ -816,7 +984,10 @@ mod tests {
     #[test]
     fn dispatch_insert_char_updates_input() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         app.dispatch_action(AppAction::InsertChar('h'));
         app.dispatch_action(AppAction::InsertChar('i'));
@@ -826,7 +997,10 @@ mod tests {
     #[test]
     fn dispatch_delete_char_removes_from_input() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         app.dispatch_action(AppAction::InsertChar('x'));
         assert_eq!(app.input.text, "x");
@@ -837,7 +1011,10 @@ mod tests {
     #[test]
     fn dispatch_toggle_multi_line_toggles_mode() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         assert!(!app.input.is_multi_line);
         app.dispatch_action(AppAction::ToggleMultiLine);
@@ -847,7 +1024,10 @@ mod tests {
     #[test]
     fn dispatch_open_project_selector_shows_overlay() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         assert!(!app.project_selector.is_visible());
         app.dispatch_action(AppAction::OpenProjectSelector);
@@ -857,12 +1037,17 @@ mod tests {
     #[test]
     fn dispatch_new_conversation_clears_messages() {
         use crate::keybindings::AppAction;
-        let project = ProjectInfo { id: Uuid::new_v4(), name: "Test".to_string() };
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
         let mut app = App::new("http://127.0.0.1:3000", project);
         // Push a message via server event so there is something to clear.
         handle_server_event(
             &mut app.state,
-            ServerEvent::Shutdown { reason: "test".to_string() },
+            ServerEvent::Shutdown {
+                reason: "test".to_string(),
+            },
         );
         assert!(!app.state.messages.is_empty());
         app.dispatch_action(AppAction::NewConversation);
@@ -876,7 +1061,9 @@ mod tests {
         let mut state = make_state();
         let outcome = handle_server_event(
             &mut state,
-            ServerEvent::SkillAlreadyActive { name: "existing".to_string() },
+            ServerEvent::SkillAlreadyActive {
+                name: "existing".to_string(),
+            },
         );
         assert_eq!(outcome, EventOutcome::Continue);
         // No notification message — it's a no-op from the user's perspective.

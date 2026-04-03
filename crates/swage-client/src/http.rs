@@ -132,12 +132,14 @@ impl GatewayClient {
         let status = response.status().as_u16();
 
         // Parse the response and verify the status field is "ok".
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
-                address: url.clone(),
-                source: e,
-            }
-        })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| ClientError::RequestFailed {
+                    address: url.clone(),
+                    source: e,
+                })?;
 
         if body.get("status").and_then(|v| v.as_str()) == Some("ok") {
             Ok(())
@@ -524,12 +526,14 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
-                address: url.clone(),
-                source: e,
-            }
-        })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| ClientError::RequestFailed {
+                    address: url.clone(),
+                    source: e,
+                })?;
         let turn_id = body["turn_id"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -554,12 +558,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 
     /// Send a typed inter-agent message.
@@ -590,12 +595,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 
     /// Query message delivery status.
@@ -614,12 +620,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 
     /// List pending approval requests.
@@ -641,12 +648,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 
     /// Decide on a pending approval (approve/reject).
@@ -672,12 +680,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 
     /// List turns in a conversation.
@@ -688,7 +697,10 @@ impl GatewayClient {
         state: Option<&str>,
         agent_id: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
-        let mut url = format!("{}/api/conversations/{conversation_id}/turns", self.base_url);
+        let mut url = format!(
+            "{}/api/conversations/{conversation_id}/turns",
+            self.base_url
+        );
         let mut params = vec![];
         if let Some(s) = state {
             params.push(format!("state={s}"));
@@ -709,12 +721,13 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        response.json().await.map_err(|e| {
-            ClientError::RequestFailed {
+        response
+            .json()
+            .await
+            .map_err(|e| ClientError::RequestFailed {
                 address: url.clone(),
                 source: e,
-            }
-        })
+            })
     }
 }
 
@@ -884,10 +897,7 @@ mod tests {
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
 
         // Use the current process PID — is_stale() will return false.
-        let meta = RuntimeMetadata::new(
-            std::process::id(),
-            "http://127.0.0.1:3000".to_string(),
-        );
+        let meta = RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string());
         meta.save().unwrap();
         let result = GatewayClient::from_runtime();
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
@@ -936,13 +946,14 @@ mod tests {
             "has_interrupted_turn": true,
         });
 
-        let with_preview: ConversationSummary =
-            serde_json::from_value(json_with_preview).unwrap();
-        assert_eq!(with_preview.message_preview.as_deref(), Some("Hello, world"));
+        let with_preview: ConversationSummary = serde_json::from_value(json_with_preview).unwrap();
+        assert_eq!(
+            with_preview.message_preview.as_deref(),
+            Some("Hello, world")
+        );
         assert!(!with_preview.has_interrupted_turn);
 
-        let no_preview: ConversationSummary =
-            serde_json::from_value(json_no_preview).unwrap();
+        let no_preview: ConversationSummary = serde_json::from_value(json_no_preview).unwrap();
         assert!(no_preview.message_preview.is_none());
         assert!(no_preview.has_interrupted_turn);
     }

@@ -79,6 +79,10 @@ export function createConversationStore(): ConversationStore {
     },
 
     async createConversation(projectId) {
+      if (!projectId) {
+        throw new Error("projectId is required to create a conversation");
+      }
+
       const resp = await api.createConversation(projectId);
 
       // Build the detail object locally — avoids an extra round-trip.

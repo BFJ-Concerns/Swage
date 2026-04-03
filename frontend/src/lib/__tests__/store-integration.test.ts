@@ -43,7 +43,7 @@ async function seedActiveConversation(store: ReturnType<typeof createConversatio
   });
   const listSpy = vi.spyOn(api, "listConversations").mockResolvedValue([]);
 
-  await store.createConversation();
+  await store.createConversation("proj-1");
 
   createSpy.mockRestore();
   listSpy.mockRestore();

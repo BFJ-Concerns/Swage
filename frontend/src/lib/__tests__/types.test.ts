@@ -148,6 +148,26 @@ describe("MessageView tool_calls", () => {
     expect(msg.tool_calls).toHaveLength(1);
     expect(msg.tool_calls![0].tool).toBe("read_file");
   });
+
+  it("accepts awaiting_approval and delegating turn states", () => {
+    const awaitingApproval: MessageView = {
+      role: "assistant",
+      content: "Waiting",
+      timestamp: "2025-01-01T00:00:00Z",
+      turn_state: "awaiting_approval",
+      tool_calls: [],
+    };
+    const delegating: MessageView = {
+      role: "assistant",
+      content: "Delegating",
+      timestamp: "2025-01-01T00:00:00Z",
+      turn_state: "delegating",
+      tool_calls: [],
+    };
+
+    expect(awaitingApproval.turn_state).toBe("awaiting_approval");
+    expect(delegating.turn_state).toBe("delegating");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -280,6 +300,22 @@ describe("ServerEvent tool variants", () => {
     expect(ev.type).toBe("shutdown");
     if (ev.type === "shutdown") {
       expect(ev.reason).toBe("idle_timeout");
+    }
+  });
+
+  it("accepts output_schema_failed with validation errors", () => {
+    const ev: ServerEvent = {
+      type: "output_schema_failed",
+      turn_id: "t-42",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    };
+
+    expect(ev.type).toBe("output_schema_failed");
+    if (ev.type === "output_schema_failed") {
+      expect(ev.turn_id).toBe("t-42");
+      expect(ev.attempts).toBe(3);
+      expect(ev.errors[0]).toEqual({ path: "/answer", message: "is required" });
     }
   });
 });

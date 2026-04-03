@@ -21,7 +21,7 @@
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 use crate::error::ClientError;
@@ -135,19 +135,31 @@ pub enum ServerEvent {
         approval_id: Uuid,
         turn_id: Uuid,
         agent_id: String,
+        kind: String,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        tool_arguments: Option<serde_json::Value>,
         prompt: String,
         #[serde(default)]
-        timeout_at: Option<String>,
+        context: Option<serde_json::Value>,
+        timeout_at: String,
+        timeout_policy: String,
     },
 
     /// An approval was confirmed (approved or rejected).
     ApprovalConfirmed {
         approval_id: Uuid,
         decision: String,
+        #[serde(default)]
+        reason: Option<String>,
     },
 
     /// An approval request expired.
-    ApprovalExpired { approval_id: Uuid },
+    ApprovalExpired {
+        approval_id: Uuid,
+        timeout_policy: String,
+    },
 
     /// The gateway rejected an approval decision (invalid, stale, or not found).
     ApprovalDecisionError {
@@ -220,12 +232,11 @@ impl GatewayWebSocket {
     /// `address` is the gateway's HTTP base URL (e.g. `"http://127.0.0.1:3000"`).
     /// It is converted to a `ws://` URL automatically.
     pub async fn connect(address: &str, conversation_id: Uuid) -> Result<Self, ClientError> {
-        let url = build_ws_url(address, conversation_id).map_err(|msg| {
-            ClientError::WebSocketFailed {
+        let url =
+            build_ws_url(address, conversation_id).map_err(|msg| ClientError::WebSocketFailed {
                 address: address.to_string(),
                 message: msg,
-            }
-        })?;
+            })?;
 
         let (stream, _response) =
             connect_async(&url)
@@ -389,7 +400,8 @@ mod tests {
 
     #[test]
     fn tool_start_event_deserialises() {
-        let json = r#"{"type":"tool_start","call_id":"abc","tool":"shell","arguments":{"cmd":"ls"}}"#;
+        let json =
+            r#"{"type":"tool_start","call_id":"abc","tool":"shell","arguments":{"cmd":"ls"}}"#;
         let event: ServerEvent = serde_json::from_str(json).unwrap();
         let ServerEvent::ToolStart { call_id, tool, .. } = event else {
             panic!("expected ToolStart variant");
@@ -412,7 +424,14 @@ mod tests {
     fn tool_end_event_deserialises() {
         let json = r#"{"type":"tool_end","call_id":"abc","tool":"shell","result":"ok","status":"success","duration_ms":42,"truncated":false}"#;
         let event: ServerEvent = serde_json::from_str(json).unwrap();
-        let ServerEvent::ToolEnd { call_id, status, duration_ms, truncated, .. } = event else {
+        let ServerEvent::ToolEnd {
+            call_id,
+            status,
+            duration_ms,
+            truncated,
+            ..
+        } = event
+        else {
             panic!("expected ToolEnd variant");
         };
         assert_eq!(call_id, "abc");
@@ -426,7 +445,14 @@ mod tests {
         let id = Uuid::new_v4();
         let json = format!(r#"{{"type":"turn_complete","turn_id":"{id}"}}"#);
         let event: ServerEvent = serde_json::from_str(&json).unwrap();
-        let ServerEvent::TurnComplete { turn_id, input_tokens, output_tokens, cost_microcents, structured_output } = event else {
+        let ServerEvent::TurnComplete {
+            turn_id,
+            input_tokens,
+            output_tokens,
+            cost_microcents,
+            structured_output,
+        } = event
+        else {
             panic!("expected TurnComplete variant");
         };
         assert_eq!(turn_id, id);
@@ -444,7 +470,13 @@ mod tests {
             r#"{{"type":"turn_complete","turn_id":"{id}","input_tokens":100,"output_tokens":50,"cost_microcents":200}}"#
         );
         let event: ServerEvent = serde_json::from_str(&json).unwrap();
-        let ServerEvent::TurnComplete { input_tokens, output_tokens, cost_microcents, .. } = event else {
+        let ServerEvent::TurnComplete {
+            input_tokens,
+            output_tokens,
+            cost_microcents,
+            ..
+        } = event
+        else {
             panic!("expected TurnComplete variant");
         };
         assert_eq!(input_tokens, Some(100));
@@ -484,7 +516,10 @@ mod tests {
     fn skill_activated_event_deserialises() {
         let json = r#"{"type":"skill_activated","name":"test-skill","display_name":"Test","description":"A test","token_count":42}"#;
         let event: ServerEvent = serde_json::from_str(json).unwrap();
-        let ServerEvent::SkillActivated { name, token_count, .. } = event else {
+        let ServerEvent::SkillActivated {
+            name, token_count, ..
+        } = event
+        else {
             panic!("expected SkillActivated");
         };
         assert_eq!(name, "test-skill");
@@ -514,7 +549,8 @@ mod tests {
     #[test]
     fn context_assembled_event_deserialises() {
         let id = Uuid::new_v4();
-        let json = format!(r#"{{"type":"context_assembled","turn_id":"{id}","report":{{"elements":0}}}}"#);
+        let json =
+            format!(r#"{{"type":"context_assembled","turn_id":"{id}","report":{{"elements":0}}}}"#);
         let event: ServerEvent = serde_json::from_str(&json).unwrap();
         let ServerEvent::ContextAssembled { turn_id, report } = event else {
             panic!("expected ContextAssembled");
@@ -523,11 +559,149 @@ mod tests {
         assert!(report.is_object());
     }
 
+    #[test]
+    fn delegation_started_event_deserialises() {
+        let parent_turn_id = Uuid::new_v4();
+        let child_turn_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"delegation_started","parent_turn_id":"{parent_turn_id}","child_turn_id":"{child_turn_id}","target_agent_id":"reviewer"}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::DelegationStarted {
+            parent_turn_id: parent,
+            child_turn_id: child,
+            target_agent_id,
+        } = event
+        else {
+            panic!("expected DelegationStarted");
+        };
+        assert_eq!(parent, parent_turn_id);
+        assert_eq!(child, child_turn_id);
+        assert_eq!(target_agent_id, "reviewer");
+    }
+
+    #[test]
+    fn delegation_completed_event_deserialises() {
+        let parent_turn_id = Uuid::new_v4();
+        let child_turn_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"delegation_completed","parent_turn_id":"{parent_turn_id}","child_turn_id":"{child_turn_id}","target_agent_id":"reviewer","success":false}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::DelegationCompleted {
+            parent_turn_id: parent,
+            child_turn_id: child,
+            target_agent_id,
+            success,
+        } = event
+        else {
+            panic!("expected DelegationCompleted");
+        };
+        assert_eq!(parent, parent_turn_id);
+        assert_eq!(child, child_turn_id);
+        assert_eq!(target_agent_id, "reviewer");
+        assert!(!success);
+    }
+
+    #[test]
+    fn approval_required_event_deserialises_full_gateway_shape() {
+        let approval_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"approval_required","approval_id":"{approval_id}","turn_id":"{turn_id}","agent_id":"gateway","kind":"tool","tool_name":"shell","tool_arguments":{{"command":"ls"}},"prompt":"Allow shell?","context":{{"cwd":"/tmp"}},"timeout_at":"2026-01-01T00:00:00Z","timeout_policy":"reject"}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::ApprovalRequired {
+            approval_id: parsed_approval_id,
+            turn_id: parsed_turn_id,
+            agent_id,
+            kind,
+            tool_name,
+            tool_arguments,
+            prompt,
+            context,
+            timeout_at,
+            timeout_policy,
+        } = event
+        else {
+            panic!("expected ApprovalRequired");
+        };
+        assert_eq!(parsed_approval_id, approval_id);
+        assert_eq!(parsed_turn_id, turn_id);
+        assert_eq!(agent_id, "gateway");
+        assert_eq!(kind, "tool");
+        assert_eq!(tool_name.as_deref(), Some("shell"));
+        assert_eq!(tool_arguments, Some(serde_json::json!({"command": "ls"})));
+        assert_eq!(prompt, "Allow shell?");
+        assert_eq!(context, Some(serde_json::json!({"cwd": "/tmp"})));
+        assert_eq!(timeout_at, "2026-01-01T00:00:00Z");
+        assert_eq!(timeout_policy, "reject");
+    }
+
+    #[test]
+    fn approval_confirmed_event_deserialises_reason() {
+        let approval_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"approval_confirmed","approval_id":"{approval_id}","decision":"approved","reason":"looks safe"}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::ApprovalConfirmed {
+            approval_id: parsed_approval_id,
+            decision,
+            reason,
+        } = event
+        else {
+            panic!("expected ApprovalConfirmed");
+        };
+        assert_eq!(parsed_approval_id, approval_id);
+        assert_eq!(decision, "approved");
+        assert_eq!(reason.as_deref(), Some("looks safe"));
+    }
+
+    #[test]
+    fn approval_expired_event_deserialises_timeout_policy() {
+        let approval_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"approval_expired","approval_id":"{approval_id}","timeout_policy":"interrupt"}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::ApprovalExpired {
+            approval_id: parsed_approval_id,
+            timeout_policy,
+        } = event
+        else {
+            panic!("expected ApprovalExpired");
+        };
+        assert_eq!(parsed_approval_id, approval_id);
+        assert_eq!(timeout_policy, "interrupt");
+    }
+
+    #[test]
+    fn approval_decision_error_event_deserialises_current_state() {
+        let json = r#"{"type":"approval_decision_error","approval_id":"bad-id","error":"already_decided","message":"already resolved","current_state":"approved"}"#;
+        let event: ServerEvent = serde_json::from_str(json).unwrap();
+        let ServerEvent::ApprovalDecisionError {
+            approval_id,
+            error,
+            message,
+            current_state,
+        } = event
+        else {
+            panic!("expected ApprovalDecisionError");
+        };
+        assert_eq!(approval_id, "bad-id");
+        assert_eq!(error, "already_decided");
+        assert_eq!(message, "already resolved");
+        assert_eq!(current_state.as_deref(), Some("approved"));
+    }
+
     // -- ClientEvent serialisation --
 
     #[test]
     fn send_message_serialises() {
-        let event = ClientEvent::SendMessage { content: "hello".to_string() };
+        let event = ClientEvent::SendMessage {
+            content: "hello".to_string(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "send_message");
@@ -556,7 +730,9 @@ mod tests {
 
     #[test]
     fn unsubscribe_serialises() {
-        let event = ClientEvent::Unsubscribe { channels: vec!["context".to_string()] };
+        let event = ClientEvent::Unsubscribe {
+            channels: vec!["context".to_string()],
+        };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "unsubscribe");
@@ -564,7 +740,9 @@ mod tests {
 
     #[test]
     fn activate_skill_serialises() {
-        let event = ClientEvent::ActivateSkill { name: "my-skill".to_string() };
+        let event = ClientEvent::ActivateSkill {
+            name: "my-skill".to_string(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "activate_skill");
@@ -573,7 +751,9 @@ mod tests {
 
     #[test]
     fn deactivate_skill_serialises() {
-        let event = ClientEvent::DeactivateSkill { name: "my-skill".to_string() };
+        let event = ClientEvent::DeactivateSkill {
+            name: "my-skill".to_string(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "deactivate_skill");
@@ -606,7 +786,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "approval_decision");
         assert_eq!(v["decision"], "rejected");
-        assert!(v.get("reason").is_none(), "None reason should be omitted from JSON");
+        assert!(
+            v.get("reason").is_none(),
+            "None reason should be omitted from JSON"
+        );
     }
 
     #[test]
@@ -616,7 +799,10 @@ mod tests {
             r#"{{"type":"turn_complete","turn_id":"{id}","structured_output":{{"answer":42}}}}"#
         );
         let event: ServerEvent = serde_json::from_str(&json).unwrap();
-        let ServerEvent::TurnComplete { structured_output, .. } = event else {
+        let ServerEvent::TurnComplete {
+            structured_output, ..
+        } = event
+        else {
             panic!("expected TurnComplete variant");
         };
         assert_eq!(structured_output, Some(serde_json::json!({"answer": 42})));
@@ -628,34 +814,49 @@ mod tests {
     fn http_address_converts_to_ws_url() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let url = build_ws_url("http://127.0.0.1:3000", id).unwrap();
-        assert_eq!(url, "ws://127.0.0.1:3000/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
+        assert_eq!(
+            url,
+            "ws://127.0.0.1:3000/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws"
+        );
     }
 
     #[test]
     fn https_address_converts_to_wss_url() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let url = build_ws_url("https://example.com:443", id).unwrap();
-        assert_eq!(url, "wss://example.com:443/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
+        assert_eq!(
+            url,
+            "wss://example.com:443/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws"
+        );
     }
 
     #[test]
     fn ws_address_is_passed_through() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let url = build_ws_url("ws://localhost:3000", id).unwrap();
-        assert_eq!(url, "ws://localhost:3000/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
+        assert_eq!(
+            url,
+            "ws://localhost:3000/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws"
+        );
     }
 
     #[test]
     fn wss_address_is_passed_through() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let url = build_ws_url("wss://example.com:443", id).unwrap();
-        assert_eq!(url, "wss://example.com:443/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws");
+        assert_eq!(
+            url,
+            "wss://example.com:443/api/conversations/550e8400-e29b-41d4-a716-446655440000/ws"
+        );
     }
 
     #[test]
     fn unknown_scheme_returns_error() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let err = build_ws_url("ftp://example.com", id).unwrap_err();
-        assert!(err.contains("ftp://example.com"), "error should include the offending address");
+        assert!(
+            err.contains("ftp://example.com"),
+            "error should include the offending address"
+        );
     }
 }
