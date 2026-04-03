@@ -233,16 +233,8 @@ impl ConversationService {
 
             // Collect tool call views for every turn in this thread.
             // Note: in a single-thread/single-turn session this is exact. For
-            // multi-turn threads, all tool calls are surfaced on every assistant
-            // message — a known limitation until Message gains a turn_id link.
-            // TODO Tool calls incorrectly attributed to all assistant messages in multi-turn sessions
-            // tags: correctness, review:branch-era-02-delivery
-            // `all_tool_call_views` accumulates tool calls from every turn, then the mapping
-            // below attaches the entire collection to every assistant message (line ~235).
-            // In a multi-turn conversation each assistant message should only carry the tool
-            // calls from its own turn. Fix requires a turn_id column on messages (or a
-            // per-turn bucket map keyed by position) so tool calls can be scoped correctly.
-            // ---
+            // multi-turn threads, all tool calls are currently surfaced on every
+            // assistant message until message-to-turn attribution exists.
             for turn in &turns {
                 let records = self.storage.list_tool_calls_by_turn(turn.id).await?;
                 for r in records {
