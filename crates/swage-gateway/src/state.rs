@@ -3,12 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use swage_config::ResolvedConfig;
 use swage_agent::ApprovalDecision;
+use swage_config::ResolvedConfig;
 use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
@@ -166,14 +166,20 @@ mod tests {
     #[test]
     fn sandbox_is_none_when_constructed_with_none() {
         let state = make_minimal_state(None);
-        assert!(state.sandbox.is_none(), "sandbox should be None when not provided");
+        assert!(
+            state.sandbox.is_none(),
+            "sandbox should be None when not provided"
+        );
     }
 
     #[test]
     fn sandbox_is_some_when_constructed_with_sandbox() {
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
         let state = make_minimal_state(Some(sandbox));
-        assert!(state.sandbox.is_some(), "sandbox should be Some when provided");
+        assert!(
+            state.sandbox.is_some(),
+            "sandbox should be Some when provided"
+        );
     }
 
     #[test]
@@ -181,8 +187,14 @@ mod tests {
         // Newly constructed state must have an empty approval_channels map —
         // no leftover entries from a previous session.
         let state = make_minimal_state(None);
-        let guard = state.approval_channels.lock().unwrap();
-        assert!(guard.is_empty(), "approval_channels should be empty on construction");
+        let guard = state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            guard.is_empty(),
+            "approval_channels should be empty on construction"
+        );
     }
 
     #[tokio::test]
@@ -192,10 +204,23 @@ mod tests {
         let state = make_minimal_state(None);
         let approval_id = Uuid::new_v4();
         let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
-        state.approval_channels.lock().unwrap().insert(approval_id, tx);
-        let sender = state.approval_channels.lock().unwrap().remove(&approval_id)
+        state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(approval_id, tx);
+        let sender = state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&approval_id)
             .expect("sender should be present");
-        sender.send(ApprovalDecision { decision: "approved".to_string(), reason: None }).unwrap();
+        sender
+            .send(ApprovalDecision {
+                decision: "approved".to_string(),
+                reason: None,
+            })
+            .unwrap();
         let decision = rx.await.expect("receiver should get decision");
         assert_eq!(decision.decision, "approved");
         assert_eq!(decision.reason, None);

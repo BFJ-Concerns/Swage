@@ -4,17 +4,20 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use swage_core::{GatewayError, StorageError};
 use serde_json::Value as JsonValue;
+use swage_core::{GatewayError, StorageError};
 use swage_storage::{
     model::{
-        EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry,
-        Team, Thread, ThreadBranch, TopologyRun, TurnState,
+        EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry, Team,
+        Thread, ThreadBranch, TopologyRun, TurnState,
     },
     store::{ProjectStore, Storage},
 };
 
-use crate::{state::AppState, topology::{TopologyExecutionRequest, TopologyExecutor}};
+use crate::{
+    state::AppState,
+    topology::{TopologyExecutionRequest, TopologyExecutor},
+};
 
 // ---------------------------------------------------------------------------
 // Response types — serialised to JSON for API consumers
@@ -130,7 +133,10 @@ pub struct ConversationService {
 
 impl ConversationService {
     pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
-        Self { storage, project_store }
+        Self {
+            storage,
+            project_store,
+        }
     }
 
     /// Create a new conversation in the default project.
@@ -178,9 +184,7 @@ impl ConversationService {
                 .map(|m| m.content);
 
             // Check whether any thread has an Interrupted turn.
-            let has_interrupted_turn = self
-                .has_interrupted_turn_in_session(session.id)
-                .await?;
+            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -195,10 +199,7 @@ impl ConversationService {
     }
 
     /// Get a conversation with its full message history.
-    pub async fn get_conversation(
-        &self,
-        id: Uuid,
-    ) -> Result<ConversationDetail, GatewayError> {
+    pub async fn get_conversation(&self, id: Uuid) -> Result<ConversationDetail, GatewayError> {
         let session = self
             .storage
             .get_session(id)
@@ -244,9 +245,9 @@ impl ConversationService {
                 for r in records {
                     let arguments = serde_json::from_str(&r.arguments)
                         .unwrap_or(JsonValue::String(r.arguments));
-                    let result = r.result.map(|text| {
-                        serde_json::from_str(&text).unwrap_or(JsonValue::String(text))
-                    });
+                    let result = r
+                        .result
+                        .map(|text| serde_json::from_str(&text).unwrap_or(JsonValue::String(text)));
                     all_tool_call_views.push(ToolCallView {
                         call_id: r.call_id,
                         tool: r.tool,
@@ -265,7 +266,9 @@ impl ConversationService {
         // Sort all messages by position (threads use per-thread position, so sort
         // by created_at if positions overlap across threads).
         all_messages.sort_by(|a, b| {
-            a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at))
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
         });
 
         let message_views = all_messages
@@ -321,9 +324,7 @@ impl ConversationService {
                 .await?
                 .map(|m| m.content);
 
-            let has_interrupted_turn = self
-                .has_interrupted_turn_in_session(session.id)
-                .await?;
+            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -352,7 +353,10 @@ impl ConversationService {
 
         let session = self
             .storage
-            .create_session(NewSession { project_id, agent_id: "gateway".to_string() })
+            .create_session(NewSession {
+                project_id,
+                agent_id: "gateway".to_string(),
+            })
             .await?;
 
         // Create the default thread for the new session.
@@ -394,14 +398,12 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
 
-        let thread = self
-            .storage
-            .get(req.thread_id)
-            .await?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
+        let thread = self.storage.get(req.thread_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
                 entity: "thread".into(),
                 id: req.thread_id.to_string(),
-            }))?;
+            })
+        })?;
         if thread.session_id != session_id {
             return Err(GatewayError::ValidationError(
                 "thread does not belong to this conversation".into(),
@@ -429,7 +431,12 @@ impl ConversationService {
         self.storage
             .list_branches_by_session(session_id)
             .await
-            .map(|branches| branches.into_iter().map(thread_branch_to_response).collect())
+            .map(|branches| {
+                branches
+                    .into_iter()
+                    .map(thread_branch_to_response)
+                    .collect()
+            })
             .map_err(GatewayError::Storage)
     }
 
@@ -438,18 +445,19 @@ impl ConversationService {
         &self,
         thread_id: Uuid,
     ) -> Result<ConversationThreadDetail, GatewayError> {
-        let thread = self
-            .storage
-            .get(thread_id)
-            .await?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
+        let thread = self.storage.get(thread_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
                 entity: "thread".into(),
                 id: thread_id.to_string(),
-            }))?;
+            })
+        })?;
 
         let messages = self.storage.list_messages_by_thread(thread.id).await?;
         let turns = self.storage.list_turns_by_thread(thread.id).await?;
-        let turn_state = turns.last().map(|turn| turn.state.clone()).unwrap_or(TurnState::Completed);
+        let turn_state = turns
+            .last()
+            .map(|turn| turn.state.clone())
+            .unwrap_or(TurnState::Completed);
         let branch = self.storage.get_branch(thread.id).await?;
 
         Ok(ConversationThreadDetail {
@@ -541,7 +549,9 @@ pub fn slugify(name: &str) -> String {
 
 /// Returns the base directory for all project data: `~/.swage/projects/`.
 fn projects_base_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".swage").join("projects"))
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".swage").join("projects"))
 }
 
 /// Mediates between HTTP project handlers and storage.
@@ -566,7 +576,9 @@ impl ProjectService {
     ) -> Result<ProjectResponse, GatewayError> {
         // Validate non-empty name.
         if req.name.trim().is_empty() {
-            return Err(GatewayError::ValidationError("name must not be empty".into()));
+            return Err(GatewayError::ValidationError(
+                "name must not be empty".into(),
+            ));
         }
 
         // Check workspace_path exists on disk if provided.
@@ -593,14 +605,24 @@ impl ProjectService {
             let project_dir = base.join(&slug);
             let memory_dir = project_dir.join("memory");
             // Non-fatal: best-effort directory creation.
-            let _ = std::fs::create_dir_all(&memory_dir);
+            if let Err(error) = std::fs::create_dir_all(&memory_dir) {
+                tracing::warn!(
+                    slug,
+                    path = %memory_dir.display(),
+                    %error,
+                    "failed to create project memory directory"
+                );
+            }
         }
 
-        let project = self.project_store.create(NewProject {
-            name: req.name,
-            slug,
-            workspace_path: req.workspace_path,
-        }).await?;
+        let project = self
+            .project_store
+            .create(NewProject {
+                name: req.name,
+                slug,
+                workspace_path: req.workspace_path,
+            })
+            .await?;
 
         Ok(project_to_response(project))
     }
@@ -633,7 +655,9 @@ impl ProjectService {
         // Validate name if provided.
         if let Some(ref name) = req.name {
             if name.trim().is_empty() {
-                return Err(GatewayError::ValidationError("name must not be empty".into()));
+                return Err(GatewayError::ValidationError(
+                    "name must not be empty".into(),
+                ));
             }
         }
 
@@ -649,7 +673,8 @@ impl ProjectService {
         // Derive the new slug from the new name, if name is being updated.
         let new_slug = req.name.as_deref().map(slugify);
 
-        let project = self.project_store
+        let project = self
+            .project_store
             .update(id, req.name, new_slug, req.workspace_path)
             .await
             .map_err(|e| match e {
@@ -745,7 +770,10 @@ pub struct TeamService {
 
 impl TeamService {
     pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
-        Self { storage, project_store }
+        Self {
+            storage,
+            project_store,
+        }
     }
 
     pub async fn create_team(
@@ -764,7 +792,10 @@ impl TeamService {
             .is_some()
         {
             return Err(GatewayError::Storage(StorageError::ConstraintViolation(
-                format!("a team named '{}' already exists in project {project_id}", req.name),
+                format!(
+                    "a team named '{}' already exists in project {project_id}",
+                    req.name
+                ),
             )));
         }
 
@@ -826,7 +857,10 @@ impl TeamService {
             {
                 if conflict.id != id {
                     return Err(GatewayError::Storage(StorageError::ConstraintViolation(
-                        format!("a team named '{}' already exists in project {}", name, existing.project_id),
+                        format!(
+                            "a team named '{}' already exists in project {}",
+                            name, existing.project_id
+                        ),
                     )));
                 }
             }
@@ -842,22 +876,22 @@ impl TeamService {
         let members = match members {
             Some(members) => Some(normalise_members(members, &resolved_entry_agent_id)?),
             None if resolved_entry_agent_id != existing.entry_agent_id
-                && !existing.members.iter().any(|member| member == &resolved_entry_agent_id) =>
+                && !existing
+                    .members
+                    .iter()
+                    .any(|member| member == &resolved_entry_agent_id) =>
             {
-                Some(normalise_members(existing.members.clone(), &resolved_entry_agent_id)?)
+                Some(normalise_members(
+                    existing.members.clone(),
+                    &resolved_entry_agent_id,
+                )?)
             }
             None => None,
         };
 
         let team = self
             .storage
-            .update_team(
-                id,
-                name,
-                description,
-                entry_agent_id,
-                members,
-            )
+            .update_team(id, name, description, entry_agent_id, members)
             .await?;
 
         Ok(team_to_response(team))
@@ -882,14 +916,18 @@ impl TeamService {
 
 fn validate_team_name(name: &str) -> Result<(), GatewayError> {
     if name.trim().is_empty() {
-        return Err(GatewayError::ValidationError("name must not be empty".into()));
+        return Err(GatewayError::ValidationError(
+            "name must not be empty".into(),
+        ));
     }
     Ok(())
 }
 
 fn validate_agent_id(agent_id: &str, field_name: &str) -> Result<(), GatewayError> {
     if agent_id.trim().is_empty() {
-        return Err(GatewayError::ValidationError(format!("{field_name} must not be empty")));
+        return Err(GatewayError::ValidationError(format!(
+            "{field_name} must not be empty"
+        )));
     }
     Ok(())
 }
@@ -1040,15 +1078,12 @@ impl TopologyRunService {
             ));
         }
 
-        let team = self
-            .state
-            .storage
-            .get_team(team_id)
-            .await?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
+        let team = self.state.storage.get_team(team_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
                 entity: "team".into(),
                 id: team_id.to_string(),
-            }))?;
+            })
+        })?;
 
         let mut known_agents: std::collections::HashSet<String> =
             team.members.iter().cloned().collect();
@@ -1104,10 +1139,12 @@ impl TopologyRunService {
             .storage
             .get_topology_run(topology_run_id)
             .await?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
-                entity: "topology_run".into(),
-                id: topology_run_id.to_string(),
-            }))?;
+            .ok_or_else(|| {
+                GatewayError::Storage(StorageError::NotFound {
+                    entity: "topology_run".into(),
+                    id: topology_run_id.to_string(),
+                })
+            })?;
         let nodes = self
             .state
             .storage
@@ -1131,10 +1168,7 @@ impl TopologyRunService {
         })
     }
 
-    pub async fn list_runs(
-        &self,
-        team_id: Uuid,
-    ) -> Result<Vec<TopologyRunResponse>, GatewayError> {
+    pub async fn list_runs(&self, team_id: Uuid) -> Result<Vec<TopologyRunResponse>, GatewayError> {
         self.state
             .storage
             .list_topology_runs_by_team(team_id)
@@ -1243,7 +1277,10 @@ mod tests {
     async fn create_conversation_returns_valid_response() {
         let svc = make_service();
 
-        let resp = svc.create_conversation().await.expect("create should succeed");
+        let resp = svc
+            .create_conversation()
+            .await
+            .expect("create should succeed");
 
         // Non-nil UUID expected.
         assert_ne!(resp.id, Uuid::nil());
@@ -1436,7 +1473,9 @@ mod tests {
         let svc = make_service();
         let resp = svc.create_conversation().await.unwrap();
 
-        svc.delete_conversation(resp.id).await.expect("delete should succeed");
+        svc.delete_conversation(resp.id)
+            .await
+            .expect("delete should succeed");
 
         let err = svc.get_conversation(resp.id).await.unwrap_err();
         assert!(matches!(err, GatewayError::ConversationNotFound { .. }));
@@ -1528,7 +1567,10 @@ mod tests {
         // User message should have no tool calls.
         let user_msg = &detail.messages[0];
         assert_eq!(user_msg.role, "user");
-        assert!(user_msg.tool_calls.is_empty(), "user message should have no tool calls");
+        assert!(
+            user_msg.tool_calls.is_empty(),
+            "user message should have no tool calls"
+        );
 
         // Assistant message should carry the tool call.
         let asst_msg = &detail.messages[1];
@@ -1621,7 +1663,10 @@ mod tests {
 
         let native = &tool_calls[0];
         assert_eq!(native.call_id, "py_01");
-        assert!(native.parent_call_id.is_none(), "native call should have no parent");
+        assert!(
+            native.parent_call_id.is_none(),
+            "native call should have no parent"
+        );
 
         let sub = &tool_calls[1];
         assert_eq!(sub.call_id, "sub_01");

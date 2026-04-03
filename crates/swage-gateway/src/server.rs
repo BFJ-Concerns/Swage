@@ -1,11 +1,11 @@
 use axum::{
+    Router,
     body::Body,
     extract::State,
     http::{HeaderValue, Request},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
-    Router,
 };
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
@@ -43,7 +43,6 @@ async fn request_id_middleware(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-
 // ---------------------------------------------------------------------------
 // Activity recording middleware
 // ---------------------------------------------------------------------------
@@ -68,16 +67,16 @@ async fn activity_recording_middleware(
     next.run(request).await
 }
 
-/// Build the axum router with all conversation routes and tracing middleware.
+/// Build the axum router for the full gateway API and frontend shell.
 ///
 /// # Routes
 ///
 /// The router handles the following endpoints (in priority order):
-/// - `POST /api/conversations` - create a new conversation
-/// - `GET /api/conversations` - list all conversations
-/// - `GET /api/conversations/:id` - get a conversation with message history
-/// - `DELETE /api/conversations/:id` - delete a conversation
-/// - `GET /api/conversations/:id/ws` - WebSocket upgrade for a conversation
+/// - `POST /api/projects` / `GET /api/projects` - project management
+/// - `POST /api/teams` / topology-run routes - team and topology execution
+/// - conversation, thread, turn, approval, and agent-message APIs
+/// - `GET /api/conversations/:id/ws` - WebSocket upgrade for live turn events
+/// - `GET /api/skills`, `POST /api/shutdown`, `GET /api/health`
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -106,18 +105,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/teams/:id/runs",
             get(handlers::list_topology_runs).post(handlers::create_topology_run),
         )
-        .route(
-            "/api/topology-runs/:id",
-            get(handlers::get_topology_run),
-        )
+        .route("/api/topology-runs/:id", get(handlers::get_topology_run))
         .route(
             "/api/conversations/:id/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
         )
-        .route(
-            "/api/threads/:id",
-            get(handlers::get_thread_detail),
-        )
+        .route("/api/threads/:id", get(handlers::get_thread_detail))
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
@@ -140,22 +133,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/turns", post(handlers::submit_turn))
         .route("/api/turns/:id", get(handlers::get_turn))
         // Turn listing per conversation.
-        .route(
-            "/api/conversations/:id/turns",
-            get(handlers::list_turns),
-        )
+        .route("/api/conversations/:id/turns", get(handlers::list_turns))
         // Agent messaging — send and query inter-agent messages.
         .route("/api/messages", post(handlers::send_agent_message))
         .route("/api/messages/:id", get(handlers::get_message_status))
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
-        .route(
-            "/api/approvals",
-            get(handlers::list_approvals),
-        )
-        .route(
-            "/api/approvals/:id",
-            post(handlers::decide_approval),
-        )
+        .route("/api/approvals", get(handlers::list_approvals))
+        .route("/api/approvals/:id", post(handlers::decide_approval))
         // Graceful shutdown endpoint — localhost only, broadcasts Shutdown event.
         .route("/api/shutdown", post(handlers::shutdown))
         // Health check — lightweight, no DB or provider calls.

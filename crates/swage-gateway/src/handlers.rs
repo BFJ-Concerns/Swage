@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
 
 use axum::{
+    Json,
     extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -14,12 +14,12 @@ use swage_core::GatewayError;
 use crate::{
     error::ApiError,
     service::{
-        ConversationBranchResponse, ConversationDetail, ConversationResponse,
-        ConversationService, ConversationSummary, ConversationThreadDetail,
-        CreateProjectRequest, CreateTeamRequest, ProjectListResponse, ProjectResponse,
-        ProjectService, TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
-        TopologyRunResponse, TopologyRunService, UpdateProjectRequest, UpdateTeamRequest,
-        CreateTopologyRunRequest, CreateConversationBranchRequest,
+        ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
+        ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
+        CreateProjectRequest, CreateTeamRequest, CreateTopologyRunRequest, ProjectListResponse,
+        ProjectResponse, ProjectService, TeamListResponse, TeamResponse, TeamService,
+        TopologyRunDetailResponse, TopologyRunResponse, TopologyRunService, UpdateProjectRequest,
+        UpdateTeamRequest,
     },
     state::AppState,
 };
@@ -357,8 +357,8 @@ pub async fn list_skills(
     State(state): State<AppState>,
     Query(params): Query<SkillsQueryParams>,
 ) -> Result<Json<SkillListResponse>, ApiError> {
-    use swage_config::{HierarchyLevel, resolve_root};
     use swage_config::skill::discover_skills;
+    use swage_config::{HierarchyLevel, resolve_root};
     use swage_storage::store::ProjectStore;
 
     // Verify the project exists — return 404 for unknown IDs.
@@ -367,7 +367,11 @@ pub async fn list_skills(
         .get(params.project_id)
         .await
         .map_err(|e| ApiError(GatewayError::Storage(e)))?
-        .ok_or_else(|| ApiError(GatewayError::ProjectNotFound { id: params.project_id }))?;
+        .ok_or_else(|| {
+            ApiError(GatewayError::ProjectNotFound {
+                id: params.project_id,
+            })
+        })?;
 
     // Resolve the config root. When it doesn't exist (no `~/.swage/` directory
     // and `SWAGE_HOME` unset or pointing at a missing path), degrade gracefully
@@ -380,9 +384,8 @@ pub async fn list_skills(
     // Build the hierarchy: global always included; project and agent directories
     // are included only when they exist on disk.
     let project_dir = root.join("projects").join(&project.slug);
-    let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> = vec![
-        (HierarchyLevel::Global, root.clone()),
-    ];
+    let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> =
+        vec![(HierarchyLevel::Global, root.clone())];
 
     if project_dir.is_dir() {
         levels.push((HierarchyLevel::Project, project_dir.clone()));
@@ -408,11 +411,11 @@ pub async fn list_skills(
         .map(|s| {
             let always_active = s.level == HierarchyLevel::Agent;
             let level = match s.level {
-                HierarchyLevel::Agent   => "agent",
-                HierarchyLevel::Team    => "team",
+                HierarchyLevel::Agent => "agent",
+                HierarchyLevel::Team => "team",
                 HierarchyLevel::Project => "project",
-                HierarchyLevel::Lens    => "lens",
-                HierarchyLevel::Global  => "global",
+                HierarchyLevel::Lens => "lens",
+                HierarchyLevel::Global => "global",
             };
             SkillItem {
                 name: s.name,
@@ -425,7 +428,9 @@ pub async fn list_skills(
         })
         .collect();
 
-    Ok(Json(SkillListResponse { skills: skill_items }))
+    Ok(Json(SkillListResponse {
+        skills: skill_items,
+    }))
 }
 
 /// `GET /api/turns/:id/context` — fetch the context assembly report for a completed turn.
@@ -514,7 +519,9 @@ pub async fn shutdown(
     // Notify all connected WebSocket clients. Errors here are non-fatal:
     // if no clients are subscribed the send returns Err(SendError), which we
     // discard — the server is shutting down anyway.
-    let _ = state.broadcast.send(ServerEvent::Shutdown { reason: reason.clone() });
+    let _ = state.broadcast.send(ServerEvent::Shutdown {
+        reason: reason.clone(),
+    });
 
     // Signal the graceful-shutdown future so axum drains in-flight requests
     // before the process exits.
@@ -595,6 +602,37 @@ pub async fn submit_turn(
         .first()
         .ok_or_else(|| ApiError::internal("no thread found for session".into()))?;
 
+    if state
+        .active_turns
+        .lock()
+        .await
+        .contains_key(&req.conversation_id)
+    {
+        return Err(GatewayError::TurnInProgress {
+            session_id: req.conversation_id,
+        }
+        .into());
+    }
+
+    let existing_turns = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if existing_turns.iter().any(|turn| {
+        matches!(
+            turn.state,
+            swage_storage::TurnState::Processing
+                | swage_storage::TurnState::AwaitingApproval
+                | swage_storage::TurnState::Delegating
+        )
+    }) {
+        return Err(GatewayError::TurnInProgress {
+            session_id: req.conversation_id,
+        }
+        .into());
+    }
+
     // Create a placeholder turn in Pending state — visible to the poller
     // immediately. The agent will create its own internal turn record during
     // processing; after completion we mirror the result onto this placeholder
@@ -620,9 +658,9 @@ pub async fn submit_turn(
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
-        use swage_storage::store::TurnStore;
-        use tokio::sync::{mpsc, Mutex};
         use std::sync::Arc;
+        use swage_storage::store::TurnStore;
+        use tokio::sync::{Mutex, mpsc};
 
         // Create a dummy WebSocket sender — events are discarded but the
         // turn processing infrastructure requires it.
@@ -630,9 +668,7 @@ pub async fn submit_turn(
         let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
 
         // Drain events in background so the channel never fills.
-        tokio::spawn(async move {
-            while ws_rx.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
         let result = crate::turn::process_turn(
             &bg_state,
@@ -665,19 +701,65 @@ pub async fn submit_turn(
                                 )
                         });
                         if let Some(real) = real_turn {
-                            let _ = bg_state.storage.update_turn_state(turn_id, real.state.clone()).await;
-                            if let Some(ref resp) = real.assistant_response {
-                                let _ = bg_state.storage.update_response(turn_id, resp).await;
-                            }
-                            if let (Some(input), Some(output)) = (real.input_tokens, real.output_tokens)
+                            if let Err(e) = bg_state
+                                .storage
+                                .update_turn_state(turn_id, real.state.clone())
+                                .await
                             {
-                                let _ = bg_state.storage.update_tokens(turn_id, input, output).await;
+                                tracing::warn!(
+                                    turn_id = %turn_id,
+                                    mirrored_turn_id = %real.id,
+                                    error = %e,
+                                    "failed to mirror placeholder turn state"
+                                );
+                            }
+                            if let Some(ref resp) = real.assistant_response {
+                                if let Err(e) =
+                                    bg_state.storage.update_response(turn_id, resp).await
+                                {
+                                    tracing::warn!(
+                                        turn_id = %turn_id,
+                                        mirrored_turn_id = %real.id,
+                                        error = %e,
+                                        "failed to mirror placeholder assistant response"
+                                    );
+                                }
+                            }
+                            if let (Some(input), Some(output)) =
+                                (real.input_tokens, real.output_tokens)
+                            {
+                                if let Err(e) =
+                                    bg_state.storage.update_tokens(turn_id, input, output).await
+                                {
+                                    tracing::warn!(
+                                        turn_id = %turn_id,
+                                        mirrored_turn_id = %real.id,
+                                        error = %e,
+                                        "failed to mirror placeholder token counts"
+                                    );
+                                }
                             }
                             if let Some(ref so) = real.structured_output {
-                                let _ = bg_state.storage.update_structured_output(turn_id, so).await;
+                                if let Err(e) =
+                                    bg_state.storage.update_structured_output(turn_id, so).await
+                                {
+                                    tracing::warn!(
+                                        turn_id = %turn_id,
+                                        mirrored_turn_id = %real.id,
+                                        error = %e,
+                                        "failed to mirror placeholder structured output"
+                                    );
+                                }
                             }
                             if let Some(cost) = real.cost_microcents {
-                                let _ = bg_state.storage.update_cost(turn_id, cost).await;
+                                if let Err(e) = bg_state.storage.update_cost(turn_id, cost).await {
+                                    tracing::warn!(
+                                        turn_id = %turn_id,
+                                        mirrored_turn_id = %real.id,
+                                        error = %e,
+                                        "failed to mirror placeholder cost"
+                                    );
+                                }
                             }
                         } else {
                             // No real turn found in storage — the agent likely failed
@@ -885,7 +967,9 @@ pub async fn list_approvals(
         })
         .collect();
 
-    Ok(Json(ApprovalListResponse { approvals: summaries }))
+    Ok(Json(ApprovalListResponse {
+        approvals: summaries,
+    }))
 }
 
 /// The two valid approval outcomes.
@@ -947,7 +1031,7 @@ pub async fn decide_approval(
     let sender = state
         .approval_channels
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .remove(&approval_id);
 
     // Map the validated outcome to storage state once, used by all paths.
@@ -1012,12 +1096,9 @@ pub async fn decide_approval(
 
             match existing {
                 None => Err(ApiError::not_found("approval", approval_id)),
-                Some(a) if a.state != swage_storage::model::ApprovalState::Pending => {
-                    Err(ApiError::conflict(format!(
-                        "approval {} already {}",
-                        approval_id, a.state
-                    )))
-                }
+                Some(a) if a.state != swage_storage::model::ApprovalState::Pending => Err(
+                    ApiError::conflict(format!("approval {} already {}", approval_id, a.state)),
+                ),
                 Some(_) => {
                     // Pending in storage with no live channel — persist the
                     // decision so the approval record reflects the outcome.
@@ -1126,13 +1207,8 @@ pub async fn list_turns(
 mod tests {
     use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-    use axum::{
-        body::to_bytes,
-        extract::ConnectInfo,
-        http::Request,
-        Router,
-    };
-    use tokio::sync::{broadcast, Mutex};
+    use axum::{Router, body::to_bytes, extract::ConnectInfo, http::Request};
+    use tokio::sync::{Mutex, broadcast};
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -1376,9 +1452,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/projects")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"name":"My Project"}"#,
-                    ))
+                    .body(axum::body::Body::from(r#"{"name":"My Project"}"#))
                     .unwrap(),
             )
             .await
@@ -1662,11 +1736,17 @@ mod tests {
 
         // Add two sessions to that project.
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project.id, agent_id: "gateway".to_string() })
+            .create_session(swage_storage::model::NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project.id, agent_id: "gateway".to_string() })
+            .create_session(swage_storage::model::NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
 
@@ -1711,15 +1791,24 @@ mod tests {
 
         // One session in A, two in B.
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_a.id, agent_id: "gateway".to_string() })
+            .create_session(swage_storage::model::NewSession {
+                project_id: project_a.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_b.id, agent_id: "gateway".to_string() })
+            .create_session(swage_storage::model::NewSession {
+                project_id: project_b.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
         storage
-            .create_session(swage_storage::model::NewSession { project_id: project_b.id, agent_id: "gateway".to_string() })
+            .create_session(swage_storage::model::NewSession {
+                project_id: project_b.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .unwrap();
 
@@ -2018,7 +2107,8 @@ mod tests {
             ],
         ]));
         let storage = Arc::new(MockStorage::new());
-        let (router, storage) = make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
+        let (router, storage) =
+            make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
         let project = storage
             .create(swage_storage::model::NewProject {
@@ -2126,7 +2216,8 @@ def build_topology():
             },
         ]));
         let storage = Arc::new(MockStorage::new());
-        let (router, storage) = make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
+        let (router, storage) =
+            make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
         let project = storage
             .create(swage_storage::model::NewProject {
@@ -2275,7 +2366,11 @@ def build_topology():
 
         assert_eq!(branch_resp.status(), StatusCode::CREATED);
         let branch_body = body_json(branch_resp).await;
-        let child_thread_id: Uuid = branch_body["child_thread_id"].as_str().unwrap().parse().unwrap();
+        let child_thread_id: Uuid = branch_body["child_thread_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
 
         storage
             .create_message(swage_storage::model::NewMessage {

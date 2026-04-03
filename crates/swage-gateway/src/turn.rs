@@ -1,51 +1,38 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, GatewayError, Role};
 use swage_storage::model::{NewAgentMessage, NewMessage, TurnState};
 
+use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
 use swage_context::memory::MemoryElement;
 use swage_context::prompts::PromptsElement;
 use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
-use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 
 use swage_agent::{
-    AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor,
-    DelegationHandler, MessageRouter, TurnRequest,
+    AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor, DelegationHandler,
+    MessageRouter, TurnRequest,
 };
-use swage_tool::dispatch::ToolDispatcher;
-use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
-use swage_tool::permission::PermissionConfig;
-use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_safety::LeakDetector;
+use swage_tool::dispatch::ToolDispatcher;
+use swage_tool::permission::PermissionConfig;
+use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
+use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 
 use crate::skill::SkillManager;
 use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
-use crate::{
-    state::AppState,
-    subscription::SubscriptionState,
-    websocket::ServerEvent,
-};
-
-
-// Gateway messaging integration: REST endpoints (POST /api/messages, POST /api/turns,
-// GET /api/approvals, etc.) provide the programmatic interface. The MessageRouter,
-// DelegationExecutor, and expiry are wired through the handler layer. Delegation
-// interception in the streaming turn loop (agent-initiated delegation during tool
-// dispatch) requires era 0.4's tool-as-delegation abstraction.
-// (deferred to Phase 05). All messaging happens within the agent execution.
-// No new WebSocket events in this phase (deferred to Phase 05).
-// Success: delegation works end-to-end through the gateway, expired messages
-// are cleaned up, single-agent conversations are unaffected.
-// ---
+use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
+// Gateway messaging spans three surfaces: REST endpoints for durable messages
+// and turn submission, session-scoped WebSocket events for live approval and
+// delegation updates, and in-process routing between running agents.
 
 /// Build the context assembly elements for a turn.
 ///
@@ -114,7 +101,15 @@ pub(crate) fn load_project_memory(swage_root: &Path, project_slug: &str) -> Stri
     let entries = match std::fs::read_dir(&memory_dir) {
         Ok(rd) => rd,
         // Missing directory is the common case for new projects.
-        Err(_) => return String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
+        Err(error) => {
+            tracing::warn!(
+                path = %memory_dir.display(),
+                %error,
+                "failed to read project memory directory"
+            );
+            return String::new();
+        }
     };
 
     // Collect .md paths and sort alphabetically so loading order is stable.
@@ -127,7 +122,13 @@ pub(crate) fn load_project_memory(swage_root: &Path, project_slug: &str) -> Stri
 
     let parts: Vec<String> = paths
         .into_iter()
-        .filter_map(|p| std::fs::read_to_string(&p).ok())
+        .filter_map(|path| match std::fs::read_to_string(&path) {
+            Ok(content) => Some(content),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to read project memory file");
+                None
+            }
+        })
         .filter(|s| !s.trim().is_empty())
         .collect();
 
@@ -276,32 +277,30 @@ impl DelegationHandler for GatewayDelegationHandler {
                 ))
             })?;
 
-        let target_resolved = match swage_config::load_resolved_config(&project.slug, target_agent_id)
-        {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::warn!(
-                    project = %project.slug,
-                    target_agent_id,
-                    error = %error,
-                    "failed to load target agent config, using startup config for delegation"
-                );
-                self.state.config.clone()
-            }
-        };
+        let target_resolved =
+            match swage_config::load_resolved_config(&project.slug, target_agent_id) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        project = %project.slug,
+                        target_agent_id,
+                        error = %error,
+                        "failed to load target agent config, using startup config for delegation"
+                    );
+                    self.state.config.clone()
+                }
+            };
 
-        let target_agent_config = build_agent_config(
-            target_agent_id.to_string(),
-            &target_resolved,
-            None,
-        );
+        let target_agent_config =
+            build_agent_config(target_agent_id.to_string(), &target_resolved, None);
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
 
         // Delegated child agents execute within the gateway runtime, but their
         // internal tool activity is not surfaced on the parent conversation's
         // WebSocket stream.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
-        let target_dispatcher = build_gateway_dispatcher(&self.state, &target_resolved, silent_ws_tx);
+        let target_dispatcher =
+            build_gateway_dispatcher(&self.state, &target_resolved, silent_ws_tx);
 
         let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
         let executor = DelegationExecutor {
@@ -351,7 +350,9 @@ impl DelegationHandler for GatewayDelegationHandler {
         {
             Ok(result_msg) => result_msg,
             Err(error) => {
-                let _ = router.fail_message(delegate_msg.id, &error.to_string()).await;
+                let _ = router
+                    .fail_message(delegate_msg.id, &error.to_string())
+                    .await;
                 return Err(error);
             }
         };
@@ -437,7 +438,9 @@ pub async fn process_turn(
     let config = match swage_config::load_resolved_config(&project_slug, "default") {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("failed to load project config for '{project_slug}', using startup config: {e}");
+            tracing::warn!(
+                "failed to load project config for '{project_slug}', using startup config: {e}"
+            );
             state.config.clone()
         }
     };
@@ -467,19 +470,20 @@ pub async fn process_turn(
         // The session's agent_id (typically "gateway") maps to the agents
         // subdirectory under the project.
         let agent_dir = project_dir.join("agents").join(&session.agent_id);
-        let agent_dir_opt = if agent_dir.is_dir() { Some(agent_dir.as_path()) } else { None };
+        let agent_dir_opt = if agent_dir.is_dir() {
+            Some(agent_dir.as_path())
+        } else {
+            None
+        };
         let (available, _warnings) =
             SkillManager::discover_available(root, &project_dir, agent_dir_opt);
 
         // Ensure agent-level skills are activated for this session.
         // Idempotent — INSERT OR IGNORE in storage means repeated calls
         // on subsequent turns are harmless.
-        if let Err(e) = SkillManager::auto_activate_agent_skills(
-            session_id,
-            &available,
-            state.storage.as_ref(),
-        )
-        .await
+        if let Err(e) =
+            SkillManager::auto_activate_agent_skills(session_id, &available, state.storage.as_ref())
+                .await
         {
             tracing::warn!(
                 error = ?e,
@@ -487,12 +491,8 @@ pub async fn process_turn(
             );
         }
 
-        match SkillManager::build_active_skills(
-            session_id,
-            &available,
-            state.storage.as_ref(),
-        )
-        .await
+        match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref())
+            .await
         {
             Err(e) => {
                 tracing::warn!(
@@ -630,11 +630,10 @@ pub async fn process_turn(
     // The ContextAssembled event and snapshot persistence require a turn_id,
     // which is not available until the agent creates the Turn record and emits
     // TurnStarted. We prepare the report now and emit it in the event loop.
-    let report_json = serde_json::to_value(&assembly_report)
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to serialise assembly report");
-            serde_json::json!({ "error": "serialisation failed" })
-        });
+    let report_json = serde_json::to_value(&assembly_report).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to serialise assembly report");
+        serde_json::json!({ "error": "serialisation failed" })
+    });
 
     // Step 7: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When a sandbox is
@@ -643,7 +642,8 @@ pub async fn process_turn(
     let dispatcher = build_gateway_dispatcher(state, &config, ws_tx.clone());
 
     // Step 8: Build the Agent that will execute the turn.
-    let agent_config = build_agent_config(session.agent_id.clone(), &config, output_schema_override);
+    let agent_config =
+        build_agent_config(session.agent_id.clone(), &config, output_schema_override);
     let agent = match AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
@@ -665,7 +665,9 @@ pub async fn process_turn(
             // Cleanup cancellation token before returning.
             let mut turns = state.active_turns.lock().await;
             turns.remove(&session_id);
-            return Err(GatewayError::WebSocketError(format!("agent construction failed: {e}")));
+            return Err(GatewayError::WebSocketError(format!(
+                "agent construction failed: {e}"
+            )));
         }
     };
 
@@ -688,9 +690,8 @@ pub async fn process_turn(
     let pricing_config = state.config.pricing.clone();
     let model_name = config.provider.model.clone();
 
-    let agent_handle = tokio::spawn(async move {
-        agent.process_turn_streaming(turn_request, event_tx).await
-    });
+    let agent_handle =
+        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await });
 
     // Captures the turn_id emitted by TurnStarted so the agent result match
     // can use it for persistence and logging after the event loop finishes.
@@ -700,7 +701,9 @@ pub async fn process_turn(
     // agent drops event_tx (channel closes) or the agent task completes.
     while let Some(event) = event_rx.recv().await {
         match event {
-            AgentEvent::TurnStarted { turn_id: started_id } => {
+            AgentEvent::TurnStarted {
+                turn_id: started_id,
+            } => {
                 turn_id = started_id;
                 // Record the turn_id in the tracing span now that the agent
                 // has created the Turn record.
@@ -729,7 +732,11 @@ pub async fn process_turn(
                 activity_tracker.record_activity();
                 let _ = ws_tx.send(ServerEvent::Token { content });
             }
-            AgentEvent::ToolStart { call_id, tool_name, arguments } => {
+            AgentEvent::ToolStart {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
                 activity_tracker.record_activity();
                 let tool_start = ServerEvent::ToolStart {
                     call_id,
@@ -741,7 +748,13 @@ pub async fn process_turn(
                     let _ = ws_tx.send(tool_start);
                 }
             }
-            AgentEvent::ToolEnd { call_id, tool_name, result, status, duration_ms } => {
+            AgentEvent::ToolEnd {
+                call_id,
+                tool_name,
+                result,
+                status,
+                duration_ms,
+            } => {
                 let tool_end = ServerEvent::ToolEnd {
                     call_id,
                     tool: tool_name,
@@ -756,7 +769,12 @@ pub async fn process_turn(
                     let _ = ws_tx.send(tool_end);
                 }
             }
-            AgentEvent::OutputSchemaRetry { turn_id, attempt, max_retries, errors } => {
+            AgentEvent::OutputSchemaRetry {
+                turn_id,
+                attempt,
+                max_retries,
+                errors,
+            } => {
                 // Retry progress is observability noise — only deliver to context subscribers.
                 let retry_event = ServerEvent::OutputSchemaRetry {
                     turn_id,
@@ -774,7 +792,11 @@ pub async fn process_turn(
                     let _ = ws_tx.send(retry_event);
                 }
             }
-            AgentEvent::OutputSchemaFailed { turn_id, attempts, errors } => {
+            AgentEvent::OutputSchemaFailed {
+                turn_id,
+                attempts,
+                errors,
+            } => {
                 // Schema exhaustion is an error condition — always deliver regardless
                 // of subscription state.
                 let _ = ws_tx.send(ServerEvent::OutputSchemaFailed {
@@ -789,13 +811,16 @@ pub async fn process_turn(
                         .collect(),
                 });
             }
-            AgentEvent::TurnCompleted { turn_id, input_tokens, output_tokens, structured_output, .. } => {
+            AgentEvent::TurnCompleted {
+                turn_id,
+                input_tokens,
+                output_tokens,
+                structured_output,
+                ..
+            } => {
                 // Derive cost from the pricing config when available.
-                let cost_microcents = pricing_config.compute_cost(
-                    &model_name,
-                    input_tokens,
-                    output_tokens,
-                );
+                let cost_microcents =
+                    pricing_config.compute_cost(&model_name, input_tokens, output_tokens);
 
                 tracing::info!(
                     input_tokens = input_tokens,
@@ -810,14 +835,15 @@ pub async fn process_turn(
                 }
 
                 // Populate usage fields only for context-subscribed connections.
-                let (ws_input, ws_output, ws_cost) =
-                    if subscription.lock().await.is_subscribed(
-                        crate::subscription::ObservabilityChannel::Context,
-                    ) {
-                        (Some(input_tokens), Some(output_tokens), cost_microcents)
-                    } else {
-                        (None, None, None)
-                    };
+                let (ws_input, ws_output, ws_cost) = if subscription
+                    .lock()
+                    .await
+                    .is_subscribed(crate::subscription::ObservabilityChannel::Context)
+                {
+                    (Some(input_tokens), Some(output_tokens), cost_microcents)
+                } else {
+                    (None, None, None)
+                };
 
                 let _ = ws_tx.send(ServerEvent::TurnComplete {
                     turn_id,
@@ -835,7 +861,10 @@ pub async fn process_turn(
             }
             // Approval lifecycle events — route to the session-scoped ws_tx
             // so only the client connected to this agent sees the event.
-            AgentEvent::DelegationStarted { target_agent_id, task: _ } => {
+            AgentEvent::DelegationStarted {
+                target_agent_id,
+                task: _,
+            } => {
                 // Tool-as-delegation started — emit as a delegation event.
                 // We use turn_id for parent_turn_id; child_turn_id is unknown
                 // at this point (the child turn hasn't been created yet).
@@ -845,7 +874,10 @@ pub async fn process_turn(
                     target_agent_id,
                 });
             }
-            AgentEvent::DelegationCompleted { target_agent_id, success } => {
+            AgentEvent::DelegationCompleted {
+                target_agent_id,
+                success,
+            } => {
                 let _ = ws_tx.send(ServerEvent::DelegationCompleted {
                     parent_turn_id: turn_id,
                     child_turn_id: Uuid::nil(),
@@ -854,8 +886,8 @@ pub async fn process_turn(
                 });
             }
             event @ (AgentEvent::ApprovalRequired { .. }
-                | AgentEvent::ApprovalConfirmed { .. }
-                | AgentEvent::ApprovalExpired { .. }) => {
+            | AgentEvent::ApprovalConfirmed { .. }
+            | AgentEvent::ApprovalExpired { .. }) => {
                 route_approval_agent_event(event, &ws_tx);
             }
         }
@@ -868,11 +900,9 @@ pub async fn process_turn(
             // turn produced validated schema output.
             if let Some(ref output) = outbound.structured_output {
                 use swage_storage::store::TurnStore;
-                if let Err(e) = TurnStore::update_structured_output(
-                    &*state.storage,
-                    turn_id,
-                    output,
-                ).await {
+                if let Err(e) =
+                    TurnStore::update_structured_output(&*state.storage, turn_id, output).await
+                {
                     // Non-fatal: the turn completed; only the persisted record is affected.
                     tracing::warn!(error = %e, %turn_id, "failed to persist structured_output");
                 }
@@ -976,7 +1006,11 @@ pub(crate) fn route_approval_agent_event(
             });
             true
         }
-        AgentEvent::ApprovalConfirmed { approval_id, decision, reason } => {
+        AgentEvent::ApprovalConfirmed {
+            approval_id,
+            decision,
+            reason,
+        } => {
             let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
                 approval_id: approval_id.to_string(),
                 decision,
@@ -984,7 +1018,10 @@ pub(crate) fn route_approval_agent_event(
             });
             true
         }
-        AgentEvent::ApprovalExpired { approval_id, timeout_policy } => {
+        AgentEvent::ApprovalExpired {
+            approval_id,
+            timeout_policy,
+        } => {
             let _ = ws_tx.send(ServerEvent::ApprovalExpired {
                 approval_id: approval_id.to_string(),
                 timeout_policy,
@@ -1001,30 +1038,25 @@ pub(crate) fn route_approval_agent_event(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{
-        collections::HashMap,
-        pin::Pin,
-        sync::Arc,
-    };
+    use std::{collections::HashMap, pin::Pin, sync::Arc};
 
     use async_trait::async_trait;
     use futures::stream;
     use tokio::sync::{Mutex, mpsc};
 
+    use swage_core::StorageError;
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason,
-        ProviderError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
-    use swage_core::StorageError;
     use swage_storage::{
         model::{
-            ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, Message,
-            EdgeEvaluation, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
-            NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
-            NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-            NodeRetry, Project, Session, Team, Thread, ThreadState, ToolCallRecord,
-            TopologyRun, TopologyRunState, Turn, TurnState,
+            ActiveSkillRecord, ApprovalKind, ApprovalRequest, ApprovalState, EdgeEvaluation,
+            Message, NewApprovalRequest, NewEdgeEvaluation, NewMessage, NewNodeExecution,
+            NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+            NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team, Thread,
+            ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
         },
         store::{
             ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, SessionStore,
@@ -1032,7 +1064,6 @@ pub(crate) mod tests {
             TurnStore,
         },
     };
-
 
     use swage_agent::AgentEvent;
 
@@ -1086,16 +1117,20 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        fn model_id(&self) -> &str { "mock-model" }
+        fn model_id(&self) -> &str {
+            "mock-model"
+        }
 
         async fn complete(
-            &self, _request: CompletionRequest,
+            &self,
+            _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in streaming tests")
         }
 
         async fn complete_with_tools(
-            &self, _request: ToolCompletionRequest,
+            &self,
+            _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!("not used in streaming tests")
         }
@@ -1127,16 +1162,20 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for MultiRoundMockProvider {
-        fn model_id(&self) -> &str { "mock-multi-round" }
+        fn model_id(&self) -> &str {
+            "mock-multi-round"
+        }
 
         async fn complete(
-            &self, _request: CompletionRequest,
+            &self,
+            _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in multi-round tests")
         }
 
         async fn complete_with_tools(
-            &self, _request: ToolCompletionRequest,
+            &self,
+            _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!("not used in multi-round tests")
         }
@@ -1160,16 +1199,20 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for PendingProvider {
-        fn model_id(&self) -> &str { "pending-model" }
+        fn model_id(&self) -> &str {
+            "pending-model"
+        }
 
         async fn complete(
-            &self, _request: CompletionRequest,
+            &self,
+            _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("not used in cancellation tests")
         }
 
         async fn complete_with_tools(
-            &self, _request: ToolCompletionRequest,
+            &self,
+            _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!("not used in cancellation tests")
         }
@@ -1252,11 +1295,14 @@ pub(crate) mod tests {
             if let Some(p) = self.get_by_name("default").await? {
                 return Ok(p);
             }
-            ProjectStore::create(self, NewProject {
-                name: "default".to_string(),
-                slug: "default".to_string(),
-                workspace_path: None,
-            })
+            ProjectStore::create(
+                self,
+                NewProject {
+                    name: "default".to_string(),
+                    slug: "default".to_string(),
+                    workspace_path: None,
+                },
+            )
             .await
         }
 
@@ -1287,11 +1333,20 @@ pub(crate) mod tests {
         ) -> Result<Project, StorageError> {
             let mut db = self.db.lock().await;
             match db.projects.get_mut(&id) {
-                None => Err(StorageError::NotFound { entity: "Project".into(), id: id.to_string() }),
+                None => Err(StorageError::NotFound {
+                    entity: "Project".into(),
+                    id: id.to_string(),
+                }),
                 Some(p) => {
-                    if let Some(n) = name { p.name = n; }
-                    if let Some(s) = slug { p.slug = s; }
-                    if let Some(wp) = workspace_path { p.workspace_path = Some(wp); }
+                    if let Some(n) = name {
+                        p.name = n;
+                    }
+                    if let Some(s) = slug {
+                        p.slug = s;
+                    }
+                    if let Some(wp) = workspace_path {
+                        p.workspace_path = Some(wp);
+                    }
                     p.updated_at = chrono::Utc::now();
                     Ok(p.clone())
                 }
@@ -1324,7 +1379,11 @@ pub(crate) mod tests {
                 created_at: now,
                 updated_at: now,
             };
-            self.db.lock().await.teams.insert(created.id, created.clone());
+            self.db
+                .lock()
+                .await
+                .teams
+                .insert(created.id, created.clone());
             Ok(created)
         }
 
@@ -1332,7 +1391,11 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.teams.get(&id).cloned())
         }
 
-        async fn get_team_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<Team>, StorageError> {
+        async fn get_team_by_name(
+            &self,
+            project_id: Uuid,
+            name: &str,
+        ) -> Result<Option<Team>, StorageError> {
             Ok(self
                 .db
                 .lock()
@@ -1367,7 +1430,10 @@ pub(crate) mod tests {
         ) -> Result<Team, StorageError> {
             let mut db = self.db.lock().await;
             match db.teams.get_mut(&id) {
-                None => Err(StorageError::NotFound { entity: "Team".into(), id: id.to_string() }),
+                None => Err(StorageError::NotFound {
+                    entity: "Team".into(),
+                    id: id.to_string(),
+                }),
                 Some(team) => {
                     if let Some(name) = name {
                         team.name = name;
@@ -1394,7 +1460,10 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl TopologyTraceStore for MockStorage {
-        async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError> {
+        async fn create_topology_run(
+            &self,
+            run: NewTopologyRun,
+        ) -> Result<TopologyRun, StorageError> {
             let now = chrono::Utc::now();
             let created = TopologyRun {
                 id: Uuid::new_v4(),
@@ -1407,14 +1476,20 @@ pub(crate) mod tests {
                 created_at: now,
                 completed_at: if matches!(
                     run.state,
-                    TopologyRunState::Completed | TopologyRunState::Failed | TopologyRunState::Interrupted
+                    TopologyRunState::Completed
+                        | TopologyRunState::Failed
+                        | TopologyRunState::Interrupted
                 ) {
                     Some(now)
                 } else {
                     None
                 },
             };
-            self.db.lock().await.topology_runs.insert(created.id, created.clone());
+            self.db
+                .lock()
+                .await
+                .topology_runs
+                .insert(created.id, created.clone());
             Ok(created)
         }
 
@@ -1422,7 +1497,10 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.topology_runs.get(&id).cloned())
         }
 
-        async fn list_topology_runs_by_team(&self, team_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+        async fn list_topology_runs_by_team(
+            &self,
+            team_id: Uuid,
+        ) -> Result<Vec<TopologyRun>, StorageError> {
             let mut runs: Vec<TopologyRun> = self
                 .db
                 .lock()
@@ -1436,7 +1514,10 @@ pub(crate) mod tests {
             Ok(runs)
         }
 
-        async fn list_topology_runs_by_session(&self, session_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+        async fn list_topology_runs_by_session(
+            &self,
+            session_id: Uuid,
+        ) -> Result<Vec<TopologyRun>, StorageError> {
             let mut runs: Vec<TopologyRun> = self
                 .db
                 .lock()
@@ -1458,10 +1539,13 @@ pub(crate) mod tests {
             error_message: Option<&str>,
         ) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
-            let run = db.topology_runs.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "TopologyRun".into(),
-                id: id.to_string(),
-            })?;
+            let run = db
+                .topology_runs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "TopologyRun".into(),
+                    id: id.to_string(),
+                })?;
             run.state = state.clone();
             if let Some(final_output) = final_output {
                 run.final_output = Some(final_output.clone());
@@ -1471,7 +1555,9 @@ pub(crate) mod tests {
             }
             if matches!(
                 state,
-                TopologyRunState::Completed | TopologyRunState::Failed | TopologyRunState::Interrupted
+                TopologyRunState::Completed
+                    | TopologyRunState::Failed
+                    | TopologyRunState::Interrupted
             ) {
                 run.completed_at = Some(chrono::Utc::now());
             }
@@ -1497,22 +1583,34 @@ pub(crate) mod tests {
                 created_at: now,
                 completed_at: if matches!(
                     execution.state,
-                    NodeExecutionState::Completed | NodeExecutionState::Failed | NodeExecutionState::Skipped
+                    NodeExecutionState::Completed
+                        | NodeExecutionState::Failed
+                        | NodeExecutionState::Skipped
                 ) {
                     Some(now)
                 } else {
                     None
                 },
             };
-            self.db.lock().await.node_executions.insert(created.id, created.clone());
+            self.db
+                .lock()
+                .await
+                .node_executions
+                .insert(created.id, created.clone());
             Ok(created)
         }
 
-        async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError> {
+        async fn get_node_execution(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<NodeExecution>, StorageError> {
             Ok(self.db.lock().await.node_executions.get(&id).cloned())
         }
 
-        async fn list_node_executions_by_run(&self, topology_run_id: Uuid) -> Result<Vec<NodeExecution>, StorageError> {
+        async fn list_node_executions_by_run(
+            &self,
+            topology_run_id: Uuid,
+        ) -> Result<Vec<NodeExecution>, StorageError> {
             let mut executions: Vec<NodeExecution> = self
                 .db
                 .lock()
@@ -1534,10 +1632,13 @@ pub(crate) mod tests {
             error_message: Option<&str>,
         ) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
-            let execution = db.node_executions.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "NodeExecution".into(),
-                id: id.to_string(),
-            })?;
+            let execution = db
+                .node_executions
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "NodeExecution".into(),
+                    id: id.to_string(),
+                })?;
             execution.state = state.clone();
             if let Some(output_json) = output_json {
                 execution.output_json = Some(output_json.clone());
@@ -1547,7 +1648,9 @@ pub(crate) mod tests {
             }
             if matches!(
                 state,
-                NodeExecutionState::Completed | NodeExecutionState::Failed | NodeExecutionState::Skipped
+                NodeExecutionState::Completed
+                    | NodeExecutionState::Failed
+                    | NodeExecutionState::Skipped
             ) {
                 execution.completed_at = Some(chrono::Utc::now());
             }
@@ -1573,7 +1676,10 @@ pub(crate) mod tests {
             Ok(created)
         }
 
-        async fn list_edge_evaluations_by_run(&self, topology_run_id: Uuid) -> Result<Vec<EdgeEvaluation>, StorageError> {
+        async fn list_edge_evaluations_by_run(
+            &self,
+            topology_run_id: Uuid,
+        ) -> Result<Vec<EdgeEvaluation>, StorageError> {
             Ok(self
                 .db
                 .lock()
@@ -1599,7 +1705,10 @@ pub(crate) mod tests {
             Ok(created)
         }
 
-        async fn list_node_retries(&self, node_execution_id: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
+        async fn list_node_retries(
+            &self,
+            node_execution_id: Uuid,
+        ) -> Result<Vec<NodeRetry>, StorageError> {
             Ok(self
                 .db
                 .lock()
@@ -1630,10 +1739,7 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.sessions.get(&id).cloned())
         }
 
-        async fn list_by_project(
-            &self,
-            project_id: Uuid,
-        ) -> Result<Vec<Session>, StorageError> {
+        async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError> {
             Ok(self
                 .db
                 .lock()
@@ -1645,7 +1751,10 @@ pub(crate) mod tests {
                 .collect())
         }
 
-        async fn list_sessions_by_agent_id(&self, agent_id: &str) -> Result<Vec<Session>, StorageError> {
+        async fn list_sessions_by_agent_id(
+            &self,
+            agent_id: &str,
+        ) -> Result<Vec<Session>, StorageError> {
             Ok(self
                 .db
                 .lock()
@@ -1702,7 +1811,10 @@ pub(crate) mod tests {
             Ok(threads)
         }
 
-        async fn list_threads_by_agent_id(&self, agent_id: &str) -> Result<Vec<Thread>, StorageError> {
+        async fn list_threads_by_agent_id(
+            &self,
+            agent_id: &str,
+        ) -> Result<Vec<Thread>, StorageError> {
             let mut threads: Vec<Thread> = self
                 .db
                 .lock()
@@ -1719,7 +1831,10 @@ pub(crate) mod tests {
         async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
             match db.threads.get_mut(&id) {
-                None => Err(StorageError::NotFound { entity: "Thread".into(), id: id.to_string() }),
+                None => Err(StorageError::NotFound {
+                    entity: "Thread".into(),
+                    id: id.to_string(),
+                }),
                 Some(t) => {
                     if !t.state.can_transition_to(&state) {
                         return Err(StorageError::ConstraintViolation(format!(
@@ -1744,14 +1859,20 @@ pub(crate) mod tests {
             branched_from_message_id: Uuid,
         ) -> Result<swage_storage::ThreadBranch, StorageError> {
             let mut db = self.db.lock().await;
-            let parent = db.threads.get(&parent_thread_id).cloned().ok_or(StorageError::NotFound {
-                entity: "Thread".into(),
-                id: parent_thread_id.to_string(),
-            })?;
+            let parent =
+                db.threads
+                    .get(&parent_thread_id)
+                    .cloned()
+                    .ok_or(StorageError::NotFound {
+                        entity: "Thread".into(),
+                        id: parent_thread_id.to_string(),
+                    })?;
             let source_position = db
                 .messages
                 .iter()
-                .find(|message| message.id == branched_from_message_id && message.thread_id == parent_thread_id)
+                .find(|message| {
+                    message.id == branched_from_message_id && message.thread_id == parent_thread_id
+                })
                 .map(|message| message.position)
                 .ok_or(StorageError::NotFound {
                     entity: "Message".into(),
@@ -1808,7 +1929,12 @@ pub(crate) mod tests {
             Ok(db
                 .thread_branches
                 .iter()
-                .filter(|branch| db.threads.get(&branch.child_thread_id).map(|thread| thread.session_id == session_id).unwrap_or(false))
+                .filter(|branch| {
+                    db.threads
+                        .get(&branch.child_thread_id)
+                        .map(|thread| thread.session_id == session_id)
+                        .unwrap_or(false)
+                })
                 .cloned()
                 .collect())
         }
@@ -1865,10 +1991,7 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.turns.get(&id).cloned())
         }
 
-        async fn list_turns_by_thread(
-            &self,
-            thread_id: Uuid,
-        ) -> Result<Vec<Turn>, StorageError> {
+        async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
             let mut turns: Vec<Turn> = self
                 .db
                 .lock()
@@ -1882,14 +2005,13 @@ pub(crate) mod tests {
             Ok(turns)
         }
 
-        async fn update_turn_state(
-            &self,
-            id: Uuid,
-            state: TurnState,
-        ) -> Result<(), StorageError> {
+        async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
             if let Some(turn) = db.turns.get_mut(&id) {
-                if matches!(state, TurnState::Completed | TurnState::Failed | TurnState::Interrupted) {
+                if matches!(
+                    state,
+                    TurnState::Completed | TurnState::Failed | TurnState::Interrupted
+                ) {
                     turn.completed_at = Some(chrono::Utc::now());
                 }
                 turn.state = state;
@@ -1956,7 +2078,11 @@ pub(crate) mod tests {
             turn_id: Uuid,
             report_json: &str,
         ) -> Result<(), StorageError> {
-            self.db.lock().await.snapshots.insert(turn_id, report_json.to_string());
+            self.db
+                .lock()
+                .await
+                .snapshots
+                .insert(turn_id, report_json.to_string());
             Ok(())
         }
 
@@ -2020,11 +2146,22 @@ pub(crate) mod tests {
         }
 
         async fn get_message(&self, id: Uuid) -> Result<Option<Message>, StorageError> {
-            Ok(self.db.lock().await.messages.iter().find(|m| m.id == id).cloned())
+            Ok(self
+                .db
+                .lock()
+                .await
+                .messages
+                .iter()
+                .find(|m| m.id == id)
+                .cloned())
         }
 
         async fn delete_by_thread(&self, thread_id: Uuid) -> Result<(), StorageError> {
-            self.db.lock().await.messages.retain(|m| m.thread_id != thread_id);
+            self.db
+                .lock()
+                .await
+                .messages
+                .retain(|m| m.thread_id != thread_id);
             Ok(())
         }
     }
@@ -2055,10 +2192,7 @@ pub(crate) mod tests {
             Ok(record)
         }
 
-        async fn get_tool_call(
-            &self,
-            id: Uuid,
-        ) -> Result<Option<ToolCallRecord>, StorageError> {
+        async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             let db = self.db.lock().await;
             Ok(db.tool_calls.iter().find(|tc| tc.id == id).cloned())
         }
@@ -2107,13 +2241,24 @@ pub(crate) mod tests {
     // Stub: skill activation is not exercised in gateway turn tests.
     #[async_trait]
     impl SkillActivationStore for MockStorage {
-        async fn activate_skill(&self, _session_id: Uuid, _skill_name: &str) -> Result<(), StorageError> {
+        async fn activate_skill(
+            &self,
+            _session_id: Uuid,
+            _skill_name: &str,
+        ) -> Result<(), StorageError> {
             Ok(())
         }
-        async fn deactivate_skill(&self, _session_id: Uuid, _skill_name: &str) -> Result<bool, StorageError> {
+        async fn deactivate_skill(
+            &self,
+            _session_id: Uuid,
+            _skill_name: &str,
+        ) -> Result<bool, StorageError> {
             Ok(false)
         }
-        async fn list_active_skills(&self, _session_id: Uuid) -> Result<Vec<ActiveSkillRecord>, StorageError> {
+        async fn list_active_skills(
+            &self,
+            _session_id: Uuid,
+        ) -> Result<Vec<ActiveSkillRecord>, StorageError> {
             Ok(vec![])
         }
         async fn clear_active_skills(&self, _session_id: Uuid) -> Result<(), StorageError> {
@@ -2144,7 +2289,11 @@ pub(crate) mod tests {
                 decided_at: None,
                 created_at: chrono::Utc::now(),
             };
-            self.db.lock().await.approvals.insert(approval_req.id, approval_req.clone());
+            self.db
+                .lock()
+                .await
+                .approvals
+                .insert(approval_req.id, approval_req.clone());
             Ok(approval_req)
         }
 
@@ -2296,10 +2445,7 @@ pub(crate) mod tests {
         ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
             unimplemented!()
         }
-        async fn expire_stale_messages(
-            &self,
-            _: std::time::Duration,
-        ) -> Result<u64, StorageError> {
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }
@@ -2334,10 +2480,13 @@ pub(crate) mod tests {
         let session_id = session.id;
 
         // Create the default thread for this session.
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("create default thread");
 
@@ -2352,7 +2501,10 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -2382,10 +2534,13 @@ pub(crate) mod tests {
             .expect("create session");
         let session_id = session.id;
 
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("create default thread");
 
@@ -2400,7 +2555,10 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -2414,17 +2572,32 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn full_turn_stores_messages_and_completes() {
         let chunks = vec![
-            StreamChunk::Delta { content: "Hello".to_string() },
-            StreamChunk::Delta { content: ", world".to_string() },
-            StreamChunk::Delta { content: "!".to_string() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hello".to_string(),
+            },
+            StreamChunk::Delta {
+                content: ", world".to_string(),
+            },
+            StreamChunk::Delta {
+                content: "!".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete without error");
+        process_turn(
+            &state,
+            session_id,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete without error");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -2440,15 +2613,21 @@ pub(crate) mod tests {
             .collect();
 
         assert_eq!(token_contents, ["Hello", ", world", "!"]);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
 
         // Get thread_id and verify messages stored in the DB.
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
 
-        let messages = state.storage.list_messages_by_thread(thread_id).await.unwrap();
+        let messages = state
+            .storage
+            .list_messages_by_thread(thread_id)
+            .await
+            .unwrap();
         assert_eq!(messages.len(), 2, "user message + assistant message");
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "Hi");
@@ -2479,10 +2658,13 @@ pub(crate) mod tests {
             .expect("create session");
         let session_id = session.id;
 
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("create default thread");
 
@@ -2496,7 +2678,10 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
@@ -2505,7 +2690,15 @@ pub(crate) mod tests {
 
         let state_clone = Arc::clone(&state);
         let handle = tokio::spawn(async move {
-            process_turn(&*state_clone, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await
+            process_turn(
+                &*state_clone,
+                session_id,
+                "Hi".to_string(),
+                tx,
+                Arc::new(Mutex::new(SubscriptionState::new(true))),
+                None,
+            )
+            .await
         });
 
         for _ in 0..50 {
@@ -2524,11 +2717,16 @@ pub(crate) mod tests {
             .await
             .expect("cancel should succeed");
 
-        handle.await.expect("task should not panic").expect("process_turn ok");
+        handle
+            .await
+            .expect("task should not panic")
+            .expect("process_turn ok");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
-            events.iter().any(|e| matches!(e, ServerEvent::Cancelled {})),
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Cancelled {})),
             "expected Cancelled event"
         );
 
@@ -2547,9 +2745,16 @@ pub(crate) mod tests {
         .await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("error is surfaced via event, not Err return");
+        process_turn(
+            &state,
+            session_id,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("error is surfaced via event, not Err return");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         // Agent delegates error categorisation — provider errors surface as agent_error.
@@ -2590,7 +2795,15 @@ pub(crate) mod tests {
             .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result = process_turn(&state, session_id, "Another message".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await;
+        let result = process_turn(
+            &state,
+            session_id,
+            "Another message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(GatewayError::TurnInProgress { .. })),
@@ -2606,8 +2819,12 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for EchoMockTool {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "Echo the input back" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Echo the input back"
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({
                 "type": "object",
@@ -2626,9 +2843,7 @@ pub(crate) mod tests {
     }
 
     /// Build an AppState with a multi-round provider and an EchoMockTool.
-    async fn make_state_with_tools(
-        rounds: Vec<Vec<StreamChunk>>,
-    ) -> (AppState, Uuid) {
+    async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
         let project = storage
@@ -2645,10 +2860,13 @@ pub(crate) mod tests {
             .expect("create session");
         let session_id = session.id;
 
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("create default thread");
 
@@ -2661,12 +2879,16 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
-            ])),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                EchoMockTool,
+            )
+                as Arc<dyn crate::tool::Tool>])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -2685,19 +2907,32 @@ pub(crate) mod tests {
                 name: "echo".into(),
                 arguments: serde_json::json!({ "text": "hello" }),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "The tool said: hello".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "The tool said: hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -2727,7 +2962,11 @@ pub(crate) mod tests {
             "expected token with 'hello', got: {events:?}"
         );
 
-        assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
     }
 
     #[tokio::test]
@@ -2738,30 +2977,53 @@ pub(crate) mod tests {
                 name: "echo".into(),
                 arguments: serde_json::json!({ "text": "stored" }),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Store this".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Store this".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
         let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-        let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+        let tool_calls = state
+            .storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .unwrap();
         assert_eq!(tool_calls.len(), 1, "expected 1 tool call record");
         assert_eq!(tool_calls[0].call_id, "call_store");
         assert_eq!(tool_calls[0].tool, "echo");
-        assert!(tool_calls[0].result.is_some(), "tool call should have a result");
+        assert!(
+            tool_calls[0].result.is_some(),
+            "tool call should have a result"
+        );
         // The agent serialises the full ToolOutput.result JSON as the stored string.
-        assert_eq!(tool_calls[0].result.as_deref(), Some("{\"output\":\"stored\"}"));
+        assert_eq!(
+            tool_calls[0].result.as_deref(),
+            Some("{\"output\":\"stored\"}")
+        );
     }
 
     #[tokio::test]
@@ -2772,19 +3034,32 @@ pub(crate) mod tests {
                 name: "nonexistent_tool".into(),
                 arguments: serde_json::json!({}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "Sorry, that tool doesn't exist.".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Sorry, that tool doesn't exist.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let (state, session_id) = make_state_with_tools(vec![round_1, round_2]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use unknown".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should still complete");
+        process_turn(
+            &state,
+            session_id,
+            "Use unknown".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should still complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -2796,7 +3071,11 @@ pub(crate) mod tests {
             "expected ToolEnd with error status, got: {events:?}"
         );
 
-        assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
     }
 
     #[tokio::test]
@@ -2812,7 +3091,9 @@ pub(crate) mod tests {
                 name: "echo".into(),
                 arguments: serde_json::json!({ "text": "second" }),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
             StreamChunk::ToolUse {
@@ -2820,42 +3101,69 @@ pub(crate) mod tests {
                 name: "echo".into(),
                 arguments: serde_json::json!({ "text": "third" }),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_3 = vec![
-            StreamChunk::Delta { content: "All done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "All done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
-        let (state, session_id) =
-            make_state_with_tools(vec![round_1, round_2, round_3]).await;
+        let (state, session_id) = make_state_with_tools(vec![round_1, round_2, round_3]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Multi-round".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Multi-round".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        let tool_starts: Vec<_> = events.iter().filter(|e| matches!(e, ServerEvent::ToolStart { .. })).collect();
-        let tool_ends: Vec<_> = events.iter().filter(|e| matches!(e, ServerEvent::ToolEnd { .. })).collect();
+        let tool_starts: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ServerEvent::ToolStart { .. }))
+            .collect();
+        let tool_ends: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ServerEvent::ToolEnd { .. }))
+            .collect();
         assert_eq!(tool_starts.len(), 3, "expected 3 ToolStart events");
         assert_eq!(tool_ends.len(), 3, "expected 3 ToolEnd events");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
         let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-        let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+        let tool_calls = state
+            .storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .unwrap();
         assert_eq!(tool_calls.len(), 3, "expected 3 tool call records");
 
-        assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         let _guard = SwageHomeGuard::isolate();
 
-        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let project = storage
             .get_or_create_default()
             .await
@@ -2887,19 +3195,25 @@ pub(crate) mod tests {
                     "task": "Summarise this request",
                 }),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let child_round = vec![
             StreamChunk::Delta {
                 content: "Delegate answer".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let parent_resume_round = vec![
             StreamChunk::Delta {
                 content: "Parent resumed after delegation".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![
@@ -2908,9 +3222,10 @@ pub(crate) mod tests {
             parent_resume_round,
         ]));
 
-        let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
-        ]);
+        let dispatcher =
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+            ]);
 
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
@@ -2988,7 +3303,10 @@ pub(crate) mod tests {
         assert_eq!(child_turns.len(), 1, "expected one child turn");
         assert_eq!(child_turns[0].state, TurnState::Completed);
         assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
-        assert_eq!(child_turns[0].assistant_response.as_deref(), Some("Delegate answer"));
+        assert_eq!(
+            child_turns[0].assistant_response.as_deref(),
+            Some("Delegate answer")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3001,10 +3319,15 @@ pub(crate) mod tests {
     }
 
     impl CapturingProvider {
-        fn new(chunks: Vec<StreamChunk>) -> (Self, Arc<std::sync::Mutex<Option<CompletionRequest>>>) {
+        fn new(
+            chunks: Vec<StreamChunk>,
+        ) -> (Self, Arc<std::sync::Mutex<Option<CompletionRequest>>>) {
             let captured = Arc::new(std::sync::Mutex::new(None));
             (
-                Self { captured: Arc::clone(&captured), chunks },
+                Self {
+                    captured: Arc::clone(&captured),
+                    chunks,
+                },
                 captured,
             )
         }
@@ -3012,21 +3335,28 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl LlmProvider for CapturingProvider {
-        fn model_id(&self) -> &str { "capturing-model" }
+        fn model_id(&self) -> &str {
+            "capturing-model"
+        }
 
         async fn complete(
-            &self, _request: CompletionRequest,
+            &self,
+            _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!()
         }
 
         async fn complete_with_tools(
-            &self, _request: ToolCompletionRequest,
+            &self,
+            _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!()
         }
 
-        fn stream(&self, request: CompletionRequest) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             *self.captured.lock().unwrap() = Some(request);
             Box::pin(stream::iter(self.chunks.clone()))
         }
@@ -3038,8 +3368,12 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for ContextCaptureTool {
-        fn name(&self) -> &str { "capture_context" }
-        fn description(&self) -> &str { "Captures the working_directory from the tool context" }
+        fn name(&self) -> &str {
+            "capture_context"
+        }
+        fn description(&self) -> &str {
+            "Captures the working_directory from the tool context"
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
@@ -3066,10 +3400,13 @@ pub(crate) mod tests {
             .await
             .expect("session");
         let session_id = session.id;
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("thread");
         (storage, session_id)
@@ -3078,7 +3415,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn process_turn_passes_tool_context_to_tools() {
         let captured = Arc::new(std::sync::Mutex::new(None));
-        let capture_tool = Arc::new(ContextCaptureTool { captured: Arc::clone(&captured) });
+        let capture_tool = Arc::new(ContextCaptureTool {
+            captured: Arc::clone(&captured),
+        });
 
         let (storage, session_id) = make_storage_with_session().await;
 
@@ -3088,9 +3427,18 @@ pub(crate) mod tests {
                 name: "capture_context".into(),
                 arguments: serde_json::json!({}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
-        let round_2 = vec![StreamChunk::Delta { content: "done".into() }, StreamChunk::Done { finish_reason: None }];
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
@@ -3106,13 +3454,25 @@ pub(crate) mod tests {
             ])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "capture".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await.expect("turn ok");
+        process_turn(
+            &state,
+            session_id,
+            "capture".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
 
         let working_dir = captured
             .lock()
@@ -3120,23 +3480,33 @@ pub(crate) mod tests {
             .take()
             .expect("ToolContext should have been passed during tool execution");
 
-        assert!(working_dir.is_absolute(), "working_directory should be absolute: {working_dir:?}");
+        assert!(
+            working_dir.is_absolute(),
+            "working_directory should be absolute: {working_dir:?}"
+        );
     }
 
     #[tokio::test]
     async fn process_turn_resolves_config_per_project_and_completes_turn() {
         let chunks = vec![
-            StreamChunk::Delta { content: "Hello".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (provider, captured_request) = CapturingProvider::new(chunks);
 
         let storage = Arc::new(MockStorage::new());
-        let project = ProjectStore::create(&*storage, swage_storage::model::NewProject {
-            name: "Test Config Project".to_string(),
-            slug: "test-config-resolution-no-project-toml".to_string(),
-            workspace_path: None,
-        })
+        let project = ProjectStore::create(
+            &*storage,
+            swage_storage::model::NewProject {
+                name: "Test Config Project".to_string(),
+                slug: "test-config-resolution-no-project-toml".to_string(),
+                workspace_path: None,
+            },
+        )
         .await
         .expect("create test project");
         let session = storage
@@ -3147,10 +3517,13 @@ pub(crate) mod tests {
             .await
             .expect("session");
         let session_id = session.id;
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("thread");
 
@@ -3164,37 +3537,76 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "hi".into(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None).await.expect("turn ok");
+        process_turn(
+            &state,
+            session_id,
+            "hi".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
 
         // Verify the provider was invoked — the agent delegates model selection
         // to the provider via model_id() rather than setting CompletionRequest.model.
         let req = captured_request.lock().unwrap().take();
-        assert!(req.is_some(), "provider should have been invoked for config-resolved turn");
+        assert!(
+            req.is_some(),
+            "provider should have been invoked for config-resolved turn"
+        );
     }
 
     #[tokio::test]
     async fn text_only_turn_still_works_with_tool_registry() {
         let (state, session_id) = make_state_with_tools(vec![vec![
-            StreamChunk::Delta { content: "Just text".into() },
-            StreamChunk::Done { finish_reason: None },
-        ]]).await;
+            StreamChunk::Delta {
+                content: "Just text".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]])
+        .await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hello".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-        assert!(events.iter().any(|e| matches!(e, ServerEvent::Token { content } if content == "Just text")));
-        assert!(events.iter().any(|e| matches!(e, ServerEvent::TurnComplete { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Token { content } if content == "Just text"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
 
-        assert!(!events.iter().any(|e| matches!(e, ServerEvent::ToolStart { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::ToolStart { .. }))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3205,8 +3617,12 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for WorkingDirReadTool {
-        fn name(&self) -> &str { "working_dir_read" }
-        fn description(&self) -> &str { "Returns the working_directory from the ToolContext" }
+        fn name(&self) -> &str {
+            "working_dir_read"
+        }
+        fn description(&self) -> &str {
+            "Returns the working_directory from the ToolContext"
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({ "type": "object", "properties": {} })
         }
@@ -3223,11 +3639,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn tool_context_working_directory_is_passed_during_tool_execution() {
         let storage = Arc::new(MockStorage::new());
-        let project = ProjectStore::create(&*storage, NewProject {
-            name: "my-project".to_string(),
-            slug: "my-project".to_string(),
-            workspace_path: None,
-        })
+        let project = ProjectStore::create(
+            &*storage,
+            NewProject {
+                name: "my-project".to_string(),
+                slug: "my-project".to_string(),
+                workspace_path: None,
+            },
+        )
         .await
         .expect("create project");
 
@@ -3240,10 +3659,13 @@ pub(crate) mod tests {
             .expect("create session");
         let session_id = session.id;
 
-        ThreadStore::create(&*storage, NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        })
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
         .await
         .expect("thread");
 
@@ -3253,11 +3675,17 @@ pub(crate) mod tests {
                 name: "working_dir_read".into(),
                 arguments: serde_json::json!({}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
@@ -3269,31 +3697,47 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>,
-            ])),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                WorkingDirReadTool,
+            )
+                as Arc<dyn crate::tool::Tool>])),
             sandbox: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(&state, session_id, "Check context".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Check context".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
         let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-        let tool_calls = state.storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+        let tool_calls = state
+            .storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .unwrap();
         assert_eq!(tool_calls.len(), 1);
         // The agent stores the full JSON-serialised tool output.
         let result = tool_calls[0].result.as_deref().unwrap_or("");
-        let result_json: serde_json::Value = serde_json::from_str(result)
-            .expect("tool result should be valid JSON");
-        let path_str = result_json["output"].as_str()
+        let result_json: serde_json::Value =
+            serde_json::from_str(result).expect("tool result should be valid JSON");
+        let path_str = result_json["output"]
+            .as_str()
             .expect("output field should be a string");
         assert!(
             std::path::Path::new(path_str).is_absolute(),
@@ -3308,11 +3752,15 @@ pub(crate) mod tests {
     /// Records calls and returns a predefined result.
     struct MockSandbox {
         calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
-        result: std::sync::Mutex<Option<Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>>>,
+        result: std::sync::Mutex<
+            Option<Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>>,
+        >,
     }
 
     impl MockSandbox {
-        fn returning(result: Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>) -> Self {
+        fn returning(
+            result: Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>,
+        ) -> Self {
             Self {
                 calls: Arc::new(Mutex::new(vec![])),
                 result: std::sync::Mutex::new(Some(result)),
@@ -3332,7 +3780,11 @@ pub(crate) mod tests {
             params: serde_json::Value,
         ) -> Result<swage_sandbox::ToolCallResult, swage_core::SandboxError> {
             self.calls.lock().await.push((name.to_string(), params));
-            self.result.lock().unwrap().take().expect("execute_tool called more than once")
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("execute_tool called more than once")
         }
 
         async fn shutdown(&mut self) -> Result<(), swage_core::SandboxError> {
@@ -3343,12 +3795,18 @@ pub(crate) mod tests {
     /// Minimal tool stub for sandbox tests — registered so dispatch can find
     /// the tool, but execution is intercepted by SandboxedExecutor before
     /// reaching this implementation.
-    struct StubTool { tool_name: &'static str }
+    struct StubTool {
+        tool_name: &'static str,
+    }
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for StubTool {
-        fn name(&self) -> &str { self.tool_name }
-        fn description(&self) -> &str { "stub for sandbox routing tests" }
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+        fn description(&self) -> &str {
+            "stub for sandbox routing tests"
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "additionalProperties": true})
         }
@@ -3379,14 +3837,23 @@ pub(crate) mod tests {
 
         let project = storage.get_or_create_default().await.expect("project");
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "gateway".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
             .await
             .expect("session");
         let session_id = session.id;
 
-        ThreadStore::create(&*storage, NewThread { session_id, agent_id: "gateway".to_string() })
-            .await
-            .expect("thread");
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("thread");
 
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
         let state = AppState {
@@ -3399,7 +3866,10 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(tools)),
             sandbox: Some(sandbox),
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: { let (tx, _) = tokio::sync::broadcast::channel(16); tx },
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -3414,11 +3884,17 @@ pub(crate) mod tests {
                 name: "echo".into(),
                 arguments: serde_json::json!({"text": "sandbox_hi"}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let sandbox = Arc::new(MockSandbox::returning(Ok(
@@ -3426,15 +3902,22 @@ pub(crate) mod tests {
         )));
         // Register the tool so dispatch step 1 (lookup) succeeds; execution
         // is intercepted at step 6 by SandboxedExecutor.
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
-            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
-        ];
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
+        let tools: Vec<Arc<dyn crate::tool::Tool>> =
+            vec![Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>];
+        let (state, session_id) =
+            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use echo".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -3458,25 +3941,41 @@ pub(crate) mod tests {
                 name: "broken".into(),
                 arguments: serde_json::json!({}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let sandbox = Arc::new(MockSandbox::returning(Err(
-            swage_core::SandboxError::IpcError { message: "pipe broken".to_string() },
+            swage_core::SandboxError::IpcError {
+                message: "pipe broken".to_string(),
+            },
         )));
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
-            Arc::new(StubTool { tool_name: "broken" }) as Arc<dyn crate::tool::Tool>,
-        ];
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![Arc::new(StubTool {
+            tool_name: "broken",
+        }) as Arc<dyn crate::tool::Tool>];
+        let (state, session_id) =
+            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use broken".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Use broken".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -3507,25 +4006,39 @@ pub(crate) mod tests {
                 name: "fail_tool".into(),
                 arguments: serde_json::json!({}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let round_2 = vec![
-            StreamChunk::Delta { content: "done".into() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
 
         let sandbox = Arc::new(MockSandbox::returning(Ok(
             swage_sandbox::ToolCallResult::failed("tool execution failed inside sandbox", 10),
         )));
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
-            Arc::new(StubTool { tool_name: "fail_tool" }) as Arc<dyn crate::tool::Tool>,
-        ];
-        let (state, session_id) = make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![Arc::new(StubTool {
+            tool_name: "fail_tool",
+        }) as Arc<dyn crate::tool::Tool>];
+        let (state, session_id) =
+            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Use fail_tool".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Use fail_tool".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -3560,7 +4073,7 @@ pub(crate) mod tests {
     #[test]
     fn process_turn_creates_correlation_span() {
         use std::sync::{Arc as StdArc, Mutex as StdMutex};
-        use tracing_subscriber::{layer::SubscriberExt, Registry};
+        use tracing_subscriber::{Registry, layer::SubscriberExt};
 
         // Accumulates (span_name, [field_names]) for every span created
         // during process_turn. Shared between the subscriber and the assertions.
@@ -3608,8 +4121,12 @@ pub(crate) mod tests {
                 .unwrap()
                 .block_on(async {
                     let chunks = vec![
-                        StreamChunk::Delta { content: "ok".to_string() },
-                        StreamChunk::Done { finish_reason: None },
+                        StreamChunk::Delta {
+                            content: "ok".to_string(),
+                        },
+                        StreamChunk::Done {
+                            finish_reason: None,
+                        },
                     ];
                     let (state, session_id) = make_state_with_session(chunks).await;
                     let (tx, _rx) = mpsc::unbounded_channel();
@@ -3623,9 +4140,16 @@ pub(crate) mod tests {
                     // before the span would be created.
                     tracing::callsite::rebuild_interest_cache();
 
-                    process_turn(&state, session_id, "test".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-                        .await
-                        .expect("turn should complete");
+                    process_turn(
+                        &state,
+                        session_id,
+                        "test".to_string(),
+                        tx,
+                        Arc::new(Mutex::new(SubscriptionState::new(true))),
+                        None,
+                    )
+                    .await
+                    .expect("turn should complete");
                 });
         });
 
@@ -3661,7 +4185,7 @@ pub(crate) mod tests {
     fn process_turn_logs_token_usage_at_completion() {
         use std::sync::{Arc as StdArc, Mutex as StdMutex};
         use swage_core::TokenUsage;
-        use tracing_subscriber::{layer::SubscriberExt, Registry};
+        use tracing_subscriber::{Registry, layer::SubscriberExt};
 
         // Accumulates (level_str, [field_names]) for every event emitted
         // during process_turn. Shared between the layer and the assertions.
@@ -3697,9 +4221,16 @@ pub(crate) mod tests {
                 .unwrap()
                 .block_on(async {
                     let chunks = vec![
-                        StreamChunk::Delta { content: "ok".to_string() },
-                        StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
-                        StreamChunk::Done { finish_reason: None },
+                        StreamChunk::Delta {
+                            content: "ok".to_string(),
+                        },
+                        StreamChunk::Usage(TokenUsage {
+                            input_tokens: 100,
+                            output_tokens: 50,
+                        }),
+                        StreamChunk::Done {
+                            finish_reason: None,
+                        },
                     ];
                     let (state, session_id) = make_state_with_session(chunks).await;
                     let (tx, _rx) = mpsc::unbounded_channel();
@@ -3763,35 +4294,33 @@ pub(crate) mod tests {
             file_path: std::path::PathBuf::from("test.md"),
         };
         let prompts = PromptsElement::new(vec![rule]);
-        let history = HistoryElement::new(vec![
-            ChatMessage::new(Role::User, "Hello"),
-        ]);
+        let history = HistoryElement::new(vec![ChatMessage::new(Role::User, "Hello")]);
 
-        let elements: Vec<Box<dyn ContextElement>> = vec![
-            Box::new(prompts),
-            Box::new(history),
-        ];
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(prompts), Box::new(history)];
 
         let config = swage_config::ContextConfig::default();
         let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-        let output = swage_context::assembly::default_assembly(
-            &elements, &config, &tokeniser,
-        );
+        let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
         // System message from instructions appears first.
         assert_eq!(
-            output.messages[0].role, Role::System,
+            output.messages[0].role,
+            Role::System,
             "first message should be system instructions"
         );
         // User message from history follows.
         assert_eq!(
-            output.messages[1].role, Role::User,
+            output.messages[1].role,
+            Role::User,
             "second message should be user history"
         );
 
         // Report should have non-zero token counts for both elements.
-        let prompts_report = output.report.elements.iter()
+        let prompts_report = output
+            .report
+            .elements
+            .iter()
             .find(|e| e.name == "prompts")
             .expect("report should include prompts element");
         assert!(
@@ -3799,7 +4328,10 @@ pub(crate) mod tests {
             "prompts element should have non-zero token count"
         );
 
-        let history_report = output.report.elements.iter()
+        let history_report = output
+            .report
+            .elements
+            .iter()
             .find(|e| e.name == "history")
             .expect("report should include history element");
         assert!(
@@ -3813,28 +4345,25 @@ pub(crate) mod tests {
     #[test]
     fn assembly_without_instructions_omits_system_message() {
         let prompts = PromptsElement::new(vec![]);
-        let history = HistoryElement::new(vec![
-            ChatMessage::new(Role::User, "Hello"),
-        ]);
+        let history = HistoryElement::new(vec![ChatMessage::new(Role::User, "Hello")]);
 
-        let elements: Vec<Box<dyn ContextElement>> = vec![
-            Box::new(prompts),
-            Box::new(history),
-        ];
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(prompts), Box::new(history)];
 
         let config = swage_config::ContextConfig::default();
         let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-        let output = swage_context::assembly::default_assembly(
-            &elements, &config, &tokeniser,
-        );
+        let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
         // No system message when instructions are empty.
         assert!(
             output.messages.iter().all(|m| m.role != Role::System),
             "expected no system message when prompts are empty"
         );
-        assert_eq!(output.messages.len(), 1, "should only contain the user message");
+        assert_eq!(
+            output.messages.len(),
+            1,
+            "should only contain the user message"
+        );
     }
 
     /// Constructing a PromptRule from the config.instructions string produces
@@ -3856,7 +4385,11 @@ pub(crate) mod tests {
         let prompts = PromptsElement::new(vec![rule]);
         let content = prompts.content();
 
-        assert_eq!(content.len(), 1, "should produce exactly one system message");
+        assert_eq!(
+            content.len(),
+            1,
+            "should produce exactly one system message"
+        );
         assert_eq!(content[0].role, flat_system.role);
         // Content should be identical — single rule, no joining needed.
         assert_eq!(content[0].content, flat_system.content);
@@ -3924,10 +4457,18 @@ pub(crate) mod tests {
 
         let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
         let messages = memory.content();
-        assert_eq!(messages.len(), 1, "non-empty memory should produce one message");
+        assert_eq!(
+            messages.len(),
+            1,
+            "non-empty memory should produce one message"
+        );
         // content is Vec<ContentPart> — extract the text to check the value.
         let text = messages[0].content.iter().find_map(|p| {
-            if let swage_core::ContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+            if let swage_core::ContentPart::Text { text } = p {
+                Some(text.as_str())
+            } else {
+                None
+            }
         });
         assert!(
             text.is_some_and(|t| t.contains("Important project context")),
@@ -3942,7 +4483,10 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No memory directory created — the helper should not panic.
         let result = load_project_memory(dir.path(), "no-such-project");
-        assert!(result.is_empty(), "should return empty string when memory dir is absent");
+        assert!(
+            result.is_empty(),
+            "should return empty string when memory dir is absent"
+        );
     }
 
     /// load_project_memory reads all .md files from the memory directory and
@@ -3950,7 +4494,11 @@ pub(crate) mod tests {
     #[test]
     fn load_project_memory_concatenates_md_files_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir.path().join("projects").join("my-project").join("memory");
+        let memory_dir = dir
+            .path()
+            .join("projects")
+            .join("my-project")
+            .join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
 
         // b_notes sorts after a_context.
@@ -3961,21 +4509,37 @@ pub(crate) mod tests {
 
         let result = load_project_memory(dir.path(), "my-project");
 
-        assert!(result.contains("First file content"), "should include first .md file");
-        assert!(result.contains("Second file content"), "should include second .md file");
-        assert!(!result.contains("Should be ignored"), "should not include non-.md files");
+        assert!(
+            result.contains("First file content"),
+            "should include first .md file"
+        );
+        assert!(
+            result.contains("Second file content"),
+            "should include second .md file"
+        );
+        assert!(
+            !result.contains("Should be ignored"),
+            "should not include non-.md files"
+        );
 
         // a_context.md sorts before b_notes.md alphabetically.
         let first_pos = result.find("First file content").unwrap();
         let second_pos = result.find("Second file content").unwrap();
-        assert!(first_pos < second_pos, "files should appear in alphabetical order");
+        assert!(
+            first_pos < second_pos,
+            "files should appear in alphabetical order"
+        );
     }
 
     /// load_project_memory skips files with only whitespace content.
     #[test]
     fn load_project_memory_skips_empty_files() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir.path().join("projects").join("my-project").join("memory");
+        let memory_dir = dir
+            .path()
+            .join("projects")
+            .join("my-project")
+            .join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
 
         std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
@@ -3984,7 +4548,10 @@ pub(crate) mod tests {
         let result = load_project_memory(dir.path(), "my-project");
 
         assert!(result.contains("Real content"));
-        assert!(!result.contains("   "), "whitespace-only files should be excluded");
+        assert!(
+            !result.contains("   "),
+            "whitespace-only files should be excluded"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3998,16 +4565,30 @@ pub(crate) mod tests {
         use swage_core::TokenUsage;
 
         let chunks = vec![
-            StreamChunk::Delta { content: "Hello".to_string() },
-            StreamChunk::Usage(TokenUsage { input_tokens: 42, output_tokens: 17 }),
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hello".to_string(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 42,
+                output_tokens: 17,
+            }),
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
@@ -4016,11 +4597,13 @@ pub(crate) mod tests {
 
         let turn = &turns[0];
         assert_eq!(
-            turn.input_tokens, Some(42),
+            turn.input_tokens,
+            Some(42),
             "input_tokens should be persisted from provider usage"
         );
         assert_eq!(
-            turn.output_tokens, Some(17),
+            turn.output_tokens,
+            Some(17),
             "output_tokens should be persisted from provider usage"
         );
     }
@@ -4030,15 +4613,26 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn token_usage_remains_null_when_provider_sends_no_usage() {
         let chunks = vec![
-            StreamChunk::Delta { content: "Hello".to_string() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hello".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        process_turn(&state, session_id, "Hi".to_string(), tx, Arc::new(Mutex::new(SubscriptionState::new(true))), None)
-            .await
-            .expect("turn should complete");
+        process_turn(
+            &state,
+            session_id,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
@@ -4049,11 +4643,13 @@ pub(crate) mod tests {
         // stores the accumulated total which starts at 0).
         let turn = &turns[0];
         assert_eq!(
-            turn.input_tokens, Some(0),
+            turn.input_tokens,
+            Some(0),
             "input_tokens should be zero when no usage reported"
         );
         assert_eq!(
-            turn.output_tokens, Some(0),
+            turn.output_tokens,
+            Some(0),
             "output_tokens should be zero when no usage reported"
         );
     }
@@ -4066,8 +4662,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn context_assembled_precedes_first_token() {
         let chunks = vec![
-            StreamChunk::Delta { content: "Hello".to_string() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hello".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4134,8 +4734,12 @@ pub(crate) mod tests {
         use swage_storage::store::ContextSnapshotStore;
 
         let chunks = vec![
-            StreamChunk::Delta { content: "Hi".to_string() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hi".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4186,8 +4790,12 @@ pub(crate) mod tests {
         use swage_storage::store::ContextSnapshotStore;
 
         let chunks = vec![
-            StreamChunk::Delta { content: "Hi".to_string() },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hi".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4245,9 +4853,16 @@ pub(crate) mod tests {
         use swage_core::TokenUsage;
 
         let chunks = vec![
-            StreamChunk::Delta { content: "Hi".to_string() },
-            StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hi".to_string(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            }),
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4281,7 +4896,11 @@ pub(crate) mod tests {
                 ..
             } => {
                 assert_eq!(*input_tokens, Some(100), "input_tokens should be populated");
-                assert_eq!(*output_tokens, Some(50), "output_tokens should be populated");
+                assert_eq!(
+                    *output_tokens,
+                    Some(50),
+                    "output_tokens should be populated"
+                );
             }
             other => panic!("expected TurnComplete, got: {other:?}"),
         }
@@ -4296,12 +4915,16 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn turn_complete_carries_structured_output_when_schema_passes() {
         let _guard = SwageHomeGuard::isolate();
-        use swage_core::FinishReason;
         use swage_config::OutputConfig;
+        use swage_core::FinishReason;
 
         let chunks = vec![
-            StreamChunk::Delta { content: r#"{"result":"ok"}"#.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: r#"{"result":"ok"}"#.to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ];
 
         // Build a config with an output schema requiring {"result": <string>}.
@@ -4311,7 +4934,10 @@ pub(crate) mod tests {
             "required": ["result"]
         });
         let mut config = swage_config::ResolvedConfig::default();
-        config.output = OutputConfig { schema: Some(schema), max_retries: 1 };
+        config.output = OutputConfig {
+            schema: Some(schema),
+            max_retries: 1,
+        };
 
         let (state, session_id) = make_state_with_config(chunks, config).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4335,15 +4961,14 @@ pub(crate) mod tests {
             .expect("expected TurnComplete");
 
         match complete {
-            ServerEvent::TurnComplete { structured_output, .. } => {
+            ServerEvent::TurnComplete {
+                structured_output, ..
+            } => {
                 assert!(
                     structured_output.is_some(),
                     "TurnComplete should carry structured_output when schema passes"
                 );
-                assert_eq!(
-                    structured_output.as_ref().unwrap()["result"],
-                    "ok"
-                );
+                assert_eq!(structured_output.as_ref().unwrap()["result"], "ok");
             }
             other => panic!("expected TurnComplete, got: {other:?}"),
         }
@@ -4353,13 +4978,17 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn structured_output_persisted_on_turn_after_schema_validation() {
         let _guard = SwageHomeGuard::isolate();
-        use swage_core::FinishReason;
         use swage_config::OutputConfig;
+        use swage_core::FinishReason;
         use swage_storage::store::TurnStore;
 
         let chunks = vec![
-            StreamChunk::Delta { content: r#"{"x":42}"#.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: r#"{"x":42}"#.to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ];
 
         let schema = serde_json::json!({
@@ -4368,7 +4997,10 @@ pub(crate) mod tests {
             "required": ["x"]
         });
         let mut config = swage_config::ResolvedConfig::default();
-        config.output = OutputConfig { schema: Some(schema), max_retries: 1 };
+        config.output = OutputConfig {
+            schema: Some(schema),
+            max_retries: 1,
+        };
 
         let (state, session_id) = make_state_with_config(chunks, config).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4390,7 +5022,9 @@ pub(crate) mod tests {
         // Look up the turn in storage and verify structured_output was persisted.
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
-        let turns = TurnStore::list_turns_by_thread(&*state.storage, thread_id).await.unwrap();
+        let turns = TurnStore::list_turns_by_thread(&*state.storage, thread_id)
+            .await
+            .unwrap();
         assert_eq!(turns.len(), 1);
         assert!(
             turns[0].structured_output.is_some(),
@@ -4405,9 +5039,16 @@ pub(crate) mod tests {
         use swage_core::TokenUsage;
 
         let chunks = vec![
-            StreamChunk::Delta { content: "Hi".to_string() },
-            StreamChunk::Usage(TokenUsage { input_tokens: 100, output_tokens: 50 }),
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Delta {
+                content: "Hi".to_string(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            }),
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ];
         let (state, session_id) = make_state_with_session(chunks).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4441,9 +5082,18 @@ pub(crate) mod tests {
                 cost_microcents,
                 ..
             } => {
-                assert_eq!(*input_tokens, None, "input_tokens should be None when unsubscribed");
-                assert_eq!(*output_tokens, None, "output_tokens should be None when unsubscribed");
-                assert_eq!(*cost_microcents, None, "cost_microcents should be None when unsubscribed");
+                assert_eq!(
+                    *input_tokens, None,
+                    "input_tokens should be None when unsubscribed"
+                );
+                assert_eq!(
+                    *output_tokens, None,
+                    "output_tokens should be None when unsubscribed"
+                );
+                assert_eq!(
+                    *cost_microcents, None,
+                    "cost_microcents should be None when unsubscribed"
+                );
             }
             other => panic!("expected TurnComplete, got: {other:?}"),
         }
@@ -4479,7 +5129,14 @@ pub(crate) mod tests {
         );
 
         match rx.try_recv().expect("ws_tx must receive the event") {
-            ServerEvent::ApprovalRequired { approval_id: aid, turn_id: tid, agent_id, kind, tool_name, .. } => {
+            ServerEvent::ApprovalRequired {
+                approval_id: aid,
+                turn_id: tid,
+                agent_id,
+                kind,
+                tool_name,
+                ..
+            } => {
                 assert_eq!(aid, approval_id.to_string());
                 assert_eq!(tid, turn_id.to_string());
                 assert_eq!(agent_id, "agent-1");
@@ -4505,7 +5162,11 @@ pub(crate) mod tests {
         );
 
         match rx.try_recv().expect("ws_tx must receive the event") {
-            ServerEvent::ApprovalConfirmed { approval_id: aid, decision, reason } => {
+            ServerEvent::ApprovalConfirmed {
+                approval_id: aid,
+                decision,
+                reason,
+            } => {
                 assert_eq!(aid, approval_id.to_string());
                 assert_eq!(decision, "approved");
                 assert_eq!(reason, Some("looks safe".to_string()));
@@ -4528,7 +5189,10 @@ pub(crate) mod tests {
         );
 
         match rx.try_recv().expect("ws_tx must receive the event") {
-            ServerEvent::ApprovalExpired { approval_id: aid, timeout_policy } => {
+            ServerEvent::ApprovalExpired {
+                approval_id: aid,
+                timeout_policy,
+            } => {
                 assert_eq!(aid, approval_id.to_string());
                 assert_eq!(timeout_policy, "deny");
             }

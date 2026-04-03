@@ -10,8 +10,8 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use swage_config::LogLevel;
 use swage_client::runtime::RuntimeMetadata;
+use swage_config::LogLevel;
 
 /// Run the gateway to completion.
 ///
@@ -26,11 +26,7 @@ use swage_client::runtime::RuntimeMetadata;
 /// - `config_path` — path to a TOML configuration file (name used for lookup)
 ///
 /// Errors during startup are printed to stderr and the process exits.
-pub async fn run_gateway(
-    port: Option<u16>,
-    host: Option<String>,
-    config_path: Option<String>,
-) {
+pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
     // Step 1: Load configuration. Errors go to stderr — no logging yet.
     let config_name = config_path.as_deref().unwrap_or("default");
     let mut config = match swage_config::load_resolved_config(config_name, "default") {
@@ -175,10 +171,7 @@ pub async fn run_gateway(
     // a warning rather than aborting — the gateway can still serve, but `swage
     // gateway status` and `swage gateway stop` will not find it.
     let bound_addr = listener.local_addr().unwrap_or(addr);
-    let metadata = RuntimeMetadata::new(
-        std::process::id(),
-        format!("http://{bound_addr}"),
-    );
+    let metadata = RuntimeMetadata::new(std::process::id(), format!("http://{bound_addr}"));
     if let Err(e) = metadata.save() {
         warn!("Failed to write runtime metadata: {e} — CLI discovery will not work");
     }
@@ -243,8 +236,8 @@ fn log_level_to_directive(level: &LogLevel) -> &'static str {
     match level {
         LogLevel::Trace => "trace",
         LogLevel::Debug => "debug",
-        LogLevel::Info  => "info",
-        LogLevel::Warn  => "warn",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
         LogLevel::Error => "error",
     }
 }
@@ -252,7 +245,7 @@ fn log_level_to_directive(level: &LogLevel) -> &'static str {
 /// Build an `EnvFilter` from a config level and an optional explicit override.
 ///
 /// When `override_directive` is `Some` and parses successfully, it takes
-/// precedence over the config level (same semantics as TEVIK_LOG / RUST_LOG).
+/// precedence over the config level (same semantics as SWAGE_LOG / RUST_LOG).
 /// An invalid override is silently ignored, falling back to the config level.
 ///
 /// Accepts an explicit override rather than reading the env directly so that
@@ -263,15 +256,25 @@ fn build_log_filter(config_level: &LogLevel, override_directive: Option<&str>) -
         .unwrap_or_else(|| EnvFilter::new(log_level_to_directive(config_level)))
 }
 
+fn select_log_override<'a>(
+    swage_log: Option<&'a str>,
+    legacy_tevik_log: Option<&'a str>,
+) -> Option<&'a str> {
+    swage_log.or(legacy_tevik_log)
+}
+
 /// Initialise the global tracing subscriber from resolved configuration.
 ///
 /// Format is selected by the `SWAGE_LOG_FORMAT` env var:
 /// - `"pretty"` → human-readable output (development)
 /// - anything else → JSON structured output on stderr (production default)
 ///
-/// `TEVIK_LOG` overrides the config log level using RUST_LOG directive syntax.
+/// `SWAGE_LOG` overrides the config log level using RUST_LOG directive syntax.
+/// `TEVIK_LOG` remains as a legacy compatibility fallback.
 fn init_logging(config: &swage_config::ResolvedConfig) {
-    let override_env = std::env::var("TEVIK_LOG").ok();
+    let swage_log = std::env::var("SWAGE_LOG").ok();
+    let legacy_tevik_log = std::env::var("TEVIK_LOG").ok();
+    let override_env = select_log_override(swage_log.as_deref(), legacy_tevik_log.as_deref());
     let filter = build_log_filter(&config.logging.level, override_env.as_deref());
 
     let use_pretty = std::env::var("SWAGE_LOG_FORMAT")
@@ -308,10 +311,12 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
 /// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn ProjectStore>`
 /// from the same underlying connection pool.
 fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
-    Arc::new(swage_storage::SqliteStorage::open(path).unwrap_or_else(|e| {
-        eprintln!("Failed to open database at {}: {e}", path.display());
-        std::process::exit(1);
-    }))
+    Arc::new(
+        swage_storage::SqliteStorage::open(path).unwrap_or_else(|e| {
+            eprintln!("Failed to open database at {}: {e}", path.display());
+            std::process::exit(1);
+        }),
+    )
 }
 
 /// Build the tool dispatch pipeline with all built-in tools from configuration.
@@ -319,21 +324,13 @@ fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
-    use std::time::Duration;
     use crate::tool::{
-        Tool,
-        file_list::FileListTool,
-        file_read::FileReadTool,
-        file_search::FileSearchTool,
-        file_write::FileWriteTool,
-        memory::MemoryTool,
-        plugin::discover_plugin_tools,
-        shell::ShellTool,
-        url_fetch::UrlFetchTool,
-        web_search::WebSearchTool,
-        workspace::resolve_workspace_root,
-        python_execute::PythonExecuteTool,
+        Tool, file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
+        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, shell::ShellTool, url_fetch::UrlFetchTool,
+        web_search::WebSearchTool, workspace::resolve_workspace_root,
     };
+    use std::time::Duration;
 
     let workspace_root = resolve_workspace_root(config);
     let max_output = config.tools.max_output_bytes;
@@ -424,9 +421,7 @@ fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<Pat
 }
 
 /// Create the LLM provider from resolved configuration.
-fn create_provider(
-    config: &swage_config::ResolvedConfig,
-) -> Arc<dyn swage_provider::LlmProvider> {
+fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
     use swage_provider::builder::ProviderChainBuilder;
     use swage_provider::retry::RetryConfig;
@@ -482,9 +477,9 @@ async fn build_sandbox(
     config: &swage_config::ResolvedConfig,
     provider: Arc<dyn swage_provider::LlmProvider>,
 ) -> Option<Arc<dyn swage_sandbox::Sandbox>> {
+    use crate::tool::workspace::resolve_workspace_root;
     use swage_core::SandboxError;
     use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
-    use crate::tool::workspace::resolve_workspace_root;
 
     if !config.sandbox.enabled {
         return None;
@@ -507,9 +502,9 @@ async fn build_sandbox(
     let llm_handler = HostLlmHandler::new(move |req: swage_core::CompletionRequest| {
         let p = Arc::clone(&provider);
         async move {
-            p.complete(req)
-                .await
-                .map_err(|e| SandboxError::IpcError { message: e.to_string() })
+            p.complete(req).await.map_err(|e| SandboxError::IpcError {
+                message: e.to_string(),
+            })
         }
     });
 
@@ -547,8 +542,8 @@ mod tests {
     fn log_level_directive_maps_all_variants() {
         assert_eq!(log_level_to_directive(&LogLevel::Trace), "trace");
         assert_eq!(log_level_to_directive(&LogLevel::Debug), "debug");
-        assert_eq!(log_level_to_directive(&LogLevel::Info),  "info");
-        assert_eq!(log_level_to_directive(&LogLevel::Warn),  "warn");
+        assert_eq!(log_level_to_directive(&LogLevel::Info), "info");
+        assert_eq!(log_level_to_directive(&LogLevel::Warn), "warn");
         assert_eq!(log_level_to_directive(&LogLevel::Error), "error");
     }
 
@@ -586,8 +581,22 @@ mod tests {
     }
 
     #[test]
+    fn select_log_override_prefers_swage_name() {
+        assert_eq!(
+            select_log_override(Some("debug"), Some("warn")),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn select_log_override_falls_back_to_legacy_name() {
+        assert_eq!(select_log_override(None, Some("warn")), Some("warn"));
+    }
+
+    #[test]
     fn build_tool_dispatcher_registers_delegate_tool() {
-        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let dispatcher = build_tool_dispatcher(
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
@@ -626,19 +635,20 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(plugin_dir.join("run.py")).unwrap().permissions();
+            let mut perms = std::fs::metadata(plugin_dir.join("run.py"))
+                .unwrap()
+                .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(plugin_dir.join("run.py"), perms).unwrap();
         }
 
-        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.plugin_directory = Some(temp_dir.path().join("plugins").display().to_string());
 
-        let dispatcher = build_tool_dispatcher(
-            &config,
-            storage as Arc<dyn swage_storage::store::Storage>,
-        );
+        let dispatcher =
+            build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());
     }

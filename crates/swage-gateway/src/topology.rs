@@ -11,7 +11,7 @@ use uuid::Uuid;
 use swage_agent::{AgentBuilder, AgentError, AgentEvent, TurnRequest};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::{ChatMessage, Role, StorageError};
-use swage_hook::{HookEvent, HookRegistry};
+use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
     NewEdgeEvaluation, NewMessage, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
     NewTopologyRun, NodeExecutionState, Team, TopologyRunState,
@@ -160,15 +160,12 @@ impl TopologyExecutor {
         while !pending.is_empty() || !active.is_empty() {
             while active.len() < concurrency_limit && !pending.is_empty() {
                 let activation = pending.pop_front().expect("pending activation exists");
-                let node = node_map
-                    .get(&activation.node_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        TopologyEngineError::InvalidGraph(format!(
-                            "node '{}' disappeared during execution",
-                            activation.node_id
-                        ))
-                    })?;
+                let node = node_map.get(&activation.node_id).cloned().ok_or_else(|| {
+                    TopologyEngineError::InvalidGraph(format!(
+                        "node '{}' disappeared during execution",
+                        activation.node_id
+                    ))
+                })?;
 
                 let visit_count = visit_counts.entry(node.id.clone()).or_default();
                 *visit_count += 1;
@@ -231,13 +228,14 @@ impl TopologyExecutor {
 
             if let Some(max_total_tokens) = request.graph.budget.max_total_tokens {
                 let node_tokens = completed.input_tokens as u64 + completed.output_tokens as u64;
-                total_tokens_consumed = total_tokens_consumed
-                    .checked_add(node_tokens)
-                    .ok_or_else(|| {
-                        TopologyEngineError::InvalidGraph(
-                            "node token accounting overflowed unexpectedly".into(),
-                        )
-                    })?;
+                total_tokens_consumed =
+                    total_tokens_consumed
+                        .checked_add(node_tokens)
+                        .ok_or_else(|| {
+                            TopologyEngineError::InvalidGraph(
+                                "node token accounting overflowed unexpectedly".into(),
+                            )
+                        })?;
 
                 if total_tokens_consumed > max_total_tokens {
                     run_failed = Some(format!(
@@ -692,7 +690,8 @@ async fn execute_agent_node(
 
     let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let dispatcher = build_gateway_dispatcher(state, &config, silent_ws_tx);
-    let agent_config = build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
+    let agent_config =
+        build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
     let agent = AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
@@ -725,8 +724,12 @@ async fn execute_agent_node(
     let mut retries = Vec::new();
     while let Ok(event) = event_rx.try_recv() {
         match event {
-            AgentEvent::TurnStarted { turn_id: current_turn_id } => turn_id = Some(current_turn_id),
-            AgentEvent::OutputSchemaRetry { attempt, errors, .. } => {
+            AgentEvent::TurnStarted {
+                turn_id: current_turn_id,
+            } => turn_id = Some(current_turn_id),
+            AgentEvent::OutputSchemaRetry {
+                attempt, errors, ..
+            } => {
                 retries.push(NodeRetryRecord {
                     attempt_number: attempt as i32,
                     failure_kind: "output_schema".into(),
@@ -751,7 +754,10 @@ async fn execute_agent_node(
     let outbound = outbound?;
     if let Some(turn_id) = turn_id {
         if let Some(ref output) = outbound.structured_output {
-            state.storage.update_structured_output(turn_id, output).await?;
+            state
+                .storage
+                .update_structured_output(turn_id, output)
+                .await?;
         }
         if let Some(cost) = state.config.pricing.compute_cost(
             &config.provider.model,
@@ -779,13 +785,12 @@ fn execute_deterministic_node(
     node: &TopologyNode,
     input_json: &serde_json::Value,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let handler_name = node
-        .handler_name
-        .as_deref()
-        .ok_or_else(|| TopologyEngineError::InvalidGraph(format!(
+    let handler_name = node.handler_name.as_deref().ok_or_else(|| {
+        TopologyEngineError::InvalidGraph(format!(
             "deterministic node '{}' is missing a handler_name",
             node.id
-        )))?;
+        ))
+    })?;
 
     let output_json = match handler_name {
         "identity" => input_json.clone(),
@@ -796,7 +801,7 @@ fn execute_deterministic_node(
         other => {
             return Err(TopologyEngineError::InvalidGraph(format!(
                 "unknown deterministic handler '{other}'"
-            )))
+            )));
         }
     };
 
@@ -994,7 +999,31 @@ async fn dispatch_hook(hook_registry: Option<&Arc<HookRegistry>>, event: HookEve
     let Some(hook_registry) = hook_registry else {
         return;
     };
-    let _ = hook_registry.dispatch(event).await;
+    let event_name = event.event_name().to_string();
+    match hook_registry.dispatch(event).await {
+        HookOutcome::Continue => {}
+        HookOutcome::ContinueModified(modified) => {
+            tracing::warn!(
+                original_event = event_name,
+                modified_event = modified.event_name(),
+                "topology hooks returned a modified event that the executor does not apply"
+            );
+        }
+        HookOutcome::Block(reason) => {
+            tracing::warn!(
+                event = event_name,
+                %reason,
+                "topology hooks blocked an event but topology execution continued"
+            );
+        }
+        HookOutcome::RequestApproval { prompt, .. } => {
+            tracing::warn!(
+                event = event_name,
+                %prompt,
+                "topology hooks requested approval but topology execution continued"
+            );
+        }
+    }
 }
 
 fn broadcast_topology_event(state: &AppState, event: ServerEvent) {
@@ -1168,8 +1197,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.final_output, serde_json::json!({"result": "approved"}));
-        let runs = state.storage.list_topology_runs_by_team(team.id).await.unwrap();
+        assert_eq!(
+            result.final_output,
+            serde_json::json!({"result": "approved"})
+        );
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].state, TopologyRunState::Completed);
         let executions = state
@@ -1276,7 +1312,11 @@ mod tests {
             .expect_err("fan-out should fail");
 
         assert!(error.to_string().contains("fan-out"));
-        let runs = state.storage.list_topology_runs_by_team(team.id).await.unwrap();
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].state, TopologyRunState::Failed);
     }
@@ -1343,7 +1383,8 @@ mod tests {
             events: recorded.clone(),
         })));
 
-        let executor = TopologyExecutor::new(state.clone()).with_hook_registry(Arc::new(hook_registry));
+        let executor =
+            TopologyExecutor::new(state.clone()).with_hook_registry(Arc::new(hook_registry));
         executor
             .execute(TopologyExecutionRequest {
                 team,

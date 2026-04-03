@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -25,22 +25,27 @@ struct StubProvider;
 
 #[async_trait::async_trait]
 impl swage_provider::LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub" }
+    fn model_id(&self) -> &str {
+        "stub"
+    }
 
     async fn complete(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in skills endpoint tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: swage_core::ToolCompletionRequest,
+        &self,
+        _request: swage_core::ToolCompletionRequest,
     ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in skills endpoint tests")
     }
 
     fn stream(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
         unimplemented!("not used in skills endpoint tests")
     }
@@ -92,7 +97,11 @@ fn create_skill(base_dir: &std::path::Path, name: &str, description: &str, tools
     let tools_yaml = if tools.is_empty() {
         String::new()
     } else {
-        let items = tools.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n");
+        let items = tools
+            .iter()
+            .map(|t| format!("  - {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         format!("tools:\n{items}\n")
     };
 
@@ -143,15 +152,20 @@ async fn known_project_no_config_root_returns_empty() {
     let non_existent = format!("/tmp/swage-nonexistent-{}", uuid::Uuid::new_v4());
     // Serialise env-var mutations: SWAGE_HOME is process-level and would race
     // if tests ran concurrently without coordination.
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
+    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Safety: test-only env mutation; scoped by this test's execution.
     unsafe { std::env::set_var("SWAGE_HOME", &non_existent) };
     let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK);
-    let skills = body["skills"].as_array().expect("response should have a skills array");
-    assert!(skills.is_empty(), "no config root should produce an empty skill list");
+    let skills = body["skills"]
+        .as_array()
+        .expect("response should have a skills array");
+    assert!(
+        skills.is_empty(),
+        "no config root should produce an empty skill list"
+    );
 }
 
 /// Skills at global level appear with level="global".
@@ -174,17 +188,22 @@ async fn global_skills_appear_in_listing() {
         .await
         .unwrap();
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
+    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("SWAGE_HOME", root) };
     let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
-    let formatter = skills.iter().find(|s| s["name"] == "formatter")
+    let formatter = skills
+        .iter()
+        .find(|s| s["name"] == "formatter")
         .expect("formatter skill should appear");
     assert_eq!(formatter["level"], "global");
-    assert_eq!(formatter["description"], "Format code according to standards");
+    assert_eq!(
+        formatter["description"],
+        "Format code according to standards"
+    );
     assert!(!formatter["always_active"].as_bool().unwrap());
 }
 
@@ -207,21 +226,31 @@ async fn project_skills_appear_in_listing() {
 
     // Project skill: {root}/projects/my-proj/skills/reviewer/SKILL.md
     let project_dir = root.join("projects").join("my-proj");
-    create_skill(&project_dir, "reviewer", "Structured code review", &["read_file"]);
+    create_skill(
+        &project_dir,
+        "reviewer",
+        "Structured code review",
+        &["read_file"],
+    );
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
+    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("SWAGE_HOME", root) };
     let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
-    let reviewer = skills.iter().find(|s| s["name"] == "reviewer")
+    let reviewer = skills
+        .iter()
+        .find(|s| s["name"] == "reviewer")
         .expect("reviewer skill should appear");
     assert_eq!(reviewer["level"], "project");
     assert!(!reviewer["always_active"].as_bool().unwrap());
     let tools = reviewer["tools"].as_array().unwrap();
-    assert!(tools.contains(&serde_json::json!("read_file")), "tools should include read_file");
+    assert!(
+        tools.contains(&serde_json::json!("read_file")),
+        "tools should include read_file"
+    );
 }
 
 /// Agent-level skills have always_active=true.
@@ -242,7 +271,11 @@ async fn agent_skills_have_always_active_true() {
         .unwrap();
 
     // Agent skill: {root}/projects/agent-proj/agents/gateway/skills/persona/SKILL.md
-    let agent_dir = root.join("projects").join("agent-proj").join("agents").join("gateway");
+    let agent_dir = root
+        .join("projects")
+        .join("agent-proj")
+        .join("agents")
+        .join("gateway");
     create_skill(&agent_dir, "persona", "Core personality and behaviour", &[]);
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap();
@@ -256,7 +289,9 @@ async fn agent_skills_have_always_active_true() {
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
-    let persona = skills.iter().find(|s| s["name"] == "persona")
+    let persona = skills
+        .iter()
+        .find(|s| s["name"] == "persona")
         .expect("persona skill should appear");
     assert_eq!(persona["level"], "agent");
     assert!(
@@ -289,7 +324,12 @@ async fn project_skill_shadows_global() {
 
     // Project skill with the same name — should shadow the global.
     let project_dir = root.join("projects").join("override-proj");
-    create_skill(&project_dir, "code-review", "Project code review", &["read_file", "search"]);
+    create_skill(
+        &project_dir,
+        "code-review",
+        "Project code review",
+        &["read_file", "search"],
+    );
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap();
     unsafe { std::env::set_var("SWAGE_HOME", root) };
@@ -299,9 +339,19 @@ async fn project_skill_shadows_global() {
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
 
-    let code_reviews: Vec<&Value> = skills.iter().filter(|s| s["name"] == "code-review").collect();
-    assert_eq!(code_reviews.len(), 1, "same-name skill should appear once after override");
-    assert_eq!(code_reviews[0]["level"], "project", "project should shadow global");
+    let code_reviews: Vec<&Value> = skills
+        .iter()
+        .filter(|s| s["name"] == "code-review")
+        .collect();
+    assert_eq!(
+        code_reviews.len(),
+        1,
+        "same-name skill should appear once after override"
+    );
+    assert_eq!(
+        code_reviews[0]["level"], "project",
+        "project should shadow global"
+    );
     assert_eq!(code_reviews[0]["description"], "Project code review");
 }
 
@@ -331,7 +381,11 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     create_skill(&project_dir, "middle", "Project middle skill", &[]);
 
     // Agent skills.
-    let agent_dir = root.join("projects").join("sorted-proj").join("agents").join("gw");
+    let agent_dir = root
+        .join("projects")
+        .join("sorted-proj")
+        .join("agents")
+        .join("gw");
     create_skill(&agent_dir, "persona", "Agent persona skill", &[]);
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap();
@@ -348,16 +402,19 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     assert_eq!(skills.len(), 4, "all 4 unique skills should appear");
 
     // Agent comes first.
-    assert_eq!(skills[0]["level"], "agent",   "agent skill should sort first");
-    assert_eq!(skills[0]["name"],  "persona");
+    assert_eq!(skills[0]["level"], "agent", "agent skill should sort first");
+    assert_eq!(skills[0]["name"], "persona");
 
     // Then project.
-    assert_eq!(skills[1]["level"], "project", "project skill should sort second");
-    assert_eq!(skills[1]["name"],  "middle");
+    assert_eq!(
+        skills[1]["level"], "project",
+        "project skill should sort second"
+    );
+    assert_eq!(skills[1]["name"], "middle");
 
     // Then global, alphabetical.
-    assert_eq!(skills[2]["level"], "global",  "global skills sort last");
-    assert_eq!(skills[2]["name"],  "alpha");
+    assert_eq!(skills[2]["level"], "global", "global skills sort last");
+    assert_eq!(skills[2]["name"], "alpha");
     assert_eq!(skills[3]["level"], "global");
-    assert_eq!(skills[3]["name"],  "zebra");
+    assert_eq!(skills[3]["name"], "zebra");
 }

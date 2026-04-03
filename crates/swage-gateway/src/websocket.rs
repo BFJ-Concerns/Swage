@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Path, State, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::{state::AppState, subscription::SubscriptionState, turn};
@@ -308,11 +308,11 @@ pub enum ServerEvent {
 
 /// Well-known error codes for the `Error` event.
 pub mod error_codes {
-    pub const PROVIDER_ERROR:    &str = "provider_error";
-    pub const TURN_IN_PROGRESS:  &str = "turn_in_progress";
-    pub const INVALID_CONFIG:    &str = "invalid_config";
-    pub const INTERNAL_ERROR:    &str = "internal_error";
-    pub const SKILL_NOT_FOUND:   &str = "skill_not_found";
+    pub const PROVIDER_ERROR: &str = "provider_error";
+    pub const TURN_IN_PROGRESS: &str = "turn_in_progress";
+    pub const INVALID_CONFIG: &str = "invalid_config";
+    pub const INTERNAL_ERROR: &str = "internal_error";
+    pub const SKILL_NOT_FOUND: &str = "skill_not_found";
 }
 
 // ---------------------------------------------------------------------------
@@ -408,9 +408,9 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // Per-connection observability subscription state. Initialised with
     // force_on from config so all events are delivered when the gateway is
     // running in development/debug mode without requiring explicit subscriptions.
-    let subscription = Arc::new(Mutex::new(
-        SubscriptionState::new(state.config.observability.force_on),
-    ));
+    let subscription = Arc::new(Mutex::new(SubscriptionState::new(
+        state.config.observability.force_on,
+    )));
 
     // Subscribe to the server-wide broadcast channel before spawning the
     // forwarding task so no broadcast events (e.g. Shutdown) are missed.
@@ -567,10 +567,18 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
     match event {
         ServerEvent::Shutdown { .. } => true,
-        ServerEvent::TopologyRunStarted { session_id: target, .. }
-        | ServerEvent::TopologyNodeStarted { session_id: target, .. }
-        | ServerEvent::TopologyNodeCompleted { session_id: target, .. }
-        | ServerEvent::TopologyRunCompleted { session_id: target, .. } => *target == session_id,
+        ServerEvent::TopologyRunStarted {
+            session_id: target, ..
+        }
+        | ServerEvent::TopologyNodeStarted {
+            session_id: target, ..
+        }
+        | ServerEvent::TopologyNodeCompleted {
+            session_id: target, ..
+        }
+        | ServerEvent::TopologyRunCompleted {
+            session_id: target, ..
+        } => *target == session_id,
         _ => false,
     }
 }
@@ -621,16 +629,12 @@ async fn discover_available_for_session(
 
     // Build hierarchy paths that mirror load_resolved_config_from.
     let project_dir = root.join("projects").join(&project.slug);
-    let agent_dir   = project_dir.join("agents").join(&session.agent_id);
+    let agent_dir = project_dir.join("agents").join(&session.agent_id);
 
-    let (skills, _warnings) = crate::skill::SkillManager::discover_available(
-        &root,
-        &project_dir,
-        Some(&agent_dir),
-    );
+    let (skills, _warnings) =
+        crate::skill::SkillManager::discover_available(&root, &project_dir, Some(&agent_dir));
     skills
 }
-
 
 /// Parse and dispatch a raw text frame from the client.
 ///
@@ -671,19 +675,42 @@ async fn dispatch_client_message(
         ClientEvent::SendMessage { content } => {
             // Check for a slash command before deciding whether to spawn a turn.
             match crate::skill::parse_slash_command(&content) {
-                SlashCommandResult::SkillActivation { skill_name, remaining_text } => {
+                SlashCommandResult::SkillActivation {
+                    skill_name,
+                    remaining_text,
+                } => {
                     let available = discover_available_for_session(state, session_id).await;
                     let is_known = available.iter().any(|s| s.name == skill_name);
 
                     if is_known {
                         // Activate the skill and forward any trailing text as a turn.
                         let tok = TiktokenTokeniser::new(&state.config.provider.model);
-                        match SkillManager::activate(session_id, &skill_name, &available, state.storage.as_ref(), &tok).await {
-                            Ok(SkillActivationResult::Activated { name, display_name, description, token_count }) => {
-                                let _ = tx.send(ServerEvent::SkillActivated { name, display_name, description, token_count });
+                        match SkillManager::activate(
+                            session_id,
+                            &skill_name,
+                            &available,
+                            state.storage.as_ref(),
+                            &tok,
+                        )
+                        .await
+                        {
+                            Ok(SkillActivationResult::Activated {
+                                name,
+                                display_name,
+                                description,
+                                token_count,
+                            }) => {
+                                let _ = tx.send(ServerEvent::SkillActivated {
+                                    name,
+                                    display_name,
+                                    description,
+                                    token_count,
+                                });
                             }
                             Ok(SkillActivationResult::AlreadyActive) => {
-                                let _ = tx.send(ServerEvent::SkillAlreadyActive { name: skill_name.clone() });
+                                let _ = tx.send(ServerEvent::SkillAlreadyActive {
+                                    name: skill_name.clone(),
+                                });
                             }
                             Err(SkillError::NotFound(n)) => {
                                 tracing::warn!(%session_id, skill = %skill_name, "slash command skill not found");
@@ -704,9 +731,18 @@ async fn dispatch_client_message(
                         // If the slash command had trailing text, forward it as a turn message.
                         if let Some(text) = remaining_text {
                             let state = state.clone();
-                            let sub   = Arc::clone(&subscription);
+                            let sub = Arc::clone(&subscription);
                             tokio::spawn(async move {
-                                if let Err(e) = turn::process_turn(&state, session_id, text, tx.clone(), sub, None).await {
+                                if let Err(e) = turn::process_turn(
+                                    &state,
+                                    session_id,
+                                    text,
+                                    tx.clone(),
+                                    sub,
+                                    None,
+                                )
+                                .await
+                                {
                                     let (code, message) = classify_gateway_error(&e);
                                     let _ = tx.send(ServerEvent::Error { code, message });
                                 }
@@ -716,9 +752,18 @@ async fn dispatch_client_message(
                     } else {
                         // Unknown skill — pass the original message through unchanged.
                         let state = state.clone();
-                        let sub   = Arc::clone(&subscription);
+                        let sub = Arc::clone(&subscription);
                         tokio::spawn(async move {
-                            if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub, None).await {
+                            if let Err(e) = turn::process_turn(
+                                &state,
+                                session_id,
+                                content,
+                                tx.clone(),
+                                sub,
+                                None,
+                            )
+                            .await
+                            {
                                 let (code, message) = classify_gateway_error(&e);
                                 let _ = tx.send(ServerEvent::Error { code, message });
                             }
@@ -728,9 +773,12 @@ async fn dispatch_client_message(
                 SlashCommandResult::NotACommand => {
                     // Regular message — spawn the turn as normal.
                     let state = state.clone();
-                    let sub   = Arc::clone(&subscription);
+                    let sub = Arc::clone(&subscription);
                     tokio::spawn(async move {
-                        if let Err(e) = turn::process_turn(&state, session_id, content, tx.clone(), sub, None).await {
+                        if let Err(e) =
+                            turn::process_turn(&state, session_id, content, tx.clone(), sub, None)
+                                .await
+                        {
                             let (code, message) = classify_gateway_error(&e);
                             let _ = tx.send(ServerEvent::Error { code, message });
                         }
@@ -753,9 +801,27 @@ async fn dispatch_client_message(
             let available = discover_available_for_session(state, session_id).await;
             let tok = TiktokenTokeniser::new(&state.config.provider.model);
 
-            match SkillManager::activate(session_id, &name, &available, state.storage.as_ref(), &tok).await {
-                Ok(SkillActivationResult::Activated { name, display_name, description, token_count }) => {
-                    let _ = tx.send(ServerEvent::SkillActivated { name, display_name, description, token_count });
+            match SkillManager::activate(
+                session_id,
+                &name,
+                &available,
+                state.storage.as_ref(),
+                &tok,
+            )
+            .await
+            {
+                Ok(SkillActivationResult::Activated {
+                    name,
+                    display_name,
+                    description,
+                    token_count,
+                }) => {
+                    let _ = tx.send(ServerEvent::SkillActivated {
+                        name,
+                        display_name,
+                        description,
+                        token_count,
+                    });
                 }
                 Ok(SkillActivationResult::AlreadyActive) => {
                     let _ = tx.send(ServerEvent::SkillAlreadyActive { name });
@@ -779,7 +845,9 @@ async fn dispatch_client_message(
         ClientEvent::DeactivateSkill { name } => {
             let available = discover_available_for_session(state, session_id).await;
 
-            match SkillManager::deactivate(session_id, &name, &available, state.storage.as_ref()).await {
+            match SkillManager::deactivate(session_id, &name, &available, state.storage.as_ref())
+                .await
+            {
                 Ok(()) => {
                     let _ = tx.send(ServerEvent::SkillDeactivated { name });
                 }
@@ -799,7 +867,11 @@ async fn dispatch_client_message(
             }
         }
 
-        ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+        ClientEvent::ApprovalDecision {
+            approval_id,
+            decision,
+            reason,
+        } => {
             use swage_storage::store::ApprovalStore;
 
             // Step 1: Parse the approval_id as a UUID.
@@ -861,7 +933,11 @@ async fn dispatch_client_message(
             } else {
                 swage_storage::ApprovalState::Rejected
             };
-            match state.storage.update_approval_state(approval_uuid, new_state, reason.as_deref()).await {
+            match state
+                .storage
+                .update_approval_state(approval_uuid, new_state, reason.as_deref())
+                .await
+            {
                 Ok(true) => {} // Recorded successfully.
                 Ok(false) => {
                     // Concurrent decision or expiry beat us to it.
@@ -889,7 +965,10 @@ async fn dispatch_client_message(
             // If no sender is present the agent either timed out or never registered —
             // proceed to emit the confirmed event anyway for UI consistency.
             {
-                let mut channels = state.approval_channels.lock().unwrap();
+                let mut channels = state
+                    .approval_channels
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = channels.remove(&approval_uuid) {
                     let _ = sender.send(swage_agent::ApprovalDecision {
                         decision: decision.clone(),
@@ -912,14 +991,11 @@ async fn dispatch_client_message(
 fn classify_gateway_error(err: &swage_core::GatewayError) -> (String, String) {
     use swage_core::GatewayError;
     match err {
-        GatewayError::TurnInProgress { .. } => (
-            error_codes::TURN_IN_PROGRESS.to_string(),
-            err.to_string(),
-        ),
-        GatewayError::Provider(_) => (error_codes::PROVIDER_ERROR.to_string(), err.to_string()),
-        GatewayError::ConfigError(_) => {
-            (error_codes::INVALID_CONFIG.to_string(), err.to_string())
+        GatewayError::TurnInProgress { .. } => {
+            (error_codes::TURN_IN_PROGRESS.to_string(), err.to_string())
         }
+        GatewayError::Provider(_) => (error_codes::PROVIDER_ERROR.to_string(), err.to_string()),
+        GatewayError::ConfigError(_) => (error_codes::INVALID_CONFIG.to_string(), err.to_string()),
         _ => (error_codes::INTERNAL_ERROR.to_string(), err.to_string()),
     }
 }
@@ -1051,8 +1127,10 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         // parent_call_id must be absent entirely, not serialised as null,
         // so existing clients that don't handle nesting remain unaffected.
-        assert!(!json.as_object().unwrap().contains_key("parent_call_id"),
-            "parent_call_id should be absent when None, got: {json}");
+        assert!(
+            !json.as_object().unwrap().contains_key("parent_call_id"),
+            "parent_call_id should be absent when None, got: {json}"
+        );
     }
 
     #[test]
@@ -1103,8 +1181,10 @@ mod tests {
             parent_call_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
-        assert!(!json.as_object().unwrap().contains_key("parent_call_id"),
-            "parent_call_id should be absent when None");
+        assert!(
+            !json.as_object().unwrap().contains_key("parent_call_id"),
+            "parent_call_id should be absent when None"
+        );
     }
 
     #[test]
@@ -1365,7 +1445,9 @@ mod tests {
     async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
         let (state, session_id) = make_state_with_session().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
         let json = r#"{"type":"activate_skill","name":"ghost-skill"}"#;
         dispatch_client_message(json, &state, session_id, tx, sub).await;
@@ -1373,7 +1455,10 @@ mod tests {
         let event = rx.recv().await.expect("should receive an event");
         match event {
             ServerEvent::Error { code, .. } => {
-                assert_eq!(code, "skill_not_found", "expected skill_not_found error code");
+                assert_eq!(
+                    code, "skill_not_found",
+                    "expected skill_not_found error code"
+                );
             }
             other => panic!("expected Error event, got: {other:?}"),
         }
@@ -1387,7 +1472,9 @@ mod tests {
     async fn deactivate_skill_event_sends_skill_deactivated() {
         let (state, session_id) = make_state_with_session().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
         let json = r#"{"type":"deactivate_skill","name":"code-review"}"#;
         dispatch_client_message(json, &state, session_id, tx, sub).await;
@@ -1404,7 +1491,9 @@ mod tests {
     async fn plain_send_message_does_not_emit_skill_event() {
         let (state, session_id) = make_state_with_session().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
         let json = r#"{"type":"send_message","content":"hello world"}"#;
         dispatch_client_message(json, &state, session_id, tx, sub).await;
@@ -1416,7 +1505,10 @@ mod tests {
 
         while let Ok(event) = rx.try_recv() {
             assert!(
-                !matches!(event, ServerEvent::SkillActivated { .. } | ServerEvent::SkillAlreadyActive { .. }),
+                !matches!(
+                    event,
+                    ServerEvent::SkillActivated { .. } | ServerEvent::SkillAlreadyActive { .. }
+                ),
                 "unexpected skill event for plain message: {event:?}",
             );
         }
@@ -1434,8 +1526,10 @@ mod tests {
     fn make_empty_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let storage_arc: Arc<dyn swage_storage::store::Storage> = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-        let project_store: Arc<dyn swage_storage::store::ProjectStore> = storage as Arc<dyn swage_storage::store::ProjectStore>;
+        let storage_arc: Arc<dyn swage_storage::store::Storage> =
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
+        let project_store: Arc<dyn swage_storage::store::ProjectStore> =
+            storage as Arc<dyn swage_storage::store::ProjectStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: storage_arc,
@@ -1477,8 +1571,10 @@ mod tests {
         );
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let storage_arc: Arc<dyn swage_storage::store::Storage> = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-        let project_store: Arc<dyn swage_storage::store::ProjectStore> = storage as Arc<dyn swage_storage::store::ProjectStore>;
+        let storage_arc: Arc<dyn swage_storage::store::Storage> =
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
+        let project_store: Arc<dyn swage_storage::store::ProjectStore> =
+            storage as Arc<dyn swage_storage::store::ProjectStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: storage_arc,
@@ -1640,10 +1736,15 @@ mod tests {
 
     #[test]
     fn client_event_approval_decision_approved_deserialises() {
-        let json = r#"{"type": "approval_decision", "approval_id": "apr_01", "decision": "approved"}"#;
+        let json =
+            r#"{"type": "approval_decision", "approval_id": "apr_01", "decision": "approved"}"#;
         let event: ClientEvent = serde_json::from_str(json).unwrap();
         match event {
-            ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+            ClientEvent::ApprovalDecision {
+                approval_id,
+                decision,
+                reason,
+            } => {
                 assert_eq!(approval_id, "apr_01");
                 assert_eq!(decision, "approved");
                 assert!(reason.is_none(), "reason should be None when absent");
@@ -1657,7 +1758,11 @@ mod tests {
         let json = r#"{"type": "approval_decision", "approval_id": "apr_02", "decision": "rejected", "reason": "too risky"}"#;
         let event: ClientEvent = serde_json::from_str(json).unwrap();
         match event {
-            ClientEvent::ApprovalDecision { approval_id, decision, reason } => {
+            ClientEvent::ApprovalDecision {
+                approval_id,
+                decision,
+                reason,
+            } => {
                 assert_eq!(approval_id, "apr_02");
                 assert_eq!(decision, "rejected");
                 assert_eq!(reason.as_deref(), Some("too risky"));
@@ -1715,9 +1820,18 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_required");
         let obj = json.as_object().unwrap();
-        assert!(!obj.contains_key("tool_name"), "tool_name should be absent when None");
-        assert!(!obj.contains_key("tool_arguments"), "tool_arguments should be absent when None");
-        assert!(!obj.contains_key("context"), "context should be absent when None");
+        assert!(
+            !obj.contains_key("tool_name"),
+            "tool_name should be absent when None"
+        );
+        assert!(
+            !obj.contains_key("tool_arguments"),
+            "tool_arguments should be absent when None"
+        );
+        assert!(
+            !obj.contains_key("context"),
+            "context should be absent when None"
+        );
     }
 
     #[test]
@@ -1743,8 +1857,10 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_confirmed");
-        assert!(!json.as_object().unwrap().contains_key("reason"),
-            "reason should be absent when None");
+        assert!(
+            !json.as_object().unwrap().contains_key("reason"),
+            "reason should be absent when None"
+        );
     }
 
     #[test]
@@ -1785,8 +1901,10 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "approval_decision_error");
-        assert!(!json.as_object().unwrap().contains_key("current_state"),
-            "current_state should be absent when None");
+        assert!(
+            !json.as_object().unwrap().contains_key("current_state"),
+            "current_state should be absent when None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1798,14 +1916,19 @@ mod tests {
         let state = make_empty_state();
         let session_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
-        let json = r#"{"type":"approval_decision","approval_id":"not-a-uuid","decision":"approved"}"#;
+        let json =
+            r#"{"type":"approval_decision","approval_id":"not-a-uuid","decision":"approved"}"#;
         dispatch_client_message(json, &state, session_id, tx, sub).await;
 
         let event = rx.recv().await.expect("should receive an error event");
         match event {
-            ServerEvent::ApprovalDecisionError { error, approval_id, .. } => {
+            ServerEvent::ApprovalDecisionError {
+                error, approval_id, ..
+            } => {
                 assert_eq!(error, "invalid_decision");
                 assert_eq!(approval_id, "not-a-uuid");
             }
@@ -1818,12 +1941,13 @@ mod tests {
         let state = make_empty_state();
         let session_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
         let id = Uuid::new_v4();
-        let json = format!(
-            r#"{{"type":"approval_decision","approval_id":"{id}","decision":"maybe"}}"#
-        );
+        let json =
+            format!(r#"{{"type":"approval_decision","approval_id":"{id}","decision":"maybe"}}"#);
         dispatch_client_message(&json, &state, session_id, tx, sub).await;
 
         let event = rx.recv().await.expect("should receive an error event");
@@ -1840,17 +1964,20 @@ mod tests {
         let state = make_empty_state();
         let session_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
 
         let id = Uuid::new_v4();
-        let json = format!(
-            r#"{{"type":"approval_decision","approval_id":"{id}","decision":"approved"}}"#
-        );
+        let json =
+            format!(r#"{{"type":"approval_decision","approval_id":"{id}","decision":"approved"}}"#);
         dispatch_client_message(&json, &state, session_id, tx, sub).await;
 
         let event = rx.recv().await.expect("should receive an error event");
         match event {
-            ServerEvent::ApprovalDecisionError { error, approval_id, .. } => {
+            ServerEvent::ApprovalDecisionError {
+                error, approval_id, ..
+            } => {
                 assert_eq!(error, "not_found");
                 assert_eq!(approval_id, id.to_string());
             }
@@ -1892,7 +2019,9 @@ mod tests {
             .expect("update state");
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
         let json = format!(
             r#"{{"type":"approval_decision","approval_id":"{}","decision":"rejected"}}"#,
             approval.id
@@ -1901,9 +2030,16 @@ mod tests {
 
         let event = rx.recv().await.expect("should receive error event");
         match event {
-            ServerEvent::ApprovalDecisionError { error, current_state, .. } => {
+            ServerEvent::ApprovalDecisionError {
+                error,
+                current_state,
+                ..
+            } => {
                 assert_eq!(error, "already_decided");
-                assert!(current_state.is_some(), "current_state should reflect the existing state");
+                assert!(
+                    current_state.is_some(),
+                    "current_state should reflect the existing state"
+                );
             }
             other => panic!("expected ApprovalDecisionError, got {other:?}"),
         }
@@ -1936,7 +2072,9 @@ mod tests {
             .expect("create approval");
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
         let json = format!(
             r#"{{"type":"approval_decision","approval_id":"{}","decision":"approved","reason":"Looks safe"}}"#,
             approval.id
@@ -1945,7 +2083,11 @@ mod tests {
 
         let event = rx.recv().await.expect("should receive ApprovalConfirmed");
         match event {
-            ServerEvent::ApprovalConfirmed { approval_id, decision, reason } => {
+            ServerEvent::ApprovalConfirmed {
+                approval_id,
+                decision,
+                reason,
+            } => {
                 assert_eq!(approval_id, approval.id.to_string());
                 assert_eq!(decision, "approved");
                 assert_eq!(reason, Some("Looks safe".to_string()));
@@ -1990,7 +2132,9 @@ mod tests {
             .insert(approval.id, oneshot_tx);
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(false)));
+        let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+            false,
+        )));
         let json = format!(
             r#"{{"type":"approval_decision","approval_id":"{}","decision":"rejected","reason":"Too risky"}}"#,
             approval.id
