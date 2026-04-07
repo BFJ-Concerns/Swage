@@ -618,7 +618,11 @@ pub async fn submit_turn(
     if existing_turns.iter().any(|turn| {
         matches!(
             turn.state,
-            swage_storage::TurnState::Processing
+            // REST submit creates a durable pending placeholder before the
+            // background worker has a chance to register `active_turns`, so
+            // `Pending` must count as in-flight here to close that race.
+            swage_storage::TurnState::Pending
+                | swage_storage::TurnState::Processing
                 | swage_storage::TurnState::AwaitingApproval
                 | swage_storage::TurnState::Delegating
         )
@@ -1375,6 +1379,80 @@ mod tests {
         assert!(body["project_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
+    }
+
+    #[tokio::test]
+    async fn post_turns_returns_409_when_thread_has_pending_placeholder_turn() {
+        use swage_storage::model::{NewTurn, TurnState};
+        use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+
+        let (router, storage) = make_router();
+
+        let create_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let create_body = body_json(create_resp).await;
+        let conversation_id = create_body["id"]
+            .as_str()
+            .expect("conversation id")
+            .parse::<Uuid>()
+            .expect("conversation uuid");
+
+        let session = storage
+            .get_session(conversation_id)
+            .await
+            .expect("get session")
+            .expect("session exists");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("list threads")
+            .into_iter()
+            .next()
+            .expect("root thread exists");
+
+        storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: session.agent_id.clone(),
+                state: TurnState::Pending,
+                user_input: Some("first message".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("seed pending placeholder turn");
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "message": "second message",
+                            "thread_id": null,
+                            "output_schema": null
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "turn_in_progress");
     }
 
     // -----------------------------------------------------------------------
