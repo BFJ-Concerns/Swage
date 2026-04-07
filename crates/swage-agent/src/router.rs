@@ -11,7 +11,6 @@ use swage_core::{MessageKind, MessageStatus};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::Storage;
 use swage_storage::model::{AgentMessage, NewAgentMessage};
-use swage_storage::store::AgentMessageStore;
 
 use crate::error::AgentError;
 

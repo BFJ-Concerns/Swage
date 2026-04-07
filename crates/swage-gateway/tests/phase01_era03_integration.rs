@@ -13,30 +13,29 @@
 //! | `streaming_tokens_arrive_through_agent_delegation` | Streaming parity proof | agent events (5r3s) + agent streaming (141x) + gateway delegation (6dy5) |
 //! | `sandbox_routes_through_execution_strategy` | Sandbox strategy proof | execution strategy (4gwe) + sandbox executor (get2) + gateway delegation (6dy5) |
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
+use swage_config::ResolvedConfig;
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use swage_config::ResolvedConfig;
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{store::ProjectStore, SqliteStorage};
+use swage_storage::{SqliteStorage, store::ProjectStore};
 
 // ---------------------------------------------------------------------------
 // Mock provider — streams a fixed sequence of chunks
@@ -58,16 +57,20 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    fn model_id(&self) -> &str { "mock-model" }
+    fn model_id(&self) -> &str {
+        "mock-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -78,7 +81,9 @@ impl LlmProvider for MockProvider {
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let mut rounds = self.rounds.lock().unwrap();
         let chunks = if rounds.is_empty() {
-            vec![StreamChunk::Done { finish_reason: Some(FinishReason::Stop) }]
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }]
         } else {
             rounds.remove(0)
         };
@@ -95,8 +100,12 @@ struct EchoTool;
 
 #[async_trait]
 impl swage_gateway::tool::Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echo the input back" }
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo the input back"
+    }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -153,7 +162,8 @@ async fn start_test_server(
         provider,
         ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
-    ).await
+    )
+    .await
 }
 
 /// Convenience: start server with echo tool registered.
@@ -162,7 +172,7 @@ async fn start_test_server_with_echo(
     config: ResolvedConfig,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>,
+        Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>
     ]);
     start_test_server_with_config(provider, config, dispatcher).await
 }
@@ -186,15 +196,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -209,21 +215,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
     sink.send(tungstenite::Message::Text(payload.to_string()))
         .await
         .expect("ws send should succeed");
-}
-
-/// Read next JSON text frame, skipping ping/pong/binary.
-async fn ws_recv(stream: &mut WsStream) -> Value {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return serde_json::from_str(&text).expect("ws text should be valid JSON");
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => panic!("WebSocket closed unexpectedly"),
-            Some(Err(e)) => panic!("WebSocket error: {e}"),
-            None => panic!("WebSocket stream ended unexpectedly"),
-            _ => continue,
-        }
-    }
 }
 
 /// Returns None on close instead of panicking.
@@ -282,11 +273,17 @@ async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
                 name: "echo".into(),
                 arguments: json!({"text": "hello"}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
-            StreamChunk::Delta { content: "Tool was denied".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Tool was denied".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -298,10 +295,18 @@ async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
     // Subscribe to tool events so we can observe the denial
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["tools"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
 
     // Send a message that triggers the echo tool
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Use echo"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Use echo"}),
+    )
+    .await;
 
     // Collect all events
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
@@ -349,11 +354,17 @@ async fn default_permissions_allow_all_tools_backward_compat() {
                 name: "echo".into(),
                 arguments: json!({"text": "hello"}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
-            StreamChunk::Delta { content: "Echo said hello".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Echo said hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -363,8 +374,16 @@ async fn default_permissions_allow_all_tools_backward_compat() {
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["tools"]})).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Use echo"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Use echo"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
@@ -375,7 +394,8 @@ async fn default_permissions_allow_all_tools_backward_compat() {
         "expected a tool_end event; got events: {events:?}"
     );
     assert_eq!(
-        tool_end.unwrap()["status"], "success",
+        tool_end.unwrap()["status"],
+        "success",
         "echo tool should succeed with default allow-all permissions; events: {events:?}"
     );
 }
@@ -405,13 +425,18 @@ async fn default_permissions_allow_all_tools_backward_compat() {
 /// will arrive without the agent's involvement.
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_events_fire_for_gateway_initiated_turns() {
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::Delta { content: "Response".into() },
-            StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 10, output_tokens: 5 }),
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "Response".into(),
+        },
+        StreamChunk::Usage(swage_core::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        }),
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]);
 
     let (router, addr, _storage) = start_test_server(provider).await;
 
@@ -419,7 +444,11 @@ async fn hook_events_fire_for_gateway_initiated_turns() {
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Hello"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Hello"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
@@ -456,15 +485,24 @@ async fn hook_events_fire_for_gateway_initiated_turns() {
 /// After unification: MUST STILL PASS — agent event forwarding preserves parity.
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_tokens_arrive_through_agent_delegation() {
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::Delta { content: "Hello".into() },
-            StreamChunk::Delta { content: " world".into() },
-            StreamChunk::Delta { content: "!".into() },
-            StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 20, output_tokens: 3 }),
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Delta {
+            content: " world".into(),
+        },
+        StreamChunk::Delta {
+            content: "!".into(),
+        },
+        StreamChunk::Usage(swage_core::TokenUsage {
+            input_tokens: 20,
+            output_tokens: 3,
+        }),
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]);
 
     let (router, addr, _storage) = start_test_server(provider).await;
 
@@ -483,12 +521,18 @@ async fn streaming_tokens_arrive_through_agent_delegation() {
         .filter_map(|e| e["content"].as_str())
         .collect();
 
-    assert_eq!(tokens, vec!["Hello", " world", "!"],
-        "token events should match provider chunks; got events: {events:?}");
+    assert_eq!(
+        tokens,
+        vec!["Hello", " world", "!"],
+        "token events should match provider chunks; got events: {events:?}"
+    );
 
     // Verify turn_complete has token counts.
     let complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(complete.is_some(), "expected turn_complete; got events: {events:?}");
+    assert!(
+        complete.is_some(),
+        "expected turn_complete; got events: {events:?}"
+    );
 }
 
 /// Multi-round tool dispatch works through the unified agent path.
@@ -511,12 +555,21 @@ async fn multi_round_tool_dispatch_through_unified_path() {
                 name: "echo".into(),
                 arguments: json!({"text": "ping"}),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
-            StreamChunk::Delta { content: "Echo returned: ping".into() },
-            StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 30, output_tokens: 5 }),
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Echo returned: ping".into(),
+            },
+            StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 30,
+                output_tokens: 5,
+            }),
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -527,14 +580,25 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["tools"]})).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Use echo"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Use echo"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
     // Verify tool_start and tool_end events
     let tool_start = events.iter().find(|e| e["type"] == "tool_start");
-    assert!(tool_start.is_some(), "expected tool_start; events: {events:?}");
+    assert!(
+        tool_start.is_some(),
+        "expected tool_start; events: {events:?}"
+    );
     assert_eq!(tool_start.unwrap()["tool"], "echo");
 
     let tool_end = events.iter().find(|e| e["type"] == "tool_end");
@@ -554,5 +618,8 @@ async fn multi_round_tool_dispatch_through_unified_path() {
 
     // Verify turn completed
     let complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(complete.is_some(), "expected turn_complete; events: {events:?}");
+    assert!(
+        complete.is_some(),
+        "expected turn_complete; events: {events:?}"
+    );
 }

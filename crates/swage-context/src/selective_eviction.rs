@@ -287,13 +287,13 @@ fn apply_evictions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::pin::Pin;
     use swage_core::{
         ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason,
         ProviderError, Role, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
-    use async_trait::async_trait;
 
     use crate::tokeniser::TiktokenTokeniser;
 
@@ -305,11 +305,15 @@ mod tests {
 
     impl MockProvider {
         fn new(response: &str) -> Self {
-            Self { response: response.to_string() }
+            Self {
+                response: response.to_string(),
+            }
         }
 
         fn failing() -> Self {
-            Self { response: String::new() }
+            Self {
+                response: String::new(),
+            }
         }
     }
 
@@ -386,7 +390,7 @@ mod tests {
         let messages = vec![
             make(Role::User, "Can you fetch the weather?"),
             make(Role::Assistant, "I'll call the weather tool."),
-            make(Role::Tool, "ERROR: weather API unavailable"),  // index 2 — evicted
+            make(Role::Tool, "ERROR: weather API unavailable"), // index 2 — evicted
             make(Role::User, "Never mind, just estimate."),
             make(Role::Assistant, "Sure, it's probably warm."),
         ];
@@ -406,10 +410,10 @@ mod tests {
             "one message should have been evicted"
         );
         assert!(
-            output.messages.iter().all(|m| {
-                m.role != Role::Tool
-                    || !message_text(m).contains("ERROR")
-            }),
+            output
+                .messages
+                .iter()
+                .all(|m| { m.role != Role::Tool || !message_text(m).contains("ERROR") }),
             "the failed tool call message must not appear in output"
         );
 
@@ -427,10 +431,7 @@ mod tests {
         let provider = MockProvider::new("[]");
         let t = tokeniser();
 
-        let messages = vec![
-            make(Role::User, "Hello"),
-            make(Role::Assistant, "Hi there"),
-        ];
+        let messages = vec![make(Role::User, "Hello"), make(Role::Assistant, "Hi there")];
         let original_count = messages.len();
 
         let compactor = SelectiveEvictionCompactor::new();
@@ -439,7 +440,11 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
 
-        assert_eq!(output.messages.len(), original_count, "no messages should be removed");
+        assert_eq!(
+            output.messages.len(),
+            original_count,
+            "no messages should be removed"
+        );
         assert!(output.evicted.is_empty(), "eviction list should be empty");
         assert!(output.experimental);
     }
@@ -450,12 +455,13 @@ mod tests {
     async fn system_messages_are_never_evicted() {
         // LLM incorrectly suggests evicting the system message at index 0.
         // The compactor must ignore this — conservative behaviour.
-        let evict_json = r#"[{"index":0,"reason":"Possibly redundant","category":"redundant_clarification"}]"#;
+        let evict_json =
+            r#"[{"index":0,"reason":"Possibly redundant","category":"redundant_clarification"}]"#;
         let provider = MockProvider::new(evict_json);
         let t = tokeniser();
 
         let messages = vec![
-            make(Role::System, "You are a helpful assistant."),  // must never be removed
+            make(Role::System, "You are a helpful assistant."), // must never be removed
             make(Role::User, "Hello"),
             make(Role::Assistant, "Hi"),
         ];
@@ -485,7 +491,8 @@ mod tests {
     #[tokio::test]
     async fn out_of_range_index_is_ignored_safely() {
         // LLM suggests evicting index 99 but there are only 2 messages.
-        let evict_json = r#"[{"index":99,"reason":"Old message","category":"superseded_reasoning"}]"#;
+        let evict_json =
+            r#"[{"index":99,"reason":"Old message","category":"superseded_reasoning"}]"#;
         let provider = MockProvider::new(evict_json);
         let t = tokeniser();
 
@@ -502,7 +509,10 @@ mod tests {
 
         // Out-of-range index silently skipped — messages unchanged.
         assert_eq!(output.messages.len(), 2);
-        assert!(output.evicted.is_empty(), "invalid index should not produce an annotation");
+        assert!(
+            output.evicted.is_empty(),
+            "invalid index should not produce an annotation"
+        );
     }
 
     // ── Multiple evictions are handled correctly ──────────────────────────────
@@ -564,13 +574,18 @@ mod tests {
 
     #[test]
     fn apply_evictions_deduplicates_candidates() {
-        let messages = vec![
-            make(Role::User, "Msg 0"),
-            make(Role::Assistant, "Msg 1"),
-        ];
+        let messages = vec![make(Role::User, "Msg 0"), make(Role::Assistant, "Msg 1")];
         let candidates = vec![
-            EvictionCandidate { index: 1, reason: "First".into(), category: "c".into() },
-            EvictionCandidate { index: 1, reason: "Duplicate".into(), category: "c".into() },
+            EvictionCandidate {
+                index: 1,
+                reason: "First".into(),
+                category: "c".into(),
+            },
+            EvictionCandidate {
+                index: 1,
+                reason: "Duplicate".into(),
+                category: "c".into(),
+            },
         ];
         let result = apply_evictions(&messages, &candidates);
         // Duplicate index 1 should appear only once.
@@ -586,13 +601,29 @@ mod tests {
             .collect::<Vec<_>>();
         // Candidates in reverse order.
         let candidates = vec![
-            EvictionCandidate { index: 4, reason: "r".into(), category: "c".into() },
-            EvictionCandidate { index: 1, reason: "r".into(), category: "c".into() },
-            EvictionCandidate { index: 2, reason: "r".into(), category: "c".into() },
+            EvictionCandidate {
+                index: 4,
+                reason: "r".into(),
+                category: "c".into(),
+            },
+            EvictionCandidate {
+                index: 1,
+                reason: "r".into(),
+                category: "c".into(),
+            },
+            EvictionCandidate {
+                index: 2,
+                reason: "r".into(),
+                category: "c".into(),
+            },
         ];
         let result = apply_evictions(&messages, &candidates);
         let indices: Vec<usize> = result.iter().map(|a| a.original_index).collect();
-        assert_eq!(indices, vec![1, 2, 4], "annotations must be sorted by index");
+        assert_eq!(
+            indices,
+            vec![1, 2, 4],
+            "annotations must be sorted by index"
+        );
     }
 
     // ── Unit: parse_eviction_response handles code fences ─────────────────────

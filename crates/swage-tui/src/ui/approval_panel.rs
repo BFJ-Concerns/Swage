@@ -142,9 +142,17 @@ pub fn render_approval_panel(frame: &mut Frame, area: Rect, state: &ApprovalPane
 
     // Keyboard hints.
     lines.push(Line::from(vec![
-        Span::styled("  [y/Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  [y/Enter] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("Approve  "),
-        Span::styled("  [n/Esc] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  [n/Esc] ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("Reject"),
     ]));
 
@@ -225,7 +233,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ApprovalPanelState::new();
@@ -239,7 +247,7 @@ mod tests {
 
     #[test]
     fn render_noop_when_empty() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = ApprovalPanelState::new();

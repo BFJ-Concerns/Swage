@@ -60,7 +60,9 @@ impl ContextElement for PromptsElement {
             return vec![];
         }
 
-        let combined = self.rules.iter()
+        let combined = self
+            .rules
+            .iter()
             .map(|r| r.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -91,7 +93,8 @@ impl ContextElement for PromptsElement {
             }
         }
 
-        let level_summary = counts.iter()
+        let level_summary = counts
+            .iter()
             .map(|(level, count)| format!("{count} {level}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -142,9 +145,11 @@ mod tests {
     /// A single rule produces one system message with the rule's content.
     #[test]
     fn single_rule_produces_system_message() {
-        let element = PromptsElement::new(vec![
-            make_rule("You are a helpful assistant.", 0, HierarchyLevel::Global),
-        ]);
+        let element = PromptsElement::new(vec![make_rule(
+            "You are a helpful assistant.",
+            0,
+            HierarchyLevel::Global,
+        )]);
 
         let messages = element.content();
         assert_eq!(messages.len(), 1);
@@ -178,8 +183,14 @@ mod tests {
                 let coding_pos = text.find("You are a coding assistant.").unwrap();
                 let safety_pos = text.find("Always be safe and helpful.").unwrap();
                 let default_pos = text.find("Default behaviour.").unwrap();
-                assert!(coding_pos < safety_pos, "project rule should appear before global");
-                assert!(safety_pos < default_pos, "higher priority global before lower");
+                assert!(
+                    coding_pos < safety_pos,
+                    "project rule should appear before global"
+                );
+                assert!(
+                    safety_pos < default_pos,
+                    "higher priority global before lower"
+                );
             }
             _ => panic!("expected text content"),
         }
@@ -215,7 +226,10 @@ mod tests {
         ]);
 
         let source = element.source();
-        assert!(source.contains("3 total"), "source should report 3 total rules");
+        assert!(
+            source.contains("3 total"),
+            "source should report 3 total rules"
+        );
         assert!(source.contains("Global") || source.contains("global"));
         assert!(source.contains("Project") || source.contains("project"));
     }
@@ -239,9 +253,11 @@ mod tests {
     /// PromptsElement is usable as dyn ContextElement (object safety check).
     #[test]
     fn prompts_element_is_usable_as_dyn_context_element() {
-        let element: Box<dyn ContextElement> = Box::new(PromptsElement::new(vec![
-            make_rule("Instructions.", 0, HierarchyLevel::Global),
-        ]));
+        let element: Box<dyn ContextElement> = Box::new(PromptsElement::new(vec![make_rule(
+            "Instructions.",
+            0,
+            HierarchyLevel::Global,
+        )]));
 
         assert_eq!(element.name(), "prompts");
         assert_eq!(element.priority(), 100);

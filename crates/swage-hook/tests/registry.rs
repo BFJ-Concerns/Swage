@@ -6,8 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::json;
-use tokio::sync::Mutex;
 use swage_hook::{FailureMode, Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
+use tokio::sync::Mutex;
 
 // -- Test hooks -------------------------------------------------------------
 
@@ -349,7 +349,10 @@ async fn timeout_with_fail_closed_returns_block() {
 
     match outcome {
         HookOutcome::Block(reason) => {
-            assert!(reason.contains("timeout"), "block reason should mention timeout, got: {reason}");
+            assert!(
+                reason.contains("timeout"),
+                "block reason should mention timeout, got: {reason}"
+            );
         }
         _ => panic!("FailClosed timeout should return Block"),
     }
@@ -379,7 +382,10 @@ async fn event_filter_excludes_non_matching_hooks() {
     registry.dispatch(event).await;
 
     let executed = log.lock().await;
-    assert!(executed.is_empty(), "hook should not fire for non-matching event");
+    assert!(
+        executed.is_empty(),
+        "hook should not fire for non-matching event"
+    );
 }
 
 #[tokio::test]
@@ -588,7 +594,10 @@ async fn first_approval_wins_among_multiple_approvals() {
 
     match outcome {
         HookOutcome::RequestApproval { prompt, .. } => {
-            assert_eq!(prompt, "first prompt", "first (highest-priority) approval should win");
+            assert_eq!(
+                prompt, "first prompt",
+                "first (highest-priority) approval should win"
+            );
         }
         _ => panic!("expected RequestApproval, got {:?}", outcome),
     }

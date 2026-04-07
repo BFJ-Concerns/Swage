@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -26,14 +26,17 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
-    s.parse::<Uuid>()
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+    s.parse::<Uuid>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -56,24 +59,27 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            11,
-            rusqlite::types::Type::Text,
-            Box::new(ParseError(e.to_string())),
-        ))?;
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(ParseError(e.to_string())),
+            )
+        })?;
     let parent_turn_id_str: Option<String> = row.get(12)?;
-    let parent_turn_id = parent_turn_id_str
-        .as_deref()
-        .map(parse_uuid)
-        .transpose()?;
+    let parent_turn_id = parent_turn_id_str.as_deref().map(parse_uuid).transpose()?;
 
     Ok(Turn {
         id: parse_uuid(&id)?,
         thread_id: parse_uuid(&thread_id)?,
         agent_id,
-        state: state_str
-            .parse::<TurnState>()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(ParseError(e))))?,
+        state: state_str.parse::<TurnState>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(ParseError(e)),
+            )
+        })?,
         user_input: row.get(3)?,
         assistant_response: row.get(4)?,
         input_tokens: row.get(5)?,
@@ -148,10 +154,7 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
-    async fn list_turns_by_thread(
-        &self,
-        thread_id: Uuid,
-    ) -> Result<Vec<Turn>, StorageError> {
+    async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, assistant_response,
@@ -166,13 +169,10 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
-    async fn update_turn_state(
-        &self,
-        id: Uuid,
-        new_state: TurnState,
-    ) -> Result<(), StorageError> {
+    async fn update_turn_state(&self, id: Uuid, new_state: TurnState) -> Result<(), StorageError> {
         // Verify the turn exists before updating.
-        let _current = self.get_turn(id)
+        let _current = self
+            .get_turn(id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "turn".into(),
@@ -181,7 +181,10 @@ impl TurnStore for SqliteStorage {
 
         // Terminal-state guard is enforced atomically in the SQL WHERE clause
         // below — "first terminal state wins" without a read-then-write race.
-        let is_terminal = matches!(new_state, TurnState::Completed | TurnState::Failed | TurnState::Interrupted);
+        let is_terminal = matches!(
+            new_state,
+            TurnState::Completed | TurnState::Failed | TurnState::Interrupted
+        );
 
         self.with_conn(move |conn| {
             let state_str = new_state.to_string();
@@ -263,8 +266,9 @@ impl TurnStore for SqliteStorage {
         // Serialise the JSON value to a text string for storage. This mirrors
         // how cost_microcents stores a scalar — we store structured_output as
         // a TEXT column containing compact JSON.
-        let json_text = serde_json::to_string(output)
-            .map_err(|e| StorageError::Serialisation { message: e.to_string() })?;
+        let json_text = serde_json::to_string(output).map_err(|e| StorageError::Serialisation {
+            message: e.to_string(),
+        })?;
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE turns SET structured_output = ?1 WHERE id = ?2",
@@ -294,11 +298,18 @@ mod tests {
     async fn make_thread() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "test-agent".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "test-agent".to_string(),
+            })
             .await
             .unwrap();
 
@@ -320,7 +331,12 @@ mod tests {
     }
 
     fn new_turn(thread_id: Uuid) -> NewTurn {
-        NewTurn { thread_id, agent_id: "test-agent".to_string(), state: TurnState::Pending, parent_turn_id: None }
+        NewTurn {
+            thread_id,
+            agent_id: "test-agent".to_string(),
+            state: TurnState::Pending,
+            parent_turn_id: None,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -365,7 +381,10 @@ mod tests {
         let (storage, thread_id) = make_thread().await;
         let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
-        storage.update_turn_state(turn.id, TurnState::Completed).await.unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await
+            .unwrap();
 
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.state, TurnState::Completed);
@@ -379,7 +398,10 @@ mod tests {
         let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
         // Transitioning to Processing (non-terminal) must leave completed_at unset.
-        storage.update_turn_state(turn.id, TurnState::Processing).await.unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Processing)
+            .await
+            .unwrap();
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.state, TurnState::Processing);
         assert!(updated.completed_at.is_none());
@@ -391,29 +413,58 @@ mod tests {
 
         // Create turns for two different agents.
         let t1 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "agent-a".to_string(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
         let t2 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-b".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "agent-b".to_string(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
         // Advance t2 to Processing — still in-progress for agent-b.
-        storage.update_turn_state(t2.id, TurnState::Processing).await.unwrap();
+        storage
+            .update_turn_state(t2.id, TurnState::Processing)
+            .await
+            .unwrap();
 
         // Complete t3 for agent-a — must NOT appear in results.
         let t3 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "agent-a".to_string(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
-        storage.update_turn_state(t3.id, TurnState::Completed).await.unwrap();
+        storage
+            .update_turn_state(t3.id, TurnState::Completed)
+            .await
+            .unwrap();
 
         // t4 for agent-a in AwaitingApproval — still active, must appear.
         let t4 = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent-a".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "agent-a".to_string(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
-        storage.update_turn_state(t4.id, TurnState::AwaitingApproval).await.unwrap();
+        storage
+            .update_turn_state(t4.id, TurnState::AwaitingApproval)
+            .await
+            .unwrap();
 
         // agent-a has two active turns (t1 pending, t4 awaiting approval).
         let a_results = storage.find_in_progress_by_agent("agent-a").await.unwrap();
@@ -434,12 +485,26 @@ mod tests {
         let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
         // assistant_response is None on creation.
-        assert!(storage.get_turn(turn.id).await.unwrap().unwrap().assistant_response.is_none());
+        assert!(
+            storage
+                .get_turn(turn.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .assistant_response
+                .is_none()
+        );
 
-        storage.update_response(turn.id, "The assistant replied.").await.unwrap();
+        storage
+            .update_response(turn.id, "The assistant replied.")
+            .await
+            .unwrap();
 
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
-        assert_eq!(updated.assistant_response.as_deref(), Some("The assistant replied."));
+        assert_eq!(
+            updated.assistant_response.as_deref(),
+            Some("The assistant replied.")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -497,7 +562,10 @@ mod tests {
         let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
         let output = serde_json::json!({"x": 1, "label": "ok"});
-        storage.update_structured_output(turn.id, &output).await.unwrap();
+        storage
+            .update_structured_output(turn.id, &output)
+            .await
+            .unwrap();
 
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.structured_output, Some(output));
@@ -509,12 +577,18 @@ mod tests {
         let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
         // Transition to Interrupted (terminal).
-        storage.update_turn_state(turn.id, TurnState::Interrupted).await.unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Interrupted)
+            .await
+            .unwrap();
         let interrupted = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(interrupted.state, TurnState::Interrupted);
 
         // Attempting to transition to Completed should be a silent no-op.
-        storage.update_turn_state(turn.id, TurnState::Completed).await.unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await
+            .unwrap();
         let still_interrupted = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(
             still_interrupted.state,

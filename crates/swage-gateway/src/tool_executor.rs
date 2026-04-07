@@ -21,7 +21,7 @@ use swage_tool::context::ToolContext;
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
-use crate::tool::python_execute::{PythonExecuteContext, PYTHON_CONTEXT};
+use crate::tool::python_execute::{PYTHON_CONTEXT, PythonExecuteContext};
 use crate::websocket::ServerEvent;
 
 /// Routes tool execution through a bubblewrap sandbox.
@@ -225,10 +225,20 @@ mod tests {
 
     #[async_trait]
     impl Tool for DummyTool {
-        fn name(&self) -> &str { "dummy" }
-        fn description(&self) -> &str { "unused" }
-        fn parameters(&self) -> Value { json!({"type": "object"}) }
-        async fn execute(&self, _params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+        fn description(&self) -> &str {
+            "unused"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
             panic!("sandbox path should never call tool.execute() directly")
         }
     }
@@ -241,9 +251,9 @@ mod tests {
 
     #[tokio::test]
     async fn routes_call_through_sandbox_and_returns_output() {
-        let sandbox = Arc::new(MockSandbox::new(
-            MockResponse::Success(json!({"result": "ok"})),
-        ));
+        let sandbox = Arc::new(MockSandbox::new(MockResponse::Success(
+            json!({"result": "ok"}),
+        )));
         let executor = SandboxedExecutor::new(sandbox.clone());
 
         let result = executor
@@ -262,9 +272,9 @@ mod tests {
 
     #[tokio::test]
     async fn tool_error_maps_to_execution_failed() {
-        let sandbox = Arc::new(MockSandbox::new(
-            MockResponse::ToolError("division by zero".to_string()),
-        ));
+        let sandbox = Arc::new(MockSandbox::new(MockResponse::ToolError(
+            "division by zero".to_string(),
+        )));
         let executor = SandboxedExecutor::new(sandbox);
 
         let err = executor
@@ -278,9 +288,9 @@ mod tests {
 
     #[tokio::test]
     async fn ipc_error_maps_with_prefix() {
-        let sandbox = Arc::new(MockSandbox::new(
-            MockResponse::IpcError("pipe broken".to_string()),
-        ));
+        let sandbox = Arc::new(MockSandbox::new(MockResponse::IpcError(
+            "pipe broken".to_string(),
+        )));
         let executor = SandboxedExecutor::new(sandbox);
 
         let err = executor
@@ -290,16 +300,17 @@ mod tests {
 
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
         assert!(
-            err.to_string().contains("sandbox communication error: pipe broken"),
+            err.to_string()
+                .contains("sandbox communication error: pipe broken"),
             "expected prefixed message, got: {err}",
         );
     }
 
     #[tokio::test]
     async fn other_sandbox_error_maps_to_execution_failed() {
-        let sandbox = Arc::new(MockSandbox::new(
-            MockResponse::Unavailable("bwrap not installed".to_string()),
-        ));
+        let sandbox = Arc::new(MockSandbox::new(MockResponse::Unavailable(
+            "bwrap not installed".to_string(),
+        )));
         let executor = SandboxedExecutor::new(sandbox);
 
         let err = executor

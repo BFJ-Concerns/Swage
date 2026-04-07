@@ -173,8 +173,14 @@ mod tests {
 
     #[test]
     fn project_name_always_appears() {
-        let line =
-            build_status_line(ConnectionState::Connected, "myproject", None, None, None, 80);
+        let line = build_status_line(
+            ConnectionState::Connected,
+            "myproject",
+            None,
+            None,
+            None,
+            80,
+        );
         assert!(
             line_text(&line).contains("myproject"),
             "project name must always be visible"
@@ -221,8 +227,14 @@ mod tests {
             80,
         );
         let text = line_text(&line);
-        assert!(text.contains("in: 1024"), "input token count missing; got: {text:?}");
-        assert!(text.contains("out: 256"), "output token count missing; got: {text:?}");
+        assert!(
+            text.contains("in: 1024"),
+            "input token count missing; got: {text:?}"
+        );
+        assert!(
+            text.contains("out: 256"),
+            "output token count missing; got: {text:?}"
+        );
     }
 
     #[test]
@@ -305,7 +317,7 @@ mod tests {
 
     #[test]
     fn render_status_bar_does_not_panic() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -325,7 +337,7 @@ mod tests {
 
     #[test]
     fn render_status_bar_shows_project_name_in_buffer() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -356,7 +368,7 @@ mod tests {
 
     #[test]
     fn render_status_bar_disconnected_state_shows_indicator() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

@@ -217,13 +217,12 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_forwards_messages_and_model_to_provider() {
-        use swage_core::{ChatMessage, ContentPart, Role};
         use chrono::Utc;
+        use swage_core::{ChatMessage, ContentPart, Role};
         use uuid::Uuid;
 
-        let received = std::sync::Arc::new(std::sync::Mutex::new(
-            None::<swage_core::CompletionRequest>,
-        ));
+        let received =
+            std::sync::Arc::new(std::sync::Mutex::new(None::<swage_core::CompletionRequest>));
         let received_clone = received.clone();
 
         let provider = move |req: swage_core::CompletionRequest| {
@@ -244,7 +243,9 @@ mod tests {
         req.messages = vec![ChatMessage {
             id: Uuid::new_v4(),
             role: Role::User,
-            content: vec![ContentPart::Text { text: "hello".into() }],
+            content: vec![ContentPart::Text {
+                text: "hello".into(),
+            }],
             created_at: Utc::now(),
             name: None,
             tool_call_id: None,

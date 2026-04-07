@@ -160,10 +160,7 @@ impl ToolDispatcher {
     /// When set, `dispatch()` delegates to `strategy.execute()` instead of
     /// calling `tool.execute()` directly. This is the injection point for
     /// sandbox-aware execution in the gateway layer.
-    pub fn with_execution_strategy(
-        mut self,
-        strategy: Arc<dyn ToolExecutionStrategy>,
-    ) -> Self {
+    pub fn with_execution_strategy(mut self, strategy: Arc<dyn ToolExecutionStrategy>) -> Self {
         self.execution_strategy = Some(strategy);
         self
     }
@@ -204,7 +201,10 @@ impl ToolDispatcher {
         // human approves. PermissionDenied short-circuits via the ? operator.
         match check_permission(&self.permissions, tool_name)? {
             PermissionCheckResult::Allowed => {}
-            PermissionCheckResult::RequiresApproval { timeout_secs, timeout_policy } => {
+            PermissionCheckResult::RequiresApproval {
+                timeout_secs,
+                timeout_policy,
+            } => {
                 return Err(ToolError::RequiresApproval {
                     name: tool_name.to_owned(),
                     timeout_secs,
@@ -214,7 +214,10 @@ impl ToolDispatcher {
         }
 
         // Step 3: Rate limit check — checked and recorded atomically.
-        match self.rate_limiter.check(agent_id, tool_name, &self.rate_config) {
+        match self
+            .rate_limiter
+            .check(agent_id, tool_name, &self.rate_config)
+        {
             RateLimitDecision::Allowed => {}
             RateLimitDecision::Limited { retry_after } => {
                 // ToolError has no RateLimited variant by design: rate-limit
@@ -247,7 +250,11 @@ impl ToolDispatcher {
         // tool directly (the default, backward-compatible path).
         let start = Instant::now();
         let raw_output = match &self.execution_strategy {
-            Some(strategy) => strategy.execute(tool.as_ref(), tool_name, &params, ctx).await?,
+            Some(strategy) => {
+                strategy
+                    .execute(tool.as_ref(), tool_name, &params, ctx)
+                    .await?
+            }
             None => tool.execute(params, ctx).await?,
         };
         let duration = start.elapsed();
@@ -268,7 +275,11 @@ impl ToolDispatcher {
             cost: None,
             duration,
             // Raw output preserved only in debug mode for post-hoc inspection.
-            raw: if self.debug_mode { Some(raw_output) } else { None },
+            raw: if self.debug_mode {
+                Some(raw_output)
+            } else {
+                None
+            },
         })
     }
 
@@ -295,7 +306,10 @@ impl ToolDispatcher {
         // Step 2 (permission check) intentionally skipped — human approved.
 
         // Step 3: Rate limit check.
-        match self.rate_limiter.check(agent_id, tool_name, &self.rate_config) {
+        match self
+            .rate_limiter
+            .check(agent_id, tool_name, &self.rate_config)
+        {
             RateLimitDecision::Allowed => {}
             RateLimitDecision::Limited { retry_after } => {
                 return Err(ToolError::ExecutionFailed {
@@ -318,7 +332,11 @@ impl ToolDispatcher {
         // Step 6: Execute with timing.
         let start = Instant::now();
         let raw_output = match &self.execution_strategy {
-            Some(strategy) => strategy.execute(tool.as_ref(), tool_name, &params, ctx).await?,
+            Some(strategy) => {
+                strategy
+                    .execute(tool.as_ref(), tool_name, &params, ctx)
+                    .await?
+            }
             None => tool.execute(params, ctx).await?,
         };
         let duration = start.elapsed();
@@ -326,16 +344,19 @@ impl ToolDispatcher {
         // Step 7: Leak detection.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
-        let result: Value = serde_json::from_str(&scanned_str).unwrap_or_else(|_| {
-            Value::String(scanned_str)
-        });
+        let result: Value =
+            serde_json::from_str(&scanned_str).unwrap_or_else(|_| Value::String(scanned_str));
 
         // Step 8: Assemble output.
         Ok(ToolOutput {
             result,
             cost: None,
             duration,
-            raw: if self.debug_mode { Some(raw_output) } else { None },
+            raw: if self.debug_mode {
+                Some(raw_output)
+            } else {
+                None
+            },
         })
     }
 }
@@ -397,7 +418,11 @@ mod tests {
             .expect("registration should succeed");
 
         let permissions = PermissionConfig {
-            allow: if allow { vec![tool_name.to_owned()] } else { vec![] },
+            allow: if allow {
+                vec![tool_name.to_owned()]
+            } else {
+                vec![]
+            },
             deny: vec![],
             bundles: HashMap::new(),
             require_approval: vec![],
@@ -428,7 +453,10 @@ mod tests {
 
         let output = result.expect("should succeed for allowed tool");
         assert_eq!(output.result["text"], "hello");
-        assert!(output.raw.is_none(), "raw should be None when debug_mode=false");
+        assert!(
+            output.raw.is_none(),
+            "raw should be None when debug_mode=false"
+        );
     }
 
     #[tokio::test]
@@ -450,7 +478,10 @@ mod tests {
             .dispatch("echo", json!({"text": "y"}), &ctx(), "agent-test")
             .await
             .expect("should succeed");
-        assert!(output.raw.is_some(), "raw should be Some when debug_mode=true");
+        assert!(
+            output.raw.is_some(),
+            "raw should be Some when debug_mode=true"
+        );
     }
 
     // -- Permission gate -----------------------------------------------------
@@ -460,7 +491,9 @@ mod tests {
         // When a tool is in require_approval, dispatch signals the agent via
         // RequiresApproval — the agent loop owns the approval lifecycle.
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).expect("registration should succeed");
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
 
         let permissions = PermissionConfig {
             allow: vec![],
@@ -483,7 +516,12 @@ mod tests {
         );
 
         let err = dispatcher
-            .dispatch("echo", json!({"text": "needs approval"}), &ctx(), "agent-test")
+            .dispatch(
+                "echo",
+                json!({"text": "needs approval"}),
+                &ctx(),
+                "agent-test",
+            )
             .await
             .expect_err("should fail with RequiresApproval for require_approval tool");
 
@@ -500,7 +538,9 @@ mod tests {
         use swage_core::ApprovalTimeoutPolicy;
 
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).expect("registration should succeed");
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
 
         let permissions = PermissionConfig {
             allow: vec![],
@@ -528,7 +568,11 @@ mod tests {
             .expect_err("should return RequiresApproval");
 
         match err {
-            ToolError::RequiresApproval { name, timeout_secs, timeout_policy } => {
+            ToolError::RequiresApproval {
+                name,
+                timeout_secs,
+                timeout_policy,
+            } => {
                 assert_eq!(name, "echo");
                 assert_eq!(timeout_secs, Some(300));
                 assert_eq!(timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
@@ -587,8 +631,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_uses_custom_strategy_when_set() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use super::ToolExecutionStrategy;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         // Strategy that records it was called and delegates to the tool.
         struct TrackingStrategy {
@@ -610,17 +654,26 @@ mod tests {
         }
 
         let called = Arc::new(AtomicBool::new(false));
-        let strategy = Arc::new(TrackingStrategy { called: called.clone() });
+        let strategy = Arc::new(TrackingStrategy {
+            called: called.clone(),
+        });
 
-        let dispatcher = make_dispatcher("echo", true, false)
-            .with_execution_strategy(strategy);
+        let dispatcher = make_dispatcher("echo", true, false).with_execution_strategy(strategy);
 
         let output = dispatcher
-            .dispatch("echo", json!({"text": "via strategy"}), &ctx(), "agent-test")
+            .dispatch(
+                "echo",
+                json!({"text": "via strategy"}),
+                &ctx(),
+                "agent-test",
+            )
             .await
             .expect("should succeed via strategy");
 
-        assert!(called.load(Ordering::SeqCst), "strategy.execute() should have been called");
+        assert!(
+            called.load(Ordering::SeqCst),
+            "strategy.execute() should have been called"
+        );
         assert_eq!(output.result["text"], "via strategy");
     }
 
@@ -658,8 +711,8 @@ mod tests {
             }
         }
 
-        let dispatcher = make_dispatcher("echo", true, false)
-            .with_execution_strategy(Arc::new(FailingStrategy));
+        let dispatcher =
+            make_dispatcher("echo", true, false).with_execution_strategy(Arc::new(FailingStrategy));
 
         let err = dispatcher
             .dispatch("echo", json!({"text": "x"}), &ctx(), "agent-test")

@@ -6,8 +6,8 @@
 //! multiple internal modules.
 
 use std::fs;
+use swage_config::{discover, load_resolved_config_from};
 use tempfile::TempDir;
-use swage_config::{load_resolved_config_from, discover};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,7 +16,13 @@ use swage_config::{load_resolved_config_from, discover};
 /// Build a standard Swage directory skeleton in a temp dir.
 /// Returns the TempDir (must be kept alive for the duration of the test)
 /// and the root path.
-fn build_skeleton(global_toml: Option<&str>, project: &str, project_toml: Option<&str>, agent: &str, agent_toml: Option<&str>) -> TempDir {
+fn build_skeleton(
+    global_toml: Option<&str>,
+    project: &str,
+    project_toml: Option<&str>,
+    agent: &str,
+    agent_toml: Option<&str>,
+) -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let root = tmp.path();
 
@@ -78,7 +84,13 @@ model = "claude-opus-4-20250514"
 port = 4000
 "#;
 
-    let tmp = build_skeleton(Some(global), "myproject", Some(project), "assistant", Some(agent));
+    let tmp = build_skeleton(
+        Some(global),
+        "myproject",
+        Some(project),
+        "assistant",
+        Some(agent),
+    );
     let config = load_resolved_config_from(tmp.path(), "myproject", "assistant")
         .expect("should load successfully");
 
@@ -186,7 +198,11 @@ fn instructions_compose_across_levels() {
     // Global instructions
     let global_instr = root.join("instructions");
     fs::create_dir_all(&global_instr).unwrap();
-    fs::write(global_instr.join("01-base.md"), "You are a helpful assistant.").unwrap();
+    fs::write(
+        global_instr.join("01-base.md"),
+        "You are a helpful assistant.",
+    )
+    .unwrap();
     fs::write(global_instr.join("02-safety.md"), "Always be safe.").unwrap();
 
     // Project instructions
@@ -210,16 +226,34 @@ fn instructions_compose_across_levels() {
 
     // Global content appears before project content, project before agent.
     // We check relative positions.
-    let global_pos = config.instructions.find("You are a helpful assistant.").unwrap();
+    let global_pos = config
+        .instructions
+        .find("You are a helpful assistant.")
+        .unwrap();
     let project_pos = config.instructions.find("This is a Rust project.").unwrap();
     let agent_pos = config.instructions.find("Be concise.").unwrap();
-    assert!(global_pos < project_pos, "global instructions should come before project");
-    assert!(project_pos < agent_pos, "project instructions should come before agent");
+    assert!(
+        global_pos < project_pos,
+        "global instructions should come before project"
+    );
+    assert!(
+        project_pos < agent_pos,
+        "project instructions should come before agent"
+    );
 
     // Level attribution is present
-    assert!(config.instructions.contains("Global"), "should attribute global level");
-    assert!(config.instructions.contains("Project"), "should attribute project level");
-    assert!(config.instructions.contains("Agent"), "should attribute agent level");
+    assert!(
+        config.instructions.contains("Global"),
+        "should attribute global level"
+    );
+    assert!(
+        config.instructions.contains("Project"),
+        "should attribute project level"
+    );
+    assert!(
+        config.instructions.contains("Agent"),
+        "should attribute agent level"
+    );
 }
 
 /// A level with no instructions/ directory contributes nothing (no error).
@@ -276,7 +310,10 @@ fn malformed_toml_produces_parse_error() {
 
     // Error should reference the file path
     let err_str = format!("{err}");
-    assert!(err_str.contains("config.toml"), "error should name the file: {err_str}");
+    assert!(
+        err_str.contains("config.toml"),
+        "error should name the file: {err_str}"
+    );
 }
 
 /// Wrong-type fields produce an error naming the file and field path.
@@ -292,7 +329,10 @@ port = "not a number"
     let err = result.expect_err("should fail on wrong type");
 
     let err_str = format!("{err}");
-    assert!(err_str.contains("port"), "error should name the field: {err_str}");
+    assert!(
+        err_str.contains("port"),
+        "error should name the field: {err_str}"
+    );
 }
 
 /// Unknown sections produce an error naming the file and the unrecognised key.
@@ -311,7 +351,10 @@ url = "sqlite://test.db"
     let err = result.expect_err("should fail on unknown section");
 
     let err_str = format!("{err}");
-    assert!(err_str.contains("databse"), "error should name the unknown section: {err_str}");
+    assert!(
+        err_str.contains("databse"),
+        "error should name the unknown section: {err_str}"
+    );
 }
 
 /// Multiple errors in one file are all reported.
@@ -331,8 +374,10 @@ foo = "bar"
 
     let err_str = format!("{err}");
     // Both errors should be present
-    assert!(err_str.contains("port") || err_str.contains("unknown_section"),
-        "at least one specific error should be reported: {err_str}");
+    assert!(
+        err_str.contains("port") || err_str.contains("unknown_section"),
+        "at least one specific error should be reported: {err_str}"
+    );
 }
 
 /// Valid config across all levels loads without errors.
@@ -438,5 +483,8 @@ fn default_lens_directory_recognised() {
 
     // Discovery should not error on the lens structure
     let projects = discover(root);
-    assert!(projects.is_empty(), "no projects, just the lens placeholder");
+    assert!(
+        projects.is_empty(),
+        "no projects, just the lens placeholder"
+    );
 }

@@ -5,23 +5,23 @@
 //! which tasks it spans.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, TokenUsage,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 // Reliability decorators (tasks: retry [rrak], circuit_breaker [97s4],
 // failover [p7fr], builder [jd4i])
 use swage_provider::builder::ProviderChainBuilder;
-use swage_provider::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
-use swage_provider::failover::{FailoverConfig, FailoverProvider};
-use swage_provider::retry::{RetryConfig, RetryProvider};
+use swage_provider::circuit_breaker::CircuitBreakerConfig;
+use swage_provider::failover::FailoverConfig;
+use swage_provider::retry::RetryConfig;
 
 // Model registry (task: registry [uicc])
 use swage_provider::registry::Registry;
@@ -57,11 +57,7 @@ impl CountingMockProvider {
     }
 
     fn next_result(&self) -> Result<(), ProviderError> {
-        self.results
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Ok(()))
+        self.results.lock().unwrap().pop_front().unwrap_or(Ok(()))
     }
 }
 
@@ -206,7 +202,11 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
     // Primary was called (initial + 2 retries = 3 calls).
     assert_eq!(primary.calls(), 3, "Primary should have been tried 3 times");
     // Secondary was called once.
-    assert_eq!(secondary.calls(), 1, "Secondary should have been tried once");
+    assert_eq!(
+        secondary.calls(),
+        1,
+        "Secondary should have been tried once"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +408,9 @@ async fn streaming_through_reliability_stack_delivers_chunks() {
     let chunks: Vec<StreamChunk> = wrapped.stream(request).collect().await;
 
     // Verify we got delta(s), usage, and done.
-    let has_delta = chunks.iter().any(|c| matches!(c, StreamChunk::Delta { .. }));
+    let has_delta = chunks
+        .iter()
+        .any(|c| matches!(c, StreamChunk::Delta { .. }));
     let has_usage = chunks.iter().any(|c| matches!(c, StreamChunk::Usage(_)));
     let has_done = chunks.iter().any(|c| matches!(c, StreamChunk::Done { .. }));
 

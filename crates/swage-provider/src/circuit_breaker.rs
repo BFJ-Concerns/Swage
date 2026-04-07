@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 
 use crate::provider::LlmProvider;
@@ -38,7 +38,10 @@ impl CircuitBreakerConfig {
     /// after every single failure — or when `recovery_timeout` is zero — which
     /// disables the recovery window entirely.
     pub fn new(failure_threshold: u32, recovery_timeout: Duration) -> Result<Self, ProviderError> {
-        let config = Self { failure_threshold, recovery_timeout };
+        let config = Self {
+            failure_threshold,
+            recovery_timeout,
+        };
         config.validate()?;
         Ok(config)
     }
@@ -100,7 +103,9 @@ struct CircuitBreakerInner {
 impl CircuitBreakerInner {
     fn new(config: CircuitBreakerConfig) -> Self {
         Self {
-            state: CircuitState::Closed { consecutive_failures: 0 },
+            state: CircuitState::Closed {
+                consecutive_failures: 0,
+            },
             config,
         }
     }
@@ -128,7 +133,9 @@ impl CircuitBreakerInner {
     ///
     /// Transitions any state to Closed with a reset failure counter.
     fn record_success(&mut self) {
-        self.state = CircuitState::Closed { consecutive_failures: 0 };
+        self.state = CircuitState::Closed {
+            consecutive_failures: 0,
+        };
     }
 
     /// Record a failed request outcome.
@@ -140,17 +147,25 @@ impl CircuitBreakerInner {
             return;
         }
         match &self.state {
-            CircuitState::Closed { consecutive_failures } => {
+            CircuitState::Closed {
+                consecutive_failures,
+            } => {
                 let new_count = consecutive_failures + 1;
                 if new_count >= self.config.failure_threshold {
-                    self.state = CircuitState::Open { opened_at: Instant::now() };
+                    self.state = CircuitState::Open {
+                        opened_at: Instant::now(),
+                    };
                 } else {
-                    self.state = CircuitState::Closed { consecutive_failures: new_count };
+                    self.state = CircuitState::Closed {
+                        consecutive_failures: new_count,
+                    };
                 }
             }
             CircuitState::HalfOpen => {
                 // Probe failed — re-open and restart the recovery countdown.
-                self.state = CircuitState::Open { opened_at: Instant::now() };
+                self.state = CircuitState::Open {
+                    opened_at: Instant::now(),
+                };
             }
             // Open: shouldn't happen since Open requests never reach the backend.
             CircuitState::Open { .. } => {}
@@ -371,7 +386,9 @@ mod tests {
 
     fn permanent_error() -> ProviderError {
         // Auth is not retriable — must never trip the circuit.
-        ProviderError::Auth { provider: "test".into() }
+        ProviderError::Auth {
+            provider: "test".into(),
+        }
     }
 
     fn test_request() -> CompletionRequest {
@@ -472,7 +489,10 @@ mod tests {
         // Circuit is now Open — next call should not reach the backend.
         let result = breaker.complete(req.clone()).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().is_retriable(), "circuit-open error must be retriable");
+        assert!(
+            result.unwrap_err().is_retriable(),
+            "circuit-open error must be retriable"
+        );
         // Exactly three backend calls — not four.
         assert_eq!(call_count.load(Ordering::SeqCst), threshold as usize);
     }
@@ -482,7 +502,8 @@ mod tests {
         // After tripping, many calls should all fast-fail without touching backend.
         let threshold = 3u32;
         let mock = MockProvider::new(
-            (0..threshold).map(|_| Err(transient_error()))
+            (0..threshold)
+                .map(|_| Err(transient_error()))
                 .chain(std::iter::repeat_with(|| Ok(ok_response())).take(20))
                 .collect(),
         );
@@ -584,9 +605,7 @@ mod tests {
     async fn permanent_errors_do_not_trip_circuit() {
         let threshold = 3u32;
         // More permanent errors than the threshold — circuit must stay Closed.
-        let mock = MockProvider::new(
-            (0..10).map(|_| Err(permanent_error())).collect(),
-        );
+        let mock = MockProvider::new((0..10).map(|_| Err(permanent_error())).collect());
         let call_count = mock.call_count.clone();
         let breaker = CircuitBreakerProvider::new(
             Box::new(mock),
@@ -601,8 +620,15 @@ mod tests {
         for i in 0..6usize {
             let result = breaker.complete(req.clone()).await;
             assert!(result.is_err(), "error should propagate");
-            assert!(!result.unwrap_err().is_retriable(), "auth error is permanent");
-            assert_eq!(call_count.load(Ordering::SeqCst), i + 1, "backend called every time");
+            assert!(
+                !result.unwrap_err().is_retriable(),
+                "auth error is permanent"
+            );
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                i + 1,
+                "backend called every time"
+            );
         }
     }
 
@@ -641,13 +667,19 @@ mod tests {
 
     #[test]
     fn config_validate_rejects_zero_threshold() {
-        let config = CircuitBreakerConfig { failure_threshold: 0, recovery_timeout: Duration::from_secs(1) };
+        let config = CircuitBreakerConfig {
+            failure_threshold: 0,
+            recovery_timeout: Duration::from_secs(1),
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn config_validate_rejects_zero_timeout() {
-        let config = CircuitBreakerConfig { failure_threshold: 5, recovery_timeout: Duration::ZERO };
+        let config = CircuitBreakerConfig {
+            failure_threshold: 5,
+            recovery_timeout: Duration::ZERO,
+        };
         assert!(config.validate().is_err());
     }
 
@@ -657,7 +689,10 @@ mod tests {
         let mock = MockProvider::new(vec![]);
         CircuitBreakerProvider::new(
             Box::new(mock),
-            CircuitBreakerConfig { failure_threshold: 0, recovery_timeout: Duration::from_secs(30) },
+            CircuitBreakerConfig {
+                failure_threshold: 0,
+                recovery_timeout: Duration::from_secs(30),
+            },
         );
     }
 
@@ -667,7 +702,10 @@ mod tests {
         let mock = MockProvider::new(vec![]);
         CircuitBreakerProvider::new(
             Box::new(mock),
-            CircuitBreakerConfig { failure_threshold: 5, recovery_timeout: Duration::ZERO },
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                recovery_timeout: Duration::ZERO,
+            },
         );
     }
 }

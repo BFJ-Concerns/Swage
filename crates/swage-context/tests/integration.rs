@@ -15,8 +15,8 @@ use tempfile::TempDir;
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 use swage_provider::LlmProvider;
 
@@ -26,7 +26,9 @@ struct StubProvider;
 
 #[async_trait]
 impl LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub-model" }
+    fn model_id(&self) -> &str {
+        "stub-model"
+    }
 
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("StubProvider::complete")
@@ -71,19 +73,24 @@ fn default_assembly_produces_era_01_equivalent_output() {
     fs::write(
         global_prompts.join("base.md"),
         "---\npriority: 10\n---\n\nYou are a helpful assistant.",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Project rule with higher priority (appears first)
     fs::write(
         project_prompts.join("project.md"),
         "---\npriority: 100\n---\n\nYou are working on project test.",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Load prompt rules from hierarchy
     let project_path = root.path().join("projects/test");
     let levels = vec![
         (swage_config::HierarchyLevel::Global, root.path().as_ref()),
-        (swage_config::HierarchyLevel::Project, project_path.as_path()),
+        (
+            swage_config::HierarchyLevel::Project,
+            project_path.as_path(),
+        ),
     ];
 
     // Load prompt rules (sorted by priority)
@@ -92,8 +99,14 @@ fn default_assembly_produces_era_01_equivalent_output() {
     assert_eq!(rules.len(), 2, "should find rules at both levels");
 
     // The higher-priority project rule should come first
-    assert_eq!(rules[0].priority, 100, "project rule (priority 100) should be first");
-    assert_eq!(rules[1].priority, 10, "global rule (priority 10) should be second");
+    assert_eq!(
+        rules[0].priority, 100,
+        "project rule (priority 100) should be first"
+    );
+    assert_eq!(
+        rules[1].priority, 10,
+        "global rule (priority 10) should be second"
+    );
 
     // Build elements: prompts from rules, history from messages
     let history_messages = vec![
@@ -110,35 +123,38 @@ fn default_assembly_produces_era_01_equivalent_output() {
 
     // Run the default assembly
     let config = swage_config::ContextConfig::default();
-    let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
-        Box::new(prompts_element),
-        Box::new(history_element),
-    ];
+    let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
+        vec![Box::new(prompts_element), Box::new(history_element)];
 
-    let output = swage_context::assembly::default_assembly(
-        &elements,
-        &config,
-        &tokeniser,
-    );
+    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
     // Verify era 0.1 equivalence:
     // 1. First message should be Role::System with combined prompt rule content
-    assert!(!output.messages.is_empty(), "assembly must produce messages");
+    assert!(
+        !output.messages.is_empty(),
+        "assembly must produce messages"
+    );
     assert_eq!(output.messages[0].role, swage_core::Role::System);
 
     // The system message content should contain both rules' content in priority order
     let system_text = &output.messages[0].content[0];
     match system_text {
         swage_core::ContentPart::Text { text } => {
-            assert!(text.contains("You are working on project test."),
-                "higher-priority project rule should appear in system message");
-            assert!(text.contains("You are a helpful assistant."),
-                "lower-priority global rule should appear in system message");
+            assert!(
+                text.contains("You are working on project test."),
+                "higher-priority project rule should appear in system message"
+            );
+            assert!(
+                text.contains("You are a helpful assistant."),
+                "lower-priority global rule should appear in system message"
+            );
             // Priority order: project rule content should appear before global
             let project_pos = text.find("You are working on project test.").unwrap();
             let global_pos = text.find("You are a helpful assistant.").unwrap();
-            assert!(project_pos < global_pos,
-                "project rule (priority 100) should appear before global rule (priority 10)");
+            assert!(
+                project_pos < global_pos,
+                "project rule (priority 100) should appear before global rule (priority 10)"
+            );
         }
         _ => panic!("expected text content in system message"),
     }
@@ -150,9 +166,18 @@ fn default_assembly_produces_era_01_equivalent_output() {
 
     // 3. Report should be populated
     assert_eq!(output.report.assembly_name, "default");
-    assert!(!output.report.elements.is_empty(), "report should contain element entries");
-    assert!(output.report.total_tokens > 0, "total tokens should be positive");
-    assert!(output.report.duration.as_nanos() > 0, "duration should be recorded");
+    assert!(
+        !output.report.elements.is_empty(),
+        "report should contain element entries"
+    );
+    assert!(
+        output.report.total_tokens > 0,
+        "total tokens should be positive"
+    );
+    assert!(
+        output.report.duration.as_nanos() > 0,
+        "duration should be recorded"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -186,20 +211,17 @@ fn budget_triggers_truncation_preserving_recent_messages() {
         ));
         messages.push(swage_core::ChatMessage::new(
             swage_core::Role::Assistant,
-            format!("This is assistant response number {i} with additional token-consuming content"),
+            format!(
+                "This is assistant response number {i} with additional token-consuming content"
+            ),
         ));
     }
 
     let history_element = swage_context::history::HistoryElement::new(messages.clone());
-    let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
-        Box::new(history_element),
-    ];
+    let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
+        vec![Box::new(history_element)];
 
-    let output = swage_context::assembly::default_assembly(
-        &elements,
-        &config,
-        &tokeniser,
-    );
+    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
     // Verify truncation occurred
     assert!(
@@ -212,17 +234,26 @@ fn budget_triggers_truncation_preserving_recent_messages() {
     // Most recent exchange should always be preserved
     let last_output = output.messages.last().unwrap();
     let last_input = messages.last().unwrap();
-    assert_eq!(last_output.role, last_input.role,
-        "last message role should match — most recent exchange preserved");
+    assert_eq!(
+        last_output.role, last_input.role,
+        "last message role should match — most recent exchange preserved"
+    );
 
     // Report should record truncation
-    assert!(!output.report.compaction_applied.is_empty(),
-        "compaction records should be present when truncation occurred");
+    assert!(
+        !output.report.compaction_applied.is_empty(),
+        "compaction records should be present when truncation occurred"
+    );
     let record = &output.report.compaction_applied[0];
     assert_eq!(record.actual_strategy, "truncation");
-    assert!(record.messages_removed > 0, "should report messages removed");
-    assert!(record.tokens_before > record.tokens_after,
-        "tokens should decrease after truncation");
+    assert!(
+        record.messages_removed > 0,
+        "should report messages removed"
+    );
+    assert!(
+        record.tokens_before > record.tokens_after,
+        "tokens should decrease after truncation"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,26 +278,25 @@ async fn failopen_catches_invalid_assembly_and_falls_back() {
     ];
 
     let history_element = swage_context::history::HistoryElement::new(history_messages);
-    let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
-        Box::new(history_element),
-    ];
+    let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
+        vec![Box::new(history_element)];
 
     // Use the top-level assemble() which wraps with fail-open.
     // Pass empty search levels and no Python runner — this test exercises the
     // default assembly path only.
-    let output = swage_context::assembly::assemble(
-        &elements,
-        &config,
-        &tokeniser,
-        &[],
-        &StubProvider,
-        None,
-    ).await;
+    let output =
+        swage_context::assembly::assemble(&elements, &config, &tokeniser, &[], &StubProvider, None)
+            .await;
 
     // Default assembly should succeed without errors
-    assert!(!output.messages.is_empty(), "assembly should produce messages");
-    assert!(output.report.errors.is_empty(),
-        "no errors expected when default assembly succeeds");
+    assert!(
+        !output.messages.is_empty(),
+        "assembly should produce messages"
+    );
+    assert!(
+        output.report.errors.is_empty(),
+        "no errors expected when default assembly succeeds"
+    );
 
     // Verify the report is populated
     assert_eq!(output.report.assembly_name, "default");
@@ -295,11 +325,13 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     fs::write(
         global_prompts.join("safety.md"),
         "---\npriority: 200\n---\n\nAlways be safe and helpful.",
-    ).unwrap();
+    )
+    .unwrap();
     fs::write(
         global_prompts.join("defaults.md"),
         "---\npriority: 5\n---\n\nDefault behaviour instructions.",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Agent: one rule with no frontmatter (default priority 0)
     let agent_prompts = root.path().join("projects/test/agents/default/prompts");
@@ -307,14 +339,18 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     fs::write(
         agent_prompts.join("persona.md"),
         "You are a coding assistant.",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Load rules from three levels (project has no prompts — silently skipped)
     let project_path = root.path().join("projects/test");
     let agent_path = root.path().join("projects/test/agents/default");
     let levels = vec![
         (swage_config::HierarchyLevel::Global, root.path().as_ref()),
-        (swage_config::HierarchyLevel::Project, project_path.as_path()),
+        (
+            swage_config::HierarchyLevel::Project,
+            project_path.as_path(),
+        ),
         (swage_config::HierarchyLevel::Agent, agent_path.as_path()),
     ];
 
@@ -325,27 +361,31 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     assert_eq!(rules.len(), 3);
     assert_eq!(rules[0].priority, 200, "safety rule should be first");
     assert_eq!(rules[1].priority, 5, "defaults rule should be second");
-    assert_eq!(rules[2].priority, 0, "persona rule (no frontmatter) should be last");
+    assert_eq!(
+        rules[2].priority, 0,
+        "persona rule (no frontmatter) should be last"
+    );
 
     // Assemble and verify the report shows per-rule attribution
     let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
     let prompts_element = swage_context::prompts::PromptsElement::new(rules);
     let config = swage_config::ContextConfig::default();
-    let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
-        Box::new(prompts_element),
-    ];
+    let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
+        vec![Box::new(prompts_element)];
 
-    let output = swage_context::assembly::default_assembly(
-        &elements,
-        &config,
-        &tokeniser,
-    );
+    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
     // Report should show the prompts element with a token count
-    let prompts_report = output.report.elements.iter()
+    let prompts_report = output
+        .report
+        .elements
+        .iter()
         .find(|e| e.name == "prompts")
         .expect("report should contain a prompts element entry");
-    assert!(prompts_report.token_count > 0, "prompts element should have positive token count");
+    assert!(
+        prompts_report.token_count > 0,
+        "prompts element should have positive token count"
+    );
 
     // The assembled system message should contain all three rules' content
     assert!(!output.messages.is_empty());
@@ -369,33 +409,48 @@ fn config_context_section_merges_through_hierarchy() {
 
     // Global config sets a budget
     let global_config = root.path().join("config.toml");
-    fs::write(&global_config, r#"
+    fs::write(
+        &global_config,
+        r#"
 [context]
 budget = 50000
 timeout = 10
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Project config overrides the budget
     let project_dir = root.path().join("projects/test");
     fs::create_dir_all(project_dir.join("agents/default")).unwrap();
     fs::create_dir_all(root.path().join("lenses/default")).unwrap();
-    fs::write(project_dir.join("config.toml"), r#"
+    fs::write(
+        project_dir.join("config.toml"),
+        r#"
 [context]
 budget = 20000
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let config = swage_config::load_resolved_config_from(root.path(), "test", "default")
         .expect("config should load successfully");
 
     // Project budget should override global
-    assert_eq!(config.context.budget, Some(20000),
-        "project budget should override global");
+    assert_eq!(
+        config.context.budget,
+        Some(20000),
+        "project budget should override global"
+    );
     // Timeout should inherit from global (not overridden by project)
-    assert_eq!(config.context.timeout, 10,
-        "timeout should inherit from global level");
+    assert_eq!(
+        config.context.timeout, 10,
+        "timeout should inherit from global level"
+    );
     // Assembly should use the default
-    assert_eq!(config.context.assembly, "default",
-        "assembly should default to 'default'");
+    assert_eq!(
+        config.context.assembly, "default",
+        "assembly should default to 'default'"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,7 +467,9 @@ budget = 20000
 fn config_validates_tools_and_context_sections() {
     let root = TempDir::new().unwrap();
     let config_path = root.path().join("config.toml");
-    fs::write(&config_path, r#"
+    fs::write(
+        &config_path,
+        r#"
 [server]
 port = 3000
 
@@ -424,9 +481,13 @@ max_output_bytes = 200000
 assembly = "default"
 timeout = 5
 budget = 128000
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let problems = swage_config::validate_files(&[config_path.as_path()]);
-    assert!(problems.is_empty(),
-        "config with [tools] and [context] should validate cleanly, got: {problems:?}");
+    assert!(
+        problems.is_empty(),
+        "config with [tools] and [context] should validate cleanly, got: {problems:?}"
+    );
 }

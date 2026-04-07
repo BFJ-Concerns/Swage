@@ -30,6 +30,12 @@ use crate::error::ClientError;
 // Server → Client event types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SchemaValidationError {
+    pub path: String,
+    pub message: String,
+}
+
 /// Events streamed from the gateway to the client.
 ///
 /// Mirrors the gateway's own `ServerEvent` wire format — uses the same
@@ -92,6 +98,69 @@ pub enum ServerEvent {
         structured_output: Option<serde_json::Value>,
     },
 
+    /// A schema validation attempt failed and the agent will retry.
+    OutputSchemaRetry {
+        turn_id: Uuid,
+        attempt: u32,
+        max_retries: u32,
+        errors: Vec<SchemaValidationError>,
+    },
+
+    /// All schema validation retries were exhausted without a valid response.
+    OutputSchemaFailed {
+        turn_id: Uuid,
+        attempts: u32,
+        errors: Vec<SchemaValidationError>,
+    },
+
+    /// A delegation from one agent to another has started.
+    DelegationStarted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+    },
+
+    /// A delegation has completed.
+    DelegationCompleted {
+        parent_turn_id: Uuid,
+        child_turn_id: Uuid,
+        target_agent_id: String,
+        success: bool,
+    },
+
+    /// A topology run has started for a session.
+    TopologyRunStarted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        team_id: Uuid,
+    },
+
+    /// A topology node has started for a session.
+    TopologyNodeStarted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        node_execution_id: Uuid,
+        node_id: String,
+    },
+
+    /// A topology node has finished for a session.
+    TopologyNodeCompleted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        node_execution_id: Uuid,
+        node_id: String,
+        success: bool,
+    },
+
+    /// A topology run has completed for a session.
+    TopologyRunCompleted {
+        session_id: Uuid,
+        topology_run_id: Uuid,
+        success: bool,
+        #[serde(default)]
+        final_output: Option<serde_json::Value>,
+    },
+
     /// An error occurred. `code` is a well-known string (e.g. `"provider_error"`).
     Error { code: String, message: String },
 
@@ -114,21 +183,6 @@ pub enum ServerEvent {
 
     /// A skill was deactivated for this session.
     SkillDeactivated { name: String },
-
-    /// A delegation from one agent to another has started.
-    DelegationStarted {
-        parent_turn_id: Uuid,
-        child_turn_id: Uuid,
-        target_agent_id: String,
-    },
-
-    /// A delegation has completed.
-    DelegationCompleted {
-        parent_turn_id: Uuid,
-        child_turn_id: Uuid,
-        target_agent_id: String,
-        success: bool,
-    },
 
     /// Approval required — a tool or hook requires human review.
     ApprovalRequired {
@@ -169,6 +223,12 @@ pub enum ServerEvent {
         #[serde(default)]
         current_state: Option<String>,
     },
+
+    /// A gateway event this client version does not understand.
+    Unknown {
+        event_type: String,
+        payload: serde_json::Value,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +244,11 @@ pub enum ServerEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
     /// Send a message to the conversation, triggering a new LLM turn.
-    SendMessage { content: String },
+    SendMessage {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<Uuid>,
+    },
     /// Cancel the currently active turn.
     Cancel {},
     /// Subscribe to one or more observability channels (e.g. `"context"`, `"tools"`).
@@ -255,9 +319,9 @@ impl GatewayWebSocket {
     /// Read the next typed server event from the stream.
     ///
     /// Returns `Ok(None)` on a clean close (the server sent a Close frame).
-    /// Non-text frames are silently skipped. Text frames that cannot be
-    /// deserialised are logged as warnings and skipped — forward compatibility
-    /// with new event types the client does not yet know about.
+    /// Non-text frames are silently skipped. Malformed JSON frames are logged
+    /// and skipped. Unknown event types are surfaced as `ServerEvent::Unknown`
+    /// so callers can decide how to handle them.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, ClientError> {
         loop {
             match self.inner.next().await {
@@ -274,15 +338,41 @@ impl GatewayWebSocket {
                 Some(Ok(Message::Close(_))) => return Ok(None),
 
                 Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<ServerEvent>(&text) {
-                        Ok(event) => return Ok(Some(event)),
-                        Err(e) => {
-                            // Unknown event type from a newer server — log and skip
-                            // rather than crashing so old clients stay compatible.
+                    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(value) => value,
+                        Err(error) => {
                             tracing::warn!(
-                                error = %e,
+                                error = %error,
                                 message = %text,
-                                "Skipping unrecognised WebSocket message from gateway"
+                                "Skipping malformed WebSocket message from gateway"
+                            );
+                            continue;
+                        }
+                    };
+
+                    match serde_json::from_value::<ServerEvent>(value.clone()) {
+                        Ok(event) => return Ok(Some(event)),
+                        Err(error) => {
+                            if let Some(event_type) = value
+                                .as_object()
+                                .and_then(|object| object.get("type"))
+                                .and_then(|value| value.as_str())
+                            {
+                                tracing::warn!(
+                                    error = %error,
+                                    event_type,
+                                    "Received unrecognised WebSocket event from gateway"
+                                );
+                                return Ok(Some(ServerEvent::Unknown {
+                                    event_type: event_type.to_string(),
+                                    payload: value,
+                                }));
+                            }
+
+                            tracing::warn!(
+                                error = %error,
+                                message = %text,
+                                "Skipping malformed WebSocket message from gateway"
                             );
                             continue;
                         }
@@ -308,7 +398,7 @@ impl GatewayWebSocket {
         })?;
 
         self.inner
-            .send(Message::Text(text.into()))
+            .send(Message::Text(text))
             .await
             .map_err(|e| ClientError::WebSocketFailed {
                 address: self.address.clone(),
@@ -701,11 +791,13 @@ mod tests {
     fn send_message_serialises() {
         let event = ClientEvent::SendMessage {
             content: "hello".to_string(),
+            thread_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "send_message");
         assert_eq!(v["content"], "hello");
+        assert!(v.get("thread_id").is_none());
     }
 
     #[test]

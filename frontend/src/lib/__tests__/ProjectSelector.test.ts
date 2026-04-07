@@ -211,7 +211,7 @@ describe("project list in dropdown", () => {
     const items = document.querySelectorAll(".project-dropdown .project-item");
     const projectAItem = Array.from(items).find((el) =>
       el.textContent?.includes("Project A"),
-    ) as HTMLElement;
+    )?.querySelector(".project-select-btn") as HTMLButtonElement;
 
     expect(projectAItem).not.toBeUndefined();
     flushSync(() => projectAItem.click());
@@ -234,7 +234,7 @@ describe("project list in dropdown", () => {
     const items = document.querySelectorAll(".project-dropdown .project-item");
     const projectAItem = Array.from(items).find((el) =>
       el.textContent?.includes("Project A"),
-    ) as HTMLElement;
+    )?.querySelector(".project-select-btn") as HTMLButtonElement;
 
     flushSync(() => projectAItem.click());
 
@@ -253,7 +253,10 @@ describe("project list in dropdown", () => {
     click(".project-selector .toggle-btn");
 
     const items = document.querySelectorAll(".project-dropdown .project-item");
-    flushSync(() => (items[0] as HTMLElement).click());
+    const firstProjectButton = items[0]?.querySelector(
+      ".project-select-btn",
+    ) as HTMLButtonElement;
+    flushSync(() => firstProjectButton.click());
 
     expect(document.querySelector(".project-dropdown")).toBeNull();
   });

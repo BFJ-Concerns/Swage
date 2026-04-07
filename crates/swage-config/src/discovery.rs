@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::model::HierarchyLevel;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -136,7 +136,12 @@ pub fn discover_projects(root: &Path) -> Vec<DiscoveredProject> {
             let path = projects_dir.join(&name);
             let agents = discover_agents(&path);
             let teams = discover_teams(&path);
-            DiscoveredProject { name, path, agents, teams }
+            DiscoveredProject {
+                name,
+                path,
+                agents,
+                teams,
+            }
         })
         .collect()
 }
@@ -173,7 +178,11 @@ pub fn discover_assemblies(dir: &Path) -> Vec<AssemblyFile> {
         // Only regular files with a .py extension.
         .filter(|entry| {
             entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && entry.path().extension().map(|ext| ext == "py").unwrap_or(false)
+                && entry
+                    .path()
+                    .extension()
+                    .map(|ext| ext == "py")
+                    .unwrap_or(false)
         })
         .filter_map(|entry| {
             let path = entry.path().canonicalize().ok()?;
@@ -193,7 +202,10 @@ pub fn discover_assemblies(dir: &Path) -> Vec<AssemblyFile> {
 /// `levels` should be ordered from highest to lowest priority (e.g. Agent →
 /// Project → Global). The first match is returned with its provenance level.
 /// Returns `None` if the assembly is not present at any level.
-pub fn resolve_assembly(name: &str, levels: &[(HierarchyLevel, &Path)]) -> Option<ResolvedAssembly> {
+pub fn resolve_assembly(
+    name: &str,
+    levels: &[(HierarchyLevel, &Path)],
+) -> Option<ResolvedAssembly> {
     let filename = format!("{name}.py");
 
     for (level, base_dir) in levels {
@@ -211,7 +223,6 @@ pub fn resolve_assembly(name: &str, levels: &[(HierarchyLevel, &Path)]) -> Optio
 
     None
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -256,7 +267,7 @@ mod tests {
         let projects = discover_projects(tmp.path());
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"alpha"), "should discover alpha");
-        assert!(names.contains(&"beta"),  "should discover beta");
+        assert!(names.contains(&"beta"), "should discover beta");
     }
 
     #[test]
@@ -285,8 +296,11 @@ mod tests {
         fs::create_dir_all(tmp.path().join("agents/reviewer")).unwrap();
 
         let agents = discover_agents(tmp.path());
-        assert!(agents.contains(&"coder".to_string()),    "should find coder");
-        assert!(agents.contains(&"reviewer".to_string()), "should find reviewer");
+        assert!(agents.contains(&"coder".to_string()), "should find coder");
+        assert!(
+            agents.contains(&"reviewer".to_string()),
+            "should find reviewer"
+        );
     }
 
     #[test]
@@ -305,8 +319,11 @@ mod tests {
         fs::create_dir_all(tmp.path().join("teams/coding")).unwrap();
 
         let teams = discover_teams(tmp.path());
-        assert!(teams.contains(&"research".to_string()), "should find research");
-        assert!(teams.contains(&"coding".to_string()),   "should find coding");
+        assert!(
+            teams.contains(&"research".to_string()),
+            "should find research"
+        );
+        assert!(teams.contains(&"coding".to_string()), "should find coding");
     }
 
     #[test]
@@ -326,12 +343,16 @@ mod tests {
         fs::create_dir_all(tmp.path().join("projects/beta")).unwrap();
 
         let projects = discover(tmp.path());
-        let alpha = projects.iter().find(|p| p.name == "alpha")
+        let alpha = projects
+            .iter()
+            .find(|p| p.name == "alpha")
             .expect("alpha should be discovered");
         assert!(alpha.agents.contains(&"assistant".to_string()));
         assert!(alpha.agents.contains(&"reviewer".to_string()));
 
-        let beta = projects.iter().find(|p| p.name == "beta")
+        let beta = projects
+            .iter()
+            .find(|p| p.name == "beta")
             .expect("beta should be discovered");
         assert!(beta.agents.is_empty(), "beta has no agents");
     }
@@ -378,7 +399,10 @@ mod tests {
 
         assert_eq!(files.len(), 2, "only .py files should be returned");
         assert_eq!(files[0].name, "custom");
-        assert_eq!(files[0].path, asm_dir.join("custom.py").canonicalize().unwrap());
+        assert_eq!(
+            files[0].path,
+            asm_dir.join("custom.py").canonicalize().unwrap()
+        );
         assert_eq!(files[1].name, "default");
     }
 
@@ -406,22 +430,25 @@ mod tests {
     fn resolve_assembly_finds_at_project_level() {
         use crate::model::HierarchyLevel;
 
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
         // Place custom.py only at the project level.
         fs::create_dir_all(project_dir.path().join("assemblies")).unwrap();
         fs::write(project_dir.path().join("assemblies/custom.py"), b"").unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
         ];
 
         let result = resolve_assembly("custom", &levels);
-        assert!(result.is_some(), "custom.py at project level should be found");
+        assert!(
+            result.is_some(),
+            "custom.py at project level should be found"
+        );
 
         let resolved = result.unwrap();
         assert_eq!(resolved.name, "custom");
@@ -433,9 +460,9 @@ mod tests {
     fn resolve_assembly_prefers_agent_over_project() {
         use crate::model::HierarchyLevel;
 
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
         // Place custom.py at both agent and project levels.
         fs::create_dir_all(agent_dir.path().join("assemblies")).unwrap();
@@ -444,28 +471,31 @@ mod tests {
         fs::write(project_dir.path().join("assemblies/custom.py"), b"").unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
         ];
 
         let resolved = resolve_assembly("custom", &levels).unwrap();
-        assert_eq!(resolved.level, HierarchyLevel::Agent,
-            "agent level should win over project when both have the file");
+        assert_eq!(
+            resolved.level,
+            HierarchyLevel::Agent,
+            "agent level should win over project when both have the file"
+        );
     }
 
     #[test]
     fn resolve_assembly_returns_none_when_not_found() {
         use crate::model::HierarchyLevel;
 
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
         ];
 
         let result = resolve_assembly("nonexistent", &levels);

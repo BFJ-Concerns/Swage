@@ -21,15 +21,14 @@ use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 use swage_gateway::{server::build_router, shutdown::recover_orphaned_turns, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
     model::{NewThread, NewTurn, TurnState},
-    store::ProjectStore,
 };
 use swage_tool;
 
@@ -332,20 +331,18 @@ async fn conversation_lifecycle_with_streaming() {
 
     // 4. Collect token events, then turn_complete.
     let mut tokens = Vec::new();
-    let mut turn_id = None;
-    loop {
+    let turn_id = loop {
         let event = ws_recv(&mut ws_read).await;
         match event["type"].as_str().unwrap() {
             "token" => tokens.push(event["content"].as_str().unwrap().to_string()),
             "turn_complete" => {
-                turn_id = Some(event["turn_id"].as_str().unwrap().to_string());
-                break;
+                break event["turn_id"].as_str().unwrap().to_string();
             }
             other => panic!("unexpected event: {other}"),
         }
-    }
+    };
     assert_eq!(tokens, ["Hello", " world", "!"]);
-    assert!(turn_id.is_some());
+    assert!(!turn_id.is_empty());
 
     // Close WebSocket before HTTP inspection.
     drop(ws_write);

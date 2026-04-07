@@ -73,12 +73,14 @@ impl AgentConnection {
         duration_ms: u64,
         error: Option<String>,
     ) -> Result<(), SandboxError> {
-        self.transport.send(&IpcMessage::ToolCallResult {
-            request_id,
-            output,
-            duration_ms,
-            error,
-        }).await
+        self.transport
+            .send(&IpcMessage::ToolCallResult {
+                request_id,
+                output,
+                duration_ms,
+                error,
+            })
+            .await
     }
 
     /// Proxy an LLM completion request through the host.
@@ -100,14 +102,16 @@ impl AgentConnection {
     ) -> Result<LlmIpcResponse, SandboxError> {
         let request_id = Uuid::new_v4().to_string();
 
-        self.transport.send(&IpcMessage::LlmRequest {
-            request_id: request_id.clone(),
-            messages,
-            model,
-            max_tokens,
-            temperature,
-            tool_definitions,
-        }).await?;
+        self.transport
+            .send(&IpcMessage::LlmRequest {
+                request_id: request_id.clone(),
+                messages,
+                model,
+                max_tokens,
+                temperature,
+                tool_definitions,
+            })
+            .await?;
 
         // Await the response, correlating by request_id.
         // The IPC channel is sequential (one outstanding LLM request at a time),
@@ -120,20 +124,37 @@ impl AgentConnection {
                     ..
                 } if resp_id == &request_id => {
                     // Destructure now that we've confirmed the id.
-                    if let IpcMessage::LlmResponse { content, token_usage, finish_reason, tool_calls, .. } = msg {
-                        return Ok(LlmIpcResponse { content, token_usage, finish_reason, tool_calls });
+                    if let IpcMessage::LlmResponse {
+                        content,
+                        token_usage,
+                        finish_reason,
+                        tool_calls,
+                        ..
+                    } = msg
+                    {
+                        return Ok(LlmIpcResponse {
+                            content,
+                            token_usage,
+                            finish_reason,
+                            tool_calls,
+                        });
                     }
                     unreachable!()
                 }
-                IpcMessage::ErrorMessage { request_id: Some(ref err_req_id), ref description, .. }
-                    if err_req_id == &request_id =>
-                {
+                IpcMessage::ErrorMessage {
+                    request_id: Some(ref err_req_id),
+                    ref description,
+                    ..
+                } if err_req_id == &request_id => {
                     return Err(SandboxError::IpcError {
                         message: description.clone(),
                     });
                 }
                 // An LlmResponse for a different request_id is a protocol error.
-                IpcMessage::LlmResponse { request_id: ref other_id, .. } => {
+                IpcMessage::LlmResponse {
+                    request_id: ref other_id,
+                    ..
+                } => {
                     return Err(SandboxError::IpcError {
                         message: format!(
                             "received LlmResponse for unexpected request_id '{other_id}', expected '{request_id}'"
@@ -172,11 +193,13 @@ impl AgentConnection {
         category: ErrorCategory,
         description: String,
     ) -> Result<(), SandboxError> {
-        self.transport.send(&IpcMessage::ErrorMessage {
-            request_id,
-            category,
-            description,
-        }).await
+        self.transport
+            .send(&IpcMessage::ErrorMessage {
+                request_id,
+                category,
+                description,
+            })
+            .await
     }
 }
 
@@ -217,15 +240,22 @@ mod tests {
         let mut host_transport = IpcTransport::new(host_stream);
 
         // Host sends a tool call request.
-        host_transport.send(&IpcMessage::ToolCallRequest {
-            request_id: "req-42".into(),
-            tool_name: "bash".into(),
-            parameters: json!({"command": "ls"}),
-        }).await.unwrap();
+        host_transport
+            .send(&IpcMessage::ToolCallRequest {
+                request_id: "req-42".into(),
+                tool_name: "bash".into(),
+                parameters: json!({"command": "ls"}),
+            })
+            .await
+            .unwrap();
 
         let msg = agent.receive_message().await.unwrap();
         match msg {
-            IpcMessage::ToolCallRequest { request_id, tool_name, .. } => {
+            IpcMessage::ToolCallRequest {
+                request_id,
+                tool_name,
+                ..
+            } => {
                 assert_eq!(request_id, "req-42");
                 assert_eq!(tool_name, "bash");
             }
@@ -253,16 +283,19 @@ mod tests {
         let mut agent = AgentConnection::new(IpcTransport::new(agent_stream));
         let mut host_transport = IpcTransport::new(host_stream);
 
-        agent.send_tool_result(
-            "req-1".into(),
-            json!({"lines": ["a", "b"]}),
-            17,
-            None,
-        ).await.unwrap();
+        agent
+            .send_tool_result("req-1".into(), json!({"lines": ["a", "b"]}), 17, None)
+            .await
+            .unwrap();
 
         let received = host_transport.receive().await.unwrap();
         match received {
-            IpcMessage::ToolCallResult { request_id, output, duration_ms, error } => {
+            IpcMessage::ToolCallResult {
+                request_id,
+                output,
+                duration_ms,
+                error,
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(output, json!({"lines": ["a", "b"]}));
                 assert_eq!(duration_ms, 17);
@@ -278,12 +311,15 @@ mod tests {
         let mut agent = AgentConnection::new(IpcTransport::new(agent_stream));
         let mut host_transport = IpcTransport::new(host_stream);
 
-        agent.send_tool_result(
-            "req-2".into(),
-            serde_json::Value::Null,
-            3,
-            Some("command not found".into()),
-        ).await.unwrap();
+        agent
+            .send_tool_result(
+                "req-2".into(),
+                serde_json::Value::Null,
+                3,
+                Some("command not found".into()),
+            )
+            .await
+            .unwrap();
 
         let received = host_transport.receive().await.unwrap();
         match received {
@@ -308,29 +344,35 @@ mod tests {
             let msg = host_transport.receive().await.unwrap();
             match msg {
                 IpcMessage::LlmRequest { request_id, .. } => {
-                    host_transport.send(&IpcMessage::LlmResponse {
-                        request_id,
-                        content: "The answer is 42.".into(),
-                        token_usage: TokenUsage {
-                            prompt_tokens: 10,
-                            completion_tokens: 5,
-                            total_tokens: 15,
-                        },
-                        finish_reason: FinishReason::Stop,
-                        tool_calls: None,
-                    }).await.unwrap();
+                    host_transport
+                        .send(&IpcMessage::LlmResponse {
+                            request_id,
+                            content: "The answer is 42.".into(),
+                            token_usage: TokenUsage {
+                                prompt_tokens: 10,
+                                completion_tokens: 5,
+                                total_tokens: 15,
+                            },
+                            finish_reason: FinishReason::Stop,
+                            tool_calls: None,
+                        })
+                        .await
+                        .unwrap();
                 }
                 other => panic!("host expected LlmRequest, got {:?}", other),
             }
         });
 
-        let response = agent.send_llm_request(
-            vec![ChatMessage::new(Role::User, "What is 6 * 7?")],
-            None,
-            Some(128),
-            None,
-            None,
-        ).await.unwrap();
+        let response = agent
+            .send_llm_request(
+                vec![ChatMessage::new(Role::User, "What is 6 * 7?")],
+                None,
+                Some(128),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         host_handle.await.unwrap();
 
@@ -347,37 +389,52 @@ mod tests {
         let mut host_transport = IpcTransport::new(host_stream);
 
         let agent_handle = tokio::spawn(async move {
-            agent.send_llm_request(
-                vec![ChatMessage::new(Role::User, "hello")],
-                Some("claude-3-opus".into()),
-                Some(256),
-                Some(0.7),
-                None,
-            ).await
+            agent
+                .send_llm_request(
+                    vec![ChatMessage::new(Role::User, "hello")],
+                    Some("claude-3-opus".into()),
+                    Some(256),
+                    Some(0.7),
+                    None,
+                )
+                .await
         });
 
         // Verify the host receives all the fields correctly.
         let received = host_transport.receive().await.unwrap();
         match received {
-            IpcMessage::LlmRequest { request_id, model, max_tokens, temperature, messages, .. } => {
-                assert!(!request_id.is_empty(), "request_id should be auto-generated");
+            IpcMessage::LlmRequest {
+                request_id,
+                model,
+                max_tokens,
+                temperature,
+                messages,
+                ..
+            } => {
+                assert!(
+                    !request_id.is_empty(),
+                    "request_id should be auto-generated"
+                );
                 assert_eq!(model, Some("claude-3-opus".into()));
                 assert_eq!(max_tokens, Some(256));
                 assert_eq!(temperature, Some(0.7));
                 assert_eq!(messages.len(), 1);
 
                 // Send back response to unblock the agent task.
-                host_transport.send(&IpcMessage::LlmResponse {
-                    request_id,
-                    content: "ok".into(),
-                    token_usage: TokenUsage {
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        total_tokens: 2,
-                    },
-                    finish_reason: FinishReason::Stop,
-                    tool_calls: None,
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::LlmResponse {
+                        request_id,
+                        content: "ok".into(),
+                        token_usage: TokenUsage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        tool_calls: None,
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("expected LlmRequest, got {:?}", other),
         }
@@ -391,25 +448,32 @@ mod tests {
         let mut agent = AgentConnection::new(IpcTransport::new(agent_stream));
         let mut host_transport = IpcTransport::new(host_stream);
 
-        let agent_handle = tokio::spawn(async move {
-            agent.send_llm_request(vec![], None, None, None, None).await
-        });
+        let agent_handle =
+            tokio::spawn(
+                async move { agent.send_llm_request(vec![], None, None, None, None).await },
+            );
 
         // Host responds with an error for the same request.
         let received = host_transport.receive().await.unwrap();
         match received {
             IpcMessage::LlmRequest { request_id, .. } => {
-                host_transport.send(&IpcMessage::ErrorMessage {
-                    request_id: Some(request_id),
-                    category: ErrorCategory::Provider,
-                    description: "provider unavailable".into(),
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::ErrorMessage {
+                        request_id: Some(request_id),
+                        category: ErrorCategory::Provider,
+                        description: "provider unavailable".into(),
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("host expected LlmRequest, got {:?}", other),
         }
 
         let result = agent_handle.await.unwrap();
-        assert!(result.is_err(), "should return error when host sends ErrorMessage");
+        assert!(
+            result.is_err(),
+            "should return error when host sends ErrorMessage"
+        );
     }
 
     // -- send_shutdown_ack ----------------------------------------------------
@@ -434,15 +498,22 @@ mod tests {
         let mut agent = AgentConnection::new(IpcTransport::new(agent_stream));
         let mut host_transport = IpcTransport::new(host_stream);
 
-        agent.send_error(
-            Some("req-99".into()),
-            ErrorCategory::ToolExecution,
-            "tool panicked".into(),
-        ).await.unwrap();
+        agent
+            .send_error(
+                Some("req-99".into()),
+                ErrorCategory::ToolExecution,
+                "tool panicked".into(),
+            )
+            .await
+            .unwrap();
 
         let received = host_transport.receive().await.unwrap();
         match received {
-            IpcMessage::ErrorMessage { request_id, category, description } => {
+            IpcMessage::ErrorMessage {
+                request_id,
+                category,
+                description,
+            } => {
                 assert_eq!(request_id, Some("req-99".into()));
                 assert_eq!(category, ErrorCategory::ToolExecution);
                 assert_eq!(description, "tool panicked");
@@ -457,7 +528,10 @@ mod tests {
         let mut agent = AgentConnection::new(IpcTransport::new(agent_stream));
         let mut host_transport = IpcTransport::new(host_stream);
 
-        agent.send_error(None, ErrorCategory::Connection, "socket error".into()).await.unwrap();
+        agent
+            .send_error(None, ErrorCategory::Connection, "socket error".into())
+            .await
+            .unwrap();
 
         let received = host_transport.receive().await.unwrap();
         match received {

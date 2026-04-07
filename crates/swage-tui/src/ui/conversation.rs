@@ -5,11 +5,11 @@
 //! tokens for the active response, and inline tool call status indicators.
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::state::{ActiveTool, DisplayMessage, DisplayToolCall};
@@ -21,9 +21,10 @@ use crate::state::{ActiveTool, DisplayMessage, DisplayToolCall};
 fn role_label(role: &str) -> Line<'static> {
     match role {
         "user" => Line::from(Span::styled("You:", Style::default().fg(Color::Cyan))),
-        "assistant" => {
-            Line::from(Span::styled("Assistant:", Style::default().fg(Color::Green)))
-        }
+        "assistant" => Line::from(Span::styled(
+            "Assistant:",
+            Style::default().fg(Color::Green),
+        )),
         other => Line::from(Span::raw(format!("{other}:"))),
     }
 }
@@ -94,9 +95,7 @@ pub fn render_conversation(
     active_tools: &[ActiveTool],
     scroll_offset: usize,
 ) {
-    let block = Block::default()
-        .title("Conversation")
-        .borders(Borders::ALL);
+    let block = Block::default().title("Conversation").borders(Borders::ALL);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -111,10 +110,7 @@ pub fn render_conversation(
     }
 
     // Build the full line list from committed message history.
-    let mut lines: Vec<Line> = messages
-        .iter()
-        .flat_map(|m| message_lines(m))
-        .collect();
+    let mut lines: Vec<Line> = messages.iter().flat_map(|m| message_lines(m)).collect();
 
     // Append the in-progress streaming response.
     if is_streaming {

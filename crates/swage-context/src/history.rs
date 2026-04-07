@@ -135,8 +135,7 @@ mod tests {
     /// HistoryElement can be stored and used as dyn ContextElement.
     #[test]
     fn history_element_is_usable_as_dyn_context_element() {
-        let element: Box<dyn ContextElement> =
-            Box::new(HistoryElement::new(make_history()));
+        let element: Box<dyn ContextElement> = Box::new(HistoryElement::new(make_history()));
 
         assert_eq!(element.name(), "history");
         assert_eq!(element.content().len(), 3);

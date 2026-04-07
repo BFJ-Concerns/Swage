@@ -214,11 +214,7 @@ impl HookRegistry {
     /// If the hook exceeds its timeout, the outcome is determined by the
     /// registration's failure mode. Panicking hooks are caught and treated
     /// identically to timeouts.
-    async fn execute_with_timeout(
-        &self,
-        reg: &HookRegistration,
-        event: &HookEvent,
-    ) -> HookOutcome {
+    async fn execute_with_timeout(&self, reg: &HookRegistration, event: &HookEvent) -> HookOutcome {
         let hook = reg.hook.clone();
         let event_clone = event.clone();
         let timeout_duration = reg.timeout;
@@ -255,12 +251,7 @@ impl HookRegistry {
 
     /// Maps a failure (timeout or panic) to the appropriate outcome
     /// based on the hook's configured failure mode.
-    fn failure_outcome(
-        &self,
-        hook_name: &str,
-        mode: FailureMode,
-        cause: &str,
-    ) -> HookOutcome {
+    fn failure_outcome(&self, hook_name: &str, mode: FailureMode, cause: &str) -> HookOutcome {
         match mode {
             FailureMode::FailOpen => {
                 debug!(hook = %hook_name, cause = %cause, "FailOpen: continuing after failure");

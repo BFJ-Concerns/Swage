@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use swage_core::{GatewayError, StorageError};
 use swage_storage::{
     model::{
         EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry, Team,
-        Thread, ThreadBranch, TopologyRun, TurnState,
+        ThreadBranch, TopologyRun, TurnState,
     },
     store::{ProjectStore, Storage},
 };
@@ -105,18 +105,17 @@ pub struct ToolCallView {
 /// A single message in a conversation, annotated with its turn's lifecycle state.
 #[derive(Debug, Serialize)]
 pub struct MessageView {
+    pub thread_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<Uuid>,
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
-    /// Latest turn state observed while building this conversation view.
-    ///
-    /// Today this value is shared across every returned message in the session,
-    /// rather than being attributed per message or per thread.
-    pub turn_state: TurnState,
+    /// Lifecycle state of the turn that produced this message, when known.
+    pub turn_state: Option<TurnState>,
     /// Tool calls that occurred in this message's turn.
     ///
-    /// Populated for assistant messages; empty for user messages.
-    /// Always present (empty array) so the frontend schema is consistent.
+    /// Populated for assistant messages when the originating turn is known.
     pub tool_calls: Vec<ToolCallView>,
 }
 
@@ -156,7 +155,8 @@ impl ConversationService {
             })
             .await?;
 
-        // Create the default thread. The gateway uses one thread per session.
+        // Create the conversation's root thread. Additional branch threads may
+        // be added later under the same session.
         self.storage
             .create(NewThread {
                 session_id: session.id,
@@ -210,77 +210,58 @@ impl ConversationService {
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
         // Collect messages and tool calls across all threads for this session.
-        // The gateway uses one thread per session; this handles the general case.
         let threads = self.storage.list_by_session(id).await?;
 
         let mut all_messages = Vec::new();
-        // All tool calls across all turns in all threads.
-        let mut all_tool_call_views: Vec<ToolCallView> = Vec::new();
-        // State of the last turn across all threads; default to Completed when none.
-        let mut last_turn_state = TurnState::Completed;
+        let mut tool_calls_by_turn: HashMap<Uuid, Vec<ToolCallView>> = HashMap::new();
+        let mut turn_state_by_turn: HashMap<Uuid, TurnState> = HashMap::new();
 
         for thread in &threads {
-            // Messages for this thread, already ordered by position.
             let messages = self.storage.list_messages_by_thread(thread.id).await?;
             all_messages.extend(messages);
 
-            // Turns for this thread — the last turn's state represents the thread's
-            // final LLM interaction result.
             let turns = self.storage.list_turns_by_thread(thread.id).await?;
-            if let Some(last) = turns.last() {
-                last_turn_state = last.state.clone();
-            }
-
-            // Collect tool call views for every turn in this thread.
-            // Note: in a single-thread/single-turn session this is exact. For
-            // multi-turn threads, all tool calls are currently surfaced on every
-            // assistant message until message-to-turn attribution exists.
-            for turn in &turns {
-                let records = self.storage.list_tool_calls_by_turn(turn.id).await?;
-                for r in records {
-                    let arguments = serde_json::from_str(&r.arguments)
-                        .unwrap_or(JsonValue::String(r.arguments));
-                    let result = r
-                        .result
-                        .map(|text| serde_json::from_str(&text).unwrap_or(JsonValue::String(text)));
-                    all_tool_call_views.push(ToolCallView {
-                        call_id: r.call_id,
-                        tool: r.tool,
-                        arguments,
-                        result,
-                        status: r.status,
-                        duration_ms: r.duration_ms.map(|ms| ms.max(0) as u64),
-                        truncated: r.truncated,
-                        total_bytes: r.total_bytes.map(|b| b.max(0) as u64),
-                        parent_call_id: r.parent_call_id,
-                    });
-                }
+            for turn in turns {
+                let turn_id = turn.id;
+                turn_state_by_turn.insert(turn_id, turn.state);
+                let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
+                tool_calls_by_turn.insert(
+                    turn_id,
+                    records.into_iter().map(tool_call_record_to_view).collect(),
+                );
             }
         }
 
-        // Sort all messages by position (threads use per-thread position, so sort
-        // by created_at if positions overlap across threads).
         all_messages.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then(a.created_at.cmp(&b.created_at))
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.thread_id.cmp(&b.thread_id))
+                .then(a.position.cmp(&b.position))
         });
 
         let message_views = all_messages
             .into_iter()
-            .map(|m| {
-                // Tool calls are attached to assistant messages only.
-                let tool_calls = if m.role == "assistant" {
-                    all_tool_call_views.clone()
+            .map(|message| {
+                let turn_id = message.turn_id;
+                let turn_state = turn_id
+                    .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id).cloned());
+                let tool_calls = if message.role == "assistant" {
+                    turn_id
+                        .and_then(|message_turn_id| {
+                            tool_calls_by_turn.get(&message_turn_id).cloned()
+                        })
+                        .unwrap_or_default()
                 } else {
-                    vec![]
+                    Vec::new()
                 };
 
                 MessageView {
-                    role: m.role,
-                    content: m.content,
-                    timestamp: m.created_at,
-                    turn_state: last_turn_state.clone(),
+                    thread_id: message.thread_id,
+                    turn_id,
+                    role: message.role,
+                    content: message.content,
+                    timestamp: message.created_at,
+                    turn_state,
                     tool_calls,
                 }
             })
@@ -449,10 +430,17 @@ impl ConversationService {
 
         let messages = self.storage.list_messages_by_thread(thread.id).await?;
         let turns = self.storage.list_turns_by_thread(thread.id).await?;
-        let turn_state = turns
-            .last()
-            .map(|turn| turn.state.clone())
-            .unwrap_or(TurnState::Completed);
+        let mut turn_state_by_turn = HashMap::new();
+        let mut tool_calls_by_turn = HashMap::new();
+        for turn in turns {
+            let turn_id = turn.id;
+            turn_state_by_turn.insert(turn_id, turn.state);
+            let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
+            tool_calls_by_turn.insert(
+                turn_id,
+                records.into_iter().map(tool_call_record_to_view).collect(),
+            );
+        }
         let branch = self.storage.get_branch(thread.id).await?;
 
         Ok(ConversationThreadDetail {
@@ -462,12 +450,26 @@ impl ConversationService {
             state: thread.state.to_string(),
             messages: messages
                 .into_iter()
-                .map(|message| MessageView {
-                    role: message.role,
-                    content: message.content,
-                    timestamp: message.created_at,
-                    turn_state: turn_state.clone(),
-                    tool_calls: vec![],
+                .map(|message| {
+                    let is_assistant = message.role == "assistant";
+                    MessageView {
+                        thread_id: message.thread_id,
+                        turn_id: message.turn_id,
+                        role: message.role,
+                        content: message.content,
+                        timestamp: message.created_at,
+                        turn_state: message
+                            .turn_id
+                            .and_then(|turn_id| turn_state_by_turn.get(&turn_id).cloned()),
+                        tool_calls: if is_assistant {
+                            message
+                                .turn_id
+                                .and_then(|turn_id| tool_calls_by_turn.get(&turn_id).cloned())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
+                    }
                 })
                 .collect(),
             branch: branch.map(thread_branch_to_response),
@@ -491,6 +493,26 @@ impl ConversationService {
             }
         }
         Ok(false)
+    }
+}
+
+fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> ToolCallView {
+    let arguments =
+        serde_json::from_str(&record.arguments).unwrap_or(JsonValue::String(record.arguments));
+    let result = record
+        .result
+        .map(|text| serde_json::from_str(&text).unwrap_or(JsonValue::String(text)));
+
+    ToolCallView {
+        call_id: record.call_id,
+        tool: record.tool,
+        arguments,
+        result,
+        status: record.status,
+        duration_ms: record.duration_ms.map(|ms| ms.max(0) as u64),
+        truncated: record.truncated,
+        total_bytes: record.total_bytes.map(|bytes| bytes.max(0) as u64),
+        parent_call_id: record.parent_call_id,
     }
 }
 
@@ -1248,10 +1270,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use swage_storage::{
-        model::{NewMessage, NewToolCall, NewTurn, TurnState},
-        store::{SessionStore, TurnStore},
-    };
+    use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -1335,6 +1354,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".to_string(),
                 content: "Hello!".to_string(),
                 position: 0,
@@ -1413,6 +1433,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".to_string(),
                 content: "Hi".to_string(),
                 position: 0,
@@ -1423,6 +1444,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".to_string(),
                 content: "Hello!".to_string(),
                 position: 1,
@@ -1441,7 +1463,7 @@ mod tests {
         assert_eq!(detail.messages.len(), 2);
         assert_eq!(detail.messages[0].role, "user");
         assert_eq!(detail.messages[0].content, "Hi");
-        assert_eq!(detail.messages[0].turn_state, TurnState::Completed);
+        assert_eq!(detail.messages[0].turn_state, Some(TurnState::Completed));
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Hello!");
     }
@@ -1514,6 +1536,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".into(),
                 content: "list files".into(),
                 position: 0,
@@ -1525,6 +1548,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "I'll run ls for you.".into(),
                 position: 1,
@@ -1601,6 +1625,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "Ran python".into(),
                 position: 0,
@@ -1690,6 +1715,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "Hello".into(),
                 position: 0,

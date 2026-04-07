@@ -29,7 +29,10 @@ impl MemoryElement {
     /// - `content` — the project's memory text (may be empty)
     /// - `project_name` — used in the assembly report's `source` field
     pub fn new(content: String, project_name: String) -> Self {
-        Self { content, project_name }
+        Self {
+            content,
+            project_name,
+        }
     }
 }
 
@@ -101,8 +104,11 @@ mod tests {
 
         let messages = element.content();
         assert_eq!(messages.len(), 1, "expected exactly one message");
-        assert_eq!(messages[0].role, Role::System,
-            "memory should produce a system message");
+        assert_eq!(
+            messages[0].role,
+            Role::System,
+            "memory should produce a system message"
+        );
     }
 
     /// Empty memory produces no messages — the element is a no-op in assembly.
@@ -110,7 +116,10 @@ mod tests {
     fn empty_memory_produces_no_messages() {
         let element = MemoryElement::new("".to_string(), "empty-project".to_string());
 
-        assert!(element.content().is_empty(), "empty memory should produce no messages");
+        assert!(
+            element.content().is_empty(),
+            "empty memory should produce no messages"
+        );
     }
 
     /// token_count() returns a positive estimate for non-empty memory.
@@ -147,16 +156,19 @@ mod tests {
     #[test]
     fn source_includes_project_name() {
         let element = MemoryElement::new("content".to_string(), "swage-project".to_string());
-        assert!(element.source().contains("swage-project"),
-            "source should include the project name");
+        assert!(
+            element.source().contains("swage-project"),
+            "source should include the project name"
+        );
     }
 
     /// MemoryElement is usable as dyn ContextElement (object safety check).
     #[test]
     fn memory_element_is_usable_as_dyn_context_element() {
-        let element: Box<dyn ContextElement> = Box::new(
-            MemoryElement::new("Remember: user prefers Rust.".to_string(), "proj".to_string())
-        );
+        let element: Box<dyn ContextElement> = Box::new(MemoryElement::new(
+            "Remember: user prefers Rust.".to_string(),
+            "proj".to_string(),
+        ));
 
         assert_eq!(element.name(), "memory");
         assert_eq!(element.priority(), 50);

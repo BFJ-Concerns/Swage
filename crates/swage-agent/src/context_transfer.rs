@@ -7,9 +7,7 @@
 
 use std::collections::HashSet;
 
-use swage_config::{
-    ContextTransferConfig, ContextTransferMode, ContextTransferTargetConfig,
-};
+use swage_config::{ContextTransferConfig, ContextTransferMode};
 use swage_core::{ChatMessage, CompletionRequest, ContentPart, Role};
 use swage_provider::LlmProvider;
 
@@ -197,7 +195,14 @@ pub async fn transfer_context_async(
     provider: Option<&dyn LlmProvider>,
 ) -> TransferredContext {
     let (mode, allowed_fields, summary_budget) = resolve_policy(config, target_agent_id);
-    evaluate_transfer_async(mode, allowed_fields, summary_budget, sender_context, provider).await
+    evaluate_transfer_async(
+        mode,
+        allowed_fields,
+        summary_budget,
+        sender_context,
+        provider,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -215,12 +220,7 @@ mod tests {
 
     #[test]
     fn mode_none_returns_empty() {
-        let result = evaluate_transfer(
-            &ContextTransferMode::None,
-            &[],
-            None,
-            &sample_context(),
-        );
+        let result = evaluate_transfer(&ContextTransferMode::None, &[], None, &sample_context());
         assert!(result.messages.is_empty());
     }
 
@@ -239,12 +239,8 @@ mod tests {
 
     #[test]
     fn mode_explicit_empty_fields_returns_empty() {
-        let result = evaluate_transfer(
-            &ContextTransferMode::Explicit,
-            &[],
-            None,
-            &sample_context(),
-        );
+        let result =
+            evaluate_transfer(&ContextTransferMode::Explicit, &[], None, &sample_context());
         assert!(result.messages.is_empty());
     }
 
@@ -273,13 +269,13 @@ mod tests {
 
     // --- Async summary mode tests ---
 
-    use std::pin::Pin;
-    use std::sync::Arc;
     use async_trait::async_trait;
     use futures::Stream;
+    use std::pin::Pin;
+    use swage_config::ContextTransferTargetConfig;
     use swage_core::{
-        CompletionRequest, CompletionResponse, ContentPart, FinishReason,
-        ProviderError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
+        StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
 
@@ -289,8 +285,13 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for MockSummaryProvider {
-        fn model_id(&self) -> &str { "mock-summary" }
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        fn model_id(&self) -> &str {
+            "mock-summary"
+        }
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             Ok(CompletionResponse {
                 content: self.summary.clone(),
                 input_tokens: 10,
@@ -299,7 +300,10 @@ mod tests {
                 cost: None,
             })
         }
-        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!()
         }
         fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
@@ -311,11 +315,21 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for ErrorProvider {
-        fn model_id(&self) -> &str { "error" }
-        async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-            Err(ProviderError::InvalidResponse("provider unavailable".into()))
+        fn model_id(&self) -> &str {
+            "error"
         }
-        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::InvalidResponse(
+                "provider unavailable".into(),
+            ))
+        }
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!()
         }
         fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
@@ -334,15 +348,23 @@ mod tests {
             Some(512),
             &sample_context(),
             Some(&provider),
-        ).await;
+        )
+        .await;
 
-        assert_eq!(result.messages.len(), 1, "summary should produce one message");
+        assert_eq!(
+            result.messages.len(),
+            1,
+            "summary should produce one message"
+        );
         assert_eq!(result.messages[0].role, Role::System);
         let text = match &result.messages[0].content[0] {
             ContentPart::Text { text } => text.clone(),
             _ => panic!("expected text"),
         };
-        assert!(text.contains("reports"), "summary should contain provider's output");
+        assert!(
+            text.contains("reports"),
+            "summary should contain provider's output"
+        );
     }
 
     #[tokio::test]
@@ -353,8 +375,12 @@ mod tests {
             Some(512),
             &sample_context(),
             None,
-        ).await;
-        assert!(result.messages.is_empty(), "no provider should fall back to empty");
+        )
+        .await;
+        assert!(
+            result.messages.is_empty(),
+            "no provider should fall back to empty"
+        );
     }
 
     #[tokio::test]
@@ -366,20 +392,27 @@ mod tests {
             Some(512),
             &sample_context(),
             Some(&provider),
-        ).await;
-        assert!(result.messages.is_empty(), "provider error should fall back to empty");
+        )
+        .await;
+        assert!(
+            result.messages.is_empty(),
+            "provider error should fall back to empty"
+        );
     }
 
     #[tokio::test]
     async fn mode_summary_async_empty_context_returns_empty() {
-        let provider = MockSummaryProvider { summary: "shouldn't be called".into() };
+        let provider = MockSummaryProvider {
+            summary: "shouldn't be called".into(),
+        };
         let result = evaluate_transfer_async(
             &ContextTransferMode::Summary,
             &[],
             Some(512),
             &[],
             Some(&provider),
-        ).await;
+        )
+        .await;
         assert!(result.messages.is_empty());
     }
 
@@ -391,7 +424,8 @@ mod tests {
             None,
             &sample_context(),
             None,
-        ).await;
+        )
+        .await;
         assert!(result.messages.is_empty());
     }
 
@@ -403,7 +437,8 @@ mod tests {
             None,
             &sample_context(),
             None,
-        ).await;
+        )
+        .await;
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].role, Role::User);
     }

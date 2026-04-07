@@ -69,6 +69,8 @@ export interface ToolCallView {
 
 /** A single message in a conversation. */
 export interface MessageView {
+  thread_id?: string;
+  turn_id?: string | null;
   role: "user" | "assistant";
   content: string;
   timestamp: string;
@@ -79,7 +81,8 @@ export interface MessageView {
     | "failed"
     | "interrupted"
     | "awaiting_approval"
-    | "delegating";
+    | "delegating"
+    | null;
   // Present on every message in the conversation API; empty when no tool calls
   // were recorded for that message. Kept optional here so local client-created
   // message objects do not need to synthesise it eagerly.
@@ -95,12 +98,12 @@ export interface ConversationResponse {
 }
 
 // -------------------------------------------------------------------------
-// WebSocket event types (the subset currently modelled by the web client)
+// WebSocket event types
 // -------------------------------------------------------------------------
 
 /** Client → Server events. */
 export type ClientEvent =
-  | { type: "send_message"; content: string }
+  | { type: "send_message"; content: string; thread_id?: string }
   | { type: "cancel" }
   // Subscribe to one or more observability channels (e.g. "tools", "context").
   | { type: "subscribe"; channels: string[] }
@@ -115,7 +118,14 @@ export interface SchemaValidationError {
 
 export type ServerEvent =
   | { type: "token"; content: string }
-  | { type: "turn_complete"; turn_id: string }
+  | {
+      type: "turn_complete";
+      turn_id: string;
+      input_tokens?: number;
+      output_tokens?: number;
+      cost_microcents?: number;
+      structured_output?: Record<string, unknown>;
+    }
   | { type: "error"; code: string; message: string }
   | { type: "cancelled" }
   // Fires when the gateway begins executing a tool call.
@@ -149,10 +159,58 @@ export type ServerEvent =
       report: Record<string, unknown>;
     }
   | {
+      type: "output_schema_retry";
+      turn_id: string;
+      attempt: number;
+      max_retries: number;
+      errors: SchemaValidationError[];
+    }
+  | {
       type: "output_schema_failed";
       turn_id: string;
       attempts: number;
       errors: SchemaValidationError[];
+    }
+  | {
+      type: "delegation_started";
+      parent_turn_id: string;
+      child_turn_id: string;
+      target_agent_id: string;
+    }
+  | {
+      type: "delegation_completed";
+      parent_turn_id: string;
+      child_turn_id: string;
+      target_agent_id: string;
+      success: boolean;
+    }
+  | {
+      type: "topology_run_started";
+      session_id: string;
+      topology_run_id: string;
+      team_id: string;
+    }
+  | {
+      type: "topology_node_started";
+      session_id: string;
+      topology_run_id: string;
+      node_execution_id: string;
+      node_id: string;
+    }
+  | {
+      type: "topology_node_completed";
+      session_id: string;
+      topology_run_id: string;
+      node_execution_id: string;
+      node_id: string;
+      success: boolean;
+    }
+  | {
+      type: "topology_run_completed";
+      session_id: string;
+      topology_run_id: string;
+      success: boolean;
+      final_output?: Record<string, unknown>;
     }
   // Fired by the gateway before it shuts down. Clients should surface this as
   // a disconnection notice; the WebSocket will close shortly after.
@@ -178,6 +236,37 @@ export type ServerEvent =
   | {
       type: "skill_deactivated";
       name: string;
+    }
+  | {
+      type: "approval_required";
+      approval_id: string;
+      turn_id: string;
+      agent_id: string;
+      kind: string;
+      tool_name?: string;
+      tool_arguments?: Record<string, unknown>;
+      prompt: string;
+      context?: Record<string, unknown>;
+      timeout_at: string;
+      timeout_policy: string;
+    }
+  | {
+      type: "approval_confirmed";
+      approval_id: string;
+      decision: string;
+      reason?: string;
+    }
+  | {
+      type: "approval_expired";
+      approval_id: string;
+      timeout_policy: string;
+    }
+  | {
+      type: "approval_decision_error";
+      approval_id: string;
+      error: string;
+      message: string;
+      current_state?: string;
     };
 
 // -------------------------------------------------------------------------

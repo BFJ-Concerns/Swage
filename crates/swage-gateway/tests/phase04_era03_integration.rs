@@ -13,11 +13,11 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use swage_core::{MessageKind, MessageStatus};
+use swage_storage::SqliteStorage;
 use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn, TurnState};
 use swage_storage::store::{
     AgentMessageStore, ProjectStore, SessionStore, Storage, ThreadStore, TurnStore,
 };
-use swage_storage::SqliteStorage;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -66,8 +66,7 @@ async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uu
 /// This validates the core messaging infrastructure (router → storage → mailbox).
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_and_receive_result() {
-    let (storage, _session_id, _thread_id, _sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, _sender_turn_id) = setup_agent_turn("agent-a").await;
 
     let router = swage_agent::MessageRouter::new(storage.clone() as Arc<dyn Storage>, None);
 
@@ -88,7 +87,11 @@ async fn delegate_and_receive_result() {
 
     // Deliver the message — transitions to Delivered.
     router.deliver_message(&delegate).await.unwrap();
-    let updated = storage.get_agent_message(delegate.id).await.unwrap().unwrap();
+    let updated = storage
+        .get_agent_message(delegate.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status, MessageStatus::Delivered);
     assert!(updated.delivered_at.is_some());
 
@@ -121,8 +124,7 @@ async fn delegate_and_receive_result() {
 /// linking back to the sender's turn. Root turns have parent_turn_id = None.
 #[tokio::test(flavor = "multi_thread")]
 async fn delegation_creates_child_turn_with_parent() {
-    let (storage, _session_id, _thread_id, sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, sender_turn_id) = setup_agent_turn("agent-a").await;
 
     // Root turn should have parent_turn_id = None.
     let root_turn = storage.get_turn(sender_turn_id).await.unwrap().unwrap();
@@ -204,8 +206,7 @@ async fn context_transfer_explicit_restricts_fields() {
 /// When the agent checks its mailbox, the messages are claimed and delivered.
 #[tokio::test(flavor = "multi_thread")]
 async fn store_and_forward_delivers_on_instantiation() {
-    let (storage, _session_id, _thread_id, _sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, _sender_turn_id) = setup_agent_turn("agent-a").await;
 
     let router = swage_agent::MessageRouter::new(storage.clone() as Arc<dyn Storage>, None);
 
@@ -223,12 +224,9 @@ async fn store_and_forward_delivers_on_instantiation() {
     assert_eq!(msg.status, MessageStatus::Pending);
 
     // Agent-b checks mailbox on instantiation.
-    let mailbox = swage_agent::check_mailbox(
-        &(storage.clone() as Arc<dyn Storage>),
-        "agent-b",
-    )
-    .await
-    .unwrap();
+    let mailbox = swage_agent::check_mailbox(&(storage.clone() as Arc<dyn Storage>), "agent-b")
+        .await
+        .unwrap();
 
     assert_eq!(mailbox.pending_delegates.len(), 1);
     assert!(!mailbox.should_shutdown);
@@ -246,8 +244,7 @@ async fn store_and_forward_delivers_on_instantiation() {
 /// record, no error.
 #[tokio::test(flavor = "multi_thread")]
 async fn notify_not_persisted_when_target_offline() {
-    let (storage, _session_id, _thread_id, _sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, _sender_turn_id) = setup_agent_turn("agent-a").await;
 
     let router = swage_agent::MessageRouter::new(storage.clone() as Arc<dyn Storage>, None);
 
@@ -294,7 +291,10 @@ async fn output_schema_contract_enforced() {
     // Delegate without schema — falls back to target.
     let payload_no_schema = serde_json::json!({"task": "work"});
     let result2 = resolve_delegation_schema(&payload_no_schema, &target_config);
-    assert_eq!(result2.schema.unwrap(), serde_json::json!({"type": "number"}));
+    assert_eq!(
+        result2.schema.unwrap(),
+        serde_json::json!({"type": "number"})
+    );
 
     // Neither has schema — no validation.
     let empty_config = OutputConfig {
@@ -373,8 +373,7 @@ async fn hook_blocks_message_send() {
 /// the manual fail path works correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn delegation_to_nonexistent_agent_fails() {
-    let (storage, _session_id, _thread_id, _sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, _sender_turn_id) = setup_agent_turn("agent-a").await;
 
     let router = swage_agent::MessageRouter::new(storage.clone() as Arc<dyn Storage>, None);
 
@@ -399,7 +398,11 @@ async fn delegation_to_nonexistent_agent_fails() {
     let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
     assert_eq!(updated.status, MessageStatus::Failed);
     assert!(
-        updated.failure_reason.as_deref().unwrap().contains("agent not found"),
+        updated
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("agent not found"),
         "failure_reason should mention 'agent not found'"
     );
 }
@@ -412,8 +415,7 @@ async fn delegation_to_nonexistent_agent_fails() {
 /// turn to be interrupted.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_interrupts_active_delegation() {
-    let (storage, _session_id, _thread_id, target_turn_id) =
-        setup_agent_turn("agent-b").await;
+    let (storage, _session_id, _thread_id, target_turn_id) = setup_agent_turn("agent-b").await;
 
     // Create a Delegate in the correlation chain.
     let delegate = storage
@@ -442,13 +444,9 @@ async fn cancel_interrupts_active_delegation() {
     };
 
     // Fallback path — no active delegations registry.
-    swage_agent::cancel::handle_cancel(
-        &(storage.clone() as Arc<dyn Storage>),
-        &cancel,
-        None,
-    )
-    .await
-    .unwrap();
+    swage_agent::cancel::handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+        .await
+        .unwrap();
 
     // The target's turn should now be interrupted.
     let turn = storage.get_turn(target_turn_id).await.unwrap().unwrap();
@@ -463,8 +461,7 @@ async fn cancel_interrupts_active_delegation() {
 /// "delivery timeout" by the expiry checker.
 #[tokio::test(flavor = "multi_thread")]
 async fn message_expiry_transitions_to_failed() {
-    let (storage, _session_id, _thread_id, _sender_turn_id) =
-        setup_agent_turn("agent-a").await;
+    let (storage, _session_id, _thread_id, _sender_turn_id) = setup_agent_turn("agent-a").await;
 
     // Create a Delegate message.
     let msg = storage

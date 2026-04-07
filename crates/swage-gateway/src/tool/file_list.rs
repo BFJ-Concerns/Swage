@@ -53,13 +53,12 @@ impl Tool for FileListTool {
             })?
             .to_string();
 
-        let resolved =
-            validate_path(&self.workspace_root, &path_str).map_err(|msg| {
-                ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: msg,
-                }
-            })?;
+        let resolved = validate_path(&self.workspace_root, &path_str).map_err(|msg| {
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: msg,
+            }
+        })?;
 
         // Verify the resolved path is a directory.
         match tokio::fs::metadata(&resolved).await {
@@ -88,12 +87,13 @@ impl Tool for FileListTool {
         }
 
         // Read directory entries.
-        let mut read_dir = tokio::fs::read_dir(&resolved)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Permission denied: {path_str}: {e}"),
-            })?;
+        let mut read_dir =
+            tokio::fs::read_dir(&resolved)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Permission denied: {path_str}: {e}"),
+                })?;
 
         let mut dirs: Vec<String> = Vec::new();
         let mut files: Vec<String> = Vec::new();
@@ -113,11 +113,7 @@ impl Tool for FileListTool {
                 files.push(format!("link  {name}"));
             } else {
                 // For regular files, include the byte size.
-                let size = entry
-                    .metadata()
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
                 files.push(format!("file  {name}  ({size} bytes)"));
             }
         }
@@ -247,10 +243,6 @@ mod tests {
             .execute(json!({ "path": "file.txt" }), &ctx())
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("Not a directory"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("Not a directory"), "got: {}", err);
     }
 }

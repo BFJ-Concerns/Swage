@@ -324,7 +324,10 @@ mod tests {
 
     #[test]
     fn token_usage_serde_round_trip() {
-        let usage = TokenUsage { input_tokens: 10, output_tokens: 20 };
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+        };
         let json = serde_json::to_string(&usage).unwrap();
         let decoded: TokenUsage = serde_json::from_str(&json).unwrap();
         assert_eq!(usage, decoded);
@@ -333,10 +336,19 @@ mod tests {
     #[test]
     fn stream_chunk_serde_round_trip() {
         let chunks = vec![
-            StreamChunk::Delta { content: "hello".into() },
-            StreamChunk::Usage(TokenUsage { input_tokens: 5, output_tokens: 3 }),
-            StreamChunk::Done { finish_reason: None },
-            StreamChunk::Error { message: "oops".into() },
+            StreamChunk::Delta {
+                content: "hello".into(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 5,
+                output_tokens: 3,
+            }),
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+            StreamChunk::Error {
+                message: "oops".into(),
+            },
         ];
         for chunk in chunks {
             let json = serde_json::to_string(&chunk).unwrap();
@@ -387,9 +399,7 @@ mod tests {
                 "properties": { "path": { "type": "string" } }
             }),
         };
-        let req = LlmRequest::builder("model-x")
-            .tools(vec![tool])
-            .build();
+        let req = LlmRequest::builder("model-x").tools(vec![tool]).build();
         let json = serde_json::to_string(&req).unwrap();
         // tools field must appear in the serialised form when non-empty
         assert!(json.contains("read_file"));
@@ -417,7 +427,9 @@ mod tests {
         let request = CompletionRequest {
             messages: vec![ChatMessage::new_parts(
                 Role::User,
-                vec![ContentPart::Text { text: "Hello".into() }],
+                vec![ContentPart::Text {
+                    text: "Hello".into(),
+                }],
             )],
             model: Some("gpt-4".into()),
             max_tokens: Some(1024),
@@ -496,7 +508,9 @@ mod tests {
         let request = ToolCompletionRequest {
             messages: vec![ChatMessage::new_parts(
                 Role::User,
-                vec![ContentPart::Text { text: "What's the weather?".into() }],
+                vec![ContentPart::Text {
+                    text: "What's the weather?".into(),
+                }],
             )],
             model: Some("gpt-4".into()),
             max_tokens: None,

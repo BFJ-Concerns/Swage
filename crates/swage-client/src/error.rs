@@ -210,7 +210,10 @@ mod tests {
             source: dummy_io_error(),
         };
         // thiserror wires #[source] to std::error::Error::source().
-        assert!(err.source().is_some(), "MetadataIo should expose its source");
+        assert!(
+            err.source().is_some(),
+            "MetadataIo should expose its source"
+        );
     }
 
     #[test]

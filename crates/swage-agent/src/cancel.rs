@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 use swage_core::MessageKind;
 use swage_storage::model::AgentMessage;
-use swage_storage::store::{ThreadStore, TurnStore};
 use swage_storage::{Storage, ThreadState, TurnState};
 
 use crate::delegation::ActiveDelegations;
@@ -51,7 +50,9 @@ pub async fn handle_cancel(
     // The correlation_id on a Cancel references the original Delegate's message ID.
     let delegate = storage.get_agent_message(correlation_id).await?;
 
-    let Some(delegate) = delegate else { return Ok(()) };
+    let Some(delegate) = delegate else {
+        return Ok(());
+    };
     if delegate.kind != MessageKind::Delegate {
         return Ok(());
     }
@@ -64,9 +65,9 @@ pub async fn handle_cancel(
         // pending writers.
         let delegation_data = {
             let active = registry.read().await;
-            active.get(&correlation_id).map(|d| {
-                (d.thread_id, d.cancel_token.clone())
-            })
+            active
+                .get(&correlation_id)
+                .map(|d| (d.thread_id, d.cancel_token.clone()))
         };
         // Guard dropped here — safe to await storage calls.
 
@@ -101,7 +102,11 @@ pub async fn handle_cancel(
             interrupt_turns_in_thread(
                 storage,
                 thread_id,
-                &[TurnState::Pending, TurnState::Processing, TurnState::AwaitingApproval],
+                &[
+                    TurnState::Pending,
+                    TurnState::Processing,
+                    TurnState::AwaitingApproval,
+                ],
             )
             .await?;
             return Ok(());
@@ -117,7 +122,10 @@ pub async fn handle_cancel(
     let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
 
     for turn in active_turns {
-        if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+        if let Err(e) = storage
+            .update_turn_state(turn.id, TurnState::Interrupted)
+            .await
+        {
             tracing::warn!(
                 turn_id = %turn.id,
                 error = %e,
@@ -153,7 +161,10 @@ async fn interrupt_turns_in_thread(
     let turns = storage.list_turns_by_thread(thread_id).await?;
     for turn in turns {
         if interruptible_states.contains(&turn.state) {
-            if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+            if let Err(e) = storage
+                .update_turn_state(turn.id, TurnState::Interrupted)
+                .await
+            {
                 tracing::warn!(
                     turn_id = %turn.id,
                     thread_id = %thread_id,
@@ -208,7 +219,10 @@ pub async fn handle_shutdown(
     let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
 
     for turn in active_turns {
-        if let Err(e) = storage.update_turn_state(turn.id, TurnState::Interrupted).await {
+        if let Err(e) = storage
+            .update_turn_state(turn.id, TurnState::Interrupted)
+            .await
+        {
             tracing::warn!(
                 turn_id = %turn.id,
                 error = %e,
@@ -236,9 +250,11 @@ pub async fn handle_shutdown(
 mod tests {
     use super::*;
     use swage_core::{MessageKind, MessageStatus};
-    use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
-    use swage_storage::store::{AgentMessageStore, ProjectStore, SessionStore, ThreadStore};
     use swage_storage::SqliteStorage;
+    use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
+    use swage_storage::store::{
+        AgentMessageStore, ProjectStore, SessionStore, ThreadStore, TurnStore,
+    };
     use uuid::Uuid;
 
     async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
@@ -311,14 +327,19 @@ mod tests {
             .unwrap();
 
         // Fallback path — no active delegations provided.
-        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None).await.unwrap();
+        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+            .await
+            .unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
 
         // Verify the thread was also reset to Idle — without this, the thread
         // remains stuck in Processing and future turns fail with TurnInProgress.
-        let thread = ThreadStore::get(storage.as_ref(), turn.thread_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(thread.state, ThreadState::Idle);
     }
 
@@ -343,7 +364,10 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             AgentError::InvalidConfig(msg) => {
-                assert!(msg.contains("correlation_id"), "error should mention correlation_id: {msg}");
+                assert!(
+                    msg.contains("correlation_id"),
+                    "error should mention correlation_id: {msg}"
+                );
             }
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
@@ -445,15 +469,30 @@ mod tests {
 
         // Thread A's turn should be interrupted.
         let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
-        assert_eq!(ta.state, TurnState::Interrupted, "annotated thread's turn should be interrupted");
+        assert_eq!(
+            ta.state,
+            TurnState::Interrupted,
+            "annotated thread's turn should be interrupted"
+        );
 
         // Thread A should be reset to Idle.
-        let thread_a_state = ThreadStore::get(storage.as_ref(), thread_a.id).await.unwrap().unwrap();
-        assert_eq!(thread_a_state.state, ThreadState::Idle, "annotated thread should be reset to Idle");
+        let thread_a_state = ThreadStore::get(storage.as_ref(), thread_a.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            thread_a_state.state,
+            ThreadState::Idle,
+            "annotated thread should be reset to Idle"
+        );
 
         // Thread B's turn should be unaffected.
         let tb = storage.get_turn(turn_b.id).await.unwrap().unwrap();
-        assert_eq!(tb.state, TurnState::Processing, "other thread's turn should be unaffected");
+        assert_eq!(
+            tb.state,
+            TurnState::Processing,
+            "other thread's turn should be unaffected"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -498,7 +537,11 @@ mod tests {
             .unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.state, TurnState::Interrupted, "should still interrupt via broad fallback");
+        assert_eq!(
+            turn.state,
+            TurnState::Interrupted,
+            "should still interrupt via broad fallback"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -580,12 +623,15 @@ mod tests {
         let registry = crate::delegation::active_delegations();
         {
             let mut active = registry.write().await;
-            active.insert(delegate.id, crate::delegation::ActiveDelegation {
-                session_id: session_a.id,
-                thread_id: thread_a.id,
-                recipient_agent_id: "agent-b".into(),
-                cancel_token: tokio_util::sync::CancellationToken::new(),
-            });
+            active.insert(
+                delegate.id,
+                crate::delegation::ActiveDelegation {
+                    session_id: session_a.id,
+                    thread_id: thread_a.id,
+                    recipient_agent_id: "agent-b".into(),
+                    cancel_token: tokio_util::sync::CancellationToken::new(),
+                },
+            );
         }
 
         let cancel = AgentMessage {
@@ -611,16 +657,27 @@ mod tests {
 
         // First delegation's turn interrupted.
         let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
-        assert_eq!(ta.state, TurnState::Interrupted, "targeted turn should be interrupted");
+        assert_eq!(
+            ta.state,
+            TurnState::Interrupted,
+            "targeted turn should be interrupted"
+        );
 
         // Second delegation's turn still processing — not affected.
         let tb = storage.get_turn(turn_b.id).await.unwrap().unwrap();
-        assert_eq!(tb.state, TurnState::Processing, "other turn should be unaffected");
+        assert_eq!(
+            tb.state,
+            TurnState::Processing,
+            "other turn should be unaffected"
+        );
 
         // Cancellation token should have been triggered.
         let active = registry.read().await;
         let delegation = active.get(&delegate.id).unwrap();
-        assert!(delegation.cancel_token.is_cancelled(), "cancel token should be triggered");
+        assert!(
+            delegation.cancel_token.is_cancelled(),
+            "cancel token should be triggered"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -640,7 +697,9 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown, None).await.unwrap();
+        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown, None)
+            .await
+            .unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
@@ -655,12 +714,15 @@ mod tests {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         {
             let mut active = registry.write().await;
-            active.insert(Uuid::new_v4(), crate::delegation::ActiveDelegation {
-                session_id: Uuid::new_v4(),
-                thread_id: Uuid::new_v4(),
-                recipient_agent_id: "agent-b".into(),
-                cancel_token: cancel_token.clone(),
-            });
+            active.insert(
+                Uuid::new_v4(),
+                crate::delegation::ActiveDelegation {
+                    session_id: Uuid::new_v4(),
+                    thread_id: Uuid::new_v4(),
+                    recipient_agent_id: "agent-b".into(),
+                    cancel_token: cancel_token.clone(),
+                },
+            );
         }
 
         let shutdown = AgentMessage {
@@ -685,6 +747,9 @@ mod tests {
         .unwrap();
 
         // Token should have been cancelled — live execution would stop.
-        assert!(cancel_token.is_cancelled(), "shutdown must cancel live execution tokens");
+        assert!(
+            cancel_token.is_cancelled(),
+            "shutdown must cancel live execution tokens"
+        );
     }
 }

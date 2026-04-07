@@ -7,7 +7,6 @@
 use serde_json::Value;
 use swage_core::ToolError;
 
-
 /// Validate `params` against `schema` for the named tool.
 ///
 /// Checks:
@@ -148,8 +147,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn ok(schema: Value, params: Value) {
-        validate_tool_schema(TOOL, &schema, &params)
-            .expect("expected validation to pass");
+        validate_tool_schema(TOOL, &schema, &params).expect("expected validation to pass");
     }
 
     fn err(schema: Value, params: Value) -> String {
@@ -176,7 +174,10 @@ mod tests {
             json!({"type": "object", "required": ["cmd"], "properties": {"cmd": {"type": "string"}}}),
             json!({}),
         );
-        assert!(msg.contains("cmd"), "error should name the missing field: {msg}");
+        assert!(
+            msg.contains("cmd"),
+            "error should name the missing field: {msg}"
+        );
         assert!(msg.contains("missing"), "error should say 'missing': {msg}");
     }
 
@@ -190,7 +191,10 @@ mod tests {
             json!({}),
         );
         // The first required field missing is "a".
-        assert!(msg.contains("'a'") || msg.contains("'b'"), "error should name a missing field: {msg}");
+        assert!(
+            msg.contains("'a'") || msg.contains("'b'"),
+            "error should name a missing field: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -211,7 +215,10 @@ mod tests {
             json!({"properties": {"x": {"type": "string"}}}),
             json!({"x": 42}),
         );
-        assert!(msg.contains("string"), "should mention expected type: {msg}");
+        assert!(
+            msg.contains("string"),
+            "should mention expected type: {msg}"
+        );
         assert!(msg.contains("'x'"), "should name the field: {msg}");
     }
 
@@ -306,7 +313,10 @@ mod tests {
 
         // Fails when nested required field is missing
         let msg = err(schema, json!({"options": {}}));
-        assert!(msg.contains("timeout"), "should name the nested missing field: {msg}");
+        assert!(
+            msg.contains("timeout"),
+            "should name the nested missing field: {msg}"
+        );
     }
 
     #[test]
@@ -324,7 +334,10 @@ mod tests {
 
         let msg = err(schema, json!({"config": {"retries": "many"}}));
         assert!(msg.contains("number"), "{msg}");
-        assert!(msg.contains("retries"), "should name the nested field: {msg}");
+        assert!(
+            msg.contains("retries"),
+            "should name the nested field: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -355,7 +368,10 @@ mod tests {
 
     #[test]
     fn schema_with_no_constraints_passes_any_params() {
-        ok(json!({"type": "object", "properties": {}}), json!({"anything": 42}));
+        ok(
+            json!({"type": "object", "properties": {}}),
+            json!({"anything": 42}),
+        );
         ok(json!({}), json!({"anything": "goes"}));
     }
 

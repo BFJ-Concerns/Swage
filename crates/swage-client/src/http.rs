@@ -507,12 +507,14 @@ impl GatewayClient {
     pub async fn submit_turn(
         &self,
         conversation_id: Uuid,
+        thread_id: Option<Uuid>,
         message: &str,
         output_schema: Option<serde_json::Value>,
     ) -> Result<Uuid, ClientError> {
         let url = format!("{}/api/turns", self.base_url);
         let body = serde_json::json!({
             "conversation_id": conversation_id,
+            "thread_id": thread_id,
             "message": message,
             "output_schema": output_schema,
         });
@@ -815,7 +817,7 @@ mod project_type_tests {
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "New Name");
         // workspace_path is None — skip_serializing_if = "Option::is_none" omits it.
-        assert!(json.get("workspace_path").map_or(true, |v| v.is_null()));
+        assert!(json.get("workspace_path").is_none_or(|v| v.is_null()));
     }
 
     #[test]

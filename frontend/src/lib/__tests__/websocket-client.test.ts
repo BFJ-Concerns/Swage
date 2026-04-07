@@ -10,7 +10,7 @@
  *   - open event → "connected" status
  *   - send() serialises ClientEvent to JSON
  *   - incoming messages dispatched to handlers
- *   - unknown event types ignored silently (forward-compat with Phase 04)
+ *   - event payloads forwarded without a hard-coded allow-list
  *   - disconnect() closes cleanly, no reconnect
  *   - unexpected close after open → "reconnecting" + backoff retry
  *   - close before open (handshake rejection / 409) → "error", no retry
@@ -250,19 +250,21 @@ describe("server event dispatch", () => {
     });
   });
 
-  it("ignores unknown event types silently (forward-compat for future events)", () => {
+  it("passes unknown event types through to handlers", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    const received: ServerEvent[] = [];
-    client.onEvent((e) => received.push(e));
+    const received: Record<string, unknown>[] = [];
+    client.onEvent((e) =>
+      received.push(e as unknown as Record<string, unknown>),
+    );
 
     client.connect("conv-abc");
     latestWs().simulateOpen();
 
-    // A hypothetical future event type — must not throw or dispatch.
+    // A hypothetical future event type — must not be dropped in the client layer.
     expect(() =>
       latestWs().simulateMessage({ type: "future_event", payload: "x" }),
     ).not.toThrow();
-    expect(received).toHaveLength(0);
+    expect(received).toEqual([{ type: "future_event", payload: "x" }]);
   });
 
   it("surfaces malformed JSON frames as an error event", () => {

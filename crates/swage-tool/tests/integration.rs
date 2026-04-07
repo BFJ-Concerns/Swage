@@ -20,9 +20,8 @@ use swage_core::ToolError;
 use swage_safety::LeakDetector;
 use swage_tool::context::MockToolContext;
 use swage_tool::dispatch::ToolDispatcher;
-use swage_tool::output::ToolOutput;
 use swage_tool::permission::PermissionConfig;
-use swage_tool::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
+use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_tool::registry::ToolRegistry;
 use swage_tool::tool::Tool;
 
@@ -64,44 +63,6 @@ impl Tool for LeakyEchoTool {
         Ok(json!({
             "output": format!("{text}\nkey: sk-TESTKEY1234567890abcdefghij")
         }))
-    }
-}
-
-/// A tool that declares a sensitive parameter key.
-struct SensitiveTool;
-
-#[async_trait]
-impl Tool for SensitiveTool {
-    fn name(&self) -> &str {
-        "sensitive_tool"
-    }
-
-    fn description(&self) -> &str {
-        "A tool with a sensitive parameter for testing redaction"
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "api_key": { "type": "string" }
-            },
-            "required": ["query"]
-        })
-    }
-
-    fn sensitive_keys(&self) -> &[&str] {
-        &["api_key"]
-    }
-
-    async fn execute(
-        &self,
-        params: Value,
-        _ctx: &dyn swage_tool::context::ToolContext,
-    ) -> Result<Value, ToolError> {
-        let query = params["query"].as_str().unwrap_or("");
-        Ok(json!({ "result": format!("searched: {query}") }))
     }
 }
 

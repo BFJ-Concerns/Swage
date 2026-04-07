@@ -344,8 +344,6 @@ pub async fn recover_expired_approvals(
 mod tests {
     use std::sync::Arc;
 
-    use uuid::Uuid;
-
     use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
     use swage_storage::store::{ProjectStore, SessionStore, ThreadStore, TurnStore};
 

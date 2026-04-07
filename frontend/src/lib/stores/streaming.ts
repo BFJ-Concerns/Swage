@@ -3,7 +3,7 @@
 // Accumulates tokens during an active turn, tracks whether the agent is
 // generating, and controls the send/stop toggle state.
 
-import type { ServerEvent, ToolCallView } from "../types";
+import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 export interface StreamingStore {
   readonly isStreaming: boolean;
@@ -34,7 +34,7 @@ export interface StreamingStoreOptions {
       role: string;
       content: string;
       timestamp: string;
-      turn_state: string;
+      turn_state: MessageView["turn_state"];
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -62,7 +62,7 @@ export function createStreamingStore(
   function pushMessage(
     role: "user" | "assistant",
     content: string,
-    turn_state: string,
+    turn_state: MessageView["turn_state"],
   ): void {
     options?.conversationStore?.addMessage({
       role,
@@ -236,6 +236,17 @@ export function createStreamingStore(
           break;
 
         case "context_assembled":
+        case "output_schema_retry":
+        case "delegation_started":
+        case "delegation_completed":
+        case "topology_run_started":
+        case "topology_node_started":
+        case "topology_node_completed":
+        case "topology_run_completed":
+        case "approval_required":
+        case "approval_confirmed":
+        case "approval_expired":
+        case "approval_decision_error":
           // Diagnostic event carrying the context assembly report for this turn.
           // No action required in the streaming store — display is handled
           // separately. The case is listed explicitly to avoid a fall-through

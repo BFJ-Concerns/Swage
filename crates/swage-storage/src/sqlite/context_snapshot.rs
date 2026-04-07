@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -59,11 +59,18 @@ mod tests {
     async fn make_turn() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "agent".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent".to_string(),
+            })
             .await
             .unwrap();
 
@@ -83,7 +90,12 @@ mod tests {
             .unwrap();
 
         let turn = storage
-            .create_turn(NewTurn { thread_id, agent_id: "agent".to_string(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "agent".to_string(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
 
@@ -118,6 +130,9 @@ mod tests {
         storage.store_snapshot(turn_id, r#"{"v":2}"#).await.unwrap();
 
         let retrieved = storage.get_snapshot(turn_id).await.unwrap().unwrap();
-        assert_eq!(retrieved, r#"{"v":2}"#, "newer snapshot should replace the old one");
+        assert_eq!(
+            retrieved, r#"{"v":2}"#,
+            "newer snapshot should replace the old one"
+        );
     }
 }

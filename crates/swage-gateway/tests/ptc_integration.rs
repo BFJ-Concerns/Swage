@@ -8,29 +8,29 @@
 //! the tool registry. Once the implementations are complete and PythonExecuteTool
 //! is registered, they should pass.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::VecDeque;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, Storage, store::ProjectStore};
+use swage_storage::SqliteStorage;
 use swage_tool;
 
 // ---------------------------------------------------------------------------
@@ -52,16 +52,20 @@ impl MultiRoundProvider {
 
 #[async_trait]
 impl LlmProvider for MultiRoundProvider {
-    fn model_id(&self) -> &str { "mock-multi-round" }
+    fn model_id(&self) -> &str {
+        "mock-multi-round"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in PTC integration tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in PTC integration tests")
     }
@@ -70,12 +74,7 @@ impl LlmProvider for MultiRoundProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        let chunks = self
-            .rounds
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_default();
+        let chunks = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
         Box::pin(futures::stream::iter(chunks))
     }
 }
@@ -144,8 +143,12 @@ struct EchoTool;
 
 #[async_trait]
 impl swage_gateway::tool::Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echo the input back" }
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo the input back"
+    }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -172,8 +175,12 @@ struct MockShellTool;
 
 #[async_trait]
 impl swage_gateway::tool::Tool for MockShellTool {
-    fn name(&self) -> &str { "shell" }
-    fn description(&self) -> &str { "Mock shell — returns the command as output" }
+    fn name(&self) -> &str {
+        "shell"
+    }
+    fn description(&self) -> &str {
+        "Mock shell — returns the command as output"
+    }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -199,15 +206,11 @@ impl swage_gateway::tool::Tool for MockShellTool {
 
 // WebSocket helpers (mirrors integration.rs).
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
@@ -307,14 +310,18 @@ print(f"{result1.strip()} {result2.strip()}")
             name: "python_execute".into(),
             arguments: json!({ "code": python_code }),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
     // Round 2: model uses the Python output in its response.
     let round_2 = vec![
         StreamChunk::Delta {
             content: "The result is: hello world".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
@@ -347,15 +354,18 @@ print(f"{result1.strip()} {result2.strip()}")
     let events = collect_events_until_complete(&mut ws_read).await;
 
     // The python_execute tool_end should show success with Python output.
-    let ptc_tool_end = events.iter().find(|e| {
-        e["type"] == "tool_end" && e["tool"] == "python_execute"
-    });
+    let ptc_tool_end = events
+        .iter()
+        .find(|e| e["type"] == "tool_end" && e["tool"] == "python_execute");
 
     assert!(
         ptc_tool_end.is_some(),
         "Expected a tool_end event for python_execute. \
          The tool must be registered and execute Python code. Events: {:?}",
-        events.iter().map(|e| e["type"].as_str()).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| e["type"].as_str())
+            .collect::<Vec<_>>()
     );
 
     let result = ptc_tool_end.unwrap();
@@ -400,11 +410,17 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
             name: "python_execute".into(),
             arguments: json!({ "code": python_code }),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
     let round_2 = vec![
-        StreamChunk::Delta { content: "Done.".into() },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Delta {
+            content: "Done.".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
@@ -436,29 +452,38 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
     let events = collect_events_until_complete(&mut ws_read).await;
 
     // There should be a tool_start for python_execute (no parent).
-    let ptc_start = events.iter().find(|e| {
-        e["type"] == "tool_start" && e["tool"] == "python_execute"
-    });
+    let ptc_start = events
+        .iter()
+        .find(|e| e["type"] == "tool_start" && e["tool"] == "python_execute");
     assert!(
         ptc_start.is_some(),
         "Expected tool_start for python_execute; events: {:?}",
-        events.iter().map(|e| format!("{}:{}", e["type"], e.get("tool").unwrap_or(&Value::Null))).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| format!("{}:{}", e["type"], e.get("tool").unwrap_or(&Value::Null)))
+            .collect::<Vec<_>>()
     );
 
     // There should be sub-tool events (tool_start/tool_end for shell)
     // with parent_call_id pointing to the python_execute call.
-    let sub_tool_starts: Vec<_> = events.iter().filter(|e| {
-        e["type"] == "tool_start"
-            && e["tool"] != "python_execute"
-            && e.get("parent_call_id").is_some()
-    }).collect();
+    let sub_tool_starts: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e["type"] == "tool_start"
+                && e["tool"] != "python_execute"
+                && e.get("parent_call_id").is_some()
+        })
+        .collect();
 
     assert!(
         !sub_tool_starts.is_empty(),
         "Expected sub-tool tool_start events with parent_call_id for nested \
          tool calls from Python. Sub-tool events must include parent_call_id \
          linking them to the python_execute invocation. Events: {:?}",
-        events.iter().map(|e| e["type"].as_str()).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| e["type"].as_str())
+            .collect::<Vec<_>>()
     );
 
     // The parent_call_id should match the python_execute call_id.
@@ -493,14 +518,18 @@ x = 1 / 0  # ZeroDivisionError
             name: "python_execute".into(),
             arguments: json!({ "code": python_code }),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
     // Model sees the error and explains it.
     let round_2 = vec![
         StreamChunk::Delta {
             content: "The code raised a ZeroDivisionError.".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
@@ -532,14 +561,17 @@ x = 1 / 0  # ZeroDivisionError
     let events = collect_events_until_complete(&mut ws_read).await;
 
     // The python_execute tool_end should contain a traceback.
-    let ptc_tool_end = events.iter().find(|e| {
-        e["type"] == "tool_end" && e["tool"] == "python_execute"
-    });
+    let ptc_tool_end = events
+        .iter()
+        .find(|e| e["type"] == "tool_end" && e["tool"] == "python_execute");
 
     assert!(
         ptc_tool_end.is_some(),
         "Expected tool_end for python_execute (even on error). Events: {:?}",
-        events.iter().map(|e| e["type"].as_str()).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| e["type"].as_str())
+            .collect::<Vec<_>>()
     );
 
     // Under agent delegation, the result is a structured object with an
@@ -578,11 +610,17 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
             name: "python_execute".into(),
             arguments: json!({ "code": python_code }),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
     let round_2 = vec![
-        StreamChunk::Delta { content: "Done.".into() },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Delta {
+            content: "Done.".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
@@ -619,12 +657,7 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
     drop(ws_read);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http(
-        &router,
-        "GET",
-        &format!("/api/conversations/{conv_id}"),
-    )
-    .await;
+    let (status, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     assert_eq!(status, StatusCode::OK);
 
     let messages = body["messages"].as_array().unwrap();
@@ -648,8 +681,7 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
     // Sub-tool calls should have parent_call_id in the API response.
     let sub_calls: Vec<_> = tool_calls
         .iter()
-        .filter(|tc| tc.get("parent_call_id").is_some()
-            && tc["parent_call_id"].as_str().is_some())
+        .filter(|tc| tc.get("parent_call_id").is_some() && tc["parent_call_id"].as_str().is_some())
         .collect();
 
     assert!(

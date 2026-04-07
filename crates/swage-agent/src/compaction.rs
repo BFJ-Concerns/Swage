@@ -155,9 +155,8 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
 /// Remove the oldest non-system messages, keeping the most recent ones that
 /// bring the total below the threshold. System messages are always preserved.
 fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<ChatMessage> {
-    let (system_msgs, non_system): (Vec<_>, Vec<_>) = messages
-        .into_iter()
-        .partition(|m| m.role == Role::System);
+    let (system_msgs, non_system): (Vec<_>, Vec<_>) =
+        messages.into_iter().partition(|m| m.role == Role::System);
 
     let target_keep = match threshold {
         CompactionThreshold::MessageCount(max) => {
@@ -206,9 +205,8 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
 ///
 /// This is the last-resort tier before declaring the context uncompactable.
 fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    let (system_msgs, non_system): (Vec<_>, Vec<_>) = messages
-        .into_iter()
-        .partition(|m| m.role == Role::System);
+    let (system_msgs, non_system): (Vec<_>, Vec<_>) =
+        messages.into_iter().partition(|m| m.role == Role::System);
 
     let mut result = system_msgs;
     if let Some(last) = non_system.into_iter().last() {
@@ -236,9 +234,9 @@ mod tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        Message, MessageStore, NewMessage, NewSession, NewThread, NewToolCall, NewTurn, Session,
-        SessionStore, Thread, ThreadState, ThreadStore, ToolCallRecord, ToolCallStore, Turn,
-        TurnState, TurnStore, ContextSnapshotStore,
+        ContextSnapshotStore, Message, MessageStore, NewMessage, NewSession, NewThread,
+        NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
 
     use super::*;
@@ -255,7 +253,9 @@ mod tests {
 
     impl SummaryProvider {
         fn new(summary: impl Into<String>) -> Arc<Self> {
-            Arc::new(Self { summary: summary.into() })
+            Arc::new(Self {
+                summary: summary.into(),
+            })
         }
     }
 
@@ -306,7 +306,9 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
-            Err(ProviderError::InvalidResponse("provider unavailable in test".into()))
+            Err(ProviderError::InvalidResponse(
+                "provider unavailable in test".into(),
+            ))
         }
 
         async fn complete_with_tools(
@@ -338,10 +340,7 @@ mod tests {
         async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_sessions_by_agent_id(
-            &self,
-            _: &str,
-        ) -> Result<Vec<Session>, StorageError> {
+        async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn delete_session(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -458,7 +457,11 @@ mod tests {
         async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn update_structured_output(&self, _: Uuid, _: &serde_json::Value) -> Result<(), StorageError> {
+        async fn update_structured_output(
+            &self,
+            _: Uuid,
+            _: &serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }
@@ -471,10 +474,7 @@ mod tests {
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
             unimplemented!()
         }
-        async fn get_latest_for_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<Message>, StorageError> {
+        async fn get_latest_for_session(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
             unimplemented!()
         }
         async fn get_message(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
@@ -487,16 +487,10 @@ mod tests {
 
     #[async_trait]
     impl ToolCallStore for StubStorage {
-        async fn create_tool_call(
-            &self,
-            _: NewToolCall,
-        ) -> Result<ToolCallRecord, StorageError> {
+        async fn create_tool_call(&self, _: NewToolCall) -> Result<ToolCallRecord, StorageError> {
             unimplemented!()
         }
-        async fn get_tool_call(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<ToolCallRecord>, StorageError> {
+        async fn get_tool_call(&self, _: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
         async fn update_tool_call_result(
@@ -539,7 +533,10 @@ mod tests {
         async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn list_active_skills(&self, _: Uuid) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
+        async fn list_active_skills(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
             unimplemented!()
         }
         async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
@@ -677,12 +674,7 @@ mod tests {
         async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
-        async fn remember_approval(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &str,
-        ) -> Result<(), StorageError> {
+        async fn remember_approval(&self, _: Uuid, _: &str, _: &str) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn has_approval_memory(
@@ -736,10 +728,7 @@ mod tests {
         ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
             unimplemented!()
         }
-        async fn expire_stale_messages(
-            &self,
-            _: std::time::Duration,
-        ) -> Result<u64, StorageError> {
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }
@@ -765,7 +754,10 @@ mod tests {
             text_msg(Role::User, "hello"),
             text_msg(Role::Assistant, "hi there"),
         ];
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::MessageCount(5)));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(5)
+        ));
     }
 
     #[test]
@@ -776,7 +768,10 @@ mod tests {
             text_msg(Role::User, "b"),
             text_msg(Role::User, "c"),
         ];
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::MessageCount(3)));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(3)
+        ));
     }
 
     #[test]
@@ -787,7 +782,10 @@ mod tests {
             text_msg(Role::User, "c"),
             text_msg(Role::User, "d"),
         ];
-        assert!(exceeds_threshold(&messages, &CompactionThreshold::MessageCount(3)));
+        assert!(exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(3)
+        ));
     }
 
     #[test]
@@ -795,8 +793,14 @@ mod tests {
         // "hello world" = 11 chars → ~2 tokens (11/4 = 2). Threshold of 1 should
         // exceed; threshold of 10 should not.
         let messages = vec![text_msg(Role::User, "hello world")];
-        assert!(exceeds_threshold(&messages, &CompactionThreshold::TokenCount(1)));
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::TokenCount(10)));
+        assert!(exceeds_threshold(
+            &messages,
+            &CompactionThreshold::TokenCount(1)
+        ));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::TokenCount(10)
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -916,7 +920,10 @@ mod tests {
 
         match result {
             Err(AgentError::CompactionFailed(_)) => {}
-            Ok(msgs) => panic!("expected CompactionFailed, got Ok with {} messages", msgs.len()),
+            Ok(msgs) => panic!(
+                "expected CompactionFailed, got Ok with {} messages",
+                msgs.len()
+            ),
             Err(e) => panic!("expected CompactionFailed, got different error: {e}"),
         }
     }

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -208,11 +208,18 @@ mod tests {
 
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "test-agent".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "test-agent".to_string(),
+            })
             .await
             .unwrap();
 
@@ -231,7 +238,12 @@ mod tests {
             .unwrap();
 
         let turn = storage
-            .create_turn(NewTurn { thread_id, agent_id: "test-agent".into(), state: TurnState::Pending, parent_turn_id: None })
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "test-agent".into(),
+                state: TurnState::Pending,
+                parent_turn_id: None,
+            })
             .await
             .unwrap();
         (storage, turn.id)
@@ -257,7 +269,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_returns_record_with_id() {
         let (storage, turn_id) = make_turn().await;
-        let record = storage.create_tool_call(new_call(turn_id, "toolu_01", 0)).await.unwrap();
+        let record = storage
+            .create_tool_call(new_call(turn_id, "toolu_01", 0))
+            .await
+            .unwrap();
 
         assert_eq!(record.turn_id, turn_id);
         assert_eq!(record.call_id, "toolu_01");
@@ -272,8 +287,14 @@ mod tests {
         let (storage, turn_id) = make_turn().await;
 
         // Insert in reverse order to verify position sorting.
-        storage.create_tool_call(new_call(turn_id, "toolu_02", 1)).await.unwrap();
-        storage.create_tool_call(new_call(turn_id, "toolu_01", 0)).await.unwrap();
+        storage
+            .create_tool_call(new_call(turn_id, "toolu_02", 1))
+            .await
+            .unwrap();
+        storage
+            .create_tool_call(new_call(turn_id, "toolu_01", 0))
+            .await
+            .unwrap();
 
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
         assert_eq!(calls.len(), 2);
@@ -284,7 +305,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn update_result_round_trip() {
         let (storage, turn_id) = make_turn().await;
-        let record = storage.create_tool_call(new_call(turn_id, "toolu_03", 0)).await.unwrap();
+        let record = storage
+            .create_tool_call(new_call(turn_id, "toolu_03", 0))
+            .await
+            .unwrap();
 
         storage
             .update_tool_call_result(
@@ -312,10 +336,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn update_result_with_truncation() {
         let (storage, turn_id) = make_turn().await;
-        let record = storage.create_tool_call(new_call(turn_id, "toolu_04", 0)).await.unwrap();
+        let record = storage
+            .create_tool_call(new_call(turn_id, "toolu_04", 0))
+            .await
+            .unwrap();
 
         storage
-            .update_tool_call_result(&record.call_id, turn_id, "...truncated", "success", 10, true, Some(50_000))
+            .update_tool_call_result(
+                &record.call_id,
+                turn_id,
+                "...truncated",
+                "success",
+                10,
+                true,
+                Some(50_000),
+            )
             .await
             .unwrap();
 
@@ -360,7 +395,10 @@ mod tests {
         // Verify round-trip via list.
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
         assert_eq!(calls.len(), 2);
-        assert!(calls[0].parent_call_id.is_none(), "native call should have no parent");
+        assert!(
+            calls[0].parent_call_id.is_none(),
+            "native call should have no parent"
+        );
         assert_eq!(
             calls[1].parent_call_id.as_deref(),
             Some("native_01"),
@@ -454,7 +492,15 @@ mod tests {
 
         // Update only call_a's result.
         storage
-            .update_tool_call_result(&call_a.call_id, turn_id, "127.0.0.1 localhost", "success", 5, false, Some(20))
+            .update_tool_call_result(
+                &call_a.call_id,
+                turn_id,
+                "127.0.0.1 localhost",
+                "success",
+                5,
+                false,
+                Some(20),
+            )
             .await
             .unwrap();
 

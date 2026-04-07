@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::model::HierarchyLevel;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // File collection
@@ -32,9 +32,7 @@ pub fn collect_instruction_files(dir: &Path) -> Result<Vec<PathBuf>, ConfigProbl
 
     // Alphabetical sort by filename so ordering is deterministic and
     // operators can control composition by naming files (01-base.md, etc.).
-    paths.sort_by(|a, b| {
-        a.file_name().cmp(&b.file_name())
-    });
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     Ok(paths)
 }
@@ -120,11 +118,15 @@ mod tests {
         write_file(tmp.path(), "notes.txt", "ignored");
 
         let files = collect_instruction_files(tmp.path()).unwrap();
-        let names: Vec<_> = files.iter()
+        let names: Vec<_> = files
+            .iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["01-base.md", "02-safety.md"],
-            "should return sorted .md files only");
+        assert_eq!(
+            names,
+            vec!["01-base.md", "02-safety.md"],
+            "should return sorted .md files only"
+        );
     }
 
     #[test]
@@ -163,24 +165,33 @@ mod tests {
 
     #[test]
     fn assemble_includes_content_from_all_levels() {
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
-        write_file(global_dir.path(),  "base.md",    "global content");
+        write_file(global_dir.path(), "base.md", "global content");
         write_file(project_dir.path(), "context.md", "project content");
-        write_file(agent_dir.path(),   "persona.md", "agent content");
+        write_file(agent_dir.path(), "persona.md", "agent content");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
         let result = assemble_instructions(&levels).unwrap();
-        assert!(result.contains("global content"),  "should include global content");
-        assert!(result.contains("project content"), "should include project content");
-        assert!(result.contains("agent content"),   "should include agent content");
+        assert!(
+            result.contains("global content"),
+            "should include global content"
+        );
+        assert!(
+            result.contains("project content"),
+            "should include project content"
+        );
+        assert!(
+            result.contains("agent content"),
+            "should include agent content"
+        );
     }
 
     #[test]
@@ -188,36 +199,41 @@ mod tests {
         let global_dir = TempDir::new().unwrap();
         write_file(global_dir.path(), "a.md", "some text");
 
-        let levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global, global_dir.path()),
-        ];
+        let levels: Vec<(HierarchyLevel, &Path)> =
+            vec![(HierarchyLevel::Global, global_dir.path())];
 
         let result = assemble_instructions(&levels).unwrap();
-        assert!(result.contains("Global"), "should include level name in attribution");
+        assert!(
+            result.contains("Global"),
+            "should include level name in attribution"
+        );
     }
 
     #[test]
     fn assemble_orders_global_before_project_before_agent() {
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
-        write_file(global_dir.path(),  "a.md", "GLOBAL");
+        write_file(global_dir.path(), "a.md", "GLOBAL");
         write_file(project_dir.path(), "a.md", "PROJECT");
-        write_file(agent_dir.path(),   "a.md", "AGENT");
+        write_file(agent_dir.path(), "a.md", "AGENT");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
         let result = assemble_instructions(&levels).unwrap();
-        let global_pos  = result.find("GLOBAL").unwrap();
+        let global_pos = result.find("GLOBAL").unwrap();
         let project_pos = result.find("PROJECT").unwrap();
-        let agent_pos   = result.find("AGENT").unwrap();
-        assert!(global_pos  < project_pos, "Global should come before Project");
-        assert!(project_pos < agent_pos,   "Project should come before Agent");
+        let agent_pos = result.find("AGENT").unwrap();
+        assert!(
+            global_pos < project_pos,
+            "Global should come before Project"
+        );
+        assert!(project_pos < agent_pos, "Project should come before Agent");
     }
 
     #[test]
@@ -227,7 +243,7 @@ mod tests {
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, existing_dir.path()),
-            (HierarchyLevel::Agent,  Path::new("/no/such/agent/dir")),
+            (HierarchyLevel::Agent, Path::new("/no/such/agent/dir")),
         ];
 
         let result = assemble_instructions(&levels).unwrap();
@@ -238,15 +254,17 @@ mod tests {
     fn assemble_returns_empty_when_all_levels_empty() {
         let dir = TempDir::new().unwrap(); // no .md files
 
-        let levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global, dir.path()),
-        ];
+        let levels: Vec<(HierarchyLevel, &Path)> = vec![(HierarchyLevel::Global, dir.path())];
 
         let result = assemble_instructions(&levels).unwrap();
         // No markdown files — assembled string should contain no meaningful content
-        let meaningful = result.lines()
+        let meaningful = result
+            .lines()
             .filter(|l| !l.trim().is_empty() && !l.starts_with("<!--"))
             .count();
-        assert_eq!(meaningful, 0, "no content should appear when no .md files exist");
+        assert_eq!(
+            meaningful, 0,
+            "no content should appear when no .md files exist"
+        );
     }
 }

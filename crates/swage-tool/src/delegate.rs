@@ -7,7 +7,7 @@
 //! following the same pattern as `RequiresApproval` for HITL gates.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use swage_core::ToolError;
 
 use crate::context::ToolContext;
@@ -58,11 +58,7 @@ impl Tool for DelegateTool {
         })
     }
 
-    async fn execute(
-        &self,
-        params: Value,
-        _ctx: &dyn ToolContext,
-    ) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Parse required fields — the schema validator has already checked
         // these, but defensive parsing avoids panics if called directly.
         let target_agent_id = params

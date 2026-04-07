@@ -13,7 +13,6 @@ use crate::approval::ApprovalChannelRegistrar;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
 
-
 /// Constructs an [`Agent`] with all required and optional dependencies.
 pub struct AgentBuilder {
     config: Option<AgentConfig>,
@@ -79,7 +78,10 @@ impl AgentBuilder {
         self
     }
 
-    pub fn delegation_handler(mut self, handler: Arc<dyn crate::delegation::DelegationHandler>) -> Self {
+    pub fn delegation_handler(
+        mut self,
+        handler: Arc<dyn crate::delegation::DelegationHandler>,
+    ) -> Self {
         self.delegation_handler = Some(handler);
         self
     }
@@ -155,14 +157,14 @@ mod tests {
     use futures::Stream;
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StorageError,
-        StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ProviderError, StorageError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        Message, MessageStore, NewMessage, NewSession, NewThread, NewToolCall, NewTurn, Session,
-        SessionStore, Thread, ThreadState, ThreadStore, ToolCallRecord, ToolCallStore, Turn,
-        TurnState, TurnStore, ContextSnapshotStore,
+        ContextSnapshotStore, Message, MessageStore, NewMessage, NewSession, NewThread,
+        NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
     use uuid::Uuid;
 
@@ -216,10 +218,7 @@ mod tests {
         async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_sessions_by_agent_id(
-            &self,
-            _: &str,
-        ) -> Result<Vec<Session>, StorageError> {
+        async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn delete_session(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -336,7 +335,11 @@ mod tests {
         async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn update_structured_output(&self, _: Uuid, _: &serde_json::Value) -> Result<(), StorageError> {
+        async fn update_structured_output(
+            &self,
+            _: Uuid,
+            _: &serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }
@@ -349,10 +352,7 @@ mod tests {
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
             unimplemented!()
         }
-        async fn get_latest_for_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<Message>, StorageError> {
+        async fn get_latest_for_session(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
             unimplemented!()
         }
         async fn get_message(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
@@ -411,7 +411,10 @@ mod tests {
         async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn list_active_skills(&self, _: Uuid) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
+        async fn list_active_skills(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
             unimplemented!()
         }
         async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
@@ -548,12 +551,7 @@ mod tests {
         async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
-        async fn remember_approval(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &str,
-        ) -> Result<(), StorageError> {
+        async fn remember_approval(&self, _: Uuid, _: &str, _: &str) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn has_approval_memory(
@@ -607,10 +605,7 @@ mod tests {
         ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
             unimplemented!()
         }
-        async fn expire_stale_messages(
-            &self,
-            _: std::time::Duration,
-        ) -> Result<u64, StorageError> {
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }

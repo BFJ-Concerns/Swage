@@ -63,10 +63,7 @@ impl EventHandler {
     /// When the gateway channel is closed, `gateway_rx` is set to `None` and
     /// `AppEvent::Disconnected` is returned once. Subsequent calls skip that
     /// arm since `pending()` never resolves when no receiver is present.
-    pub async fn next(
-        &mut self,
-        gateway_rx: &mut Option<mpsc::Receiver<ServerEvent>>,
-    ) -> AppEvent {
+    pub async fn next(&mut self, gateway_rx: &mut Option<mpsc::Receiver<ServerEvent>>) -> AppEvent {
         loop {
             tokio::select! {
                 // Terminal keypress, resize, focus, or paste events.
@@ -138,15 +135,14 @@ mod tests {
         let mut handler = EventHandler::new_headless(Duration::from_millis(1000));
         let (tx, rx) = mpsc::channel(8);
         let mut rx = Some(rx);
-        tx.send(ServerEvent::Shutdown { reason: "test".to_string() })
-            .await
-            .unwrap();
-        let event = tokio::time::timeout(
-            Duration::from_millis(200),
-            handler.next(&mut rx),
-        )
+        tx.send(ServerEvent::Shutdown {
+            reason: "test".to_string(),
+        })
         .await
-        .expect("gateway event should arrive quickly");
+        .unwrap();
+        let event = tokio::time::timeout(Duration::from_millis(200), handler.next(&mut rx))
+            .await
+            .expect("gateway event should arrive quickly");
         assert!(matches!(event, AppEvent::Gateway(_)));
     }
 
@@ -157,12 +153,9 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ServerEvent>(8);
         let mut rx = Some(rx);
         drop(tx);
-        let event = tokio::time::timeout(
-            Duration::from_millis(200),
-            handler.next(&mut rx),
-        )
-        .await
-        .expect("disconnected event should arrive quickly");
+        let event = tokio::time::timeout(Duration::from_millis(200), handler.next(&mut rx))
+            .await
+            .expect("disconnected event should arrive quickly");
         assert!(matches!(event, AppEvent::Disconnected));
         assert!(rx.is_none(), "gateway_rx should be cleared on disconnect");
     }
@@ -171,12 +164,9 @@ mod tests {
     #[tokio::test]
     async fn tick_fires_when_no_gateway_channel() {
         let mut handler = EventHandler::new_headless(Duration::from_millis(5));
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            handler.next(&mut None),
-        )
-        .await
-        .expect("tick should fire within timeout");
+        let result = tokio::time::timeout(Duration::from_millis(500), handler.next(&mut None))
+            .await
+            .expect("tick should fire within timeout");
         // Headless handler has no terminal stream, so only Tick can fire.
         assert!(matches!(result, AppEvent::Tick), "expected Tick event");
     }

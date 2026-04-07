@@ -311,7 +311,11 @@ fn hook_outcome_request_approval_minimal() {
         timeout: None,
     };
     match outcome {
-        HookOutcome::RequestApproval { prompt, context, timeout } => {
+        HookOutcome::RequestApproval {
+            prompt,
+            context,
+            timeout,
+        } => {
             assert_eq!(prompt, "Please review this tool call");
             assert!(context.is_none());
             assert!(timeout.is_none());
@@ -330,7 +334,9 @@ fn hook_outcome_request_approval_with_context() {
         timeout: None,
     };
     match outcome {
-        HookOutcome::RequestApproval { context: Some(c), .. } => {
+        HookOutcome::RequestApproval {
+            context: Some(c), ..
+        } => {
             assert_eq!(c["tool"], "Bash");
         }
         _ => panic!("expected RequestApproval with context"),
@@ -347,7 +353,9 @@ fn hook_outcome_request_approval_with_timeout() {
         timeout: Some(deadline),
     };
     match outcome {
-        HookOutcome::RequestApproval { timeout: Some(d), .. } => {
+        HookOutcome::RequestApproval {
+            timeout: Some(d), ..
+        } => {
             assert_eq!(d.as_secs(), 300);
         }
         _ => panic!("expected RequestApproval with timeout"),
@@ -375,7 +383,11 @@ fn hook_outcome_request_approval_is_clone() {
     };
     let cloned = original.clone();
     match cloned {
-        HookOutcome::RequestApproval { prompt, context, timeout } => {
+        HookOutcome::RequestApproval {
+            prompt,
+            context,
+            timeout,
+        } => {
             assert_eq!(prompt, "clone me");
             assert!(context.is_some());
             assert_eq!(timeout.unwrap().as_secs(), 60);

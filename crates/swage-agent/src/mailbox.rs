@@ -9,9 +9,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use swage_core::{MessageKind, MessageStatus};
-use swage_storage::model::AgentMessage;
-use swage_storage::store::AgentMessageStore;
 use swage_storage::Storage;
+use swage_storage::model::AgentMessage;
 
 use crate::error::AgentError;
 
@@ -114,8 +113,8 @@ pub async fn check_mailbox(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_storage::model::NewAgentMessage;
     use swage_storage::SqliteStorage;
+    use swage_storage::model::NewAgentMessage;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_mailbox() {
@@ -161,7 +160,11 @@ mod tests {
         assert!(contents.pending_delegates.is_empty());
 
         // Verify the delegate was marked Failed with the shutdown reason.
-        let msg = storage.get_agent_message(delegate.id).await.unwrap().unwrap();
+        let msg = storage
+            .get_agent_message(delegate.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(msg.status, MessageStatus::Failed);
         assert_eq!(msg.failure_reason.as_deref(), Some("shutdown received"));
     }
@@ -246,7 +249,10 @@ mod tests {
 
         let contents = check_mailbox(&storage, "agent-a").await.unwrap();
         assert_eq!(contents.pending_results.len(), 1);
-        assert_eq!(contents.pending_results[0].correlation_id, Some(correlation));
+        assert_eq!(
+            contents.pending_results[0].correlation_id,
+            Some(correlation)
+        );
         assert_eq!(contents.pending_results[0].payload["response"], "done");
     }
 

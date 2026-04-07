@@ -13,23 +13,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse, FinishReason,
-};
-use uuid::Uuid;
 use swage_config::ResolvedConfig;
+use swage_core::{
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Mock provider — minimal for non-streaming tests
@@ -41,10 +41,13 @@ struct StubProvider;
 
 #[async_trait]
 impl LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub" }
+    fn model_id(&self) -> &str {
+        "stub"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         Ok(CompletionResponse {
             content: String::new(),
@@ -56,7 +59,8 @@ impl LlmProvider for StubProvider {
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used")
     }
@@ -77,9 +81,7 @@ impl LlmProvider for StubProvider {
 ///
 /// Returns the router (for tower::oneshot HTTP) and the socket address
 /// (for TCP connection checks).
-async fn start_test_server_with_config(
-    config: ResolvedConfig,
-) -> (Router, SocketAddr) {
+async fn start_test_server_with_config(config: ResolvedConfig) -> (Router, SocketAddr) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let idle_timeout = config.lifecycle.idle_timeout;
     let state = AppState::new(
@@ -99,9 +101,10 @@ async fn start_test_server_with_config(
     let serve_router = router.clone();
     tokio::spawn(async move {
         axum::serve(listener, serve_router)
-            .with_graceful_shutdown(
-                swage_gateway::shutdown::idle_monitor(state_for_monitor, idle_timeout),
-            )
+            .with_graceful_shutdown(swage_gateway::shutdown::idle_monitor(
+                state_for_monitor,
+                idle_timeout,
+            ))
             .await
             .unwrap();
     });
@@ -114,9 +117,7 @@ async fn start_test_server_with_config(
 /// The returned state shares the same `Arc` internals (active_turns, activity_tracker,
 /// etc.) as the running server, so tests can inspect and mutate live state — for
 /// example, to inject fake active turns for deferral testing.
-async fn start_test_server_with_state(
-    config: ResolvedConfig,
-) -> (Router, SocketAddr, AppState) {
+async fn start_test_server_with_state(config: ResolvedConfig) -> (Router, SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let idle_timeout = config.lifecycle.idle_timeout;
     let state = AppState::new(
@@ -137,9 +138,10 @@ async fn start_test_server_with_state(
     let serve_router = router.clone();
     tokio::spawn(async move {
         axum::serve(listener, serve_router)
-            .with_graceful_shutdown(
-                swage_gateway::shutdown::idle_monitor(state_for_monitor, idle_timeout),
-            )
+            .with_graceful_shutdown(swage_gateway::shutdown::idle_monitor(
+                state_for_monitor,
+                idle_timeout,
+            ))
             .await
             .unwrap();
     });
@@ -167,11 +169,7 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 /// Send an HTTP request and return the full response (for header inspection).
-async fn http_response(
-    router: &Router,
-    method: &str,
-    uri: &str,
-) -> axum::http::Response<Body> {
+async fn http_response(router: &Router, method: &str, uri: &str) -> axum::http::Response<Body> {
     router
         .clone()
         .oneshot(
@@ -201,9 +199,7 @@ async fn http_response(
 /// Currently fails: the /api/health route does not exist (returns 404).
 #[tokio::test(flavor = "multi_thread")]
 async fn health_endpoint_returns_ok() {
-    let (router, _addr) = start_test_server_with_config(
-        ResolvedConfig::default(),
-    ).await;
+    let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;
 
     let (status, body) = http(&router, "GET", "/api/health").await;
 
@@ -228,9 +224,7 @@ async fn health_endpoint_returns_ok() {
 /// Currently fails: the request_id middleware does not exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_id_header_present_on_health_response() {
-    let (router, _addr) = start_test_server_with_config(
-        ResolvedConfig::default(),
-    ).await;
+    let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;
 
     let resp = http_response(&router, "GET", "/api/health").await;
 
@@ -240,7 +234,9 @@ async fn request_id_header_present_on_health_response() {
         .expect("X-Request-Id header should be present on every response");
 
     // Must be a valid UUID (36-char hyphenated form).
-    let id_str = request_id.to_str().expect("X-Request-Id should be valid UTF-8");
+    let id_str = request_id
+        .to_str()
+        .expect("X-Request-Id should be valid UTF-8");
     assert!(
         Uuid::parse_str(id_str).is_ok(),
         "X-Request-Id should be a valid UUID, got: {id_str}",
@@ -258,9 +254,7 @@ async fn request_id_header_present_on_health_response() {
 /// Currently fails: the request_id middleware does not exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_ids_are_unique_across_requests() {
-    let (router, _addr) = start_test_server_with_config(
-        ResolvedConfig::default(),
-    ).await;
+    let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;
 
     let resp_a = http_response(&router, "GET", "/api/health").await;
     let resp_b = http_response(&router, "GET", "/api/health").await;
@@ -281,7 +275,10 @@ async fn request_ids_are_unique_across_requests() {
         .unwrap()
         .to_owned();
 
-    assert_ne!(id_a, id_b, "each request should receive a distinct request_id");
+    assert_ne!(
+        id_a, id_b,
+        "each request should receive a distinct request_id"
+    );
 }
 
 // ===========================================================================
@@ -317,11 +314,8 @@ async fn server_shuts_down_after_idle_timeout() {
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     // Try to open a TCP connection — should fail because the server shut down.
-    let connect_result = tokio::time::timeout(
-        Duration::from_secs(1),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await;
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(addr)).await;
 
     match connect_result {
         Ok(Ok(_stream)) => {
@@ -334,9 +328,7 @@ async fn server_shuts_down_after_idle_timeout() {
             // Connection refused — server shut down. This is the expected outcome.
         }
         Err(_) => {
-            panic!(
-                "TCP connect timed out — server may be in a half-closed state"
-            );
+            panic!("TCP connect timed out — server may be in a half-closed state");
         }
     }
 }
@@ -381,7 +373,11 @@ async fn active_turn_defers_idle_shutdown() {
     // represents an in-flight turn and will defer shutdown.
     let fake_turn_id = Uuid::new_v4();
     let cancel_token = CancellationToken::new();
-    state.active_turns.lock().await.insert(fake_turn_id, cancel_token);
+    state
+        .active_turns
+        .lock()
+        .await
+        .insert(fake_turn_id, cancel_token);
 
     // Wait 3 seconds: past the idle threshold (2s) but still within the grace
     // period (2s from when idle was first detected at ~T=2s → expires at ~T=4s).
@@ -402,11 +398,8 @@ async fn active_turn_defers_idle_shutdown() {
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     // TCP connection must now be refused — the server has shut down.
-    let connect_result = tokio::time::timeout(
-        Duration::from_secs(1),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await;
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(addr)).await;
 
     match connect_result {
         Ok(Ok(_stream)) => {

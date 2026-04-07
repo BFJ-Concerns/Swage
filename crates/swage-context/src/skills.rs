@@ -99,7 +99,8 @@ impl ContextElement for SkillsElement {
             return vec![];
         }
 
-        let combined = self.sorted_skills()
+        let combined = self
+            .sorted_skills()
             .iter()
             .map(|s| s.instructions.as_str())
             .collect::<Vec<_>>()
@@ -128,7 +129,8 @@ impl ContextElement for SkillsElement {
         // Build per-skill descriptions using the tokeniser-free text estimate.
         // We use count_text on the raw instructions so we avoid constructing a
         // full ChatMessage just for the source string.
-        let skill_summaries: Vec<String> = self.sorted_skills()
+        let skill_summaries: Vec<String> = self
+            .sorted_skills()
             .iter()
             .map(|s| {
                 // Token count is reported as an estimate from the raw instruction
@@ -207,9 +209,10 @@ mod tests {
     /// A single skill produces one system message containing its instructions.
     #[test]
     fn single_skill_produces_system_message() {
-        let element = SkillsElement::new(vec![
-            agent_skill("persona", "You are a friendly assistant."),
-        ]);
+        let element = SkillsElement::new(vec![agent_skill(
+            "persona",
+            "You are a friendly assistant.",
+        )]);
 
         let messages = element.content();
         assert_eq!(messages.len(), 1);
@@ -237,8 +240,14 @@ mod tests {
 
         match &messages[0].content[0] {
             swage_core::ContentPart::Text { text } => {
-                assert!(text.contains("Instruction A."), "first skill instructions present");
-                assert!(text.contains("Instruction B."), "second skill instructions present");
+                assert!(
+                    text.contains("Instruction A."),
+                    "first skill instructions present"
+                );
+                assert!(
+                    text.contains("Instruction B."),
+                    "second skill instructions present"
+                );
                 assert!(text.contains("---"), "separator is present between skills");
             }
             _ => panic!("expected text content"),
@@ -261,7 +270,7 @@ mod tests {
         match &messages[0].content[0] {
             swage_core::ContentPart::Text { text } => {
                 let agent_pos = text.find("Agent instructions.").unwrap();
-                let user_pos  = text.find("User instructions.").unwrap();
+                let user_pos = text.find("User instructions.").unwrap();
                 assert!(
                     agent_pos < user_pos,
                     "agent skill must precede user skill in assembled output"
@@ -277,8 +286,8 @@ mod tests {
         let element = SkillsElement::new(vec![
             // Deliberately reversed to verify sorting.
             user_skill("second", "Second instructions.", 2),
-            user_skill("first",  "First instructions.",  1),
-            user_skill("third",  "Third instructions.",  3),
+            user_skill("first", "First instructions.", 1),
+            user_skill("third", "Third instructions.", 3),
         ]);
 
         let messages = element.content();
@@ -286,11 +295,11 @@ mod tests {
 
         match &messages[0].content[0] {
             swage_core::ContentPart::Text { text } => {
-                let first_pos  = text.find("First instructions.").unwrap();
+                let first_pos = text.find("First instructions.").unwrap();
                 let second_pos = text.find("Second instructions.").unwrap();
-                let third_pos  = text.find("Third instructions.").unwrap();
-                assert!(first_pos  < second_pos, "first before second");
-                assert!(second_pos < third_pos,  "second before third");
+                let third_pos = text.find("Third instructions.").unwrap();
+                assert!(first_pos < second_pos, "first before second");
+                assert!(second_pos < third_pos, "second before third");
             }
             _ => panic!("expected text content"),
         }
@@ -299,9 +308,10 @@ mod tests {
     /// token_count() returns a positive estimate for non-empty skills.
     #[test]
     fn token_count_returns_positive_for_non_empty_skills() {
-        let element = SkillsElement::new(vec![
-            agent_skill("persona", "You are a friendly assistant."),
-        ]);
+        let element = SkillsElement::new(vec![agent_skill(
+            "persona",
+            "You are a friendly assistant.",
+        )]);
         let tokeniser = MockTokeniser;
         // MockTokeniser returns 10 per message; we produce 1 message.
         assert_eq!(element.token_count(&tokeniser), 10);
@@ -338,16 +348,20 @@ mod tests {
         ]);
 
         let source = element.source();
-        assert!(source.contains("code-review"), "source should include skill name 'code-review'");
-        assert!(source.contains("persona"),      "source should include skill name 'persona'");
+        assert!(
+            source.contains("code-review"),
+            "source should include skill name 'code-review'"
+        );
+        assert!(
+            source.contains("persona"),
+            "source should include skill name 'persona'"
+        );
     }
 
     /// source() includes the hierarchy level for each skill.
     #[test]
     fn source_includes_hierarchy_level() {
-        let element = SkillsElement::new(vec![
-            agent_skill("my-skill", "Agent-level skill."),
-        ]);
+        let element = SkillsElement::new(vec![agent_skill("my-skill", "Agent-level skill.")]);
 
         let source = element.source();
         // HierarchyLevel::Agent displays as "agent" (lowercased in source).
@@ -360,9 +374,10 @@ mod tests {
     /// SkillsElement is usable as dyn ContextElement (object safety check).
     #[test]
     fn skills_element_is_usable_as_dyn_context_element() {
-        let element: Box<dyn ContextElement> = Box::new(SkillsElement::new(vec![
-            agent_skill("persona", "Instructions."),
-        ]));
+        let element: Box<dyn ContextElement> = Box::new(SkillsElement::new(vec![agent_skill(
+            "persona",
+            "Instructions.",
+        )]));
 
         assert_eq!(element.name(), "skills");
         assert_eq!(element.priority(), 75);

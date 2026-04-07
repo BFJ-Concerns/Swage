@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use swage_agent::AgentBuilder;
 use swage_agent::config::{AgentConfig, CompactionThreshold};
 use swage_agent::message::InboundMessage;
-use swage_agent::AgentBuilder;
 
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, ToolCall,
@@ -28,7 +28,7 @@ use swage_hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
 use swage_provider::LlmProvider;
 use swage_safety::LeakDetector;
 use swage_storage::sqlite::SqliteStorage;
-use swage_storage::{MessageStore, ProjectStore, SessionStore, Storage, ThreadStore, TurnStore};
+use swage_storage::{MessageStore, ProjectStore, SessionStore, ThreadStore, TurnStore};
 use swage_tool::context::ToolContext;
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::tool::Tool;
@@ -53,8 +53,6 @@ enum MockResponse {
         input_tokens: u32,
         output_tokens: u32,
     },
-    /// Provider error.
-    Error(String),
 }
 
 /// Configurable mock provider that returns canned responses in sequence.
@@ -86,13 +84,11 @@ impl MockProvider {
     fn next_response(&self) -> MockResponse {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let mut responses = self.responses.lock().unwrap();
-        responses
-            .pop()
-            .unwrap_or(MockResponse::Text {
-                content: "fallback response".into(),
-                input_tokens: 5,
-                output_tokens: 5,
-            })
+        responses.pop().unwrap_or(MockResponse::Text {
+            content: "fallback response".into(),
+            input_tokens: 5,
+            output_tokens: 5,
+        })
     }
 }
 
@@ -117,10 +113,6 @@ impl LlmProvider for MockProvider {
                 output_tokens,
                 finish_reason: FinishReason::Stop,
                 cost: None,
-            }),
-            MockResponse::Error(msg) => Err(ProviderError::ModelError {
-                model: self.model_id.clone(),
-                message: msg,
             }),
             // If a tool-call response is returned via complete(), treat as text.
             MockResponse::ToolCalls {
@@ -167,10 +159,6 @@ impl LlmProvider for MockProvider {
                 finish_reason: FinishReason::ToolUse,
                 cost: None,
                 tool_calls,
-            }),
-            MockResponse::Error(msg) => Err(ProviderError::ModelError {
-                model: self.model_id.clone(),
-                message: msg,
             }),
         }
     }
@@ -389,7 +377,11 @@ async fn full_message_lifecycle_persists_turn_and_messages() {
     let messages = MessageStore::list_messages_by_thread(&*storage, threads[0].id)
         .await
         .expect("list messages");
-    assert_eq!(messages.len(), 2, "thread should have user + assistant messages");
+    assert_eq!(
+        messages.len(),
+        2,
+        "thread should have user + assistant messages"
+    );
     assert_eq!(messages[0].role, "user");
     assert_eq!(messages[0].content, "Hello agent");
     assert_eq!(messages[1].role, "assistant");
@@ -405,7 +397,10 @@ async fn full_message_lifecycle_persists_turn_and_messages() {
         swage_storage::TurnState::Completed,
         "turn should be Completed"
     );
-    assert!(turns[0].completed_at.is_some(), "completed_at should be set");
+    assert!(
+        turns[0].completed_at.is_some(),
+        "completed_at should be set"
+    );
 }
 
 /// **Proves:** Tool dispatch [15v6] + Hook lifecycle [hr5n, 2cab] + Leak detection [cz4d]
@@ -483,7 +478,12 @@ async fn tool_dispatch_with_hooks_and_leak_detection() {
 
     // Verify hook ordering: BeforeInbound → PreToolUse → PostToolUse → AfterResponse.
     let events = hook_events.lock().unwrap().clone();
-    let expected_order = vec!["BeforeInbound", "PreToolUse", "PostToolUse", "AfterResponse"];
+    let expected_order = vec![
+        "BeforeInbound",
+        "PreToolUse",
+        "PostToolUse",
+        "AfterResponse",
+    ];
     assert_eq!(
         events, expected_order,
         "hooks should fire in lifecycle order"
@@ -843,10 +843,7 @@ async fn multi_round_tool_dispatch_and_max_rounds_enforcement() {
         })
         .await;
 
-    assert!(
-        result.is_err(),
-        "should fail when max tool rounds exceeded"
-    );
+    assert!(result.is_err(), "should fail when max tool rounds exceeded");
 }
 
 /// **Proves:** BeforeInbound hook blocking [hr5n] + session management
@@ -858,7 +855,6 @@ async fn before_inbound_hook_blocks_message() {
     let storage = test_storage();
 
     // Provider that should never be called.
-    let call_count = Arc::new(AtomicUsize::new(0));
     let provider = Arc::new(MockProvider::text("should not reach here"));
 
     let mut registry = HookRegistry::new();

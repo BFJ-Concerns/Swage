@@ -171,7 +171,9 @@ mod tests {
 
     #[test]
     fn test_token_constructible() {
-        let event = AgentEvent::Token { content: "hello".to_string() };
+        let event = AgentEvent::Token {
+            content: "hello".to_string(),
+        };
         if let AgentEvent::Token { content } = event {
             assert_eq!(content, "hello");
         } else {
@@ -186,7 +188,12 @@ mod tests {
             tool_name: "bash".to_string(),
             arguments: serde_json::json!({"cmd": "ls"}),
         };
-        if let AgentEvent::ToolStart { call_id, tool_name, arguments } = event {
+        if let AgentEvent::ToolStart {
+            call_id,
+            tool_name,
+            arguments,
+        } = event
+        {
             assert_eq!(call_id, "call-1");
             assert_eq!(tool_name, "bash");
             assert_eq!(arguments["cmd"], "ls");
@@ -204,7 +211,14 @@ mod tests {
             status: "success".to_string(),
             duration_ms: Some(42),
         };
-        if let AgentEvent::ToolEnd { call_id, tool_name, result, status, duration_ms } = event {
+        if let AgentEvent::ToolEnd {
+            call_id,
+            tool_name,
+            result,
+            status,
+            duration_ms,
+        } = event
+        {
             assert_eq!(call_id, "call-1");
             assert_eq!(tool_name, "bash");
             assert_eq!(result["output"], "file.txt");
@@ -261,7 +275,9 @@ mod tests {
 
     #[test]
     fn test_error_constructible() {
-        let event = AgentEvent::Error { message: "something went wrong".to_string() };
+        let event = AgentEvent::Error {
+            message: "something went wrong".to_string(),
+        };
         if let AgentEvent::Error { message } = event {
             assert_eq!(message, "something went wrong");
         } else {
@@ -276,26 +292,32 @@ mod tests {
         let turn_id = Uuid::new_v4();
 
         tx.send(AgentEvent::TurnStarted { turn_id }).unwrap();
-        tx.send(AgentEvent::Token { content: "tok".to_string() }).unwrap();
+        tx.send(AgentEvent::Token {
+            content: "tok".to_string(),
+        })
+        .unwrap();
         tx.send(AgentEvent::ToolStart {
             call_id: "c".to_string(),
             tool_name: "t".to_string(),
             arguments: serde_json::Value::Null,
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::ToolEnd {
             call_id: "c".to_string(),
             tool_name: "t".to_string(),
             result: serde_json::Value::Null,
             status: "success".to_string(),
             duration_ms: None,
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::TurnCompleted {
             turn_id,
             input_tokens: 1,
             output_tokens: 2,
             tool_calls_count: 0,
             structured_output: None,
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::ApprovalRequired {
             approval_id: Uuid::new_v4(),
             turn_id,
@@ -308,25 +330,33 @@ mod tests {
             context: None,
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
             timeout_policy: "reject".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::ApprovalConfirmed {
             approval_id: Uuid::new_v4(),
             decision: "approve".to_string(),
             reason: None,
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::ApprovalExpired {
             approval_id: Uuid::new_v4(),
             timeout_policy: "interrupt".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::DelegationStarted {
             target_agent_id: "reviewer".to_string(),
             task: "Review code".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(AgentEvent::DelegationCompleted {
             target_agent_id: "reviewer".to_string(),
             success: true,
-        }).unwrap();
-        tx.send(AgentEvent::Error { message: "err".to_string() }).unwrap();
+        })
+        .unwrap();
+        tx.send(AgentEvent::Error {
+            message: "err".to_string(),
+        })
+        .unwrap();
 
         // Drain the channel — all 11 events must arrive.
         let mut received = 0;
@@ -354,7 +384,10 @@ mod tests {
         drop(tx);
 
         let event = rx.recv().await.expect("should receive event");
-        if let AgentEvent::TurnCompleted { structured_output, .. } = event {
+        if let AgentEvent::TurnCompleted {
+            structured_output, ..
+        } = event
+        {
             assert_eq!(structured_output, Some(payload));
         } else {
             panic!("expected TurnCompleted");
@@ -363,7 +396,9 @@ mod tests {
 
     #[test]
     fn test_debug_and_clone() {
-        let event = AgentEvent::Token { content: "x".to_string() };
+        let event = AgentEvent::Token {
+            content: "x".to_string(),
+        };
         let cloned = event.clone();
         let debug_str = format!("{:?}", cloned);
         assert!(debug_str.contains("Token"));
@@ -396,7 +431,10 @@ mod tests {
 
     #[test]
     fn schema_validation_error_debug_and_clone() {
-        let err = SchemaValidationError { path: "/x".to_string(), message: "bad".to_string() };
+        let err = SchemaValidationError {
+            path: "/x".to_string(),
+            message: "bad".to_string(),
+        };
         let cloned = err.clone();
         let debug_str = format!("{:?}", cloned);
         assert!(debug_str.contains("SchemaValidationError"));
@@ -418,7 +456,13 @@ mod tests {
                 message: "required".to_string(),
             }],
         };
-        if let AgentEvent::OutputSchemaRetry { turn_id: id, attempt, max_retries, errors } = event {
+        if let AgentEvent::OutputSchemaRetry {
+            turn_id: id,
+            attempt,
+            max_retries,
+            errors,
+        } = event
+        {
             assert_eq!(id, turn_id);
             assert_eq!(attempt, 1);
             assert_eq!(max_retries, 3);
@@ -457,7 +501,12 @@ mod tests {
                 message: "required".to_string(),
             }],
         };
-        if let AgentEvent::OutputSchemaFailed { turn_id: id, attempts, errors } = event {
+        if let AgentEvent::OutputSchemaFailed {
+            turn_id: id,
+            attempts,
+            errors,
+        } = event
+        {
             assert_eq!(id, turn_id);
             assert_eq!(attempts, 3);
             assert_eq!(errors.len(), 1);
@@ -545,7 +594,13 @@ mod tests {
             timeout_at: "2026-03-24T13:00:00Z".to_string(),
             timeout_policy: "interrupt".to_string(),
         };
-        if let AgentEvent::ApprovalRequired { kind, hook_name, context, timeout_policy, .. } = event
+        if let AgentEvent::ApprovalRequired {
+            kind,
+            hook_name,
+            context,
+            timeout_policy,
+            ..
+        } = event
         {
             assert_eq!(kind, "hook");
             assert_eq!(hook_name.as_deref(), Some("pre_deploy"));
@@ -564,7 +619,12 @@ mod tests {
             decision: "approve".to_string(),
             reason: Some("Looks safe".to_string()),
         };
-        if let AgentEvent::ApprovalConfirmed { approval_id: aid, decision, reason } = event {
+        if let AgentEvent::ApprovalConfirmed {
+            approval_id: aid,
+            decision,
+            reason,
+        } = event
+        {
             assert_eq!(aid, approval_id);
             assert_eq!(decision, "approve");
             assert_eq!(reason.as_deref(), Some("Looks safe"));
@@ -594,7 +654,11 @@ mod tests {
             approval_id,
             timeout_policy: "reject".to_string(),
         };
-        if let AgentEvent::ApprovalExpired { approval_id: aid, timeout_policy } = event {
+        if let AgentEvent::ApprovalExpired {
+            approval_id: aid,
+            timeout_policy,
+        } = event
+        {
             assert_eq!(aid, approval_id);
             assert_eq!(timeout_policy, "reject");
         } else {

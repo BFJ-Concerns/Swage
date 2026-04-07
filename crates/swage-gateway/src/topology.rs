@@ -32,6 +32,8 @@ pub enum TopologyEngineError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error(transparent)]
+    Config(#[from] swage_config::ConfigError),
     #[error("topology hook blocked {event}: {reason}")]
     HookBlocked { event: String, reason: String },
     #[error("topology hook requested approval for {event}: {prompt}")]
@@ -193,6 +195,9 @@ impl TopologyExecutor {
                     ))
                 })?;
 
+                // TODO Add regression test for iteration-limit cancellation
+                // This branch aborts the run when a cyclic or re-queued node exceeds its iteration_limit, but the inline tests only cover fan-out and hook failures. Add a topology execution test that drives a bounded cycle past the limit and asserts Failed state plus persisted cancellation of later work.
+                // ---
                 let visit_count = visit_counts.entry(node.id.clone()).or_default();
                 *visit_count += 1;
                 if let Some(limit) = node.iteration_limit {
@@ -252,6 +257,9 @@ impl TopologyExecutor {
                 }
             };
 
+            // TODO Add regression test for topology token budget enforcement
+            // The executor fails the run once accumulated node usage exceeds max_total_tokens, but there is no behavioural test proving the persisted run state and terminal result handling on that path. Add a multi-node execution test that crosses the budget and asserts the run is marked Failed with no successful completion payload.
+            // ---
             if let Some(max_total_tokens) = request.graph.budget.max_total_tokens {
                 let node_tokens = completed.input_tokens as u64 + completed.output_tokens as u64;
                 total_tokens_consumed =
@@ -642,6 +650,9 @@ async fn execute_agent_node(
     input_json: &serde_json::Value,
     cancel_token: CancellationToken,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
+    let config = resolve_node_config(project, team, agent_id)?;
+    let rendered_input = render_node_input(node, input_json);
+
     let thread = ThreadStore::create(
         state.storage.as_ref(),
         NewThread {
@@ -655,14 +666,13 @@ async fn execute_agent_node(
         .storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            turn_id: None,
             role: Role::User.to_string(),
-            content: render_node_input(node, input_json),
+            content: rendered_input.clone(),
             position: 0,
             agent_id: agent_id.to_string(),
         })
         .await?;
-
-    let config = resolve_node_config(state, project, team, agent_id);
     let stored_history = state.storage.list_messages_by_thread(thread.id).await?;
     let history_messages: Vec<ChatMessage> = stored_history
         .into_iter()
@@ -743,7 +753,7 @@ async fn execute_agent_node(
             TurnRequest {
                 session_id,
                 thread_id: thread.id,
-                user_message: render_node_input(node, input_json),
+                user_message: rendered_input,
                 assembled_context: output.messages,
                 parent_turn_id: None,
                 existing_turn_id: None,
@@ -847,23 +857,13 @@ fn execute_deterministic_node(
 }
 
 fn resolve_node_config(
-    state: &AppState,
     project: &swage_storage::model::Project,
     team: &Team,
     agent_id: &str,
-) -> swage_config::ResolvedConfig {
+) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
     swage_config::load_resolved_config_for_team(&project.slug, &team.name, agent_id)
         .or_else(|_| swage_config::load_resolved_config(&project.slug, agent_id))
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                project = %project.slug,
-                team = %team.name,
-                agent_id,
-                error = %error,
-                "failed to load node config, using startup config"
-            );
-            state.config.clone()
-        })
+        .map_err(TopologyEngineError::from)
 }
 
 fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> String {

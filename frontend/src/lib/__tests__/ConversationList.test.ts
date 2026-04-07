@@ -258,7 +258,9 @@ describe("ConversationList", () => {
     const store = makeStore([conv]);
     component = mount(ConversationList, { target: document.body, props: { store } });
 
-    const entry = document.querySelector(".conversation-item") as HTMLElement;
+    const entry = document.querySelector(
+      ".conversation-item .conversation-select-btn",
+    ) as HTMLButtonElement;
     entry.click();
     await Promise.resolve();
 

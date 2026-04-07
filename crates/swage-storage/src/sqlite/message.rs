@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -13,22 +13,24 @@ use crate::store::MessageStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
-/// Column order: id, thread_id, role, content, position, agent_id,
-/// tool_call_id, tool_name, created_at  (9 columns, matching every SELECT).
+/// Column order: id, thread_id, turn_id, role, content, position, agent_id,
+/// tool_call_id, tool_name, created_at  (10 columns, matching every SELECT).
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
-    let created: String = row.get(8)?;
+    let turn_id: Option<String> = row.get(2)?;
+    let created: String = row.get(9)?;
 
     Ok(Message {
         id: parse_uuid(&id)?,
         thread_id: parse_uuid(&thread_id)?,
-        role: row.get(2)?,
-        content: row.get(3)?,
-        position: row.get(4)?,
-        agent_id: row.get(5)?,
-        tool_call_id: row.get(6)?,
-        tool_name: row.get(7)?,
+        turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
+        role: row.get(3)?,
+        content: row.get(4)?,
+        position: row.get(5)?,
+        agent_id: row.get(6)?,
+        tool_call_id: row.get(7)?,
+        tool_name: row.get(8)?,
         created_at: parse_dt(&created)?,
     })
 }
@@ -51,7 +53,6 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 // MessageStore
 // ---------------------------------------------------------------------------
 
-
 #[async_trait]
 impl MessageStore for SqliteStorage {
     async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError> {
@@ -60,16 +61,14 @@ impl MessageStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
 
-            // TODO(debt): SQL wiring to thread_id, agent_id, tool_call_id, tool_name
-            // is task [xf78]. Inserting turn_id as a placeholder so existing
-            // column name compiles; the schema rename is part of the migration.
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
+                    message.turn_id.map(|turn_id| turn_id.to_string()),
                     &message.role,
                     &message.content,
                     message.position,
@@ -83,6 +82,7 @@ impl MessageStore for SqliteStorage {
             Ok(Message {
                 id,
                 thread_id: message.thread_id,
+                turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
                 position: message.position,
@@ -98,7 +98,7 @@ impl MessageStore for SqliteStorage {
     async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, thread_id, role, content, position, agent_id,
+                "SELECT id, thread_id, turn_id, role, content, position, agent_id,
                         tool_call_id, tool_name, created_at
                  FROM messages
                  WHERE thread_id = ?1
@@ -118,7 +118,7 @@ impl MessageStore for SqliteStorage {
         // most recently created one (ties broken by descending position).
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT m.id, m.thread_id, m.role, m.content, m.position, m.agent_id,
+                "SELECT m.id, m.thread_id, m.turn_id, m.role, m.content, m.position, m.agent_id,
                         m.tool_call_id, m.tool_name, m.created_at
                  FROM messages m
                  JOIN threads t ON m.thread_id = t.id
@@ -136,7 +136,7 @@ impl MessageStore for SqliteStorage {
     async fn get_message(&self, id: Uuid) -> Result<Option<Message>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, thread_id, role, content, position, agent_id,
+                "SELECT id, thread_id, turn_id, role, content, position, agent_id,
                         tool_call_id, tool_name, created_at
                  FROM messages
                  WHERE id = ?1",
@@ -182,11 +182,18 @@ mod tests {
     async fn make_thread() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "test-agent".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "test-agent".to_string(),
+            })
             .await
             .unwrap();
 
@@ -210,6 +217,7 @@ mod tests {
     fn new_msg(thread_id: Uuid, role: &str, content: &str, position: i32) -> NewMessage {
         NewMessage {
             thread_id,
+            turn_id: None,
             role: role.into(),
             content: content.into(),
             position,
@@ -223,8 +231,14 @@ mod tests {
     async fn create_and_list_by_thread() {
         let (storage, _, thread_id) = make_thread().await;
 
-        storage.create_message(new_msg(thread_id, "user", "hello", 0)).await.unwrap();
-        storage.create_message(new_msg(thread_id, "assistant", "hi", 1)).await.unwrap();
+        storage
+            .create_message(new_msg(thread_id, "user", "hello", 0))
+            .await
+            .unwrap();
+        storage
+            .create_message(new_msg(thread_id, "assistant", "hi", 1))
+            .await
+            .unwrap();
 
         let msgs = storage.list_messages_by_thread(thread_id).await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -237,7 +251,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_by_thread_returns_empty_for_unknown_thread() {
         let (storage, _, _) = make_thread().await;
-        let msgs = storage.list_messages_by_thread(Uuid::new_v4()).await.unwrap();
+        let msgs = storage
+            .list_messages_by_thread(Uuid::new_v4())
+            .await
+            .unwrap();
         assert!(msgs.is_empty());
     }
 
@@ -246,8 +263,14 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         // Insert out of position order to verify the ORDER BY clause works.
-        storage.create_message(new_msg(thread_id, "assistant", "second", 1)).await.unwrap();
-        storage.create_message(new_msg(thread_id, "user", "first", 0)).await.unwrap();
+        storage
+            .create_message(new_msg(thread_id, "assistant", "second", 1))
+            .await
+            .unwrap();
+        storage
+            .create_message(new_msg(thread_id, "user", "first", 0))
+            .await
+            .unwrap();
 
         let msgs = storage.list_messages_by_thread(thread_id).await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -261,8 +284,15 @@ mod tests {
     async fn get_message_by_id_returns_message() {
         let (storage, _, thread_id) = make_thread().await;
 
-        let created = storage.create_message(new_msg(thread_id, "user", "hi", 0)).await.unwrap();
-        let fetched = storage.get_message(created.id).await.unwrap().expect("should exist");
+        let created = storage
+            .create_message(new_msg(thread_id, "user", "hi", 0))
+            .await
+            .unwrap();
+        let fetched = storage
+            .get_message(created.id)
+            .await
+            .unwrap()
+            .expect("should exist");
 
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.thread_id, thread_id);
@@ -284,24 +314,40 @@ mod tests {
     async fn delete_by_thread_removes_all_messages() {
         let (storage, _, thread_id) = make_thread().await;
 
-        storage.create_message(new_msg(thread_id, "user", "a", 0)).await.unwrap();
-        storage.create_message(new_msg(thread_id, "assistant", "b", 1)).await.unwrap();
+        storage
+            .create_message(new_msg(thread_id, "user", "a", 0))
+            .await
+            .unwrap();
+        storage
+            .create_message(new_msg(thread_id, "assistant", "b", 1))
+            .await
+            .unwrap();
 
         storage.delete_by_thread(thread_id).await.unwrap();
 
         let msgs = storage.list_messages_by_thread(thread_id).await.unwrap();
-        assert!(msgs.is_empty(), "all messages should be gone after delete_by_thread");
+        assert!(
+            msgs.is_empty(),
+            "all messages should be gone after delete_by_thread"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_by_thread_is_scoped_to_thread() {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "a".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "a".to_string(),
+            })
             .await
             .unwrap();
 
@@ -321,12 +367,24 @@ mod tests {
             .await
             .unwrap();
 
-        storage.create_message(new_msg(t1, "user", "in t1", 0)).await.unwrap();
-        storage.create_message(new_msg(t2, "user", "in t2", 0)).await.unwrap();
+        storage
+            .create_message(new_msg(t1, "user", "in t1", 0))
+            .await
+            .unwrap();
+        storage
+            .create_message(new_msg(t2, "user", "in t2", 0))
+            .await
+            .unwrap();
 
         storage.delete_by_thread(t1).await.unwrap();
 
-        assert!(storage.list_messages_by_thread(t1).await.unwrap().is_empty());
+        assert!(
+            storage
+                .list_messages_by_thread(t1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(storage.list_messages_by_thread(t2).await.unwrap().len(), 1);
     }
 
@@ -336,8 +394,14 @@ mod tests {
     async fn get_latest_for_session_returns_last_message() {
         let (storage, session_id, thread_id) = make_thread().await;
 
-        storage.create_message(new_msg(thread_id, "user", "first", 0)).await.unwrap();
-        storage.create_message(new_msg(thread_id, "assistant", "last", 1)).await.unwrap();
+        storage
+            .create_message(new_msg(thread_id, "user", "first", 0))
+            .await
+            .unwrap();
+        storage
+            .create_message(new_msg(thread_id, "assistant", "last", 1))
+            .await
+            .unwrap();
 
         let latest = storage
             .get_latest_for_session(session_id)

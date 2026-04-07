@@ -118,10 +118,14 @@ impl ToolDispatcher for GatewayToolDispatcher {
             position,
             parent_call_id: Some(self.parent_call_id.clone()),
         };
-        let _ = self.handle.block_on(
-            self.handle
-                .spawn(async move { storage.create_tool_call(new_call).await }),
-        );
+        if let Err(error) = self.persist_tool_call_start(storage, new_call) {
+            let failure = format!("failed to persist tool call start: {error}");
+            self.send_tool_end(&call_id, tool_name, &failure, "error", 0);
+            return DispatchResult {
+                content: failure,
+                is_error: true,
+            };
+        }
 
         // Dispatch the tool call through the full pipeline.
         // Build a context inside the spawn so it can be borrowed by dispatch().
@@ -130,26 +134,33 @@ impl ToolDispatcher for GatewayToolDispatcher {
         let tool_name_owned = tool_name.to_string();
 
         let start = Instant::now();
-        let exec = self
-            .handle
-            .block_on(self.handle.spawn(async move {
-                let ctx = swage_tool::context::MockToolContext {
-                    agent_id: "gateway-dispatcher".to_string(),
-                    session_id: String::new(),
-                    working_directory,
-                    allowed_paths: vec![],
-                    user_info: None,
-                    call_id: None,
-                    turn_id: None,
+        let exec = match self.handle.block_on(self.handle.spawn(async move {
+            let ctx = swage_tool::context::MockToolContext {
+                agent_id: "gateway-dispatcher".to_string(),
+                session_id: String::new(),
+                working_directory,
+                allowed_paths: vec![],
+                user_info: None,
+                call_id: None,
+                turn_id: None,
+            };
+            dispatcher
+                .dispatch(&tool_name_owned, arguments, &ctx, "gateway-dispatcher")
+                .await
+        })) {
+            Ok(exec) => exec,
+            Err(error) => {
+                let failure = format!("tool dispatch task panicked: {error}");
+                self.send_tool_end(&call_id, tool_name, &failure, "error", 0);
+                return DispatchResult {
+                    content: failure,
+                    is_error: true,
                 };
-                dispatcher
-                    .dispatch(&tool_name_owned, arguments, &ctx, "gateway-dispatcher")
-                    .await
-            }))
-            .expect("tool dispatch task should not panic");
+            }
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let (output, is_error) = match exec {
+        let (mut output, mut is_error) = match exec {
             Ok(tool_output) => (
                 tool_output.result["output"]
                     .as_str()
@@ -160,22 +171,15 @@ impl ToolDispatcher for GatewayToolDispatcher {
             Err(e) => (e.to_string(), true),
         };
 
-        let status = if is_error { "error" } else { "success" };
-
-        // Send ToolEnd to the WebSocket.
-        let _ = self.ws_tx.send(ServerEvent::ToolEnd {
-            call_id: call_id.clone(),
-            tool: tool_name.to_string(),
-            result: serde_json::json!(&output),
-            status: status.to_string(),
-            duration_ms,
-            truncated: false,
-            total_bytes: None,
-            parent_call_id: Some(self.parent_call_id.clone()),
-        });
-
-        // Persist the completed result.
-        self.update_result(&call_id, &output, status, duration_ms, false, None);
+        let mut status = if is_error { "error" } else { "success" };
+        if let Err(error) =
+            self.persist_tool_call_result(&call_id, &output, status, duration_ms, false, None)
+        {
+            output = format!("failed to persist tool call result: {error}");
+            is_error = true;
+            status = "error";
+        }
+        self.send_tool_end(&call_id, tool_name, &output, status, duration_ms);
 
         DispatchResult {
             content: output,
@@ -189,8 +193,23 @@ impl ToolDispatcher for GatewayToolDispatcher {
 // ---------------------------------------------------------------------------
 
 impl GatewayToolDispatcher {
+    fn persist_tool_call_start(
+        &self,
+        storage: Arc<dyn Storage>,
+        new_call: NewToolCall,
+    ) -> Result<(), String> {
+        self.handle
+            .block_on(
+                self.handle
+                    .spawn(async move { storage.create_tool_call(new_call).await }),
+            )
+            .map_err(|error| format!("tool call persistence task panicked: {error}"))?
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// Persist the completed result for a sub-tool call record.
-    fn update_result(
+    fn persist_tool_call_result(
         &self,
         call_id: &str,
         content: &str,
@@ -198,24 +217,47 @@ impl GatewayToolDispatcher {
         duration_ms: u64,
         truncated: bool,
         total_bytes: Option<i64>,
-    ) {
+    ) -> Result<(), String> {
         let storage = Arc::clone(&self.storage);
         let call_id = call_id.to_string();
         let content = content.to_string();
         let turn_id = self.turn_id;
-        let _ = self.handle.block_on(self.handle.spawn(async move {
-            storage
-                .update_tool_call_result(
-                    &call_id,
-                    turn_id,
-                    &content,
-                    status,
-                    duration_ms as i64,
-                    truncated,
-                    total_bytes,
-                )
-                .await
-        }));
+        self.handle
+            .block_on(self.handle.spawn(async move {
+                storage
+                    .update_tool_call_result(
+                        &call_id,
+                        turn_id,
+                        &content,
+                        status,
+                        duration_ms as i64,
+                        truncated,
+                        total_bytes,
+                    )
+                    .await
+            }))
+            .map_err(|error| format!("tool call result task panicked: {error}"))?
+            .map_err(|error| error.to_string())
+    }
+
+    fn send_tool_end(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        output: &str,
+        status: &str,
+        duration_ms: u64,
+    ) {
+        let _ = self.ws_tx.send(ServerEvent::ToolEnd {
+            call_id: call_id.to_string(),
+            tool: tool_name.to_string(),
+            result: serde_json::json!(output),
+            status: status.to_string(),
+            duration_ms,
+            truncated: false,
+            total_bytes: None,
+            parent_call_id: Some(self.parent_call_id.clone()),
+        });
     }
 }
 
@@ -235,9 +277,7 @@ mod tests {
     use swage_core::ToolError;
     use swage_storage::SqliteStorage;
     use swage_storage::model::{NewProject, NewSession, NewThread, NewTurn, TurnState};
-    use swage_storage::store::{
-        ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
-    };
+    use swage_storage::store::{ProjectStore, SessionStore, Storage, ThreadStore, TurnStore};
     use swage_tool::context::ToolContext;
     use swage_tool::dispatch::ToolDispatcher as SwageToolDispatcher;
 
@@ -382,13 +422,13 @@ mod tests {
     /// Happy path: known tool returns its output.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_returns_tool_output() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, _rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             dispatcher_with_echo(),
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "py_01",
         ));
 
@@ -404,13 +444,13 @@ mod tests {
     /// Unknown tool name returns an error.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_unknown_tool_returns_error() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, _rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             empty_dispatcher(),
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "py_02",
         ));
 
@@ -428,13 +468,13 @@ mod tests {
     /// ToolStart event must carry the parent's call_id.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_sends_tool_start_with_parent_call_id() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             dispatcher_with_echo(),
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "python_001",
         ));
 
@@ -462,13 +502,13 @@ mod tests {
     /// ToolEnd event must carry the parent's call_id and success status.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_sends_tool_end_with_parent_call_id() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             dispatcher_with_echo(),
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "python_002",
         ));
 
@@ -564,13 +604,13 @@ mod tests {
         let sub_dispatcher = Arc::new(SwageToolDispatcher::allow_all(vec![
             Arc::new(FailingTool) as Arc<dyn swage_tool::tool::Tool>
         ]));
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             sub_dispatcher,
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "py_fail",
         ));
 
@@ -622,13 +662,13 @@ mod tests {
             false,
         ));
 
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, _rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             restricted_dispatcher,
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "py_deny",
         ));
 
@@ -650,13 +690,13 @@ mod tests {
     /// client state machine stays consistent.
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_unknown_tool_still_emits_tool_start_and_end() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap()) as Arc<dyn Storage>;
+        let (storage, turn_id) = make_seeded_turn().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let d = Arc::new(make_dispatcher(
             empty_dispatcher(),
             tx,
             storage,
-            Uuid::new_v4(),
+            turn_id,
             "py_miss",
         ));
 

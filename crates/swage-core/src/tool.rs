@@ -213,7 +213,10 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let blocks = messages[0].content_blocks.as_ref().expect("should have blocks");
+        let blocks = messages[0]
+            .content_blocks
+            .as_ref()
+            .expect("should have blocks");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "tool_use");
         assert_eq!(blocks[0]["id"], "call_abc");
@@ -256,7 +259,10 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let blocks = messages[1].content_blocks.as_ref().expect("should have blocks");
+        let blocks = messages[1]
+            .content_blocks
+            .as_ref()
+            .expect("should have blocks");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "tool_result");
         assert_eq!(blocks[0]["tool_use_id"], "call_1");
@@ -298,8 +304,16 @@ mod tests {
             },
         ];
         let results = vec![
-            ToolResult { call_id: "c1".into(), content: "r1".into(), is_error: false },
-            ToolResult { call_id: "c2".into(), content: "r2".into(), is_error: false },
+            ToolResult {
+                call_id: "c1".into(),
+                content: "r1".into(),
+                is_error: false,
+            },
+            ToolResult {
+                call_id: "c2".into(),
+                content: "r2".into(),
+                is_error: false,
+            },
         ];
 
         let messages = build_tool_round_messages(&calls, &results, "");

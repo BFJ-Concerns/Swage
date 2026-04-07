@@ -102,10 +102,7 @@ impl Registry {
     ///
     /// Rejects duplicates — a provider with the same `id` cannot be
     /// registered twice.
-    pub fn register_provider(
-        &mut self,
-        config: ProviderConfig,
-    ) -> Result<(), RegistryError> {
+    pub fn register_provider(&mut self, config: ProviderConfig) -> Result<(), RegistryError> {
         if self.providers.contains_key(&config.id) {
             return Err(RegistryError::DuplicateProvider(config.id.clone()));
         }
@@ -119,10 +116,7 @@ impl Registry {
     /// 1. No model with the same `id` is already registered.
     /// 2. The referenced `provider_id` exists.
     /// 3. None of the model's aliases clash with existing aliases.
-    pub fn register_model(
-        &mut self,
-        config: ModelConfig,
-    ) -> Result<(), RegistryError> {
+    pub fn register_model(&mut self, config: ModelConfig) -> Result<(), RegistryError> {
         // Reject duplicate model id.
         if self.models.contains_key(&config.id) {
             return Err(RegistryError::DuplicateModel(config.id.clone()));
@@ -188,10 +182,7 @@ impl Registry {
             let matching: Vec<&ModelConfig> = self
                 .models
                 .values()
-                .filter(|m| {
-                    m.provider_id == provider_id
-                        && m.model_id.contains(model_substring)
-                })
+                .filter(|m| m.provider_id == provider_id && m.model_id.contains(model_substring))
                 .collect();
 
             if matching.len() == 1 {
@@ -206,10 +197,7 @@ impl Registry {
     // -- Internal helpers ---------------------------------------------------
 
     /// Pairs a model with its provider to build a `ResolvedModel`.
-    fn build_resolved(
-        &self,
-        model: &ModelConfig,
-    ) -> Result<ResolvedModel, RegistryError> {
+    fn build_resolved(&self, model: &ModelConfig) -> Result<ResolvedModel, RegistryError> {
         let provider = self
             .providers
             .get(&model.provider_id)
@@ -247,12 +235,7 @@ mod tests {
         .unwrap()
     }
 
-    fn model(
-        id: &str,
-        provider_id: &str,
-        model_id: &str,
-        aliases: &[&str],
-    ) -> ModelConfig {
+    fn model(id: &str, provider_id: &str, model_id: &str, aliases: &[&str]) -> ModelConfig {
         ModelConfig {
             id: id.to_string(),
             provider_id: provider_id.to_string(),
@@ -277,8 +260,7 @@ mod tests {
     #[test]
     fn register_provider_succeeds() {
         let mut registry = Registry::new();
-        let result =
-            registry.register_provider(provider("openai", Protocol::OpenAiCompatible));
+        let result = registry.register_provider(provider("openai", Protocol::OpenAiCompatible));
         assert!(result.is_ok());
         assert!(registry.providers.contains_key("openai"));
     }
@@ -306,8 +288,7 @@ mod tests {
             .register_provider(provider("openai", Protocol::OpenAiCompatible))
             .unwrap();
 
-        let result =
-            registry.register_provider(provider("openai", Protocol::OpenAiCompatible));
+        let result = registry.register_provider(provider("openai", Protocol::OpenAiCompatible));
         assert!(matches!(result, Err(RegistryError::DuplicateProvider(id)) if id == "openai"));
     }
 
@@ -320,12 +301,8 @@ mod tests {
             .register_provider(provider("openai", Protocol::OpenAiCompatible))
             .unwrap();
 
-        let result = registry.register_model(model(
-            "gpt4o",
-            "openai",
-            "gpt-4o",
-            &["4o", "gpt4-omni"],
-        ));
+        let result =
+            registry.register_model(model("gpt4o", "openai", "gpt-4o", &["4o", "gpt4-omni"]));
         assert!(result.is_ok());
         assert!(registry.models.contains_key("gpt4o"));
         assert_eq!(registry.aliases.get("4o"), Some(&"gpt4o".to_string()));
@@ -339,12 +316,7 @@ mod tests {
     fn register_model_with_unknown_provider_rejected() {
         let mut registry = Registry::new();
 
-        let result = registry.register_model(model(
-            "gpt4",
-            "nonexistent",
-            "gpt-4",
-            &[],
-        ));
+        let result = registry.register_model(model("gpt4", "nonexistent", "gpt-4", &[]));
         assert!(matches!(
             result,
             Err(RegistryError::UnknownProvider { model_id, provider_id })
@@ -362,8 +334,7 @@ mod tests {
             .register_model(model("gpt4", "openai", "gpt-4", &[]))
             .unwrap();
 
-        let result =
-            registry.register_model(model("gpt4", "openai", "gpt-4-turbo", &[]));
+        let result = registry.register_model(model("gpt4", "openai", "gpt-4-turbo", &[]));
         assert!(matches!(result, Err(RegistryError::DuplicateModel(id)) if id == "gpt4"));
     }
 
@@ -378,12 +349,8 @@ mod tests {
             .unwrap();
 
         // Another model tries to claim the same alias.
-        let result = registry.register_model(model(
-            "gpt4turbo",
-            "openai",
-            "gpt-4-turbo",
-            &["smart"],
-        ));
+        let result =
+            registry.register_model(model("gpt4turbo", "openai", "gpt-4-turbo", &["smart"]));
         assert!(matches!(
             result,
             Err(RegistryError::DuplicateAlias { alias, existing_model })
@@ -403,12 +370,8 @@ mod tests {
             .register_model(model("existing", "openai", "gpt-4", &["clash"]))
             .unwrap();
 
-        let result = registry.register_model(model(
-            "newcomer",
-            "openai",
-            "gpt-4-turbo",
-            &["ok", "clash"],
-        ));
+        let result =
+            registry.register_model(model("newcomer", "openai", "gpt-4-turbo", &["ok", "clash"]));
         assert!(result.is_err());
 
         // "ok" must not have leaked into the alias map.
@@ -490,12 +453,7 @@ mod tests {
             .register_provider(provider("google", Protocol::Google))
             .unwrap();
         registry
-            .register_model(model(
-                "gemini-pro",
-                "google",
-                "gemini-1.5-pro-latest",
-                &[],
-            ))
+            .register_model(model("gemini-pro", "google", "gemini-1.5-pro-latest", &[]))
             .unwrap();
 
         // Substring match: "pro" matches "gemini-1.5-pro-latest".

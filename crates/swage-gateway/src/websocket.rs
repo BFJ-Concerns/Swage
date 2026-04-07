@@ -22,7 +22,11 @@ use crate::{state::AppState, subscription::SubscriptionState, turn};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
     /// Send a message to the conversation, triggering a provider turn.
-    SendMessage { content: String },
+    SendMessage {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<Uuid>,
+    },
     /// Human responds to a pending approval request.
     ///
     /// The client sends this event when the user approves or rejects an action
@@ -429,10 +433,14 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                     match event {
                         None => break, // All senders dropped — turn and connection done.
                         Some(event) => {
+                            let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
                                     if ws_sink.send(Message::Text(json.into())).await.is_err() {
                                         // Client disconnected — stop forwarding.
+                                        break;
+                                    }
+                                    if is_shutdown {
                                         break;
                                     }
                                 }
@@ -484,6 +492,12 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
         // Send a close frame when the forwarding loop exits for any reason.
         let _ = ws_sink.send(Message::Close(None)).await;
     });
+
+    if state.shutdown_signal.is_cancelled() {
+        let _ = tx.send(ServerEvent::Shutdown {
+            reason: "admin shutdown request".to_string(),
+        });
+    }
 
     // Re-emit any pending approvals for this session's agent. A client may
     // connect (or reconnect) after an approval was raised, so we catch them
@@ -593,8 +607,6 @@ async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {
-    use swage_storage::store::ProjectStore;
-
     // Fetch session to get project_id and agent_id.
     let session = match state.storage.get_session(session_id).await {
         Ok(Some(s)) => s,
@@ -676,7 +688,7 @@ async fn dispatch_client_message(
             subscription.lock().await.unsubscribe(&channels);
         }
 
-        ClientEvent::SendMessage { content } => {
+        ClientEvent::SendMessage { content, thread_id } => {
             // Check for a slash command before deciding whether to spawn a turn.
             match crate::skill::parse_slash_command(&content) {
                 SlashCommandResult::SkillActivation {
@@ -750,6 +762,7 @@ async fn dispatch_client_message(
                                 if let Err(e) = turn::process_turn(
                                     &state,
                                     session_id,
+                                    thread_id,
                                     text,
                                     tx.clone(),
                                     sub,
@@ -771,6 +784,7 @@ async fn dispatch_client_message(
                             if let Err(e) = turn::process_turn(
                                 &state,
                                 session_id,
+                                thread_id,
                                 content,
                                 tx.clone(),
                                 sub,
@@ -789,9 +803,16 @@ async fn dispatch_client_message(
                     let state = state.clone();
                     let sub = Arc::clone(&subscription);
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            turn::process_turn(&state, session_id, content, tx.clone(), sub, None)
-                                .await
+                        if let Err(e) = turn::process_turn(
+                            &state,
+                            session_id,
+                            thread_id,
+                            content,
+                            tx.clone(),
+                            sub,
+                            None,
+                        )
+                        .await
                         {
                             let (code, message) = classify_gateway_error(&e);
                             let _ = tx.send(ServerEvent::Error { code, message });
@@ -906,8 +927,6 @@ async fn dispatch_client_message(
             decision,
             reason,
         } => {
-            use swage_storage::store::ApprovalStore;
-
             // Step 1: Parse the approval_id as a UUID.
             let approval_uuid = match approval_id.parse::<Uuid>() {
                 Ok(id) => id,
@@ -1058,7 +1077,7 @@ mod tests {
     fn client_event_send_message_deserialises() {
         let json = r#"{"type": "send_message", "content": "hello"}"#;
         let event: ClientEvent = serde_json::from_str(json).unwrap();
-        assert!(matches!(event, ClientEvent::SendMessage { content } if content == "hello"));
+        assert!(matches!(event, ClientEvent::SendMessage { content, .. } if content == "hello"));
     }
 
     #[test]
@@ -2081,7 +2100,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_decision_already_decided_sends_error() {
-        use swage_storage::store::ApprovalStore;
         use swage_storage::{ApprovalKind, ApprovalState, NewApprovalRequest};
 
         let state = make_empty_state();
@@ -2141,7 +2159,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_decision_success_sends_confirmed() {
-        use swage_storage::store::ApprovalStore;
         use swage_storage::{ApprovalKind, NewApprovalRequest};
 
         let state = make_empty_state();
@@ -2192,7 +2209,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_decision_fires_oneshot_channel() {
-        use swage_storage::store::ApprovalStore;
         use swage_storage::{ApprovalKind, NewApprovalRequest};
 
         let state = make_empty_state();

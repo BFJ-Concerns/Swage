@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -53,7 +53,11 @@ fn row_to_topology_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopologyRun>
         session_id: parse_uuid(&session_id)?,
         source_turn_id: source_turn_id.map(|s| parse_uuid(&s)).transpose()?,
         state: TopologyRunState::from_str(&state).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            )
         })?,
         final_output: parse_json_value_opt(final_output_json)?,
         error_message: row.get(6)?,
@@ -79,7 +83,11 @@ fn row_to_node_execution(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeExecut
         agent_id: row.get(4)?,
         task_name: row.get(5)?,
         state: NodeExecutionState::from_str(&state).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            )
         })?,
         input_json: parse_json_value_opt(input_json)?,
         output_json: parse_json_value_opt(output_json)?,
@@ -206,7 +214,10 @@ impl TopologyTraceStore for SqliteStorage {
         .await
     }
 
-    async fn list_topology_runs_by_team(&self, team_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+    async fn list_topology_runs_by_team(
+        &self,
+        team_id: Uuid,
+    ) -> Result<Vec<TopologyRun>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, team_id, session_id, source_turn_id, state, final_output_json, error_message, created_at, completed_at
@@ -218,7 +229,10 @@ impl TopologyTraceStore for SqliteStorage {
         .await
     }
 
-    async fn list_topology_runs_by_session(&self, session_id: Uuid) -> Result<Vec<TopologyRun>, StorageError> {
+    async fn list_topology_runs_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<TopologyRun>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, team_id, session_id, source_turn_id, state, final_output_json, error_message, created_at, completed_at
@@ -240,7 +254,9 @@ impl TopologyTraceStore for SqliteStorage {
         let final_output_json = final_output
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| StorageError::Serialisation { message: e.to_string() })?;
+            .map_err(|e| StorageError::Serialisation {
+                message: e.to_string(),
+            })?;
 
         self.with_conn(move |conn| {
             let completed_at = if is_terminal_topology_state(&state) {
@@ -256,7 +272,13 @@ impl TopologyTraceStore for SqliteStorage {
                      error_message = COALESCE(?4, error_message),
                      completed_at = COALESCE(?5, completed_at)
                  WHERE id = ?1",
-                params![id.to_string(), state.to_string(), final_output_json, error_message, completed_at],
+                params![
+                    id.to_string(),
+                    state.to_string(),
+                    final_output_json,
+                    error_message,
+                    completed_at
+                ],
             )?;
             Ok(())
         })
@@ -368,7 +390,9 @@ impl TopologyTraceStore for SqliteStorage {
         let output_json = output_json
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| StorageError::Serialisation { message: e.to_string() })?;
+            .map_err(|e| StorageError::Serialisation {
+                message: e.to_string(),
+            })?;
 
         self.with_conn(move |conn| {
             let completed_at = if is_terminal_node_state(&state) {
@@ -384,7 +408,13 @@ impl TopologyTraceStore for SqliteStorage {
                      error_message = COALESCE(?4, error_message),
                      completed_at = COALESCE(?5, completed_at)
                  WHERE id = ?1",
-                params![id.to_string(), state.to_string(), output_json, error_message, completed_at],
+                params![
+                    id.to_string(),
+                    state.to_string(),
+                    output_json,
+                    error_message,
+                    completed_at
+                ],
             )?;
             Ok(())
         })
@@ -552,7 +582,11 @@ mod tests {
             .await
             .unwrap();
 
-        let fetched = storage.get_topology_run(run.id).await.unwrap().expect("run exists");
+        let fetched = storage
+            .get_topology_run(run.id)
+            .await
+            .unwrap()
+            .expect("run exists");
         assert_eq!(fetched.team_id, team.id);
         assert_eq!(fetched.session_id, session.id);
         assert_eq!(fetched.state, TopologyRunState::Running);
@@ -713,14 +747,28 @@ mod tests {
             .await
             .unwrap();
 
-        let updated_node = storage.get_node_execution(node.id).await.unwrap().expect("node exists");
-        let updated_run = storage.get_topology_run(run.id).await.unwrap().expect("run exists");
+        let updated_node = storage
+            .get_node_execution(node.id)
+            .await
+            .unwrap()
+            .expect("node exists");
+        let updated_run = storage
+            .get_topology_run(run.id)
+            .await
+            .unwrap()
+            .expect("run exists");
 
         assert_eq!(updated_node.state, NodeExecutionState::Completed);
-        assert_eq!(updated_node.output_json, json(serde_json::json!({"status": "ok"})));
+        assert_eq!(
+            updated_node.output_json,
+            json(serde_json::json!({"status": "ok"}))
+        );
         assert!(updated_node.completed_at.is_some());
         assert_eq!(updated_run.state, TopologyRunState::Completed);
-        assert_eq!(updated_run.final_output, json(serde_json::json!({"result": "done"})));
+        assert_eq!(
+            updated_run.final_output,
+            json(serde_json::json!({"result": "done"}))
+        );
         assert!(updated_run.completed_at.is_some());
     }
 
@@ -796,7 +844,13 @@ mod tests {
         assert!(storage.delete_team(team.id).await.unwrap());
         assert!(storage.get_topology_run(run.id).await.unwrap().is_none());
         assert!(storage.get_node_execution(node.id).await.unwrap().is_none());
-        assert!(storage.list_edge_evaluations_by_run(run.id).await.unwrap().is_empty());
+        assert!(
+            storage
+                .list_edge_evaluations_by_run(run.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(storage.list_node_retries(node.id).await.unwrap().is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 
@@ -98,10 +98,8 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_not_found_maps_to_404() {
-        let (status, code) = status_and_code(GatewayError::ConversationNotFound {
-            id: Uuid::new_v4(),
-        })
-        .await;
+        let (status, code) =
+            status_and_code(GatewayError::ConversationNotFound { id: Uuid::new_v4() }).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(code, "not_found");
     }
@@ -118,9 +116,9 @@ mod tests {
 
     #[tokio::test]
     async fn provider_error_maps_to_502() {
-        let (status, code) = status_and_code(GatewayError::Provider(
-            ProviderError::StreamError("overloaded".to_string()),
-        ))
+        let (status, code) = status_and_code(GatewayError::Provider(ProviderError::StreamError(
+            "overloaded".to_string(),
+        )))
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(code, "provider_error");

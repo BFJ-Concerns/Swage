@@ -23,16 +23,15 @@ pub mod schema_contract;
 
 // Public re-exports — the primary surface for consumers.
 pub use agent::Agent;
+pub use approval::{ApprovalChannelRegistrar, ApprovalDecision};
 pub use builder::AgentBuilder;
 pub use config::{AgentConfig, CompactionThreshold};
-pub use error::AgentError;
-pub use event::AgentEvent;
-pub use approval::{ApprovalChannelRegistrar, ApprovalDecision};
 pub use context_transfer::TransferredContext;
 pub use delegation::{
-    ActiveDelegation, ActiveDelegations, DelegationExecutor, DelegationHandler,
-    active_delegations,
+    ActiveDelegation, ActiveDelegations, DelegationExecutor, DelegationHandler, active_delegations,
 };
+pub use error::AgentError;
+pub use event::AgentEvent;
 pub use expiry::{DEFAULT_EXPIRY_INTERVAL, DEFAULT_MESSAGE_TTL};
 pub use mailbox::{MailboxContents, check_mailbox};
 pub use message::{ErrorResponse, InboundMessage, OutboundMessage, TurnRequest};

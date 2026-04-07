@@ -91,7 +91,10 @@ pub enum ProviderError {
 
     /// Request timed out (transient).
     #[error("request to provider {provider} timed out after {duration:?}")]
-    Timeout { provider: String, duration: Duration },
+    Timeout {
+        provider: String,
+        duration: Duration,
+    },
 
     /// Network-level failure (transient).
     #[error("network error communicating with provider {provider}: {message}")]
@@ -367,10 +370,7 @@ impl ToolError {
 pub enum HookError {
     /// Hook script or handler failed (permanent).
     #[error("hook {hook_name} execution failed: {message}")]
-    ExecutionFailed {
-        hook_name: String,
-        message: String,
-    },
+    ExecutionFailed { hook_name: String, message: String },
 
     /// Hook timed out (permanent — hooks should complete promptly).
     #[error("hook {hook_name} timed out after {duration:?}")]
@@ -837,7 +837,12 @@ mod tests {
             timeout_secs: Some(300),
             timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
         };
-        if let ToolError::RequiresApproval { name, timeout_secs, timeout_policy } = &err {
+        if let ToolError::RequiresApproval {
+            name,
+            timeout_secs,
+            timeout_policy,
+        } = &err
+        {
             assert_eq!(name, "deploy");
             assert_eq!(*timeout_secs, Some(300));
             assert_eq!(*timeout_policy, Some(ApprovalTimeoutPolicy::Reject));
@@ -853,7 +858,12 @@ mod tests {
             timeout_secs: None,
             timeout_policy: None,
         };
-        if let ToolError::RequiresApproval { timeout_secs, timeout_policy, .. } = &err {
+        if let ToolError::RequiresApproval {
+            timeout_secs,
+            timeout_policy,
+            ..
+        } = &err
+        {
             assert!(timeout_secs.is_none());
             assert!(timeout_policy.is_none());
         } else {
@@ -868,7 +878,10 @@ mod tests {
             timeout_secs: Some(60),
             timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
         };
-        assert!(!err.is_retriable(), "approval is distinct control flow, not retriable");
+        assert!(
+            !err.is_retriable(),
+            "approval is distinct control flow, not retriable"
+        );
     }
 
     #[test]
@@ -1074,8 +1087,7 @@ mod tests {
 
     #[test]
     fn swage_error_delegates_retriable_for_gateway_permanent() {
-        let err: SwageError =
-            GatewayError::ConversationNotFound { id: Uuid::new_v4() }.into();
+        let err: SwageError = GatewayError::ConversationNotFound { id: Uuid::new_v4() }.into();
         assert!(!err.is_retriable());
     }
 
@@ -1190,7 +1202,10 @@ mod tests {
             timeout_policy: None,
         };
         let msg = format!("{err}");
-        assert!(msg.contains("shell"), "display must include tool name; got: {msg}");
+        assert!(
+            msg.contains("shell"),
+            "display must include tool name; got: {msg}"
+        );
     }
 
     #[test]
@@ -1215,7 +1230,10 @@ mod tests {
 
     #[test]
     fn approval_timeout_policy_variants_are_distinct() {
-        assert_ne!(ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt);
+        assert_ne!(
+            ApprovalTimeoutPolicy::Reject,
+            ApprovalTimeoutPolicy::Interrupt
+        );
     }
 
     #[test]
@@ -1243,12 +1261,18 @@ mod tests {
     #[test]
     fn approval_timeout_policy_from_str_unknown_fails() {
         let result: Result<ApprovalTimeoutPolicy, _> = "unknown".parse();
-        assert!(result.is_err(), "unknown policy string should fail to parse");
+        assert!(
+            result.is_err(),
+            "unknown policy string should fail to parse"
+        );
     }
 
     #[test]
     fn approval_timeout_policy_display_from_str_round_trip() {
-        for variant in [ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt] {
+        for variant in [
+            ApprovalTimeoutPolicy::Reject,
+            ApprovalTimeoutPolicy::Interrupt,
+        ] {
             let s = variant.to_string();
             let parsed: ApprovalTimeoutPolicy = s.parse().unwrap();
             assert_eq!(parsed, variant);
@@ -1257,7 +1281,10 @@ mod tests {
 
     #[test]
     fn approval_timeout_policy_serde_round_trip() {
-        for variant in [ApprovalTimeoutPolicy::Reject, ApprovalTimeoutPolicy::Interrupt] {
+        for variant in [
+            ApprovalTimeoutPolicy::Reject,
+            ApprovalTimeoutPolicy::Interrupt,
+        ] {
             let json = serde_json::to_string(&variant).unwrap();
             let decoded: ApprovalTimeoutPolicy = serde_json::from_str(&json).unwrap();
             assert_eq!(decoded, variant);

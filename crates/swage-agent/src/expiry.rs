@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use swage_storage::store::AgentMessageStore;
 use swage_storage::Storage;
 
 /// Default message TTL: 24 hours.
@@ -64,8 +63,8 @@ pub fn spawn_expiry_task(
 mod tests {
     use super::*;
     use swage_core::MessageKind;
-    use swage_storage::model::NewAgentMessage;
     use swage_storage::SqliteStorage;
+    use swage_storage::model::NewAgentMessage;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn expire_with_zero_ttl() {

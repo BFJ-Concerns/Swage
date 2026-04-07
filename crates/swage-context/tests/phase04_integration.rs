@@ -20,8 +20,8 @@ use tempfile::TempDir;
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 use swage_provider::LlmProvider;
 
@@ -34,7 +34,9 @@ struct StubProvider;
 
 #[async_trait]
 impl LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub-model" }
+    fn model_id(&self) -> &str {
+        "stub-model"
+    }
 
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("StubProvider::complete")
@@ -47,10 +49,7 @@ impl LlmProvider for StubProvider {
         unimplemented!("StubProvider::complete_with_tools")
     }
 
-    fn stream(
-        &self,
-        _req: CompletionRequest,
-    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+    fn stream(&self, _req: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
         unimplemented!("StubProvider::stream")
     }
 }
@@ -98,8 +97,7 @@ def assemble(ctx):
         budget: Some(16000),
     };
 
-    let tokeniser =
-        swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
     // Build elements with identifiable content.
     let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
@@ -123,9 +121,8 @@ def assemble(ctx):
 
     // Search hierarchy: project level at the temp dir root.
     let project_dir = root.path().join("projects/test");
-    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> = vec![
-        (swage_config::HierarchyLevel::Project, project_dir.as_path()),
-    ];
+    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
+        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
 
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
@@ -212,8 +209,7 @@ def assemble(ctx):
         budget: Some(16000),
     };
 
-    let tokeniser =
-        swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
     // Build a conversation history with identifiable decisions and facts.
     let mut history = Vec::new();
@@ -257,9 +253,8 @@ def assemble(ctx):
     ];
 
     let project_dir = root.path().join("projects/test");
-    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> = vec![
-        (swage_config::HierarchyLevel::Project, project_dir.as_path()),
-    ];
+    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
+        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,
@@ -278,9 +273,11 @@ def assemble(ctx):
     );
 
     // The report should show a compaction record with structured extraction.
-    let has_structured_compaction = output.report.compaction_applied.iter().any(|r| {
-        r.actual_strategy.contains("structured_extract")
-    });
+    let has_structured_compaction = output
+        .report
+        .compaction_applied
+        .iter()
+        .any(|r| r.actual_strategy.contains("structured_extract"));
     assert!(
         has_structured_compaction,
         "report should contain a structured_extract compaction record"
@@ -360,8 +357,7 @@ def assemble(ctx):
         budget: Some(16000),
     };
 
-    let tokeniser =
-        swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
     let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
         Box::new(swage_context::prompts::PromptsElement::new(vec![
@@ -450,20 +446,17 @@ async fn broken_python_assembly_triggers_failopen_with_error() {
         budget: None,
     };
 
-    let tokeniser =
-        swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-    let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
-        Box::new(swage_context::history::HistoryElement::new(vec![
+    let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
+        vec![Box::new(swage_context::history::HistoryElement::new(vec![
             swage_core::ChatMessage::new(swage_core::Role::User, "Hello"),
             swage_core::ChatMessage::new(swage_core::Role::Assistant, "Hi!"),
-        ])),
-    ];
+        ]))];
 
     let project_dir = root.path().join("projects/test");
-    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> = vec![
-        (swage_config::HierarchyLevel::Project, project_dir.as_path()),
-    ];
+    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
+        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,
@@ -551,8 +544,7 @@ def assemble(ctx):
         budget: Some(16000),
     };
 
-    let tokeniser =
-        swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
     let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
         Box::new(swage_context::prompts::PromptsElement::new(vec![
@@ -570,9 +562,8 @@ def assemble(ctx):
     ];
 
     let project_dir = root.path().join("projects/test");
-    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> = vec![
-        (swage_config::HierarchyLevel::Project, project_dir.as_path()),
-    ];
+    let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
+        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,
@@ -595,9 +586,11 @@ def assemble(ctx):
     );
 
     // The report should contain a warning about the circular reference.
-    let has_cycle_warning = output.report.warnings.iter().any(|w| {
-        w.contains("circular") || w.contains("cycle") || w.contains("alpha")
-    });
+    let has_cycle_warning = output
+        .report
+        .warnings
+        .iter()
+        .any(|w| w.contains("circular") || w.contains("cycle") || w.contains("alpha"));
     assert!(
         has_cycle_warning,
         "report should warn about circular reference between alpha and beta"

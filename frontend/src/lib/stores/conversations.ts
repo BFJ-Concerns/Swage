@@ -17,7 +17,12 @@ export interface ConversationStore {
   // threading projectId through every intermediate component.
   createConversation(projectId?: string): Promise<void>;
   deleteConversation(id: string): Promise<void>;
-  addMessage(message: { role: string; content: string; timestamp: string; turn_state: string }): void;
+  addMessage(message: {
+    role: string;
+    content: string;
+    timestamp: string;
+    turn_state: MessageView["turn_state"];
+  }): void;
   refreshActiveConversation(): Promise<void>;
 }
 

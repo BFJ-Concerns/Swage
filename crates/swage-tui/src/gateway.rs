@@ -240,7 +240,10 @@ impl ConnectionManager {
     /// Returns `ClientError::WebSocketFailed` if the WebSocket is not open.
     pub async fn send_message(&mut self, content: String) -> Result<(), ClientError> {
         self.ws_required()?
-            .send(ClientEvent::SendMessage { content })
+            .send(ClientEvent::SendMessage {
+                content,
+                thread_id: None,
+            })
             .await
     }
 }

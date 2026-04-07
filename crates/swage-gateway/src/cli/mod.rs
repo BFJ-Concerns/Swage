@@ -165,10 +165,15 @@ mod tests {
     #[test]
     fn parse_gateway_start_with_flags() {
         let cli = Cli::try_parse_from([
-            "swage", "gateway", "start",
-            "--port", "8080",
-            "--host", "0.0.0.0",
-            "--config", "/tmp/config.toml",
+            "swage",
+            "gateway",
+            "start",
+            "--port",
+            "8080",
+            "--host",
+            "0.0.0.0",
+            "--config",
+            "/tmp/config.toml",
             "--foreground",
         ])
         .unwrap();

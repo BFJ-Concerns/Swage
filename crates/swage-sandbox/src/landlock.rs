@@ -260,7 +260,9 @@ impl LandlockRuleset {
                 "Landlock restrictions partially applied (ABI {abi} < {MAX_KNOWN_ABI}): missing {:?}",
                 missing
             );
-            Ok(LandlockStatus::Partial { missing_features: missing })
+            Ok(LandlockStatus::Partial {
+                missing_features: missing,
+            })
         }
     }
 }
@@ -289,20 +291,23 @@ fn detect_abi() -> i64 {
 /// The flags represent all rights controlled by the ruleset. Features not
 /// available in the detected ABI are reported as missing.
 fn flags_for_abi(abi: i64) -> (u64, Vec<String>) {
-    let mut flags = ABI_V1_FLAGS; // baseline
     let mut missing = Vec::new();
 
-    if abi >= 2 {
-        flags |= ACCESS_FS_REFER;
-    } else {
+    if abi < 2 {
         missing.push("ACCESS_FS_REFER (ABI 2, Linux 5.19)".into());
     }
 
-    if abi >= 3 {
-        flags |= ACCESS_FS_TRUNCATE;
-    } else {
+    if abi < 3 {
         missing.push("ACCESS_FS_TRUNCATE (ABI 3, Linux 6.2)".into());
     }
+
+    let flags = if abi >= 3 {
+        ABI_V3_FLAGS
+    } else if abi >= 2 {
+        ABI_V2_FLAGS
+    } else {
+        ABI_V1_FLAGS
+    };
 
     (flags, missing)
 }
@@ -361,8 +366,6 @@ fn add_path_rule(ruleset_fd: i32, path: &std::path::Path, allowed_access: u64) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::config::SandboxConfig;
 
@@ -382,7 +385,11 @@ mod tests {
         let ruleset = LandlockRuleset::new(&config);
 
         assert_eq!(ruleset.read_paths.len(), 2);
-        assert!(ruleset.read_paths.contains(&PathBuf::from("/home/user/project")));
+        assert!(
+            ruleset
+                .read_paths
+                .contains(&PathBuf::from("/home/user/project"))
+        );
         assert!(ruleset.read_paths.contains(&PathBuf::from("/usr/lib")));
     }
 
@@ -396,7 +403,9 @@ mod tests {
         let ruleset = LandlockRuleset::new(&config);
 
         assert!(
-            ruleset.write_paths.contains(&PathBuf::from("/tmp/agent-workspace")),
+            ruleset
+                .write_paths
+                .contains(&PathBuf::from("/tmp/agent-workspace")),
             "working_directory must be in write_paths; got: {:?}",
             ruleset.write_paths
         );

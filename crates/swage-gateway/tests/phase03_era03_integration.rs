@@ -21,23 +21,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
+use swage_config::ResolvedConfig;
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use swage_config::ResolvedConfig;
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{store::ProjectStore, SqliteStorage};
+use swage_storage::{SqliteStorage, store::ProjectStore};
 
 // Serialise tests that mutate SWAGE_HOME — it's process-wide state.
 static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -85,7 +85,11 @@ impl swage_tool::tool::Tool for WriteFileTool {
         })
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn swage_tool::context::ToolContext) -> Result<Value, swage_core::ToolError> {
+    async fn execute(
+        &self,
+        params: Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<Value, swage_core::ToolError> {
         Ok(params)
     }
 }
@@ -108,16 +112,20 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    fn model_id(&self) -> &str { "mock-model" }
+    fn model_id(&self) -> &str {
+        "mock-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -128,7 +136,9 @@ impl LlmProvider for MockProvider {
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let mut rounds = self.rounds.lock().unwrap();
         let chunks = if rounds.is_empty() {
-            vec![StreamChunk::Done { finish_reason: Some(FinishReason::Stop) }]
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }]
         } else {
             rounds.remove(0)
         };
@@ -146,7 +156,7 @@ async fn start_test_server_with_config(
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(WriteFileTool) as Arc<dyn swage_tool::tool::Tool>,
+        Arc::new(WriteFileTool) as Arc<dyn swage_tool::tool::Tool>
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
@@ -187,15 +197,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -266,11 +272,11 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
     use swage_core::ApprovalTimeoutPolicy;
 
     let mut config = ResolvedConfig::default();
-    config.tools.permissions.require_approval = vec![
-        RequireApprovalEntry::Simple(tool_name.to_string()),
-    ];
+    config.tools.permissions.require_approval =
+        vec![RequireApprovalEntry::Simple(tool_name.to_string())];
     config.hitl.timeout = timeout_secs;
-    config.hitl.timeout_policy = policy.parse::<ApprovalTimeoutPolicy>()
+    config.hitl.timeout_policy = policy
+        .parse::<ApprovalTimeoutPolicy>()
         .expect("invalid timeout policy");
     config
 }
@@ -296,12 +302,18 @@ async fn tool_approval_approve_continues_turn() {
                 name: "write_file".into(),
                 arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
             },
-            StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
         ],
         // Round 2: after tool executes, agent produces final text.
         vec![
-            StreamChunk::Delta { content: "Done.".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Done.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -315,24 +327,35 @@ async fn tool_approval_approve_continues_turn() {
 
     // Connect via WebSocket and send a message.
     let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Write a file"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Write a file"}),
+    )
+    .await;
 
     // Expect an ApprovalRequired event (the turn pauses).
-    let approval_event = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
-        .await
-        .expect("should receive ApprovalRequired event");
+    let approval_event =
+        ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+            .await
+            .expect("should receive ApprovalRequired event");
 
-    let approval_id = approval_event["approval_id"].as_str().expect("should have approval_id");
+    let approval_id = approval_event["approval_id"]
+        .as_str()
+        .expect("should have approval_id");
     assert_eq!(approval_event["kind"], "tool");
     assert_eq!(approval_event["tool_name"], "write_file");
 
     // Approve the request.
-    ws_send(&mut sink, json!({
-        "type": "approval_decision",
-        "approval_id": approval_id,
-        "decision": "approved",
-        "reason": "Looks safe"
-    })).await;
+    ws_send(
+        &mut sink,
+        json!({
+            "type": "approval_decision",
+            "approval_id": approval_id,
+            "decision": "approved",
+            "reason": "Looks safe"
+        }),
+    )
+    .await;
 
     // Expect ApprovalConfirmed and then the turn completing normally.
     let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", Duration::from_secs(5))
@@ -363,12 +386,18 @@ async fn tool_approval_reject_delivers_feedback() {
                 name: "write_file".into(),
                 arguments: json!({"path": "/etc/passwd", "content": "bad"}),
             },
-            StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
         ],
         // After rejection: agent gets feedback and produces a text response.
         vec![
-            StreamChunk::Delta { content: "I'll try a different approach.".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "I'll try a different approach.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -380,20 +409,29 @@ async fn tool_approval_reject_delivers_feedback() {
     let conversation_id = body["id"].as_str().unwrap();
 
     let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Write to /etc/passwd"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Write to /etc/passwd"}),
+    )
+    .await;
 
-    let approval_event = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
-        .await
-        .expect("should receive ApprovalRequired");
+    let approval_event =
+        ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+            .await
+            .expect("should receive ApprovalRequired");
     let approval_id = approval_event["approval_id"].as_str().unwrap();
 
     // Reject.
-    ws_send(&mut sink, json!({
-        "type": "approval_decision",
-        "approval_id": approval_id,
-        "decision": "rejected",
-        "reason": "Dangerous path"
-    })).await;
+    ws_send(
+        &mut sink,
+        json!({
+            "type": "approval_decision",
+            "approval_id": approval_id,
+            "decision": "rejected",
+            "reason": "Dangerous path"
+        }),
+    )
+    .await;
 
     let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", Duration::from_secs(5))
         .await
@@ -421,12 +459,18 @@ async fn tool_approval_timeout_reject_policy() {
                 name: "write_file".into(),
                 arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
             },
-            StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
         ],
         // After timeout (treated as rejection): agent produces final text.
         vec![
-            StreamChunk::Delta { content: "Approval timed out, moving on.".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Approval timed out, moving on.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -439,7 +483,11 @@ async fn tool_approval_timeout_reject_policy() {
     let conversation_id = body["id"].as_str().unwrap();
 
     let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Write a file"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Write a file"}),
+    )
+    .await;
 
     // Wait for ApprovalRequired...
     let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
@@ -466,16 +514,16 @@ async fn tool_approval_timeout_reject_policy() {
 async fn tool_approval_timeout_interrupt_policy() {
     let _guard = SwageHomeGuard::isolate();
 
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "call_01".into(),
-                name: "write_file".into(),
-                arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
-            },
-            StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::ToolUse {
+            call_id: "call_01".into(),
+            name: "write_file".into(),
+            arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::ToolUse),
+        },
+    ]]);
 
     // Interrupt policy with short timeout.
     let config = config_with_approval("write_file", 1, "interrupt");
@@ -486,7 +534,11 @@ async fn tool_approval_timeout_interrupt_policy() {
     let conversation_id = body["id"].as_str().unwrap();
 
     let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Write a file"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Write a file"}),
+    )
+    .await;
 
     let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
         .await
@@ -501,10 +553,13 @@ async fn tool_approval_timeout_interrupt_policy() {
     // Turn should NOT complete normally — it should be interrupted.
     // Collect remaining events; we should NOT see a turn_complete.
     let remaining = ws_collect_events(&mut stream, Duration::from_secs(2)).await;
-    let has_turn_complete = remaining.iter().any(|e| {
-        e.get("type").and_then(|t| t.as_str()) == Some("turn_complete")
-    });
-    assert!(!has_turn_complete, "turn should not complete on interrupt policy timeout");
+    let has_turn_complete = remaining
+        .iter()
+        .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("turn_complete"));
+    assert!(
+        !has_turn_complete,
+        "turn should not complete on interrupt policy timeout"
+    );
 }
 
 /// Journey: Pending approval survives WebSocket reconnection — re-emitted to new client.
@@ -521,12 +576,18 @@ async fn pending_approval_survives_reconnect() {
                 name: "write_file".into(),
                 arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
             },
-            StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
         ],
         // Round 2 for after approval.
         vec![
-            StreamChunk::Delta { content: "Done.".into() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "Done.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -541,7 +602,11 @@ async fn pending_approval_survives_reconnect() {
     // Connect, trigger approval, then disconnect.
     {
         let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
-        ws_send(&mut sink, json!({"type": "send_message", "content": "Write a file"})).await;
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Write a file"}),
+        )
+        .await;
 
         let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
             .await
@@ -564,11 +629,15 @@ async fn pending_approval_survives_reconnect() {
 
     // Now approve it.
     let approval_id = re_emitted["approval_id"].as_str().unwrap();
-    ws_send(&mut sink2, json!({
-        "type": "approval_decision",
-        "approval_id": approval_id,
-        "decision": "approved",
-    })).await;
+    ws_send(
+        &mut sink2,
+        json!({
+            "type": "approval_decision",
+            "approval_id": approval_id,
+            "decision": "approved",
+        }),
+    )
+    .await;
 
     let _confirmed = ws_wait_for_event(&mut stream2, "approval_confirmed", Duration::from_secs(5))
         .await
@@ -593,9 +662,11 @@ async fn hook_triggered_approval_uses_custom_prompt() {
     // Mark as tested at the agent level — the cross-task journey is proved by
     // the agent's hook-driven approval tests combined with the gateway's event
     // forwarding tests from [byi8].
-    eprintln!("Hook-triggered approval is tested at the agent level (task 3c77) — \
+    eprintln!(
+        "Hook-triggered approval is tested at the agent level (task 3c77) — \
                full gateway integration deferred to Phase 05 when the REST API \
-               provides a hook configuration surface");
+               provides a hook configuration surface"
+    );
 }
 
 /// Journey: Agent B triggers approval → only Agent B's clients receive the event.
@@ -616,8 +687,10 @@ async fn agent_scoped_routing_isolates_approval_events() {
     //
     // The routing infrastructure is in place and unit-tested. The cross-agent
     // isolation is verified by `approvals_for_other_agent_not_re_emitted_on_connect`.
-    eprintln!("Agent-scoped routing is unit-tested via [byi8] and re-emission tests — \
-               full multi-agent WebSocket integration deferred to Phase 04");
+    eprintln!(
+        "Agent-scoped routing is unit-tested via [byi8] and re-emission tests — \
+               full multi-agent WebSocket integration deferred to Phase 04"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -731,10 +804,8 @@ async fn no_pending_approvals_no_event_on_connect() {
 #[tokio::test(flavor = "multi_thread")]
 async fn approvals_for_other_session_not_re_emitted_on_connect() {
     use swage_core::ApprovalTimeoutPolicy;
-    use swage_storage::model::{
-        ApprovalKind, NewApprovalRequest, NewSession, NewThread, NewTurn, TurnState,
-    };
-    use swage_storage::store::{ApprovalStore, SessionStore, ThreadStore, TurnStore};
+    use swage_storage::model::{ApprovalKind, NewApprovalRequest, NewTurn, TurnState};
+    use swage_storage::store::{ApprovalStore, ThreadStore, TurnStore};
     use uuid::Uuid;
 
     let _guard = SwageHomeGuard::isolate();
@@ -746,7 +817,7 @@ async fn approvals_for_other_session_not_re_emitted_on_connect() {
     // Create two conversations (sessions).
     let (_, body_a) = http(&router, "POST", "/api/conversations").await;
     let conv_a = body_a["id"].as_str().unwrap();
-    let session_a: Uuid = conv_a.parse().unwrap();
+    let _session_a: Uuid = conv_a.parse().unwrap();
 
     let (_, body_b) = http(&router, "POST", "/api/conversations").await;
     let session_b: Uuid = body_b["id"].as_str().unwrap().parse().unwrap();

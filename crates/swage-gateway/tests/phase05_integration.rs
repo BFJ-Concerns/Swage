@@ -10,17 +10,16 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
 use tokio::net::TcpListener;
 
-use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse, FinishReason,
-};
 use swage_config::ResolvedConfig;
+use swage_core::{
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
@@ -33,10 +32,13 @@ struct StubProvider;
 
 #[async_trait]
 impl LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub" }
+    fn model_id(&self) -> &str {
+        "stub"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         Ok(CompletionResponse {
             content: String::new(),
@@ -48,7 +50,8 @@ impl LlmProvider for StubProvider {
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used")
     }
@@ -109,10 +112,16 @@ async fn client_library_health_and_shutdown_against_live_gateway() {
 
     // Construct the client from an address and verify health.
     let client = swage_client::http::GatewayClient::new(&address);
-    client.health().await.expect("health check should succeed against running gateway");
+    client
+        .health()
+        .await
+        .expect("health check should succeed against running gateway");
 
     // Shutdown via the client library — the same path `swage gateway stop` uses.
-    client.shutdown().await.expect("shutdown request should succeed");
+    client
+        .shutdown()
+        .await
+        .expect("shutdown request should succeed");
 }
 
 /// Client library conversation CRUD against a live gateway.
@@ -129,28 +138,44 @@ async fn client_library_conversation_crud_against_live_gateway() {
     let client = swage_client::http::GatewayClient::new(&address);
 
     // Create a conversation.
-    let created = client.create_conversation().await
+    let created = client
+        .create_conversation()
+        .await
         .expect("create_conversation should succeed");
     assert!(!created.id.is_nil(), "conversation ID should be non-nil");
 
     // List conversations — should include the one we just created.
-    let list = client.list_conversations().await
+    let list = client
+        .list_conversations()
+        .await
         .expect("list_conversations should succeed");
-    assert!(list.iter().any(|c| c.id == created.id), "created conversation should appear in list");
+    assert!(
+        list.iter().any(|c| c.id == created.id),
+        "created conversation should appear in list"
+    );
 
     // Get conversation detail.
-    let detail = client.get_conversation(created.id).await
+    let detail = client
+        .get_conversation(created.id)
+        .await
         .expect("get_conversation should succeed");
     assert_eq!(detail.id, created.id);
 
     // Delete the conversation.
-    client.delete_conversation(created.id).await
+    client
+        .delete_conversation(created.id)
+        .await
         .expect("delete_conversation should succeed");
 
     // Verify deletion — list should no longer contain it.
-    let list_after = client.list_conversations().await
+    let list_after = client
+        .list_conversations()
+        .await
         .expect("list after delete should succeed");
-    assert!(!list_after.iter().any(|c| c.id == created.id), "deleted conversation should not appear");
+    assert!(
+        !list_after.iter().any(|c| c.id == created.id),
+        "deleted conversation should not appear"
+    );
 }
 
 /// Client library project CRUD against a live gateway.
@@ -166,9 +191,14 @@ async fn client_library_project_crud_against_live_gateway() {
     let client = swage_client::http::GatewayClient::new(&address);
 
     // List projects — should contain at least the default project.
-    let projects = client.list_projects().await
+    let projects = client
+        .list_projects()
+        .await
         .expect("list_projects should succeed");
-    assert!(!projects.projects.is_empty(), "should have at least the default project");
+    assert!(
+        !projects.projects.is_empty(),
+        "should have at least the default project"
+    );
 }
 
 /// Runtime metadata round-trip: write, discover, use, clean up.
@@ -183,10 +213,7 @@ async fn runtime_metadata_round_trip_with_client_discovery() {
     let address = format!("http://{addr}");
 
     // Write runtime metadata as the gateway startup [kfs2] would.
-    let metadata = swage_client::runtime::RuntimeMetadata::new(
-        std::process::id(),
-        address.clone(),
-    );
+    let metadata = swage_client::runtime::RuntimeMetadata::new(std::process::id(), address.clone());
     metadata.save().expect("save should succeed");
 
     // Discover the gateway via metadata — the path CLI commands take.
@@ -194,11 +221,13 @@ async fn runtime_metadata_round_trip_with_client_discovery() {
         .expect("from_runtime should succeed when metadata exists");
 
     // The discovered client should reach the same gateway.
-    client.health().await.expect("health via discovered client should succeed");
+    client
+        .health()
+        .await
+        .expect("health via discovered client should succeed");
 
     // Clean up metadata as shutdown [kfs2] would.
-    swage_client::runtime::RuntimeMetadata::remove()
-        .expect("remove should succeed");
+    swage_client::runtime::RuntimeMetadata::remove().expect("remove should succeed");
 
     // After removal, from_runtime should fail.
     assert!(
@@ -226,13 +255,11 @@ async fn stale_metadata_detected_for_dead_pid() {
     metadata.save().expect("save should succeed");
 
     // Load and check staleness.
-    let loaded = swage_client::runtime::RuntimeMetadata::load()
-        .expect("load should succeed");
+    let loaded = swage_client::runtime::RuntimeMetadata::load().expect("load should succeed");
     assert!(loaded.is_stale(), "metadata with dead PID should be stale");
 
     // Clean up.
-    swage_client::runtime::RuntimeMetadata::remove()
-        .expect("remove should succeed");
+    swage_client::runtime::RuntimeMetadata::remove().expect("remove should succeed");
 }
 
 /// Shell completions include the actual CLI subcommand structure.
@@ -247,16 +274,28 @@ async fn stale_metadata_detected_for_dead_pid() {
 async fn shell_completions_include_gateway_subcommands() {
     // Generate fish completions (fish format is easiest to grep).
     let mut output = Vec::new();
-    swage_gateway::cli::completions::generate_to_writer(
-        clap_complete::Shell::Fish,
-        &mut output,
-    );
+    swage_gateway::cli::completions::generate_to_writer(clap_complete::Shell::Fish, &mut output);
     let completions = String::from_utf8(output).expect("completions should be valid UTF-8");
 
     // Verify the completions reference the actual subcommands.
-    assert!(completions.contains("gateway"), "completions should include 'gateway' group");
-    assert!(completions.contains("start"), "completions should include 'start' subcommand");
-    assert!(completions.contains("stop"), "completions should include 'stop' subcommand");
-    assert!(completions.contains("status"), "completions should include 'status' subcommand");
-    assert!(completions.contains("completions"), "completions should include 'completions' command");
+    assert!(
+        completions.contains("gateway"),
+        "completions should include 'gateway' group"
+    );
+    assert!(
+        completions.contains("start"),
+        "completions should include 'start' subcommand"
+    );
+    assert!(
+        completions.contains("stop"),
+        "completions should include 'stop' subcommand"
+    );
+    assert!(
+        completions.contains("status"),
+        "completions should include 'status' subcommand"
+    );
+    assert!(
+        completions.contains("completions"),
+        "completions should include 'completions' command"
+    );
 }

@@ -28,8 +28,7 @@ use crate::socket::SocketManager;
 /// stripping, provider keys would propagate into the sandbox. Removing them
 /// here means bwrap never sees them and cannot forward them to the agent.
 /// All LLM completions are proxied through the host via IPC instead.
-const CREDENTIAL_ENV_VARS: &[&str] =
-    &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
+const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // BubblewrapSandbox
@@ -104,10 +103,9 @@ impl Sandbox for BubblewrapSandbox {
         let socket_path = socket_manager.path().to_path_buf();
 
         // Determine the agent binary — the host re-execs itself in sandbox mode.
-        let agent_binary =
-            std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
-                message: format!("cannot determine agent binary path: {e}"),
-            })?;
+        let agent_binary = std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
+            message: format!("cannot determine agent binary path: {e}"),
+        })?;
 
         // Build the bwrap command with namespace isolation and mount config.
         // The socket path is injected via --setenv in the command builder.
@@ -149,8 +147,10 @@ impl Sandbox for BubblewrapSandbox {
         tracing::debug!(pid = process.pid(), "bubblewrap sandbox agent spawned");
 
         // Accept the agent's incoming connection.
-        let (stream, _addr) =
-            listener.accept().await.map_err(|e| SandboxError::SpawnFailed {
+        let (stream, _addr) = listener
+            .accept()
+            .await
+            .map_err(|e| SandboxError::SpawnFailed {
                 message: format!("IPC accept failed: {e}"),
             })?;
 
@@ -229,7 +229,11 @@ impl Sandbox for BubblewrapSandbox {
                             ),
                         });
                     }
-                    return Ok(ToolCallResult { output, duration_ms, error });
+                    return Ok(ToolCallResult {
+                        output,
+                        duration_ms,
+                        error,
+                    });
                 }
 
                 IpcMessage::LlmRequest {
@@ -278,7 +282,9 @@ impl Sandbox for BubblewrapSandbox {
                 }
 
                 IpcMessage::ErrorMessage { description, .. } => {
-                    return Err(SandboxError::IpcError { message: description });
+                    return Err(SandboxError::IpcError {
+                        message: description,
+                    });
                 }
 
                 other => {
@@ -439,9 +445,10 @@ mod tests {
     async fn execute_tool_returns_result_on_tool_call_result() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("echo", json!({"text": "hello"})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(
+                async move { sandbox.execute_tool("echo", json!({"text": "hello"})).await },
+            );
 
         // Receive ToolCallRequest.
         let msg = agent.receive().await.unwrap();
@@ -472,7 +479,9 @@ mod tests {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
         let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("think", json!({"query": "answer"})).await
+            sandbox
+                .execute_tool("think", json!({"query": "answer"}))
+                .await
         });
 
         // Agent: receive ToolCallRequest.
@@ -521,9 +530,8 @@ mod tests {
     async fn execute_tool_handles_multiple_interleaved_llm_requests() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("complex_tool", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("complex_tool", json!({})).await });
 
         let msg = agent.receive().await.unwrap();
         let req_id = match &msg {
@@ -568,9 +576,8 @@ mod tests {
     async fn execute_tool_returns_error_on_error_message() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("bad_tool", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("bad_tool", json!({})).await });
 
         // Receive the request.
         let _ = agent.receive().await.unwrap();
@@ -611,9 +618,8 @@ mod tests {
     async fn execute_tool_returns_error_on_request_id_mismatch() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("echo", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("echo", json!({})).await });
 
         // Receive the request (we'll ignore the request_id intentionally).
         let _ = agent.receive().await.unwrap();
@@ -649,7 +655,10 @@ mod tests {
     #[tokio::test]
     async fn shutdown_before_spawn_is_idempotent() {
         let mut sandbox = BubblewrapSandbox::new(test_config(), no_op_llm_handler());
-        sandbox.shutdown().await.expect("shutdown before spawn must succeed");
+        sandbox
+            .shutdown()
+            .await
+            .expect("shutdown before spawn must succeed");
     }
 
     #[tokio::test]
@@ -663,7 +672,10 @@ mod tests {
         assert!(matches!(msg, IpcMessage::Shutdown));
         agent.send(&IpcMessage::ShutdownAck).await.unwrap();
 
-        shutdown_handle.await.unwrap().expect("shutdown must succeed");
+        shutdown_handle
+            .await
+            .unwrap()
+            .expect("shutdown must succeed");
     }
 
     #[tokio::test]

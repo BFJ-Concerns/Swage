@@ -120,10 +120,7 @@ impl Tool for ShellTool {
                 let _ = kill_child(&mut child).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!(
-                        "Command timed out after {:.1}s",
-                        self.timeout.as_secs_f64()
-                    ),
+                    message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
                 })
             }
 
@@ -274,7 +271,10 @@ mod tests {
     async fn missing_command_returns_invalid_params() {
         let t = tool(5);
         let result = t.execute(json!({}), &ctx()).await;
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidParameters { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidParameters { .. }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -304,11 +304,18 @@ mod tests {
             max_output_bytes: 10,
         };
         let result = t
-            .execute(json!({"command": "printf '%0.s1234567890' $(seq 1 100)"}), &ctx())
+            .execute(
+                json!({"command": "printf '%0.s1234567890' $(seq 1 100)"}),
+                &ctx(),
+            )
             .await;
         let val = result.expect("command should succeed");
         let output = val["output"].as_str().unwrap();
-        assert!(output.len() <= 10, "content should be capped: len={}", output.len());
+        assert!(
+            output.len() <= 10,
+            "content should be capped: len={}",
+            output.len()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

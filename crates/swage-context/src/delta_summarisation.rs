@@ -173,13 +173,13 @@ impl DeltaSummarisationCompactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::pin::Pin;
     use swage_core::{
         ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason,
         ProviderError, Role, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
-    use async_trait::async_trait;
 
     use crate::tokeniser::TiktokenTokeniser;
 
@@ -191,12 +191,16 @@ mod tests {
 
     impl MockProvider {
         fn new(response: &str) -> Self {
-            Self { response: response.to_string() }
+            Self {
+                response: response.to_string(),
+            }
         }
 
         /// Constructs a mock that returns an LLM error on every call.
         fn failing() -> Self {
-            Self { response: String::new() }
+            Self {
+                response: String::new(),
+            }
         }
     }
 
@@ -319,9 +323,15 @@ mod tests {
         // Always experimental.
         assert!(output.experimental, "output must be marked experimental");
         // No prior on first use.
-        assert!(!output.prior_used, "prior_used should be false on first use");
+        assert!(
+            !output.prior_used,
+            "prior_used should be false on first use"
+        );
         // Output contains the extraction summary.
-        assert!(!output.messages.is_empty(), "output must contain at least one message");
+        assert!(
+            !output.messages.is_empty(),
+            "output must contain at least one message"
+        );
         // Delta starts at the beginning when there is no prior boundary.
         assert_eq!(output.delta_start, 0, "delta_start must be 0 on first use");
         // The output message is a system message.
@@ -355,8 +365,14 @@ mod tests {
         let output = result.unwrap();
 
         assert!(output.experimental, "output must be marked experimental");
-        assert!(output.prior_used, "prior_used must be true when prior was available");
-        assert_eq!(output.delta_start, 2, "delta_start must equal boundary_turn_index");
+        assert!(
+            output.prior_used,
+            "prior_used must be true when prior was available"
+        );
+        assert_eq!(
+            output.delta_start, 2,
+            "delta_start must equal boundary_turn_index"
+        );
 
         // Output must include both the prior summary and the new delta.
         assert!(
@@ -400,7 +416,9 @@ mod tests {
         ];
 
         let compactor = DeltaSummarisationCompactor::new(Some(prior));
-        let result = compactor.compact(&all_messages, 1000, &PanickingProvider, &t).await;
+        let result = compactor
+            .compact(&all_messages, 1000, &PanickingProvider, &t)
+            .await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -445,12 +463,21 @@ mod tests {
         ];
 
         let compactor = DeltaSummarisationCompactor::new(Some(prior));
-        let result = compactor.compact(&messages, 1000, &PanickingProvider, &t).await;
+        let result = compactor
+            .compact(&messages, 1000, &PanickingProvider, &t)
+            .await;
 
         // Clamped boundary → empty delta → prior returned unchanged.
-        assert!(result.is_ok(), "out-of-range boundary should be handled safely");
+        assert!(
+            result.is_ok(),
+            "out-of-range boundary should be handled safely"
+        );
         let output = result.unwrap();
-        assert_eq!(output.messages.len(), 1, "only prior message should be returned");
+        assert_eq!(
+            output.messages.len(),
+            1,
+            "only prior message should be returned"
+        );
         assert!(output.prior_used);
     }
 }

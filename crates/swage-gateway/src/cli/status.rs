@@ -53,10 +53,7 @@ pub async fn run() -> Result<(), ClientError> {
                 meta.pid
             );
             Err(ClientError::GatewayNotRunning {
-                reason: format!(
-                    "PID {} is alive but health check failed",
-                    meta.pid
-                ),
+                reason: format!("PID {} is alive but health check failed", meta.pid),
             })
         }
     }
@@ -122,8 +119,14 @@ mod tests {
     fn format_uptime_hours_and_minutes() {
         assert_eq!(format_uptime(Duration::seconds(3600)), "1h 0m");
         assert_eq!(format_uptime(Duration::seconds(3600 + 5 * 60)), "1h 5m");
-        assert_eq!(format_uptime(Duration::seconds(2 * 3600 + 34 * 60 + 17)), "2h 34m");
-        assert_eq!(format_uptime(Duration::seconds(12 * 3600 + 3 * 60)), "12h 3m");
+        assert_eq!(
+            format_uptime(Duration::seconds(2 * 3600 + 34 * 60 + 17)),
+            "2h 34m"
+        );
+        assert_eq!(
+            format_uptime(Duration::seconds(12 * 3600 + 3 * 60)),
+            "12h 3m"
+        );
     }
 
     // Negative or very small durations should not panic.
@@ -131,6 +134,9 @@ mod tests {
     fn format_uptime_handles_near_zero() {
         // Negative could theoretically appear if clocks drift — should not panic.
         let result = std::panic::catch_unwind(|| format_uptime(Duration::seconds(-5)));
-        assert!(result.is_ok(), "format_uptime should not panic on negative input");
+        assert!(
+            result.is_ok(),
+            "format_uptime should not panic on negative input"
+        );
     }
 }

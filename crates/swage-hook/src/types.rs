@@ -30,10 +30,7 @@ pub enum HookEvent {
     SessionEnd { session_id: String },
 
     /// A tool is about to be executed. Hooks can block this.
-    PreToolUse {
-        tool_name: String,
-        params: Value,
-    },
+    PreToolUse { tool_name: String, params: Value },
 
     /// A tool has finished executing. Hooks can observe but not block.
     PostToolUse {

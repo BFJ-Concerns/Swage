@@ -19,15 +19,15 @@
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
-use serde_json::{json, Value};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::{SqliteStorage, store::ProjectStore};
+use swage_storage::SqliteStorage;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -56,22 +56,27 @@ struct StubProvider;
 
 #[async_trait::async_trait]
 impl swage_provider::LlmProvider for StubProvider {
-    fn model_id(&self) -> &str { "stub" }
+    fn model_id(&self) -> &str {
+        "stub"
+    }
 
     async fn complete(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in project integration tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: swage_core::ToolCompletionRequest,
+        &self,
+        _request: swage_core::ToolCompletionRequest,
     ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in project integration tests")
     }
 
     fn stream(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
         unimplemented!("not used in project integration tests")
     }
@@ -129,8 +134,14 @@ async fn sessions_are_isolated_between_projects() {
         Some(json!({ "name": "Alpha", "workspace_path": "/tmp" })),
     )
     .await;
-    assert_eq!(status_a, StatusCode::CREATED, "project A creation should succeed");
-    let project_a_id = project_a["id"].as_str().expect("project A should have an id");
+    assert_eq!(
+        status_a,
+        StatusCode::CREATED,
+        "project A creation should succeed"
+    );
+    let project_a_id = project_a["id"]
+        .as_str()
+        .expect("project A should have an id");
 
     let (status_b, project_b) = http_json(
         &router,
@@ -139,8 +150,14 @@ async fn sessions_are_isolated_between_projects() {
         Some(json!({ "name": "Bravo", "workspace_path": "/tmp" })),
     )
     .await;
-    assert_eq!(status_b, StatusCode::CREATED, "project B creation should succeed");
-    let project_b_id = project_b["id"].as_str().expect("project B should have an id");
+    assert_eq!(
+        status_b,
+        StatusCode::CREATED,
+        "project B creation should succeed"
+    );
+    let project_b_id = project_b["id"]
+        .as_str()
+        .expect("project B should have an id");
 
     // Create two sessions in project A.
     let (s1_status, _) = http_json(
@@ -208,14 +225,17 @@ async fn sessions_are_isolated_between_projects() {
     );
 
     // The default project should still exist and be unaffected.
-    let (list_status, project_list) =
-        http_json(&router, "GET", "/api/projects", None).await;
+    let (list_status, project_list) = http_json(&router, "GET", "/api/projects", None).await;
     assert_eq!(list_status, StatusCode::OK);
     let projects = project_list["projects"]
         .as_array()
         .expect("projects should be an array");
     // Default + Alpha + Bravo = 3 projects.
-    assert_eq!(projects.len(), 3, "should have default + 2 created projects");
+    assert_eq!(
+        projects.len(),
+        3,
+        "should have default + 2 created projects"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -273,8 +293,11 @@ async fn memory_is_isolated_between_projects() {
 
     // Create memory directory for A and write a file.
     std::fs::create_dir_all(&mem_dir_a).expect("create memory dir A");
-    std::fs::write(mem_dir_a.join("context.md"), "# Project A context\nImportant fact.")
-        .expect("write memory file in A");
+    std::fs::write(
+        mem_dir_a.join("context.md"),
+        "# Project A context\nImportant fact.",
+    )
+    .expect("write memory file in A");
 
     // Project B's memory directory should either not exist or be empty.
     if mem_dir_b.exists() {
@@ -320,8 +343,7 @@ async fn default_project_cannot_be_deleted() {
     let (router, _storage) = make_test_router();
 
     // List all projects to find the default one (auto-created by migrations).
-    let (list_status, list_body) =
-        http_json(&router, "GET", "/api/projects", None).await;
+    let (list_status, list_body) = http_json(&router, "GET", "/api/projects", None).await;
     assert_eq!(list_status, StatusCode::OK);
 
     let projects = list_body["projects"]

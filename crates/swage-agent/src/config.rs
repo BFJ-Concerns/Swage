@@ -72,9 +72,7 @@ impl AgentConfig {
         // construction time rather than at the first validation attempt.
         if let Some(schema) = &self.output_schema {
             jsonschema::validator_for(schema).map_err(|e| {
-                crate::AgentError::InvalidConfig(format!(
-                    "output schema compilation failed: {e}"
-                ))
+                crate::AgentError::InvalidConfig(format!("output schema compilation failed: {e}"))
             })?;
         }
         Ok(())
@@ -90,7 +88,10 @@ mod tests {
         let config = AgentConfig::new("test-agent");
         assert_eq!(config.agent_id, "test-agent");
         assert_eq!(config.max_tool_rounds, 10);
-        assert_eq!(config.compaction_threshold, CompactionThreshold::MessageCount(100));
+        assert_eq!(
+            config.compaction_threshold,
+            CompactionThreshold::MessageCount(100)
+        );
         assert!(config.metadata.is_empty());
     }
 
@@ -189,14 +190,26 @@ mod compaction_threshold_tests {
 
     #[test]
     fn equality_same_variant_same_value() {
-        assert_eq!(CompactionThreshold::TokenCount(1_000), CompactionThreshold::TokenCount(1_000));
-        assert_eq!(CompactionThreshold::MessageCount(50), CompactionThreshold::MessageCount(50));
+        assert_eq!(
+            CompactionThreshold::TokenCount(1_000),
+            CompactionThreshold::TokenCount(1_000)
+        );
+        assert_eq!(
+            CompactionThreshold::MessageCount(50),
+            CompactionThreshold::MessageCount(50)
+        );
     }
 
     #[test]
     fn equality_same_variant_different_value() {
-        assert_ne!(CompactionThreshold::TokenCount(1_000), CompactionThreshold::TokenCount(999));
-        assert_ne!(CompactionThreshold::MessageCount(50), CompactionThreshold::MessageCount(51));
+        assert_ne!(
+            CompactionThreshold::TokenCount(1_000),
+            CompactionThreshold::TokenCount(999)
+        );
+        assert_ne!(
+            CompactionThreshold::MessageCount(50),
+            CompactionThreshold::MessageCount(51)
+        );
     }
 
     #[test]

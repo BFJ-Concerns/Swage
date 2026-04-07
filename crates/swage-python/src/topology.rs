@@ -10,7 +10,7 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use swage_topology::{
-    validate_graph, TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem,
+    TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem, validate_graph,
 };
 use tracing::debug;
 
@@ -315,9 +315,11 @@ def build_topology():
 
         match err {
             TopologyDefinitionError::Validation(problems) => {
-                assert!(problems
-                    .iter()
-                    .any(|problem| problem.message.contains("agent_id 'ghost'")));
+                assert!(
+                    problems
+                        .iter()
+                        .any(|problem| problem.message.contains("agent_id 'ghost'"))
+                );
             }
             other => panic!("expected validation error, got {other:?}"),
         }

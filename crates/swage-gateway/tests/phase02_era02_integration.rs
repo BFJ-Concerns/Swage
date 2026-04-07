@@ -13,18 +13,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, TokenUsage,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
@@ -54,16 +54,20 @@ impl UsageTrackingProvider {
 
 #[async_trait]
 impl LlmProvider for UsageTrackingProvider {
-    fn model_id(&self) -> &str { "mock-usage-model" }
+    fn model_id(&self) -> &str {
+        "mock-usage-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -73,12 +77,16 @@ impl LlmProvider for UsageTrackingProvider {
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let chunks = vec![
-            StreamChunk::Delta { content: self.response_text.clone() },
+            StreamChunk::Delta {
+                content: self.response_text.clone(),
+            },
             StreamChunk::Usage(TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
             }),
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ];
         Box::pin(futures::stream::iter(chunks))
     }
@@ -101,16 +109,20 @@ impl ToolCallingProvider {
 
 #[async_trait]
 impl LlmProvider for ToolCallingProvider {
-    fn model_id(&self) -> &str { "mock-tool-model" }
+    fn model_id(&self) -> &str {
+        "mock-tool-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -125,8 +137,12 @@ impl LlmProvider for ToolCallingProvider {
         if was_called {
             // Second round: respond with text after tool execution.
             let chunks = vec![
-                StreamChunk::Delta { content: "Tool done.".into() },
-                StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+                StreamChunk::Delta {
+                    content: "Tool done.".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
             ];
             Box::pin(futures::stream::iter(chunks))
         } else {
@@ -137,7 +153,9 @@ impl LlmProvider for ToolCallingProvider {
                     name: "echo".into(),
                     arguments: json!({"text": "ping"}),
                 },
-                StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::ToolUse),
+                },
             ];
             Box::pin(futures::stream::iter(chunks))
         }
@@ -152,8 +170,12 @@ struct EchoTool;
 
 #[async_trait]
 impl swage_gateway::tool::Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echo the input back" }
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo the input back"
+    }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -229,15 +251,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -325,10 +343,18 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
 
     // Connect and subscribe to the "context" channel.
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a message to trigger a turn.
-    ws_send(&mut sink, json!({"type": "send_message", "content": "hello"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "hello"}),
+    )
+    .await;
 
     // Collect all events from the turn.
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
@@ -353,10 +379,14 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
 
     // Report should have populated fields.
     let report = &events[context_assembled_idx.unwrap()]["report"];
-    assert!(report["total_tokens"].as_u64().unwrap_or(0) > 0,
-        "report should have non-zero total_tokens");
-    assert!(!report["elements"].as_array().unwrap_or(&vec![]).is_empty(),
-        "report should have at least one element");
+    assert!(
+        report["total_tokens"].as_u64().unwrap_or(0) > 0,
+        "report should have non-zero total_tokens"
+    );
+    assert!(
+        !report["elements"].as_array().unwrap_or(&vec![]).is_empty(),
+        "report should have at least one element"
+    );
 }
 
 /// Journey: Execution Visibility (Core Journey 4) — negative case
@@ -372,10 +402,8 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
 async fn unsubscribed_client_receives_no_observability_events() {
     let echo_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(EchoTool);
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![echo_tool]);
-    let (_router, addr, _storage) = start_test_server_with_dispatcher(
-        ToolCallingProvider::new(),
-        dispatcher,
-    ).await;
+    let (_router, addr, _storage) =
+        start_test_server_with_dispatcher(ToolCallingProvider::new(), dispatcher).await;
 
     // Create a conversation via HTTP (creates session + default thread).
     let (status, body) = http(&_router, "POST", "/api/conversations").await;
@@ -386,16 +414,23 @@ async fn unsubscribed_client_receives_no_observability_events() {
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
     // Send a message that will trigger a tool call.
-    ws_send(&mut sink, json!({"type": "send_message", "content": "use echo"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "use echo"}),
+    )
+    .await;
 
     // Collect all events.
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
     // There should be no tool_start, tool_end, or context_assembled events.
-    let observability_events: Vec<_> = events.iter().filter(|e| {
-        let event_type = e["type"].as_str().unwrap_or("");
-        matches!(event_type, "tool_start" | "tool_end" | "context_assembled")
-    }).collect();
+    let observability_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let event_type = e["type"].as_str().unwrap_or("");
+            matches!(event_type, "tool_start" | "tool_end" | "context_assembled")
+        })
+        .collect();
 
     assert!(
         observability_events.is_empty(),
@@ -427,27 +462,42 @@ async fn past_turn_report_matches_live_websocket_report() {
 
     // Connect and subscribe to context.
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a message.
-    ws_send(&mut sink, json!({"type": "send_message", "content": "store this"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "store this"}),
+    )
+    .await;
 
     // Collect events.
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
     // Extract the live ContextAssembled report and the turn_id.
     let context_event = events.iter().find(|e| e["type"] == "context_assembled");
-    assert!(context_event.is_some(), "expected context_assembled event; got: {events:?}");
+    assert!(
+        context_event.is_some(),
+        "expected context_assembled event; got: {events:?}"
+    );
     let context_event = context_event.unwrap();
-    let turn_id = context_event["turn_id"].as_str().expect("turn_id in context_assembled");
+    let turn_id = context_event["turn_id"]
+        .as_str()
+        .expect("turn_id in context_assembled");
     let live_report = &context_event["report"];
 
     // Query the REST endpoint for the same turn.
-    let (status, stored_body) = http(
-        &router, "GET",
-        &format!("/api/turns/{turn_id}/context"),
-    ).await;
-    assert_eq!(status, StatusCode::OK, "past turn context endpoint should return 200");
+    let (status, stored_body) =
+        http(&router, "GET", &format!("/api/turns/{turn_id}/context")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "past turn context endpoint should return 200"
+    );
 
     // The stored report should match the live one.
     assert_eq!(
@@ -479,27 +529,42 @@ async fn token_usage_persisted_and_in_turn_complete() {
 
     // Connect and subscribe to context (to get extended TurnComplete).
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a message.
-    ws_send(&mut sink, json!({"type": "send_message", "content": "count tokens"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "count tokens"}),
+    )
+    .await;
 
     // Collect events.
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
     // Find the TurnComplete event.
     let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(turn_complete.is_some(), "expected turn_complete event; got: {events:?}");
+    assert!(
+        turn_complete.is_some(),
+        "expected turn_complete event; got: {events:?}"
+    );
     let turn_complete = turn_complete.unwrap();
-    let turn_id = turn_complete["turn_id"].as_str().expect("turn_id in turn_complete");
+    let turn_id = turn_complete["turn_id"]
+        .as_str()
+        .expect("turn_id in turn_complete");
 
     // For a context-subscribed client, TurnComplete should include usage.
     assert_eq!(
-        turn_complete["input_tokens"].as_u64(), Some(1240),
+        turn_complete["input_tokens"].as_u64(),
+        Some(1240),
         "turn_complete should include input_tokens for subscribed client"
     );
     assert_eq!(
-        turn_complete["output_tokens"].as_u64(), Some(380),
+        turn_complete["output_tokens"].as_u64(),
+        Some(380),
         "turn_complete should include output_tokens for subscribed client"
     );
 
@@ -510,8 +575,16 @@ async fn token_usage_persisted_and_in_turn_complete() {
     let turn = storage.get_turn(turn_uuid).await.unwrap();
     assert!(turn.is_some(), "turn should exist in storage");
     let turn = turn.unwrap();
-    assert_eq!(turn.input_tokens, Some(1240), "input_tokens should be persisted");
-    assert_eq!(turn.output_tokens, Some(380), "output_tokens should be persisted");
+    assert_eq!(
+        turn.input_tokens,
+        Some(1240),
+        "input_tokens should be persisted"
+    );
+    assert_eq!(
+        turn.output_tokens,
+        Some(380),
+        "output_tokens should be persisted"
+    );
 }
 
 /// Journey: Terminal Workflow (Core Journey 2) — clean shutdown
@@ -536,7 +609,11 @@ async fn shutdown_endpoint_notifies_websocket_clients() {
 
     // POST /api/shutdown from localhost.
     let (status, body) = http(&router, "POST", "/api/shutdown").await;
-    assert_eq!(status, StatusCode::OK, "shutdown from localhost should return 200; got {status}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "shutdown from localhost should return 200; got {status}"
+    );
     assert_eq!(body["status"], "shutting_down");
 
     // The WebSocket client should receive a Shutdown event.

@@ -67,30 +67,38 @@ impl SkillActivationStore for SqliteStorage {
                  ORDER BY activated_at ASC",
             )?;
 
-            let records = stmt.query_map(params![session_id.to_string()], |row| {
-                let session_str: String = row.get(0)?;
-                let skill_name: String = row.get(1)?;
-                let activated_str: String = row.get(2)?;
+            let records = stmt
+                .query_map(params![session_id.to_string()], |row| {
+                    let session_str: String = row.get(0)?;
+                    let skill_name: String = row.get(1)?;
+                    let activated_str: String = row.get(2)?;
 
-                // Parse the UUID and timestamp back from their stored string forms.
-                let session_id = session_str
-                    .parse::<Uuid>()
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))?;
-                let activated_at = activated_str
-                    .parse::<chrono::DateTime<Utc>>()
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))?;
+                    // Parse the UUID and timestamp back from their stored string forms.
+                    let session_id = session_str.parse::<Uuid>().map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                    let activated_at =
+                        activated_str
+                            .parse::<chrono::DateTime<Utc>>()
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    2,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?;
 
-                Ok(ActiveSkillRecord { session_id, skill_name, activated_at })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ActiveSkillRecord {
+                        session_id,
+                        skill_name,
+                        activated_at,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
 
             Ok(records)
         })
@@ -122,11 +130,18 @@ mod tests {
     async fn make_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage
-            .create(NewProject { name: "p".into(), slug: "p".into(), workspace_path: None })
+            .create(NewProject {
+                name: "p".into(),
+                slug: "p".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "agent".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent".to_string(),
+            })
             .await
             .unwrap();
         (storage, session.id)
@@ -153,7 +168,11 @@ mod tests {
         storage.activate_skill(session_id, "forge").await.unwrap();
 
         let skills = storage.list_active_skills(session_id).await.unwrap();
-        assert_eq!(skills.len(), 1, "duplicate activation should not insert a second row");
+        assert_eq!(
+            skills.len(),
+            1,
+            "duplicate activation should not insert a second row"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -178,7 +197,10 @@ mod tests {
         storage.activate_skill(session_id, "forge").await.unwrap();
 
         let removed = storage.deactivate_skill(session_id, "forge").await.unwrap();
-        assert!(removed, "deactivate_skill should return true when skill was active");
+        assert!(
+            removed,
+            "deactivate_skill should return true when skill was active"
+        );
 
         let skills = storage.list_active_skills(session_id).await.unwrap();
         assert!(skills.is_empty(), "skill should be gone after deactivation");
@@ -188,8 +210,14 @@ mod tests {
     async fn deactivate_returns_false_when_not_active() {
         let (storage, session_id) = make_session().await;
 
-        let removed = storage.deactivate_skill(session_id, "nonexistent").await.unwrap();
-        assert!(!removed, "deactivate_skill should return false when skill was not active");
+        let removed = storage
+            .deactivate_skill(session_id, "nonexistent")
+            .await
+            .unwrap();
+        assert!(
+            !removed,
+            "deactivate_skill should return false when skill was not active"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -202,7 +230,10 @@ mod tests {
         storage.clear_active_skills(session_id).await.unwrap();
 
         let skills = storage.list_active_skills(session_id).await.unwrap();
-        assert!(skills.is_empty(), "clear should remove all active skills for the session");
+        assert!(
+            skills.is_empty(),
+            "clear should remove all active skills for the session"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -211,11 +242,18 @@ mod tests {
 
         // Create a second session in the same storage instance.
         let project = storage
-            .create(NewProject { name: "q".into(), slug: "q".into(), workspace_path: None })
+            .create(NewProject {
+                name: "q".into(),
+                slug: "q".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
         let session_b = storage
-            .create_session(NewSession { project_id: project.id, agent_id: "agent2".to_string() })
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "agent2".to_string(),
+            })
             .await
             .unwrap()
             .id;
@@ -227,7 +265,10 @@ mod tests {
 
         let skills_a = storage.list_active_skills(session_a).await.unwrap();
         let skills_b = storage.list_active_skills(session_b).await.unwrap();
-        assert!(skills_a.is_empty(), "session A should have no skills after clear");
+        assert!(
+            skills_a.is_empty(),
+            "session A should have no skills after clear"
+        );
         assert_eq!(skills_b.len(), 1, "session B skills should be unaffected");
     }
 
@@ -255,6 +296,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(count, 0, "cascade delete should remove active_skills when session is deleted");
+        assert_eq!(
+            count, 0,
+            "cascade delete should remove active_skills when session is deleted"
+        );
     }
 }

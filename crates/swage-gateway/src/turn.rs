@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, GatewayError, Role};
-use swage_storage::model::{NewAgentMessage, NewMessage, TurnState};
+use swage_storage::model::{NewAgentMessage, NewMessage, NewTurn, TurnState};
 
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 use swage_context::element::ContextElement;
@@ -247,6 +247,32 @@ pub(crate) fn build_agent_config(
     agent_config
 }
 
+fn load_session_config(
+    state: &AppState,
+    project_slug: &str,
+    agent_id: &str,
+) -> swage_config::ResolvedConfig {
+    swage_config::load_resolved_config(project_slug, agent_id).unwrap_or_else(|error| {
+        tracing::warn!(
+            "failed to load project config for '{project_slug}' agent '{agent_id}', using startup config: {error}"
+        );
+        state.config.clone()
+    })
+}
+
+fn resolve_swage_root() -> Option<PathBuf> {
+    match swage_config::discovery::resolve_root() {
+        Ok(root) => Some(root),
+        Err(error) => {
+            tracing::warn!(
+                error = %error.kind,
+                "failed to resolve swage root; proceeding without skills, memory, or custom assembly"
+            );
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
     state: AppState,
@@ -386,6 +412,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
+    target_thread_id: Option<Uuid>,
     content: String,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
@@ -394,6 +421,7 @@ pub async fn process_turn(
     process_turn_with_existing_turn(
         state,
         session_id,
+        target_thread_id,
         content,
         ws_tx,
         subscription,
@@ -411,19 +439,25 @@ pub async fn process_turn(
 pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
     session_id: Uuid,
+    target_thread_id: Option<Uuid>,
     content: String,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     existing_turn_id: Option<Uuid>,
 ) -> Result<(), GatewayError> {
-    // Step 1: Resolve the session's thread. The gateway creates one thread per
-    // session in create_conversation / create_session_in_project.
-    let threads = state.storage.list_by_session(session_id).await?;
-    let thread = threads
-        .into_iter()
-        .next()
+    // Step 1: Resolve the project and target thread for this session.
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await?
         .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+    let thread = crate::thread_selection::resolve_thread_for_session(
+        state.storage.as_ref(),
+        session_id,
+        target_thread_id,
+    )
+    .await?;
     let thread_id = thread.id;
 
     // Step 2: Guard — reject if a turn is already active for this thread.
@@ -441,11 +475,6 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     // Step 3: Resolve the project for this session so we can load per-project config
     // and build the ToolContext passed to each tool invocation.
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await?
-        .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
     let project_id = session.project_id;
 
     let project = state
@@ -458,30 +487,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Load project-specific config (model, instructions, etc.). Falls back to
     // the startup config when no project-level config.toml exists, which is
     // the normal case for most projects.
-    let config = match swage_config::load_resolved_config(&project_slug, "default") {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "failed to load project config for '{project_slug}', using startup config: {e}"
-            );
-            state.config.clone()
-        }
-    };
+    let config = load_session_config(state, &project_slug, &session.agent_id);
 
     // Resolve the swage root once — skill discovery, project memory loading,
     // and assembly search-path construction all depend on it.
     //
     // Fail-open: a warning is logged and each consumer falls back gracefully.
-    let swage_root_opt: Option<PathBuf> = match swage_config::discovery::resolve_root() {
-        Ok(root) => Some(root),
-        Err(e) => {
-            tracing::warn!(
-                error = %e.kind,
-                "failed to resolve swage root; proceeding without skills, memory, or custom assembly"
-            );
-            None
-        }
-    };
+    let swage_root_opt = resolve_swage_root();
 
     // Discover available skills for this project+agent context, then build the
     // active skill set by matching stored activation records against definitions.
@@ -539,14 +551,32 @@ pub(crate) async fn process_turn_with_existing_turn(
         vec![]
     };
 
-    // Step 4: Set up the cancellation token before any turn processing begins.
+    // Step 4: Ensure the turn exists before we persist any messages so every
+    // message in this turn can carry an honest turn_id.
+    let prepared_turn_id = match existing_turn_id {
+        Some(turn_id) => turn_id,
+        None => {
+            state
+                .storage
+                .create_turn(NewTurn {
+                    thread_id,
+                    agent_id: session.agent_id.clone(),
+                    state: TurnState::Pending,
+                    parent_turn_id: None,
+                })
+                .await?
+                .id
+        }
+    };
+
+    // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = CancellationToken::new();
     {
         let mut turns = state.active_turns.lock().await;
         turns.insert(session_id, cancel_token.clone());
     }
 
-    // Step 5: Store the user message.
+    // Step 6: Store the user message.
     // Position is the current count of messages in the thread.
     let user_position = state
         .storage
@@ -562,14 +592,15 @@ pub(crate) async fn process_turn_with_existing_turn(
         .storage
         .create_message(NewMessage {
             thread_id,
+            turn_id: Some(prepared_turn_id),
             role: Role::User.to_string(),
             content: content.clone(),
             position: user_position,
-            agent_id: "gateway".to_string(),
+            agent_id: session.agent_id.clone(),
         })
         .await?;
 
-    // Steps 6–7: Assemble context via the swage-context assembly engine.
+    // Steps 7–8: Assemble context via the swage-context assembly engine.
     // Loads thread history, project memory, and constructs typed elements.
     // Runs fail-open assembly: custom Python configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
@@ -658,13 +689,13 @@ pub(crate) async fn process_turn_with_existing_turn(
         serde_json::json!({ "error": "serialisation failed" })
     });
 
-    // Step 7: Resolve tool permissions from config cascade and build the
+    // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When a sandbox is
     // available, inject SandboxedExecutor as the execution strategy so tool
     // calls are routed through bubblewrap transparently.
     let dispatcher = build_gateway_dispatcher(state, &config, ws_tx.clone());
 
-    // Step 8: Build the Agent that will execute the turn.
+    // Step 10: Build the Agent that will execute the turn.
     let agent_config =
         build_agent_config(session.agent_id.clone(), &config, output_schema_override);
     let agent = match AgentBuilder::new()
@@ -694,18 +725,18 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     };
 
-    // Step 9: Create the TurnRequest with assembled context and cancellation.
+    // Step 11: Create the TurnRequest with assembled context and cancellation.
     let turn_request = TurnRequest {
         session_id,
         thread_id,
         user_message: content,
         assembled_context: assembled_messages,
         parent_turn_id: None,
-        existing_turn_id,
+        existing_turn_id: Some(prepared_turn_id),
         cancellation_token: cancel_token,
     };
 
-    // Step 10: Create the event channel and spawn the agent's streaming loop.
+    // Step 12: Create the event channel and spawn the agent's streaming loop.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     // Spawn the agent on a tokio task — it manages turn creation, state
@@ -925,10 +956,15 @@ pub(crate) async fn process_turn_with_existing_turn(
             if let Some(ref output) = outbound.structured_output {
                 use swage_storage::store::TurnStore;
                 if let Err(e) =
-                    TurnStore::update_structured_output(&*state.storage, turn_id, output).await
+                    TurnStore::update_structured_output(&*state.storage, outbound.turn_id, output)
+                        .await
                 {
                     // Non-fatal: the turn completed; only the persisted record is affected.
-                    tracing::warn!(error = %e, %turn_id, "failed to persist structured_output");
+                    tracing::warn!(
+                        error = %e,
+                        turn_id = %outbound.turn_id,
+                        "failed to persist structured_output"
+                    );
                 }
             }
         }
@@ -1070,15 +1106,15 @@ pub(crate) mod tests {
 
     use swage_core::StorageError;
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-        ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+        ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
         model::{
-            ActiveSkillRecord, AgentMessage, ApprovalKind, ApprovalRequest, ApprovalState,
-            EdgeEvaluation, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
-            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
+            ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
+            Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+            NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
             NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
             Project, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
             TopologyRunState, Turn, TurnState,
@@ -1937,6 +1973,7 @@ pub(crate) mod tests {
                 db.messages.push(swage_storage::Message {
                     id: message_id,
                     thread_id: branch.child_thread_id,
+                    turn_id: message.turn_id,
                     role: message.role,
                     content: message.content,
                     position: message.position,
@@ -2126,6 +2163,7 @@ pub(crate) mod tests {
             let m = Message {
                 id: Uuid::new_v4(),
                 thread_id: message.thread_id,
+                turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
                 position: message.position,
@@ -2704,6 +2742,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -2806,6 +2845,7 @@ pub(crate) mod tests {
             process_turn(
                 &*state_clone,
                 session_id,
+                None,
                 "Hi".to_string(),
                 tx,
                 Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -2861,6 +2901,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -2911,6 +2952,7 @@ pub(crate) mod tests {
         let result = process_turn(
             &state,
             session_id,
+            None,
             "Another message".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3039,6 +3081,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Use echo".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3109,6 +3152,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Store this".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3166,6 +3210,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Use unknown".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3233,6 +3278,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Multi-round".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3356,6 +3402,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Delegate this".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3582,6 +3629,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "capture".into(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3665,6 +3713,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "hi".into(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3698,6 +3747,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -3831,6 +3881,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Check context".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4027,6 +4078,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Use echo".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4085,6 +4137,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Use broken".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4148,6 +4201,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Use fail_tool".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4259,6 +4313,7 @@ pub(crate) mod tests {
                     process_turn(
                         &state,
                         session_id,
+                        None,
                         "test".to_string(),
                         tx,
                         Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4356,6 +4411,7 @@ pub(crate) mod tests {
                     process_turn(
                         &state,
                         session_id,
+                        None,
                         "test".to_string(),
                         tx,
                         Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4698,6 +4754,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4742,6 +4799,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4791,6 +4849,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hi".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4847,8 +4906,6 @@ pub(crate) mod tests {
     /// The assembly report should be persisted as a context snapshot.
     #[tokio::test]
     async fn assembly_report_persisted_as_context_snapshot() {
-        use swage_storage::store::ContextSnapshotStore;
-
         let chunks = vec![
             StreamChunk::Delta {
                 content: "Hi".to_string(),
@@ -4863,6 +4920,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -4903,8 +4961,6 @@ pub(crate) mod tests {
     /// snapshot persistence still happens.
     #[tokio::test]
     async fn context_assembled_not_sent_when_unsubscribed() {
-        use swage_storage::store::ContextSnapshotStore;
-
         let chunks = vec![
             StreamChunk::Delta {
                 content: "Hi".to_string(),
@@ -4920,6 +4976,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
@@ -4987,6 +5044,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -5061,6 +5119,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "give me json".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
@@ -5124,6 +5183,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "give me x".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
@@ -5173,6 +5233,7 @@ pub(crate) mod tests {
         process_turn(
             &state,
             session_id,
+            None,
             "Hello".to_string(),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(false))),
@@ -5322,7 +5383,7 @@ pub(crate) mod tests {
         // Only the channel passed to route_approval_agent_event should receive
         // the event — the other remains empty, proving session-scoped routing.
         let (tx_a, mut rx_a) = mpsc::unbounded_channel::<ServerEvent>();
-        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<ServerEvent>();
+        let (_tx_b, mut rx_b) = mpsc::unbounded_channel::<ServerEvent>();
 
         route_approval_agent_event(
             AgentEvent::ApprovalRequired {

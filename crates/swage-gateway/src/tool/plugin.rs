@@ -209,7 +209,9 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(plugin_dir.join("run.py")).unwrap().permissions();
+            let mut perms = std::fs::metadata(plugin_dir.join("run.py"))
+                .unwrap()
+                .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(plugin_dir.join("run.py"), perms).unwrap();
         }

@@ -53,7 +53,11 @@ fn extract_from_fence(text: &str) -> Option<serde_json::Value> {
     // embedded inside JSON string values (e.g. `{"code": "```nested```"}`).
     let fence_end = inner.find("\n```").or_else(|| {
         // Edge case: closing fence at the very start of inner (no preceding newline).
-        if inner.starts_with("```") { Some(0) } else { None }
+        if inner.starts_with("```") {
+            Some(0)
+        } else {
+            None
+        }
     })?;
 
     let block = inner[..fence_end].trim();
@@ -105,7 +109,10 @@ mod tests {
     #[test]
     fn fenced_json_with_surrounding_prose() {
         let input = "Here is the result:\n```json\n{\"name\": \"alice\"}\n```\nHope that helps!";
-        assert_eq!(extract_json(input), Some(serde_json::json!({"name": "alice"})));
+        assert_eq!(
+            extract_json(input),
+            Some(serde_json::json!({"name": "alice"}))
+        );
     }
 
     #[test]
@@ -137,7 +144,10 @@ mod tests {
     fn prose_with_embedded_fragment_returns_none() {
         // Prose embedding a JSON fragment mid-sentence is too ambiguous to extract.
         // The fragment is not at the start/end and not in a fence — return None.
-        assert_eq!(extract_json("The answer is {\"x\": 1} as you can see."), None);
+        assert_eq!(
+            extract_json("The answer is {\"x\": 1} as you can see."),
+            None
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -157,6 +167,9 @@ mod tests {
         let input = "```json\n{\"code\": \"```nested```\"}\n```";
         // The content inside the first fence is valid JSON, so it should parse.
         let result = extract_json(input);
-        assert!(result.is_some(), "nested fence should still extract valid JSON");
+        assert!(
+            result.is_some(),
+            "nested fence should still extract valid JSON"
+        );
     }
 }

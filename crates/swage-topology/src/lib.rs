@@ -538,9 +538,11 @@ mod tests {
         };
 
         let problems = validate_graph(&graph, &catalog()).expect_err("graph should fail");
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("agent_id 'ghost'")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("agent_id 'ghost'"))
+        );
     }
 
     #[test]
@@ -582,9 +584,11 @@ mod tests {
         };
 
         let problems = validate_graph(&graph, &catalog()).expect_err("graph should fail");
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("condition field 'missing'")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("condition field 'missing'"))
+        );
     }
 
     #[test]
@@ -616,9 +620,11 @@ mod tests {
         };
 
         let problems = validate_graph(&graph, &catalog()).expect_err("graph should fail");
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("unreachable")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("unreachable"))
+        );
     }
 
     #[test]
@@ -663,9 +669,11 @@ mod tests {
         };
 
         let problems = validate_graph(&graph, &catalog()).expect_err("graph should fail");
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("has no iteration limit")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("has no iteration limit"))
+        );
     }
 
     #[test]
@@ -754,11 +762,15 @@ mod tests {
         };
 
         let problems = validate_graph(&graph, &catalog()).expect_err("graph should fail");
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("max_fan_out")));
-        assert!(problems
-            .iter()
-            .any(|problem| problem.message.contains("must be declared as an array")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("max_fan_out"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("must be declared as an array"))
+        );
     }
 }

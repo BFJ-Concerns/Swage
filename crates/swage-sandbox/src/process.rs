@@ -4,8 +4,10 @@
 //! Handles graceful shutdown with configurable grace period, forceful
 //! termination, and die-with-parent on Linux.
 
-use std::process::ExitStatus;
 use std::time::Duration;
+
+#[cfg(test)]
+use std::process::ExitStatus;
 
 use swage_core::SandboxError;
 
@@ -72,10 +74,14 @@ impl ChildProcessManager {
     }
 
     /// Waits asynchronously for the child process to exit.
+    #[cfg(test)]
     pub async fn wait_for_exit(&mut self) -> Result<ExitStatus, SandboxError> {
-        self.child.wait().await.map_err(|e| SandboxError::SpawnFailed {
-            message: format!("error waiting for child process: {e}"),
-        })
+        self.child
+            .wait()
+            .await
+            .map_err(|e| SandboxError::SpawnFailed {
+                message: format!("error waiting for child process: {e}"),
+            })
     }
 
     /// Sends SIGTERM and waits for the child to exit within `grace_period`.
@@ -108,9 +114,12 @@ impl ChildProcessManager {
                 );
                 self.force_kill()?;
                 // Wait for the kernel to reap the process so no zombie is left.
-                self.child.wait().await.map_err(|e| SandboxError::SpawnFailed {
-                    message: format!("error reaping child after SIGKILL: {e}"),
-                })?;
+                self.child
+                    .wait()
+                    .await
+                    .map_err(|e| SandboxError::SpawnFailed {
+                        message: format!("error reaping child after SIGKILL: {e}"),
+                    })?;
                 Ok(())
             }
         }
@@ -123,9 +132,11 @@ impl ChildProcessManager {
     /// if needed.
     pub fn force_kill(&mut self) -> Result<(), SandboxError> {
         // start_kill sends SIGKILL without blocking on process exit.
-        self.child.start_kill().map_err(|e| SandboxError::SpawnFailed {
-            message: format!("failed to send SIGKILL to child process: {e}"),
-        })
+        self.child
+            .start_kill()
+            .map_err(|e| SandboxError::SpawnFailed {
+                message: format!("failed to send SIGKILL to child process: {e}"),
+            })
     }
 }
 
@@ -151,11 +162,14 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_produces_different_pid_from_host() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
         // The child must be a different process.
-        assert_ne!(mgr.pid(), std::process::id(), "child PID should differ from host PID");
+        assert_ne!(
+            mgr.pid(),
+            std::process::id(),
+            "child PID should differ from host PID"
+        );
 
         // Clean up.
         mgr.force_kill().ok();
@@ -164,8 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn pid_is_nonzero() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
         assert_ne!(mgr.pid(), 0, "PID should be nonzero");
 
@@ -177,10 +190,12 @@ mod tests {
 
     #[tokio::test]
     async fn is_running_true_for_live_child() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
-        assert!(mgr.is_running(), "child should be running immediately after spawn");
+        assert!(
+            mgr.is_running(),
+            "child should be running immediately after spawn"
+        );
 
         mgr.force_kill().ok();
         mgr.wait_for_exit().await.ok();
@@ -188,23 +203,29 @@ mod tests {
 
     #[tokio::test]
     async fn is_running_false_after_exit() {
-        let mut mgr = ChildProcessManager::spawn(true_command())
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(true_command()).expect("spawn should succeed");
 
         // `true` exits immediately — wait for it, then check.
-        mgr.wait_for_exit().await.expect("wait_for_exit should succeed");
+        mgr.wait_for_exit()
+            .await
+            .expect("wait_for_exit should succeed");
 
-        assert!(!mgr.is_running(), "is_running should be false after child exits");
+        assert!(
+            !mgr.is_running(),
+            "is_running should be false after child exits"
+        );
     }
 
     // -- Wait -----------------------------------------------------------------
 
     #[tokio::test]
     async fn wait_for_exit_returns_on_child_completion() {
-        let mut mgr = ChildProcessManager::spawn(true_command())
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(true_command()).expect("spawn should succeed");
 
-        let status = mgr.wait_for_exit().await.expect("wait_for_exit should succeed");
+        let status = mgr
+            .wait_for_exit()
+            .await
+            .expect("wait_for_exit should succeed");
 
         // `true` exits with code 0.
         assert!(status.success(), "expected successful exit from `true`");
@@ -214,8 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_shutdown_terminates_child() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
         assert!(mgr.is_running(), "child should be running before shutdown");
 
@@ -223,13 +243,15 @@ mod tests {
             .await
             .expect("graceful_shutdown should succeed");
 
-        assert!(!mgr.is_running(), "child should no longer be running after shutdown");
+        assert!(
+            !mgr.is_running(),
+            "child should no longer be running after shutdown"
+        );
     }
 
     #[tokio::test]
     async fn graceful_shutdown_is_idempotent() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
         mgr.graceful_shutdown(Duration::from_secs(5))
             .await
@@ -245,15 +267,19 @@ mod tests {
 
     #[tokio::test]
     async fn force_kill_terminates_child() {
-        let mut mgr = ChildProcessManager::spawn(sleep_command(60))
-            .expect("spawn should succeed");
+        let mut mgr = ChildProcessManager::spawn(sleep_command(60)).expect("spawn should succeed");
 
         mgr.force_kill().expect("force_kill should succeed");
 
         // Reap the process and verify it exited.
-        mgr.wait_for_exit().await.expect("wait_for_exit should succeed after SIGKILL");
+        mgr.wait_for_exit()
+            .await
+            .expect("wait_for_exit should succeed after SIGKILL");
 
-        assert!(!mgr.is_running(), "child should not be running after force kill");
+        assert!(
+            !mgr.is_running(),
+            "child should not be running after force kill"
+        );
     }
 
     // -- Die-with-parent (Linux only) ----------------------------------------

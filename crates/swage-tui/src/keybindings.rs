@@ -46,7 +46,9 @@ pub enum AppAction {
 /// message in single-line mode but inserts a newline in multi-line mode.
 /// Returns `None` for keys that have no binding.
 pub fn map_key_event(event: KeyEvent, is_multi_line: bool) -> Option<AppAction> {
-    let KeyEvent { code, modifiers, .. } = event;
+    let KeyEvent {
+        code, modifiers, ..
+    } = event;
 
     // Ctrl bindings are checked first so that Ctrl+letter combos never fall
     // through to the InsertChar arm below.

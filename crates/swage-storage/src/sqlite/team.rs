@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -108,7 +108,11 @@ impl TeamStore for SqliteStorage {
         .await
     }
 
-    async fn get_team_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<Team>, StorageError> {
+    async fn get_team_by_name(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Team>, StorageError> {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
@@ -149,13 +153,15 @@ impl TeamStore for SqliteStorage {
             });
         }
 
-        let members_json = match members {
-            Some(members) => Some(
-                serde_json::to_string(&members)
-                    .map_err(|e| StorageError::Serialisation { message: e.to_string() })?,
-            ),
-            None => None,
-        };
+        let members_json =
+            match members {
+                Some(members) => Some(serde_json::to_string(&members).map_err(|e| {
+                    StorageError::Serialisation {
+                        message: e.to_string(),
+                    }
+                })?),
+                None => None,
+            };
 
         self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
@@ -184,10 +190,8 @@ impl TeamStore for SqliteStorage {
 
     async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError> {
         self.with_conn(move |conn| {
-            let affected = conn.execute(
-                "DELETE FROM teams WHERE id = ?1",
-                params![id.to_string()],
-            )?;
+            let affected =
+                conn.execute("DELETE FROM teams WHERE id = ?1", params![id.to_string()])?;
             Ok(affected > 0)
         })
         .await
@@ -216,7 +220,11 @@ mod tests {
             .await
             .unwrap();
 
-        let fetched = storage.get_team(created.id).await.unwrap().expect("team exists");
+        let fetched = storage
+            .get_team(created.id)
+            .await
+            .unwrap()
+            .expect("team exists");
         assert_eq!(fetched.name, "research");
         assert_eq!(fetched.entry_agent_id, "planner");
         assert_eq!(fetched.members, vec!["planner", "reviewer"]);
@@ -332,7 +340,13 @@ mod tests {
             .unwrap();
 
         let teams = storage.list_teams_by_project(project.id).await.unwrap();
-        assert_eq!(teams.iter().map(|team| team.name.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(
+            teams
+                .iter()
+                .map(|team| team.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -4,7 +4,7 @@
 //! The trait is extensible for provider-specific counting in future.
 
 use swage_core::message::{ChatMessage, ContentPart};
-use tiktoken_rs::{cl100k_base, o200k_base, CoreBPE};
+use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 
 /// Synchronous token counting over text and message sequences.
 ///
@@ -75,7 +75,8 @@ impl Tokeniser for TiktokenTokeniser {
             total += OVERHEAD_PER_MESSAGE;
 
             // Role string contributes token cost (e.g. "user", "assistant").
-            total += self.bpe
+            total += self
+                .bpe
                 .encode_with_special_tokens(&msg.role.to_string())
                 .len();
 

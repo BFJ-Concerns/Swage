@@ -19,23 +19,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
+use swage_config::ResolvedConfig;
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use swage_config::ResolvedConfig;
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{store::ProjectStore, SqliteStorage};
+use swage_storage::{SqliteStorage, store::ProjectStore};
 
 // Serialise tests that mutate SWAGE_HOME — it's process-wide state.
 static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -82,16 +82,20 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    fn model_id(&self) -> &str { "mock-model" }
+    fn model_id(&self) -> &str {
+        "mock-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -102,7 +106,9 @@ impl LlmProvider for MockProvider {
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let mut rounds = self.rounds.lock().unwrap();
         let chunks = if rounds.is_empty() {
-            vec![StreamChunk::Done { finish_reason: Some(FinishReason::Stop) }]
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }]
         } else {
             rounds.remove(0)
         };
@@ -159,15 +165,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -248,12 +250,14 @@ async fn valid_output_delivers_structured_output_on_turn_complete() {
 
     // Provider returns valid JSON matching the schema.
     let valid_json = r#"{"result": "success"}"#;
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::Delta { content: valid_json.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: valid_json.to_string(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]);
 
     let (router, addr, storage) = start_test_server_with_config(provider, config).await;
 
@@ -262,10 +266,18 @@ async fn valid_output_delivers_structured_output_on_turn_complete() {
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a message to trigger the turn.
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Give me JSON"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Give me JSON"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
@@ -300,7 +312,10 @@ async fn valid_output_delivers_structured_output_on_turn_complete() {
     let turn_id = tc["turn_id"].as_str().unwrap();
     let turn_uuid = uuid::Uuid::parse_str(turn_id).unwrap();
     use swage_storage::store::TurnStore;
-    let turn = TurnStore::get_turn(&*storage, turn_uuid).await.unwrap().unwrap();
+    let turn = TurnStore::get_turn(&*storage, turn_uuid)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         turn.structured_output.is_some(),
         "turn record should persist structured_output"
@@ -338,12 +353,20 @@ async fn invalid_output_retries_with_visible_event_then_succeeds() {
     // Round 2: valid output (score is a number).
     let provider = MockProvider::new(vec![
         vec![
-            StreamChunk::Delta { content: r#"{"score": "high"}"#.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: r#"{"score": "high"}"#.to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
         vec![
-            StreamChunk::Delta { content: r#"{"score": 95}"#.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: r#"{"score": 95}"#.to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -354,8 +377,16 @@ async fn invalid_output_retries_with_visible_event_then_succeeds() {
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
 
     // Subscribe to context channel to receive retry events.
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Score this"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Score this"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
@@ -415,12 +446,14 @@ async fn zero_retries_causes_immediate_failure() {
     let config = config_with_schema(schema, 0);
 
     // Provider returns invalid output — answer is a string, not an integer.
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::Delta { content: r#"{"answer": "forty-two"}"#.to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: r#"{"answer": "forty-two"}"#.to_string(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]);
 
     let (router, addr, _storage) = start_test_server_with_config(provider, config).await;
 
@@ -430,8 +463,16 @@ async fn zero_retries_causes_immediate_failure() {
 
     // Subscribe to see all events. OutputSchemaFailed should arrive regardless
     // of subscription state, but subscribing ensures we see everything.
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Answer me"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Answer me"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
@@ -465,8 +506,7 @@ async fn zero_retries_causes_immediate_failure() {
         // If a TurnComplete is emitted for a failed schema, it must NOT carry
         // structured_output.
         assert!(
-            tc.get("structured_output").is_none()
-                || tc["structured_output"].is_null(),
+            tc.get("structured_output").is_none() || tc["structured_output"].is_null(),
             "turn_complete after schema failure must not carry structured_output"
         );
     }
@@ -487,20 +527,28 @@ async fn no_schema_preserves_existing_behaviour() {
     // Default config — no output schema.
     let config = ResolvedConfig::default();
 
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::Delta { content: "Hello, ".to_string() },
-            StreamChunk::Delta { content: "world!".to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
-        ],
-    ]);
+    let provider = MockProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "Hello, ".to_string(),
+        },
+        StreamChunk::Delta {
+            content: "world!".to_string(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]);
 
     let (router, addr, _storage) = start_test_server_with_config(provider, config).await;
 
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
     ws_send(&mut sink, json!({"type": "send_message", "content": "Hi"})).await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
@@ -511,7 +559,11 @@ async fn no_schema_preserves_existing_behaviour() {
         .filter(|e| e["type"] == "token")
         .filter_map(|e| e["content"].as_str())
         .collect();
-    assert_eq!(tokens, vec!["Hello, ", "world!"], "tokens should stream unchanged");
+    assert_eq!(
+        tokens,
+        vec!["Hello, ", "world!"],
+        "tokens should stream unchanged"
+    );
 
     // TurnComplete should be present without structured_output.
     let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
@@ -521,8 +573,7 @@ async fn no_schema_preserves_existing_behaviour() {
     );
     let tc = turn_complete.unwrap();
     assert!(
-        tc.get("structured_output").is_none()
-            || tc["structured_output"].is_null(),
+        tc.get("structured_output").is_none() || tc["structured_output"].is_null(),
         "no structured_output expected when no schema is configured; got: {tc:?}"
     );
 
@@ -563,14 +614,26 @@ async fn tokens_stream_during_both_initial_and_retry_attempts() {
     // Round 2: valid JSON — streamed as tokens.
     let provider = MockProvider::new(vec![
         vec![
-            StreamChunk::Delta { content: "{\"wrong\":".to_string() },
-            StreamChunk::Delta { content: " \"field\"}".to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "{\"wrong\":".to_string(),
+            },
+            StreamChunk::Delta {
+                content: " \"field\"}".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
         vec![
-            StreamChunk::Delta { content: "{\"name\":".to_string() },
-            StreamChunk::Delta { content: " \"Alice\"}".to_string() },
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Delta {
+                content: "{\"name\":".to_string(),
+            },
+            StreamChunk::Delta {
+                content: " \"Alice\"}".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ],
     ]);
 
@@ -579,8 +642,16 @@ async fn tokens_stream_during_both_initial_and_retry_attempts() {
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().unwrap();
     let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Name?"})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Name?"}),
+    )
+    .await;
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 

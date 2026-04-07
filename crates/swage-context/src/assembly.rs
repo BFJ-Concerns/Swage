@@ -141,7 +141,8 @@ pub fn default_assembly(
                 // Extract history messages, compact, then splice back in.
                 let history_msgs: Vec<ChatMessage> = assembled[range.clone()].to_vec();
                 let compactor = TruncationCompactor::new();
-                let (compacted, record) = compactor.compact(history_msgs, history_budget, tokeniser);
+                let (compacted, record) =
+                    compactor.compact(history_msgs, history_budget, tokeniser);
 
                 // Update the element report token count to reflect post-compaction cost.
                 if let Some(report) = element_reports.iter_mut().find(|r| r.name == "history") {
@@ -163,9 +164,7 @@ pub fn default_assembly(
     // ── Final report ──────────────────────────────────────────────────────────
 
     let total_tokens = tokeniser.count_messages(&assembled);
-    let budget_remaining = config
-        .budget
-        .map(|b| b as isize - total_tokens as isize);
+    let budget_remaining = config.budget.map(|b| b as isize - total_tokens as isize);
     let duration = start.elapsed();
 
     let report = AssemblyReport {
@@ -206,9 +205,7 @@ fn extract_skill_names_preview(source: &str) -> Option<String> {
     // portion before " (" to isolate the name.
     let names: Vec<&str> = after_prefix
         .split("), ")
-        .filter_map(|entry| {
-            entry.split(" (").next().filter(|n| !n.is_empty())
-        })
+        .filter_map(|entry| entry.split(" (").next().filter(|n| !n.is_empty()))
         .collect();
 
     if names.is_empty() {
@@ -268,8 +265,7 @@ async fn dispatch_assembly(
             let start = Instant::now();
 
             // Locate the Python file in the config hierarchy.
-            let resolved = resolve_assembly(name, search_levels)
-                .ok_or(DispatchError::NotFound)?;
+            let resolved = resolve_assembly(name, search_levels).ok_or(DispatchError::NotFound)?;
 
             // A runner is required for Python execution. When none is provided
             // (e.g. in test contexts without the Python crate), treat as not-found
@@ -295,7 +291,7 @@ async fn dispatch_assembly(
                     timeout,
                     budget,
                     &model,
-                    "",  // agent_id: not available in this context
+                    "", // agent_id: not available in this context
                     elements,
                     tokeniser,
                     owned_levels,
@@ -326,8 +322,7 @@ async fn dispatch_assembly(
 
             let compaction_applied = build_compaction_records(compaction_results, tokeniser);
             let total_tokens = tokeniser.count_messages(&assembled);
-            let budget_remaining =
-                config.budget.map(|b| b as isize - total_tokens as isize);
+            let budget_remaining = config.budget.map(|b| b as isize - total_tokens as isize);
 
             let report = AssemblyReport {
                 assembly_name: name.to_string(),
@@ -376,10 +371,7 @@ fn substitute_compacted(
 
 /// Find the start..end range in `messages` where a contiguous subsequence of
 /// the given `ids` appears, or `None` if no such subsequence exists.
-fn find_contiguous_by_id(
-    messages: &[ChatMessage],
-    ids: &[Uuid],
-) -> Option<std::ops::Range<usize>> {
+fn find_contiguous_by_id(messages: &[ChatMessage], ids: &[Uuid]) -> Option<std::ops::Range<usize>> {
     if ids.is_empty() || messages.len() < ids.len() {
         return None;
     }
@@ -478,26 +470,28 @@ pub async fn assemble(
         Ok(Ok(output)) => output,
 
         // Python assembly produced an empty message list.
-        Ok(Err(DispatchError::ExecutionFailed { ref error_kind, ref message }))
-            if error_kind == "invalid_output" =>
-        {
+        Ok(Err(DispatchError::ExecutionFailed {
+            ref error_kind,
+            ref message,
+        })) if error_kind == "invalid_output" => {
             let mut fallback = default_assembly(elements, config, tokeniser);
-            fallback.report.errors.push(make_error(
-                &assembly_name,
-                "invalid_output",
-                message,
-            ));
+            fallback
+                .report
+                .errors
+                .push(make_error(&assembly_name, "invalid_output", message));
             fallback
         }
 
         // Python execution failed (syntax error, runtime exception, timeout).
-        Ok(Err(DispatchError::ExecutionFailed { error_kind, message })) => {
+        Ok(Err(DispatchError::ExecutionFailed {
+            error_kind,
+            message,
+        })) => {
             let mut fallback = default_assembly(elements, config, tokeniser);
-            fallback.report.errors.push(make_error(
-                &assembly_name,
-                &error_kind,
-                &message,
-            ));
+            fallback
+                .report
+                .errors
+                .push(make_error(&assembly_name, &error_kind, &message));
             fallback
         }
 
@@ -534,13 +528,15 @@ pub async fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_core::Role;
-    use swage_provider::LlmProvider;
     use async_trait::async_trait;
-    use std::pin::Pin;
     use futures::Stream;
-    use swage_core::{CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-        ToolCompletionRequest, ToolCompletionResponse};
+    use std::pin::Pin;
+    use swage_core::Role;
+    use swage_core::{
+        CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use swage_provider::LlmProvider;
 
     // ── Stub provider (unit tests only need model_id; other methods never called) ──
 
@@ -548,17 +544,28 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for StubProvider {
-        fn model_id(&self) -> &str { "stub-model" }
+        fn model_id(&self) -> &str {
+            "stub-model"
+        }
 
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!("StubProvider::complete — not used in unit tests")
         }
 
-        async fn complete_with_tools(&self, _req: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!("StubProvider::complete_with_tools — not used in unit tests")
         }
 
-        fn stream(&self, _req: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(
+            &self,
+            _req: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             unimplemented!("StubProvider::stream — not used in unit tests")
         }
     }
@@ -726,7 +733,11 @@ mod tests {
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
         // Only system + 2 history messages; memory content absent.
-        assert_eq!(output.messages.len(), 3, "memory content should be excluded");
+        assert_eq!(
+            output.messages.len(),
+            3,
+            "memory content should be excluded"
+        );
         // No message should come from the memory element.
         for msg in &output.messages {
             let is_memory = matches!(
@@ -741,8 +752,7 @@ mod tests {
 
     #[test]
     fn report_assembly_name_is_default() {
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
@@ -761,7 +771,12 @@ mod tests {
 
         // Two active elements: prompts + history. Memory is excluded.
         assert_eq!(output.report.elements.len(), 2);
-        let names: Vec<&str> = output.report.elements.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = output
+            .report
+            .elements
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert!(names.contains(&"prompts"));
         assert!(names.contains(&"history"));
         assert!(!names.contains(&"memory"));
@@ -782,8 +797,7 @@ mod tests {
 
     #[test]
     fn report_budget_and_budget_remaining_populated_when_budget_configured() {
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         // 2 messages × 10 = 20 tokens. Budget of 100 → remaining = 80.
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &budget_config(100), &tokeniser);
@@ -794,8 +808,7 @@ mod tests {
 
     #[test]
     fn report_budget_none_when_not_configured() {
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
@@ -807,8 +820,7 @@ mod tests {
 
     #[test]
     fn compaction_not_triggered_when_within_budget() {
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         // 2 messages × 10 = 20 tokens. Budget 100 → no compaction needed.
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &budget_config(100), &tokeniser);
@@ -846,9 +858,7 @@ mod tests {
     /// Normal path: default assembly succeeds and is returned without errors.
     #[tokio::test]
     async fn assemble_returns_default_output_on_success() {
-        let elements: Vec<Box<dyn ContextElement>> = vec![
-            history_element(&[("Hello", "Hi!")]),
-        ];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hello", "Hi!")])];
         let config = no_budget_config(); // config.assembly == "default"
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
@@ -862,9 +872,7 @@ mod tests {
     /// Unknown assembly name with no search levels → not_found fallback.
     #[tokio::test]
     async fn assemble_falls_back_on_unknown_assembly_name() {
-        let elements: Vec<Box<dyn ContextElement>> = vec![
-            history_element(&[("Hello", "Hi!")]),
-        ];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hello", "Hi!")])];
         let config = ContextConfig {
             assembly: "nonexistent_python_assembly".to_string(),
             timeout: 5,
@@ -876,7 +884,10 @@ mod tests {
         let output = assemble_default(&elements, &config, &tokeniser).await;
 
         // Fallback output is still valid.
-        assert!(!output.messages.is_empty(), "fallback should produce messages");
+        assert!(
+            !output.messages.is_empty(),
+            "fallback should produce messages"
+        );
 
         // Error is recorded in the report.
         assert_eq!(output.report.errors.len(), 1);
@@ -909,19 +920,21 @@ mod tests {
             direct_output.messages.len(),
             "fallback and direct default assembly should produce same message count"
         );
-        for (fb, direct) in fallback_output.messages.iter().zip(direct_output.messages.iter()) {
+        for (fb, direct) in fallback_output
+            .messages
+            .iter()
+            .zip(direct_output.messages.iter())
+        {
             assert_eq!(fb.role, direct.role, "message roles should match");
         }
     }
 
     #[test]
     fn most_recent_history_exchange_preserved_after_compaction() {
-        let elements: Vec<Box<dyn ContextElement>> = vec![
-            history_element(&[
-                ("Old turn", "Old reply"),
-                ("Recent user", "Recent assistant"),
-            ]),
-        ];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[
+            ("Old turn", "Old reply"),
+            ("Recent user", "Recent assistant"),
+        ])];
         // Tight budget: only room for 2 messages (the recent exchange).
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &budget_config(20), &tokeniser);
@@ -959,8 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn assemble_report_has_no_errors_on_success() {
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         let tokeniser = FixedCostTokeniser { cost: 10 };
 
         let output = assemble_default(&elements, &no_budget_config(), &tokeniser).await;
@@ -986,7 +998,10 @@ mod tests {
             !output.report.compaction_applied.is_empty(),
             "expected compaction to run"
         );
-        assert!(output.report.errors.is_empty(), "compaction should not cause an error");
+        assert!(
+            output.report.errors.is_empty(),
+            "compaction should not cause an error"
+        );
     }
 
     #[tokio::test]
@@ -997,8 +1012,7 @@ mod tests {
         // this test validates the timeout *infrastructure* rather than a real slow assembly.
         //
         // True timeout testing for slow (Python) assemblies is an integration test concern.
-        let elements: Vec<Box<dyn ContextElement>> =
-            vec![history_element(&[("Hi", "Hello")])];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hi", "Hello")])];
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let config = ContextConfig {
             assembly: "default".to_string(),
@@ -1063,7 +1077,7 @@ mod tests {
         assert_eq!(output.messages.len(), 4);
         assert_eq!(output.messages[0].role, Role::System); // prompts
         assert_eq!(output.messages[1].role, Role::System); // skills
-        assert_eq!(output.messages[2].role, Role::User);   // history
+        assert_eq!(output.messages[2].role, Role::User); // history
         assert_eq!(output.messages[3].role, Role::Assistant);
     }
 
@@ -1078,11 +1092,18 @@ mod tests {
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
         // Skills element produces no messages — total is prompts + history only.
-        assert_eq!(output.messages.len(), 3, "empty skills element adds no messages");
+        assert_eq!(
+            output.messages.len(),
+            3,
+            "empty skills element adds no messages"
+        );
 
         // But the skills element must still appear in the report.
         let skills_report = output.report.elements.iter().find(|e| e.name == "skills");
-        assert!(skills_report.is_some(), "empty skills element should appear in report");
+        assert!(
+            skills_report.is_some(),
+            "empty skills element should appear in report"
+        );
         assert_eq!(skills_report.unwrap().token_count, 0);
     }
 
@@ -1096,10 +1117,21 @@ mod tests {
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
-        let skills_report = output.report.elements.iter().find(|e| e.name == "skills").unwrap();
+        let skills_report = output
+            .report
+            .elements
+            .iter()
+            .find(|e| e.name == "skills")
+            .unwrap();
         let preview = skills_report.preview.as_deref().unwrap_or("");
-        assert!(preview.contains("code-review"), "preview must include skill name");
-        assert!(preview.contains("persona"), "preview must include second skill name");
+        assert!(
+            preview.contains("code-review"),
+            "preview must include skill name"
+        );
+        assert!(
+            preview.contains("persona"),
+            "preview must include second skill name"
+        );
     }
 
     #[test]
@@ -1111,16 +1143,27 @@ mod tests {
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
-        let skills_report = output.report.elements.iter().find(|e| e.name == "skills").unwrap();
+        let skills_report = output
+            .report
+            .elements
+            .iter()
+            .find(|e| e.name == "skills")
+            .unwrap();
         // No active skills → preview should be None.
-        assert!(skills_report.preview.is_none(), "empty skills should have no preview");
+        assert!(
+            skills_report.preview.is_none(),
+            "empty skills should have no preview"
+        );
     }
 
     #[test]
     fn memory_remains_excluded_when_skills_element_present() {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
-            skills_element("skills: my-skill (project, ~10 tokens)", Some("Skill instructions.")),
+            skills_element(
+                "skills: my-skill (project, ~10 tokens)",
+                Some("Skill instructions."),
+            ),
             memory_element(),
             history_element(&[("Hi", "Hello")]),
         ];
@@ -1130,8 +1173,19 @@ mod tests {
         // Prompts (1) + skills (1) + history (2) = 4. Memory excluded.
         assert_eq!(output.messages.len(), 4, "memory must remain excluded");
 
-        let report_names: Vec<&str> = output.report.elements.iter().map(|e| e.name.as_str()).collect();
-        assert!(!report_names.contains(&"memory"), "memory must not appear in report");
-        assert!(report_names.contains(&"skills"), "skills must appear in report");
+        let report_names: Vec<&str> = output
+            .report
+            .elements
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            !report_names.contains(&"memory"),
+            "memory must not appear in report"
+        );
+        assert!(
+            report_names.contains(&"skills"),
+            "skills must appear in report"
+        );
     }
 }

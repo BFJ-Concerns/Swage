@@ -310,10 +310,6 @@ mod tests {
                 error,
             }
         }
-
-        fn total_calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
-        }
     }
 
     #[async_trait]
@@ -390,10 +386,6 @@ mod tests {
                 call_count: Arc::new(Mutex::new(0)),
                 error,
             }
-        }
-
-        fn total_calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
         }
     }
 

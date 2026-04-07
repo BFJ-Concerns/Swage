@@ -27,9 +27,11 @@ pub async fn run(args: &TuiArgs) -> Result<(), ClientError> {
     let url = resolve_gateway_url(args);
     // Error type is Box<dyn std::error::Error>; map to a ClientError so the
     // combined binary's exit-code handler can surface it uniformly.
-    swage_tui::run(&url).await.map_err(|e| ClientError::GatewayNotRunning {
-        reason: e.to_string(),
-    })
+    swage_tui::run(&url)
+        .await
+        .map_err(|e| ClientError::GatewayNotRunning {
+            reason: e.to_string(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +46,9 @@ mod tests {
     // Explicit --url flag must take precedence over discovery and defaults.
     #[test]
     fn explicit_url_takes_precedence_over_discovery() {
-        let args = TuiArgs { url: Some("http://explicit:9999".to_string()) };
+        let args = TuiArgs {
+            url: Some("http://explicit:9999".to_string()),
+        };
         assert_eq!(resolve_gateway_url(&args), "http://explicit:9999");
     }
 

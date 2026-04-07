@@ -5,13 +5,13 @@
 //! `swage` namespace module. The gateway registers `python_execute` as a tool;
 //! this crate handles the runtime, tool bindings, and execution machinery.
 
-pub mod runtime;
+pub mod assembly;
+pub mod assembly_bindings;
+pub mod bindings;
 pub mod dispatch;
 pub mod execute;
-pub mod bindings;
-pub mod assembly_bindings;
-pub mod assembly;
 pub mod runner;
+pub mod runtime;
 pub mod topology;
 pub mod topology_bindings;
 

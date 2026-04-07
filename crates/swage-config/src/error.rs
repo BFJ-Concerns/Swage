@@ -132,7 +132,9 @@ mod tests {
         let p = problem(
             "config.toml",
             None,
-            ConfigProblemKind::UnknownSection { name: "databse".to_string() },
+            ConfigProblemKind::UnknownSection {
+                name: "databse".to_string(),
+            },
         );
         let s = p.to_string();
         assert!(s.contains("config.toml"), "should contain file path: {s}");
@@ -150,7 +152,10 @@ mod tests {
             },
         );
         let s = p.to_string();
-        assert!(s.contains("project/config.toml"), "should contain file path: {s}");
+        assert!(
+            s.contains("project/config.toml"),
+            "should contain file path: {s}"
+        );
         assert!(s.contains("protokol"), "should contain field name: {s}");
     }
 
@@ -166,7 +171,10 @@ mod tests {
         );
         let s = p.to_string();
         assert!(s.contains("config.toml"), "should contain file path: {s}");
-        assert!(s.contains("integer") || s.contains("string"), "should describe type mismatch: {s}");
+        assert!(
+            s.contains("integer") || s.contains("string"),
+            "should describe type mismatch: {s}"
+        );
     }
 
     #[test]
@@ -190,7 +198,9 @@ mod tests {
             problem(
                 "config.toml",
                 None,
-                ConfigProblemKind::UnknownSection { name: "databse".to_string() },
+                ConfigProblemKind::UnknownSection {
+                    name: "databse".to_string(),
+                },
             ),
             problem(
                 "config.toml",
@@ -226,7 +236,10 @@ mod tests {
             },
         );
         let s = p.to_string();
-        assert!(s.contains("agent/config.toml"), "should contain file path: {s}");
+        assert!(
+            s.contains("agent/config.toml"),
+            "should contain file path: {s}"
+        );
         assert!(s.contains("port must be"), "should contain message: {s}");
     }
 
@@ -241,6 +254,9 @@ mod tests {
         );
         let s = p.to_string();
         assert!(s.contains("/workspace"), "should contain path: {s}");
-        assert!(s.contains("projects directory"), "should contain message: {s}");
+        assert!(
+            s.contains("projects directory"),
+            "should contain message: {s}"
+        );
     }
 }

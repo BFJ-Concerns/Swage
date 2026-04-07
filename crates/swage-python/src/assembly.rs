@@ -142,7 +142,9 @@ pub fn execute_assembly(
                 "assembly execution timed out, interrupting"
             );
             // Interrupt the Python thread — GIL-safe, same mechanism as PTC.
-            unsafe { pyo3::ffi::PyErr_SetInterrupt(); }
+            unsafe {
+                pyo3::ffi::PyErr_SetInterrupt();
+            }
             // Wait briefly for the interrupted thread to finish cleanup.
             let _ = result_rx.recv_timeout(Duration::from_secs(2));
 
@@ -191,7 +193,11 @@ const ASSEMBLY_WRAPPER: &str = concat!(
     "\n",
     // Compile and exec the assembly file into a dedicated namespace.
     "try:\n",
-    "    ", "exec", "(compile(_asm_code, _asm_path, '", "exec", "'), _asm_ns)\n",
+    "    ",
+    "exec",
+    "(compile(_asm_code, _asm_path, '",
+    "exec",
+    "'), _asm_ns)\n",
     "except SyntaxError:\n",
     "    _asm_err_kind = 'syntax'\n",
     "    _asm_err = _tb.format_exc()\n",
@@ -342,8 +348,8 @@ fn inject_assembly_module(py: Python<'_>) -> PyResult<()> {
 mod tests {
     use super::*;
     use crate::assembly_bindings::AssemblyData;
-    use swage_core::{ChatMessage, Role};
     use std::io::Write;
+    use swage_core::{ChatMessage, Role};
     use tempfile::NamedTempFile;
 
     /// Minimal element data for tests — one prompt and a short history.
@@ -476,7 +482,10 @@ def assemble(ctx):
             "expected SyntaxError in message, got: {}",
             err.message
         );
-        assert!(err.traceback.is_some(), "syntax errors should include a traceback");
+        assert!(
+            err.traceback.is_some(),
+            "syntax errors should include a traceback"
+        );
     }
 
     #[test]
@@ -551,7 +560,10 @@ def assemble(ctx):
             "expected error detail, got: {}",
             err.message
         );
-        assert!(err.traceback.is_some(), "runtime exceptions should include a traceback");
+        assert!(
+            err.traceback.is_some(),
+            "runtime exceptions should include a traceback"
+        );
     }
 
     // ── Warnings and compactions ─────────────────────────────────────────────
@@ -641,7 +653,10 @@ def assemble(ctx):
     /// files into it. Returns the TempDir (must be kept alive for the test).
     fn setup_assembly_hierarchy(
         assemblies: &[(&str, &str)],
-    ) -> (tempfile::TempDir, Vec<(swage_config::HierarchyLevel, std::path::PathBuf)>) {
+    ) -> (
+        tempfile::TempDir,
+        Vec<(swage_config::HierarchyLevel, std::path::PathBuf)>,
+    ) {
         let dir = tempfile::TempDir::new().unwrap();
         let assemblies_dir = dir.path().join("assemblies");
         std::fs::create_dir_all(&assemblies_dir).unwrap();
@@ -738,14 +753,8 @@ def assemble(ctx):
     #[test]
     fn include_cycle_is_detected_and_warned() {
         let (_dir, levels) = setup_assembly_hierarchy(&[
-            (
-                "alpha",
-                "def assemble(ctx):\n    ctx.include(\"beta\")\n",
-            ),
-            (
-                "beta",
-                "def assemble(ctx):\n    ctx.include(\"alpha\")\n",
-            ),
+            ("alpha", "def assemble(ctx):\n    ctx.include(\"beta\")\n"),
+            ("beta", "def assemble(ctx):\n    ctx.include(\"alpha\")\n"),
         ]);
 
         // Start by including alpha, which includes beta, which tries to
@@ -767,7 +776,10 @@ def assemble(ctx):
 
         // Should have a circular reference warning.
         assert!(
-            result.warnings.iter().any(|w| w.contains("circular reference")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("circular reference")),
             "expected circular reference warning, got: {:?}",
             result.warnings
         );

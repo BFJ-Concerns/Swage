@@ -67,7 +67,6 @@ pub struct Agent {
 // Session management
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Message processing — the core execution loop
 // ---------------------------------------------------------------------------
@@ -131,8 +130,7 @@ impl Agent {
 
             turn
         } else {
-            self
-                .storage
+            self.storage
                 .create_turn(NewTurn {
                     thread_id,
                     agent_id: self.config.agent_id.clone(),
@@ -149,8 +147,13 @@ impl Agent {
         match self.dispatch_before_inbound(&user_message).await {
             Ok(_processed) => {}
             Err(e) => {
-                let _ = self.storage.update_turn_state(turn.id, TurnState::Failed).await;
-                let _ = event_tx.send(AgentEvent::Error { message: e.to_string() });
+                let _ = self
+                    .storage
+                    .update_turn_state(turn.id, TurnState::Failed)
+                    .await;
+                let _ = event_tx.send(AgentEvent::Error {
+                    message: e.to_string(),
+                });
                 return Err(e);
             }
         }
@@ -190,15 +193,20 @@ impl Agent {
             // the stream loop is non-deterministic when both branches are
             // immediately ready.
             if cancel_token.is_cancelled() {
-                let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
-                let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                let _ = self
+                    .storage
+                    .update_turn_state(turn.id, TurnState::Interrupted)
+                    .await;
+                let _ = self
+                    .storage
+                    .update_state(thread_id, ThreadState::Idle)
+                    .await;
                 return Err(AgentError::Cancelled);
             }
 
             if round >= max_tool_rounds {
-                let msg = format!(
-                    "\n\n[Tool-call round limit ({max_tool_rounds}) reached — stopping.]"
-                );
+                let msg =
+                    format!("\n\n[Tool-call round limit ({max_tool_rounds}) reached — stopping.]");
                 accumulated.push_str(&msg);
                 let _ = event_tx.send(AgentEvent::Token { content: msg });
                 break 'outer;
@@ -256,70 +264,87 @@ impl Agent {
             for call in &round_tool_calls {
                 // Re-check cancellation before each tool execution.
                 if cancel_token.is_cancelled() {
-                    let _ = self.storage.update_turn_state(turn.id, TurnState::Interrupted).await;
-                    let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
+                    let _ = self
+                        .storage
+                        .update_turn_state(turn.id, TurnState::Interrupted)
+                        .await;
+                    let _ = self
+                        .storage
+                        .update_state(thread_id, ThreadState::Idle)
+                        .await;
                     return Err(AgentError::Cancelled);
                 }
 
                 let start = std::time::Instant::now();
 
                 // PreToolUse hook — may block, request approval, or proceed.
-                let (result_content, is_error, status) =
-                    match self.dispatch_pre_tool_use(&call.name, &call.arguments).await {
-                        Err(AgentError::HookBlocked { reason, .. }) => {
-                            (reason, true, "blocked".to_string())
-                        }
-                        Err(e) => {
-                            (format!("hook error: {e}"), true, "error".to_string())
-                        }
-                        Ok(PreToolUseOutcome::RequestApproval { prompt, context, timeout }) => {
-                            // Hook-driven approval gate.
-                            use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
-                            let gate_timeout = timeout.unwrap_or(
-                                std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS)
-                            );
-                            match self.handle_approval_gate(
-                                turn.id, thread_id,
+                let (result_content, is_error, status) = match self
+                    .dispatch_pre_tool_use(&call.name, &call.arguments)
+                    .await
+                {
+                    Err(AgentError::HookBlocked { reason, .. }) => {
+                        (reason, true, "blocked".to_string())
+                    }
+                    Err(e) => (format!("hook error: {e}"), true, "error".to_string()),
+                    Ok(PreToolUseOutcome::RequestApproval {
+                        prompt,
+                        context,
+                        timeout,
+                    }) => {
+                        // Hook-driven approval gate.
+                        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+                        let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
+                            DEFAULT_APPROVAL_TIMEOUT_SECS,
+                        ));
+                        match self
+                            .handle_approval_gate(
+                                turn.id,
+                                thread_id,
                                 swage_storage::model::ApprovalKind::Hook,
                                 Some(call.name.clone()),
                                 Some(call.arguments.clone()),
                                 None,
-                                prompt, context,
+                                prompt,
+                                context,
                                 gate_timeout,
                                 swage_core::ApprovalTimeoutPolicy::default(),
                                 &event_tx,
                                 &cancel_token,
-                            ).await? {
-                                ApprovalGateOutcome::Approved => {
-                                    // Approved — proceed with normal dispatch.
-                                    self.dispatch_tool_call(
-                                        call,
-                                        turn.id,
-                                        session_id,
-                                        &llm_request.messages,
-                                        &event_tx,
-                                        &cancel_token,
-                                    ).await?
-                                }
-                                ApprovalGateOutcome::Rejected { feedback } => {
-                                    (feedback, true, "rejected".to_string())
-                                }
-                                ApprovalGateOutcome::Interrupted => {
-                                    return Err(AgentError::Cancelled);
-                                }
+                            )
+                            .await?
+                        {
+                            ApprovalGateOutcome::Approved => {
+                                // Approved — proceed with normal dispatch.
+                                self.dispatch_tool_call(
+                                    call,
+                                    turn.id,
+                                    session_id,
+                                    &llm_request.messages,
+                                    &event_tx,
+                                    &cancel_token,
+                                )
+                                .await?
+                            }
+                            ApprovalGateOutcome::Rejected { feedback } => {
+                                (feedback, true, "rejected".to_string())
+                            }
+                            ApprovalGateOutcome::Interrupted => {
+                                return Err(AgentError::Cancelled);
                             }
                         }
-                        Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(
-                                call,
-                                turn.id,
-                                session_id,
-                                &llm_request.messages,
-                                &event_tx,
-                                &cancel_token,
-                            ).await?
-                        }
-                    };
+                    }
+                    Ok(PreToolUseOutcome::Proceed) => {
+                        self.dispatch_tool_call(
+                            call,
+                            turn.id,
+                            session_id,
+                            &llm_request.messages,
+                            &event_tx,
+                            &cancel_token,
+                        )
+                        .await?
+                    }
+                };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -443,6 +468,7 @@ impl Agent {
                         .storage
                         .create_message(NewMessage {
                             thread_id,
+                            turn_id: Some(turn.id),
                             role: "assistant".into(),
                             content: accumulated.clone(),
                             position,
@@ -494,6 +520,9 @@ impl Agent {
                     ..llm_request.clone()
                 };
 
+                // TODO Extract shared stream-consumption helper
+                // This retry path reimplements the same cancellation, token accounting, delta forwarding, and provider-error handling as the main streaming loop above, so a shared helper would remove duplication and keep the retry behaviour aligned with the primary path.
+                // ---
                 // Clear accumulated text and re-enter the streaming loop for a fresh response.
                 accumulated.clear();
 
@@ -541,7 +570,9 @@ impl Agent {
             Ok(content) => content,
             Err(e) => {
                 self.fail_turn_and_idle(turn.id, thread_id).await;
-                let _ = event_tx.send(AgentEvent::Error { message: e.to_string() });
+                let _ = event_tx.send(AgentEvent::Error {
+                    message: e.to_string(),
+                });
                 return Err(e);
             }
         };
@@ -559,6 +590,7 @@ impl Agent {
         self.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: safe_content.clone(),
                 position,
@@ -609,18 +641,13 @@ impl Agent {
 // Hook lifecycle
 // ---------------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------------
 // Leak detection
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // Lifecycle hook helpers
@@ -643,17 +670,23 @@ impl Agent {
     /// Fire `SessionStart` — non-blocking fire-and-forget.
     #[allow(dead_code)] // Part of hook lifecycle API; wired when gateway fires session events
     pub(crate) fn fire_session_start(&self, session_id: &str) {
-        self.fire_hook(HookEvent::SessionStart { session_id: session_id.to_owned() });
+        self.fire_hook(HookEvent::SessionStart {
+            session_id: session_id.to_owned(),
+        });
     }
 
     /// Fire `SessionEnd` — non-blocking fire-and-forget.
     pub(crate) fn fire_session_end(&self, session_id: &str) {
-        self.fire_hook(HookEvent::SessionEnd { session_id: session_id.to_owned() });
+        self.fire_hook(HookEvent::SessionEnd {
+            session_id: session_id.to_owned(),
+        });
     }
 
     /// Fire `AgentStop` — non-blocking fire-and-forget.
     pub(crate) fn fire_agent_stop(&self, agent_id: &str) {
-        self.fire_hook(HookEvent::AgentStop { agent_id: agent_id.to_owned() });
+        self.fire_hook(HookEvent::AgentStop {
+            agent_id: agent_id.to_owned(),
+        });
     }
 
     /// Fire `PreCompact` and return the outcome for the caller to inspect.
@@ -662,10 +695,7 @@ impl Agent {
     /// outcome can flag content for preservation before the compaction runs.
     /// When no registry is configured, returns `HookOutcome::Continue`.
     #[allow(dead_code)] // Part of hook lifecycle API; wired when compaction invokes hooks
-    pub(crate) async fn fire_pre_compact(
-        &self,
-        context: &serde_json::Value,
-    ) -> HookOutcome {
+    pub(crate) async fn fire_pre_compact(&self, context: &serde_json::Value) -> HookOutcome {
         let Some(registry) = &self.hook_registry else {
             return HookOutcome::Continue;
         };
@@ -705,9 +735,15 @@ impl Agent {
                 hook: "PreToolUse".into(),
                 reason,
             }),
-            swage_hook::HookOutcome::RequestApproval { prompt, context, timeout } => {
-                Ok(PreToolUseOutcome::RequestApproval { prompt, context, timeout })
-            }
+            swage_hook::HookOutcome::RequestApproval {
+                prompt,
+                context,
+                timeout,
+            } => Ok(PreToolUseOutcome::RequestApproval {
+                prompt,
+                context,
+                timeout,
+            }),
             // Continue and ContinueModified both mean "proceed".
             _ => Ok(PreToolUseOutcome::Proceed),
         }
@@ -764,7 +800,11 @@ impl Agent {
         });
 
         let Some(ref dispatcher) = self.tool_dispatcher else {
-            return Ok(("no tool dispatcher configured".to_string(), true, "error".to_string()));
+            return Ok((
+                "no tool dispatcher configured".to_string(),
+                true,
+                "error".to_string(),
+            ));
         };
 
         use crate::context::AgentToolContext;
@@ -778,7 +818,12 @@ impl Agent {
         .with_turn_id(turn_id);
 
         match dispatcher
-            .dispatch(&call.name, call.arguments.clone(), &ctx, &self.config.agent_id)
+            .dispatch(
+                &call.name,
+                call.arguments.clone(),
+                &ctx,
+                &self.config.agent_id,
+            )
             .await
         {
             Ok(output) => {
@@ -925,7 +970,10 @@ impl Agent {
 
                 // Suspend the parent turn — durable state so restart recovery
                 // can find it and transition to Interrupted.
-                let _ = self.storage.update_turn_state(turn_id, TurnState::Delegating).await;
+                let _ = self
+                    .storage
+                    .update_turn_state(turn_id, TurnState::Delegating)
+                    .await;
 
                 // Emit DelegationStarted event so clients can track progress.
                 let _ = event_tx.send(AgentEvent::DelegationStarted {
@@ -949,7 +997,10 @@ impl Agent {
                 // Resume the parent turn — back to Processing regardless of
                 // outcome. The tool call result (success or error string) is
                 // what the LLM sees.
-                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+                let _ = self
+                    .storage
+                    .update_turn_state(turn_id, TurnState::Processing)
+                    .await;
 
                 match delegation_result {
                     Ok(result) => {
@@ -979,6 +1030,52 @@ impl Agent {
 // ---------------------------------------------------------------------------
 
 impl Agent {
+    async fn resume_after_approval_decision(
+        &self,
+        approval_id: Uuid,
+        turn_id: Uuid,
+        state: swage_storage::model::ApprovalState,
+        reason: Option<&str>,
+    ) -> Result<(), AgentError> {
+        self.storage
+            .update_approval_state(approval_id, state, reason)
+            .await?;
+        self.storage
+            .update_turn_state(turn_id, TurnState::Processing)
+            .await?;
+        Ok(())
+    }
+
+    async fn interrupt_approval_gate(
+        &self,
+        approval_id: Uuid,
+        turn_id: Uuid,
+        thread_id: Uuid,
+        reason: &str,
+    ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
+        self.storage
+            .update_approval_state(
+                approval_id,
+                swage_storage::model::ApprovalState::Expired,
+                Some(reason),
+            )
+            .await?;
+        self.storage
+            .update_turn_state(turn_id, TurnState::Interrupted)
+            .await?;
+        if self
+            .storage
+            .get(thread_id)
+            .await?
+            .is_some_and(|thread| thread.state != ThreadState::Idle)
+        {
+            self.storage
+                .update_state(thread_id, ThreadState::Idle)
+                .await?;
+        }
+        Ok(crate::approval::ApprovalGateOutcome::Interrupted)
+    }
+
     /// Execute the approval gate: create an approval request, transition the
     /// turn to `AwaitingApproval`, emit an `ApprovalRequired` event, then wait
     /// for a human decision on a oneshot channel (racing against a timeout).
@@ -1004,8 +1101,10 @@ impl Agent {
         use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
         use swage_storage::model::{ApprovalState, NewApprovalRequest};
 
-        let timeout_at = chrono::Utc::now() + chrono::Duration::from_std(timeout)
-            .unwrap_or_else(|_| chrono::Duration::seconds(DEFAULT_APPROVAL_TIMEOUT_SECS as i64));
+        let timeout_at = chrono::Utc::now()
+            + chrono::Duration::from_std(timeout).unwrap_or_else(|_| {
+                chrono::Duration::seconds(DEFAULT_APPROVAL_TIMEOUT_SECS as i64)
+            });
 
         // 1. Create the approval request record in storage.
         let approval = self
@@ -1047,12 +1146,18 @@ impl Agent {
         // 4. Register the oneshot channel for the decision.
         let Some(ref registrar) = self.approval_registrar else {
             // No approval channel infrastructure — treat as rejection.
-            let _ = self.storage.update_approval_state(
-                approval.id,
-                ApprovalState::Rejected,
-                Some("no approval channel configured"),
-            ).await;
-            let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+            let _ = self
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Rejected,
+                    Some("no approval channel configured"),
+                )
+                .await;
+            let _ = self
+                .storage
+                .update_turn_state(turn_id, TurnState::Processing)
+                .await;
             return Ok(ApprovalGateOutcome::Rejected {
                 feedback: "Tool requires approval but no approval channel is configured".into(),
             });
@@ -1086,34 +1191,13 @@ impl Agent {
             GateResult::Cancelled => {
                 // Cooperative cancellation — interrupt immediately regardless
                 // of timeout policy. The approval becomes stale.
-                // Log failures individually — a partial update is better than
-                // aborting all three, and the warnings make inconsistencies visible.
-                if let Err(e) = self.storage.update_approval_state(
+                self.interrupt_approval_gate(
                     approval.id,
-                    ApprovalState::Expired,
-                    Some("cancelled by inter-agent message"),
-                ).await {
-                    tracing::warn!(
-                        approval_id = %approval.id,
-                        error = %e,
-                        "cancel: failed to expire approval"
-                    );
-                }
-                if let Err(e) = self.storage.update_turn_state(turn_id, TurnState::Interrupted).await {
-                    tracing::warn!(
-                        turn_id = %turn_id,
-                        error = %e,
-                        "cancel: failed to interrupt turn"
-                    );
-                }
-                if let Err(e) = self.storage.update_state(thread_id, ThreadState::Idle).await {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        error = %e,
-                        "cancel: failed to reset thread to Idle"
-                    );
-                }
-                Ok(ApprovalGateOutcome::Interrupted)
+                    turn_id,
+                    thread_id,
+                    "cancelled by inter-agent message",
+                )
+                .await
             }
             GateResult::Decision(d) if d.is_approved() => {
                 if kind == swage_storage::model::ApprovalKind::Tool {
@@ -1143,45 +1227,44 @@ impl Agent {
                     }
                 }
 
-                // Approved — update storage and resume.
-                let _ = self.storage.update_approval_state(
+                self.resume_after_approval_decision(
                     approval.id,
+                    turn_id,
                     ApprovalState::Approved,
                     d.reason.as_deref(),
-                ).await;
+                )
+                .await?;
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
                     decision: "approved".into(),
                     reason: d.reason,
                 });
-                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
                 Ok(ApprovalGateOutcome::Approved)
             }
             GateResult::Decision(d) => {
                 // Rejected by human.
-                let reason_text = d.reason.clone().unwrap_or_else(|| "rejected by reviewer".into());
-                let _ = self.storage.update_approval_state(
+                let reason_text = d
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "rejected by reviewer".into());
+                self.resume_after_approval_decision(
                     approval.id,
+                    turn_id,
                     ApprovalState::Rejected,
                     d.reason.as_deref(),
-                ).await;
+                )
+                .await?;
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
                     decision: "rejected".into(),
                     reason: d.reason,
                 });
-                let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
                 Ok(ApprovalGateOutcome::Rejected {
                     feedback: format!("Tool call rejected: {reason_text}"),
                 })
             }
             GateResult::Timeout => {
                 // Timeout or channel dropped — apply policy.
-                let _ = self.storage.update_approval_state(
-                    approval.id,
-                    ApprovalState::Expired,
-                    Some("approval timed out"),
-                ).await;
                 let _ = event_tx.send(AgentEvent::ApprovalExpired {
                     approval_id: approval.id,
                     timeout_policy: timeout_policy.to_string(),
@@ -1190,16 +1273,26 @@ impl Agent {
                 match timeout_policy {
                     swage_core::ApprovalTimeoutPolicy::Reject => {
                         // Treat timeout as rejection — turn continues.
-                        let _ = self.storage.update_turn_state(turn_id, TurnState::Processing).await;
+                        self.resume_after_approval_decision(
+                            approval.id,
+                            turn_id,
+                            ApprovalState::Expired,
+                            Some("approval timed out"),
+                        )
+                        .await?;
                         Ok(ApprovalGateOutcome::Rejected {
                             feedback: "Tool call rejected: approval timed out".into(),
                         })
                     }
                     swage_core::ApprovalTimeoutPolicy::Interrupt => {
                         // Turn is interrupted — no further processing.
-                        let _ = self.storage.update_turn_state(turn_id, TurnState::Interrupted).await;
-                        let _ = self.storage.update_state(thread_id, ThreadState::Idle).await;
-                        Ok(ApprovalGateOutcome::Interrupted)
+                        self.interrupt_approval_gate(
+                            approval.id,
+                            turn_id,
+                            thread_id,
+                            "approval timed out",
+                        )
+                        .await
                     }
                 }
             }
@@ -1228,9 +1321,7 @@ impl Agent {
         // 1. Resolve target thread — explicit thread_id takes precedence,
         //    then fall back to the agent's active thread.
         let thread_id = msg.thread_id.or(self.active_thread_id).ok_or_else(|| {
-            AgentError::InvalidConfig(
-                "no active thread — create or resume a session first".into(),
-            )
+            AgentError::InvalidConfig("no active thread — create or resume a session first".into())
         })?;
 
         // 2. Create turn in Pending state — records the intent before any work.
@@ -1250,6 +1341,7 @@ impl Agent {
         self.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".into(),
                 content: msg.message.clone(),
                 position: next_position,
@@ -1317,8 +1409,7 @@ impl Agent {
                 total_output_tokens += response.output_tokens;
 
                 // If LLM returned text (no tool calls), we're done.
-                if response.finish_reason != FinishReason::ToolUse
-                    || response.tool_calls.is_empty()
+                if response.finish_reason != FinishReason::ToolUse || response.tool_calls.is_empty()
                 {
                     break response.content;
                 }
@@ -1391,6 +1482,7 @@ impl Agent {
         self.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: safe_content.clone(),
                 position: current_position,
@@ -1399,11 +1491,13 @@ impl Agent {
             .await?;
 
         // 9d. Update turn with response and tokens, mark Completed.
+        self.storage.update_response(turn.id, &safe_content).await?;
         self.storage
-            .update_response(turn.id, &safe_content)
-            .await?;
-        self.storage
-            .update_tokens(turn.id, total_input_tokens.into(), total_output_tokens.into())
+            .update_tokens(
+                turn.id,
+                total_input_tokens.into(),
+                total_output_tokens.into(),
+            )
             .await?;
         self.storage
             .update_turn_state(turn.id, TurnState::Completed)
@@ -1510,8 +1604,13 @@ impl Agent {
                     }
                     Ok(PreToolUseOutcome::RequestApproval { .. }) => {
                         // Non-streaming path has no approval infrastructure.
-                        ("Tool requires approval (not available in non-streaming mode)".to_string(),
-                         true, "error".to_string(), None)
+                        (
+                            "Tool requires approval (not available in non-streaming mode)"
+                                .to_string(),
+                            true,
+                            "error".to_string(),
+                            None,
+                        )
                     }
                     Ok(PreToolUseOutcome::Proceed) => {
                         // 2. Dispatch through tool_dispatcher.
@@ -1527,20 +1626,15 @@ impl Agent {
                             }
                             Err(tool_err) => {
                                 // Tool errors become tool results, not turn failures.
-                                (
-                                    tool_err.to_string(),
-                                    true,
-                                    "error".to_string(),
-                                    None,
-                                )
+                                (tool_err.to_string(), true, "error".to_string(), None)
                             }
                         }
                     }
                 };
 
             // 3. PostToolUse hook (informational — fire and forget).
-            let result_value: Value =
-                serde_json::from_str(&result_content).unwrap_or(Value::String(result_content.clone()));
+            let result_value: Value = serde_json::from_str(&result_content)
+                .unwrap_or(Value::String(result_content.clone()));
             self.dispatch_post_tool_use(&tc.name, &tc.arguments, &result_value)
                 .await;
 
@@ -1570,6 +1664,7 @@ impl Agent {
             self.storage
                 .create_message(NewMessage {
                     thread_id,
+                    turn_id: Some(turn_id),
                     role: "tool".into(),
                     content: safe_result.clone(),
                     position: *current_position,
@@ -1841,7 +1936,10 @@ impl Agent {
             HookOutcome::Continue => Ok(content.to_owned()),
             HookOutcome::ContinueModified(modified) => {
                 // Extract the content from the modified event.
-                if let HookEvent::BeforeInbound { content: new_content } = *modified {
+                if let HookEvent::BeforeInbound {
+                    content: new_content,
+                } = *modified
+                {
                     Ok(new_content)
                 } else {
                     // Hook returned a different event variant — treat as unmodified.
@@ -1855,7 +1953,9 @@ impl Agent {
             // RequestApproval is only meaningful on PreToolUse hooks.
             // Silently continue for hook contexts where approval has no effect.
             HookOutcome::RequestApproval { .. } => {
-                tracing::warn!("RequestApproval returned from BeforeInbound hook — not applicable; continuing");
+                tracing::warn!(
+                    "RequestApproval returned from BeforeInbound hook — not applicable; continuing"
+                );
                 Ok(content.to_owned())
             }
         }
@@ -1881,7 +1981,10 @@ impl Agent {
         match registry.dispatch(event).await {
             HookOutcome::Continue => Ok(content.to_owned()),
             HookOutcome::ContinueModified(modified) => {
-                if let HookEvent::AfterResponse { content: new_content } = *modified {
+                if let HookEvent::AfterResponse {
+                    content: new_content,
+                } = *modified
+                {
                     Ok(new_content)
                 } else {
                     Ok(content.to_owned())
@@ -1894,7 +1997,9 @@ impl Agent {
             // RequestApproval is only meaningful on PreToolUse hooks.
             // Silently continue for hook contexts where approval has no effect.
             HookOutcome::RequestApproval { .. } => {
-                tracing::warn!("RequestApproval returned from AfterResponse hook — not applicable; continuing");
+                tracing::warn!(
+                    "RequestApproval returned from AfterResponse hook — not applicable; continuing"
+                );
                 Ok(content.to_owned())
             }
         }
@@ -1917,9 +2022,8 @@ impl Agent {
 
         // Fail-open: catch any panic from the scanning pipeline.
         let text_owned = text.to_owned();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            detector.scan(&text_owned)
-        })) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text_owned)))
+        {
             Ok(redacted) => redacted,
             Err(_) => {
                 tracing::warn!("leak detector panicked during scan — returning original text");
@@ -2102,7 +2206,10 @@ mod hook_inbound_response_tests {
         registry.register(HookRegistration::new(Arc::new(ContinueHook)));
         let agent = test_agent(Some(Arc::new(registry)));
 
-        let result = agent.dispatch_before_inbound("original content").await.unwrap();
+        let result = agent
+            .dispatch_before_inbound("original content")
+            .await
+            .unwrap();
         assert_eq!(result, "original content");
     }
 
@@ -2114,7 +2221,10 @@ mod hook_inbound_response_tests {
         })));
         let agent = test_agent(Some(Arc::new(registry)));
 
-        let err = agent.dispatch_before_inbound("bad content").await.unwrap_err();
+        let err = agent
+            .dispatch_before_inbound("bad content")
+            .await
+            .unwrap_err();
         match err {
             AgentError::HookBlocked { hook, reason } => {
                 assert_eq!(hook, "BeforeInbound");
@@ -2143,7 +2253,10 @@ mod hook_inbound_response_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn after_response_no_registry_passes_through() {
         let agent = test_agent(None);
-        let result = agent.dispatch_after_response("response text").await.unwrap();
+        let result = agent
+            .dispatch_after_response("response text")
+            .await
+            .unwrap();
         assert_eq!(result, "response text");
     }
 
@@ -2165,7 +2278,10 @@ mod hook_inbound_response_tests {
         })));
         let agent = test_agent(Some(Arc::new(registry)));
 
-        let err = agent.dispatch_after_response("unsafe output").await.unwrap_err();
+        let err = agent
+            .dispatch_after_response("unsafe output")
+            .await
+            .unwrap_err();
         match err {
             AgentError::HookBlocked { hook, reason } => {
                 assert_eq!(hook, "AfterResponse");
@@ -2193,8 +2309,7 @@ mod hook_inbound_response_tests {
 
     /// Build an Agent with a leak detector configured.
     fn test_agent_with_detector() -> Agent {
-        let detector =
-            LeakDetector::new(vec![]).expect("default patterns should compile");
+        let detector = LeakDetector::new(vec![]).expect("default patterns should compile");
         Agent {
             config: AgentConfig::new("test-agent"),
             provider: Arc::new(StubProvider),
@@ -2407,7 +2522,9 @@ mod hook_dispatch_tests {
         // completes normally and we verify the event was dispatched.
         let fired = Arc::new(Mutex::new(Vec::new()));
         let mut registry = HookRegistry::new();
-        registry.register(HookRegistration::new(Arc::new(RecordingHook(fired.clone()))));
+        registry.register(HookRegistration::new(Arc::new(RecordingHook(
+            fired.clone(),
+        ))));
 
         let agent = agent_with_registry(Some(registry));
         agent
@@ -2415,7 +2532,11 @@ mod hook_dispatch_tests {
             .await;
 
         let events = fired.lock().unwrap().clone();
-        assert_eq!(events, vec!["PostToolUse"], "PostToolUse hook should have fired");
+        assert_eq!(
+            events,
+            vec!["PostToolUse"],
+            "PostToolUse hook should have fired"
+        );
     }
 }
 
@@ -2429,13 +2550,13 @@ mod session_tests {
     use futures::Stream;
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-        ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+        ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
+    use swage_storage::model::NewProject;
     use swage_storage::store::{ProjectStore, SessionStore, ThreadStore};
     use swage_storage::{NewThread, SqliteStorage, ThreadState};
-    use swage_storage::model::NewProject;
     use uuid::Uuid;
 
     use super::*;
@@ -2465,10 +2586,7 @@ mod session_tests {
         ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!("stub: complete_with_tools not used in session tests")
         }
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             unimplemented!("stub: stream not used in session tests")
         }
     }
@@ -2518,7 +2636,10 @@ mod session_tests {
         let (storage, project_id) = setup_storage().await;
         let mut agent = make_agent(storage.clone());
 
-        let session_id = agent.create_session(project_id).await.expect("create_session");
+        let session_id = agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         let session = SessionStore::get_session(storage.as_ref(), session_id)
             .await
@@ -2533,12 +2654,19 @@ mod session_tests {
         let (storage, project_id) = setup_storage().await;
         let mut agent = make_agent(storage.clone());
 
-        let session_id = agent.create_session(project_id).await.expect("create_session");
+        let session_id = agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         let threads = ThreadStore::list_by_session(storage.as_ref(), session_id)
             .await
             .expect("list_by_session");
-        assert_eq!(threads.len(), 1, "exactly one default thread should be created");
+        assert_eq!(
+            threads.len(),
+            1,
+            "exactly one default thread should be created"
+        );
         assert_eq!(threads[0].state, ThreadState::Idle);
         assert_eq!(threads[0].agent_id, "test-agent");
     }
@@ -2548,7 +2676,10 @@ mod session_tests {
         let (storage, project_id) = setup_storage().await;
         let mut agent = make_agent(storage.clone());
 
-        let session_id = agent.create_session(project_id).await.expect("create_session");
+        let session_id = agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         assert_eq!(agent.active_session_id, Some(session_id));
 
@@ -2569,7 +2700,10 @@ mod session_tests {
         let mut agent = make_agent(storage.clone());
 
         // Set up a session with a default thread, then create a second thread.
-        let session_id = agent.create_session(project_id).await.expect("create_session");
+        let session_id = agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
         let second_thread = ThreadStore::create(
             storage.as_ref(),
             NewThread {
@@ -2580,7 +2714,10 @@ mod session_tests {
         .await
         .expect("create second thread");
 
-        agent.switch_thread(second_thread.id).await.expect("switch_thread");
+        agent
+            .switch_thread(second_thread.id)
+            .await
+            .expect("switch_thread");
 
         assert_eq!(agent.active_thread_id, Some(second_thread.id));
     }
@@ -2589,10 +2726,16 @@ mod session_tests {
     async fn switch_thread_returns_not_found_for_nonexistent_thread() {
         let (storage, project_id) = setup_storage().await;
         let mut agent = make_agent(storage.clone());
-        agent.create_session(project_id).await.expect("create_session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         let bogus_id = Uuid::new_v4();
-        let err = agent.switch_thread(bogus_id).await.expect_err("should fail");
+        let err = agent
+            .switch_thread(bogus_id)
+            .await
+            .expect_err("should fail");
 
         assert!(
             matches!(err, AgentError::ThreadNotFound(id) if id == bogus_id),
@@ -2606,7 +2749,10 @@ mod session_tests {
         let mut agent = make_agent(storage.clone());
 
         // Create two sessions; each gets a default thread.
-        agent.create_session(project_id).await.expect("create first session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create first session");
         let second_session = SessionStore::create_session(
             storage.as_ref(),
             swage_storage::NewSession {
@@ -2646,7 +2792,10 @@ mod session_tests {
     async fn shutdown_clears_active_session_and_thread() {
         let (storage, project_id) = setup_storage().await;
         let mut agent = make_agent(storage.clone());
-        agent.create_session(project_id).await.expect("create_session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         // Both should be set after session creation.
         assert!(agent.active_session_id.is_some());
@@ -2654,8 +2803,14 @@ mod session_tests {
 
         agent.shutdown().await.expect("shutdown");
 
-        assert!(agent.active_session_id.is_none(), "active_session_id should be cleared");
-        assert!(agent.active_thread_id.is_none(), "active_thread_id should be cleared");
+        assert!(
+            agent.active_session_id.is_none(),
+            "active_session_id should be cleared"
+        );
+        assert!(
+            agent.active_thread_id.is_none(),
+            "active_thread_id should be cleared"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2664,7 +2819,10 @@ mod session_tests {
         let mut agent = make_agent(storage.clone());
 
         // No session created — shutdown should still succeed.
-        agent.shutdown().await.expect("shutdown with no active session");
+        agent
+            .shutdown()
+            .await
+            .expect("shutdown with no active session");
 
         assert!(agent.active_session_id.is_none());
         assert!(agent.active_thread_id.is_none());
@@ -2710,7 +2868,10 @@ mod session_tests {
             .build()
             .expect("build agent");
 
-        agent.create_session(project_id).await.expect("create_session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
         agent.shutdown().await.expect("shutdown");
 
         // Give the spawned hook tasks a moment to complete.
@@ -2718,8 +2879,14 @@ mod session_tests {
 
         let events = fired.lock().unwrap().clone();
         // SessionEnd + AgentStop fire during shutdown (SessionStart fires on resume, not create).
-        assert!(events.contains(&"SessionEnd".to_owned()), "SessionEnd not fired: {events:?}");
-        assert!(events.contains(&"AgentStop".to_owned()), "AgentStop not fired: {events:?}");
+        assert!(
+            events.contains(&"SessionEnd".to_owned()),
+            "SessionEnd not fired: {events:?}"
+        );
+        assert!(
+            events.contains(&"AgentStop".to_owned()),
+            "AgentStop not fired: {events:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2767,8 +2934,14 @@ mod session_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let events = fired.lock().unwrap().clone();
-        assert!(!events.contains(&"SessionEnd".to_owned()), "SessionEnd should not fire: {events:?}");
-        assert!(events.contains(&"AgentStop".to_owned()), "AgentStop not fired: {events:?}");
+        assert!(
+            !events.contains(&"SessionEnd".to_owned()),
+            "SessionEnd should not fire: {events:?}"
+        );
+        assert!(
+            events.contains(&"AgentStop".to_owned()),
+            "AgentStop not fired: {events:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2825,10 +2998,7 @@ mod session_tests {
             })
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -2858,7 +3028,10 @@ mod session_tests {
         let provider = Arc::new(TextProvider::new("Hello from the LLM!"));
         let mut agent = make_agent_with_provider(storage, provider);
 
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -2882,7 +3055,10 @@ mod session_tests {
         let provider = Arc::new(TextProvider::new("Done."));
         let mut agent = make_agent_with_provider(storage.clone(), provider);
 
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
 
         let result = agent
@@ -2913,7 +3089,10 @@ mod session_tests {
         let provider = Arc::new(TextProvider::new("Response text"));
         let mut agent = make_agent_with_provider(storage.clone(), provider);
 
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
@@ -2945,7 +3124,10 @@ mod session_tests {
         let provider = Arc::new(TextProvider::new("ok"));
         let mut agent = make_agent_with_provider(storage.clone(), provider);
 
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
@@ -3000,14 +3182,33 @@ mod resume_session_tests {
 
     #[async_trait]
     impl LlmProvider for StubProvider {
-        fn model_id(&self) -> &str { "stub" }
-        async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-            Ok(CompletionResponse { content: String::new(), input_tokens: 0, output_tokens: 0,
-                finish_reason: FinishReason::Stop, cost: None })
+        fn model_id(&self) -> &str {
+            "stub"
         }
-        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
-            Ok(ToolCompletionResponse { content: String::new(), tool_calls: vec![], input_tokens: 0,
-                output_tokens: 0, finish_reason: FinishReason::Stop, cost: None })
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(CompletionResponse {
+                content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cost: None,
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            Ok(ToolCompletionResponse {
+                content: String::new(),
+                tool_calls: vec![],
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cost: None,
+            })
         }
         fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
@@ -3038,21 +3239,36 @@ mod resume_session_tests {
     /// Create a session and a default thread for it, returning the session_id.
     async fn make_session(storage: &Arc<SqliteStorage>, agent_id: &str) -> uuid::Uuid {
         // Must create a project first (foreign key constraint).
-        let project = ProjectStore::create(storage.as_ref(), NewProject {
-            name: "test-project".into(),
-            slug: format!("test-{}", uuid::Uuid::new_v4()),
-            workspace_path: None,
-        }).await.expect("create project");
+        let project = ProjectStore::create(
+            storage.as_ref(),
+            NewProject {
+                name: "test-project".into(),
+                slug: format!("test-{}", uuid::Uuid::new_v4()),
+                workspace_path: None,
+            },
+        )
+        .await
+        .expect("create project");
 
-        let session = SessionStore::create_session(storage.as_ref(), NewSession {
-            project_id: project.id,
-            agent_id: agent_id.into(),
-        }).await.expect("create session");
+        let session = SessionStore::create_session(
+            storage.as_ref(),
+            NewSession {
+                project_id: project.id,
+                agent_id: agent_id.into(),
+            },
+        )
+        .await
+        .expect("create session");
 
-        ThreadStore::create(storage.as_ref(), NewThread {
-            session_id: session.id,
-            agent_id: agent_id.into(),
-        }).await.expect("create thread");
+        ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: agent_id.into(),
+            },
+        )
+        .await
+        .expect("create thread");
 
         session.id
     }
@@ -3063,10 +3279,16 @@ mod resume_session_tests {
         let session_id = make_session(&storage, "agent-x").await;
         let mut agent = test_agent_with_storage("agent-x", storage);
 
-        agent.resume_session(session_id).await.expect("resume should succeed");
+        agent
+            .resume_session(session_id)
+            .await
+            .expect("resume should succeed");
 
         assert_eq!(agent.active_session_id, Some(session_id));
-        assert!(agent.active_thread_id.is_some(), "active_thread_id should be set");
+        assert!(
+            agent.active_thread_id.is_some(),
+            "active_thread_id should be set"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3098,24 +3320,39 @@ mod resume_session_tests {
 
         // Get the thread created by make_session
         let threads = ThreadStore::list_by_session(storage.as_ref(), session_id)
-            .await.expect("list threads");
+            .await
+            .expect("list threads");
         let thread_id = threads[0].id;
 
         // Create an orphaned Processing turn for this agent
-        let orphaned = TurnStore::create_turn(storage.as_ref(), NewTurn {
-            thread_id,
-            agent_id: "agent-r".into(),
-            state: TurnState::Processing,
-            parent_turn_id: None,
-        }).await.expect("create orphaned turn");
+        let orphaned = TurnStore::create_turn(
+            storage.as_ref(),
+            NewTurn {
+                thread_id,
+                agent_id: "agent-r".into(),
+                state: TurnState::Processing,
+                parent_turn_id: None,
+            },
+        )
+        .await
+        .expect("create orphaned turn");
 
         let mut agent = test_agent_with_storage("agent-r", storage.clone());
-        agent.resume_session(session_id).await.expect("resume should succeed");
+        agent
+            .resume_session(session_id)
+            .await
+            .expect("resume should succeed");
 
         // Verify the orphaned turn is now Interrupted
         let turn = TurnStore::get_turn(storage.as_ref(), orphaned.id)
-            .await.expect("get turn").expect("turn exists");
-        assert_eq!(turn.state, TurnState::Interrupted, "orphaned turn should be Interrupted");
+            .await
+            .expect("get turn")
+            .expect("turn exists");
+        assert_eq!(
+            turn.state,
+            TurnState::Interrupted,
+            "orphaned turn should be Interrupted"
+        );
     }
 }
 
@@ -3140,9 +3377,9 @@ mod lifecycle_hook_tests {
     };
     use swage_hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
     use swage_provider::LlmProvider;
+    use swage_storage::model::NewProject;
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::store::ProjectStore;
-    use swage_storage::model::NewProject;
 
     use crate::builder::AgentBuilder;
     use crate::config::{AgentConfig, CompactionThreshold};
@@ -3157,8 +3394,13 @@ mod lifecycle_hook_tests {
 
     #[async_trait]
     impl LlmProvider for StubProvider {
-        fn model_id(&self) -> &str { "stub" }
-        async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             Ok(CompletionResponse {
                 content: String::new(),
                 input_tokens: 0,
@@ -3167,7 +3409,10 @@ mod lifecycle_hook_tests {
                 cost: None,
             })
         }
-        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
             Ok(ToolCompletionResponse {
                 content: String::new(),
                 tool_calls: vec![],
@@ -3187,7 +3432,9 @@ mod lifecycle_hook_tests {
 
     #[async_trait]
     impl Hook for RecordingHook {
-        fn name(&self) -> &str { "recorder" }
+        fn name(&self) -> &str {
+            "recorder"
+        }
         async fn execute(&self, event: &HookEvent) -> HookOutcome {
             self.0.lock().unwrap().push(event.event_name().to_owned());
             HookOutcome::Continue
@@ -3249,10 +3496,15 @@ mod lifecycle_hook_tests {
 
         let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let mut registry = HookRegistry::new();
-        registry.register(HookRegistration::new(Arc::new(RecordingHook(events.clone()))));
+        registry.register(HookRegistration::new(Arc::new(RecordingHook(
+            events.clone(),
+        ))));
 
         let mut agent = make_agent(storage, Some(registry));
-        agent.create_session(project_id).await.expect("create_session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -3269,10 +3521,15 @@ mod lifecycle_hook_tests {
 
         let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let mut registry = HookRegistry::new();
-        registry.register(HookRegistration::new(Arc::new(RecordingHook(events.clone()))));
+        registry.register(HookRegistration::new(Arc::new(RecordingHook(
+            events.clone(),
+        ))));
 
         let mut agent = make_agent(storage, Some(registry));
-        agent.create_session(project_id).await.expect("create_session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
         agent.shutdown().await.expect("shutdown");
 
         // shutdown fires hooks via tokio::spawn — give tasks time to complete.
@@ -3294,17 +3551,31 @@ mod lifecycle_hook_tests {
         let (storage, project_id) = setup().await;
         // Agent without a hook registry — lifecycle hooks should be no-ops.
         let mut agent = make_agent(storage, None);
-        agent.create_session(project_id).await.expect("create_session");
-        agent.shutdown().await.expect("shutdown with no registry should not error");
-        assert!(agent.active_session_id.is_none(), "active session should be cleared after shutdown");
-        assert!(agent.active_thread_id.is_none(), "active thread should be cleared after shutdown");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create_session");
+        agent
+            .shutdown()
+            .await
+            .expect("shutdown with no registry should not error");
+        assert!(
+            agent.active_session_id.is_none(),
+            "active session should be cleared after shutdown"
+        );
+        assert!(
+            agent.active_thread_id.is_none(),
+            "active thread should be cleared after shutdown"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fire_pre_compact_returns_continue_when_no_registry() {
         let (storage, _) = setup().await;
         let agent = make_agent(storage, None);
-        let outcome = agent.fire_pre_compact(&serde_json::json!({"key": "value"})).await;
+        let outcome = agent
+            .fire_pre_compact(&serde_json::json!({"key": "value"}))
+            .await;
         assert!(
             matches!(outcome, HookOutcome::Continue),
             "expected Continue when no registry configured"
@@ -3330,7 +3601,7 @@ mod create_thread_tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        sqlite::SqliteStorage, NewSession, ProjectStore, SessionStore, ThreadStore,
+        NewSession, ProjectStore, SessionStore, ThreadStore, sqlite::SqliteStorage,
     };
 
     use crate::config::AgentConfig;
@@ -3484,16 +3755,16 @@ mod create_thread_tests {
 mod tool_dispatch_cycle_tests {
     use std::collections::HashMap;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use futures::Stream;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-        ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolError,
+        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse, ToolError,
     };
     use swage_provider::LlmProvider;
     use swage_storage::model::NewProject;
@@ -3526,11 +3797,7 @@ mod tool_dispatch_cycle_tests {
         fn parameters(&self) -> Value {
             json!({"type": "object", "properties": {"text": {"type": "string"}}})
         }
-        async fn execute(
-            &self,
-            params: Value,
-            _ctx: &dyn ToolContext,
-        ) -> Result<Value, ToolError> {
+        async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
             Ok(json!({ "echoed": params["text"] }))
         }
     }
@@ -3624,10 +3891,7 @@ mod tool_dispatch_cycle_tests {
             }
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -3696,7 +3960,10 @@ mod tool_dispatch_cycle_tests {
             "Here is the echoed result.",
         ));
         let mut agent = make_agent_with_tools(storage, provider, echo_dispatcher());
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -3709,7 +3976,10 @@ mod tool_dispatch_cycle_tests {
             .expect("process_message");
 
         assert_eq!(result.response, "Here is the echoed result.");
-        assert!(result.tool_calls_count >= 1, "should have at least 1 tool call");
+        assert!(
+            result.tool_calls_count >= 1,
+            "should have at least 1 tool call"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3724,7 +3994,10 @@ mod tool_dispatch_cycle_tests {
             "Done.",
         ));
         let mut agent = make_agent_with_tools(storage.clone(), provider, echo_dispatcher());
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -3736,7 +4009,8 @@ mod tool_dispatch_cycle_tests {
             .await
             .expect("process_message");
 
-        let records = storage.list_tool_calls_by_turn(result.turn_id)
+        let records = storage
+            .list_tool_calls_by_turn(result.turn_id)
             .await
             .expect("list tool calls");
         assert_eq!(records.len(), 1, "should have exactly 1 tool call record");
@@ -3757,7 +4031,10 @@ mod tool_dispatch_cycle_tests {
             "I handled the error.",
         ));
         let mut agent = make_agent_with_tools(storage.clone(), provider, failing_dispatcher());
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -3771,7 +4048,8 @@ mod tool_dispatch_cycle_tests {
 
         assert_eq!(result.response, "I handled the error.");
 
-        let records = storage.list_tool_calls_by_turn(result.turn_id)
+        let records = storage
+            .list_tool_calls_by_turn(result.turn_id)
             .await
             .expect("list tool calls");
         assert_eq!(records.len(), 1);
@@ -3790,7 +4068,10 @@ mod tool_dispatch_cycle_tests {
             "I noted the denial.",
         ));
         let mut agent = make_agent_with_tools(storage.clone(), provider, echo_dispatcher());
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -3956,7 +4237,10 @@ mod tool_dispatch_cycle_tests {
             .await
             .expect("delegation should succeed");
 
-        assert!(!is_error, "delegation result should not be marked as an error");
+        assert!(
+            !is_error,
+            "delegation result should not be marked as an error"
+        );
         assert_eq!(status, "success");
         assert_eq!(result, "{\"response\":\"delegated\"}");
 
@@ -3968,7 +4252,11 @@ mod tool_dispatch_cycle_tests {
         let transferred: Vec<ChatMessage> = serde_json::from_value(captured)
             .expect("captured context should deserialize as chat messages");
 
-        assert_eq!(transferred.len(), 1, "summary mode should send one compacted message");
+        assert_eq!(
+            transferred.len(),
+            1,
+            "summary mode should send one compacted message"
+        );
         assert_eq!(transferred[0].role, Role::System);
         let summary_text = match &transferred[0].content[0] {
             ContentPart::Text { text } => text.clone(),
@@ -3987,21 +4275,21 @@ mod tool_dispatch_cycle_tests {
 mod multi_round_tests {
     use std::collections::HashMap;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use futures::Stream;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-        ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolError,
+        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse, ToolError,
     };
     use swage_provider::LlmProvider;
+    use swage_storage::SqliteStorage;
     use swage_storage::model::NewProject;
     use swage_storage::store::ProjectStore;
-    use swage_storage::SqliteStorage;
     use swage_tool::context::ToolContext;
     use swage_tool::dispatch::ToolDispatcher;
     use swage_tool::tool::Tool;
@@ -4028,11 +4316,7 @@ mod multi_round_tests {
         fn parameters(&self) -> Value {
             json!({"type": "object", "properties": {"text": {"type": "string"}}})
         }
-        async fn execute(
-            &self,
-            params: Value,
-            _ctx: &dyn ToolContext,
-        ) -> Result<Value, ToolError> {
+        async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
             Ok(json!({ "echoed": params["text"] }))
         }
     }
@@ -4106,10 +4390,7 @@ mod multi_round_tests {
             }
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -4163,10 +4444,7 @@ mod multi_round_tests {
             }
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -4225,7 +4503,10 @@ mod multi_round_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(MultiRoundProvider::new(3, "All done after 3 rounds."));
         let mut agent = make_agent_with_config(storage, provider, echo_dispatcher(), 10);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -4247,7 +4528,10 @@ mod multi_round_tests {
         // Provider returns 2 rounds of tool calls, but max is 1.
         let provider = Arc::new(MultiRoundProvider::new(2, "unreachable"));
         let mut agent = make_agent_with_config(storage.clone(), provider, echo_dispatcher(), 1);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let err = agent
@@ -4272,7 +4556,10 @@ mod multi_round_tests {
             call_count: AtomicUsize::new(0),
         });
         let mut agent = make_agent_with_config(storage, provider, echo_dispatcher(), 10);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
 
         let session_id = agent.active_session_id.unwrap();
         let result = agent
@@ -4309,11 +4596,8 @@ mod process_turn_streaming_tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        TurnStore, ThreadStore,
-        model::NewProject,
-        sqlite::SqliteStorage,
+        ThreadState, ThreadStore, TurnState, TurnStore, model::NewProject, sqlite::SqliteStorage,
         store::ProjectStore,
-        TurnState, ThreadState,
     };
 
     use super::*;
@@ -4339,9 +4623,16 @@ mod process_turn_streaming_tests {
         /// Convenience: single text response.
         fn text(text: &str) -> Self {
             Self::new(vec![
-                StreamChunk::Delta { content: text.to_string() },
-                StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 10, output_tokens: 5 }),
-                StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+                StreamChunk::Delta {
+                    content: text.to_string(),
+                },
+                StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                }),
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
             ])
         }
     }
@@ -4423,21 +4714,31 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("Hello!"));
         let mut agent = make_agent(storage.clone(), provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        agent.process_turn_streaming(req, tx).await.expect("streaming should succeed");
+        agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("streaming should succeed");
 
         let mut events = vec![];
         while let Ok(e) = rx.try_recv() {
             events.push(e);
         }
 
-        let has_turn_started = events.iter().any(|e| matches!(e, AgentEvent::TurnStarted { .. }));
-        let has_turn_completed = events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { .. }));
+        let has_turn_started = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnStarted { .. }));
+        let has_turn_completed = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnCompleted { .. }));
         assert!(has_turn_started, "TurnStarted event missing");
         assert!(has_turn_completed, "TurnCompleted event missing");
     }
@@ -4447,13 +4748,19 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("word1 word2 word3"));
         let mut agent = make_agent(storage, provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        agent.process_turn_streaming(req, tx).await.expect("streaming should succeed");
+        agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("streaming should succeed");
 
         let token_contents: Vec<String> = {
             let mut out = vec![];
@@ -4465,7 +4772,10 @@ mod process_turn_streaming_tests {
             out
         };
 
-        assert!(!token_contents.is_empty(), "should have emitted at least one Token event");
+        assert!(
+            !token_contents.is_empty(),
+            "should have emitted at least one Token event"
+        );
         let combined = token_contents.join("");
         assert_eq!(combined, "word1 word2 word3");
     }
@@ -4475,13 +4785,19 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("ok"));
         let mut agent = make_agent(storage.clone(), provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed");
 
         let turn = TurnStore::get_turn(storage.as_ref(), result.turn_id)
             .await
@@ -4495,7 +4811,10 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("ok"));
         let mut agent = make_agent(storage.clone(), provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
@@ -4529,7 +4848,11 @@ mod process_turn_streaming_tests {
         let turns = TurnStore::list_turns_by_thread(storage.as_ref(), thread_id)
             .await
             .expect("list turns");
-        assert_eq!(turns.len(), 1, "reused turn should avoid creating a duplicate");
+        assert_eq!(
+            turns.len(),
+            1,
+            "reused turn should avoid creating a duplicate"
+        );
         assert_eq!(turns[0].id, existing_turn.id);
         assert_eq!(turns[0].state, TurnState::Completed);
     }
@@ -4539,13 +4862,19 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("ok"));
         let mut agent = make_agent(storage.clone(), provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        agent.process_turn_streaming(req, tx).await.expect("should succeed");
+        agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed");
 
         let thread = ThreadStore::get(storage.as_ref(), thread_id)
             .await
@@ -4560,7 +4889,10 @@ mod process_turn_streaming_tests {
         // A provider that streams infinitely — cancellation must stop it.
         let provider = Arc::new(ChunkProvider::text("this would normally complete"));
         let mut agent = make_agent(storage, provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
@@ -4593,13 +4925,19 @@ mod process_turn_streaming_tests {
         let (storage, project_id) = setup_storage().await;
         let provider = Arc::new(ChunkProvider::text("the answer is 42"));
         let mut agent = make_agent(storage, provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed");
 
         assert_eq!(result.response, "the answer is 42");
         assert_eq!(result.input_tokens, 10);
@@ -4622,32 +4960,53 @@ mod process_turn_streaming_tests {
             // Reverse so we can pop from the back.
             let mut reversed = responses;
             reversed.reverse();
-            Self { responses: std::sync::Mutex::new(reversed) }
+            Self {
+                responses: std::sync::Mutex::new(reversed),
+            }
         }
 
         fn text_chunks(text: &str) -> Vec<StreamChunk> {
             vec![
-                StreamChunk::Delta { content: text.to_string() },
-                StreamChunk::Usage(swage_core::TokenUsage { input_tokens: 10, output_tokens: 5 }),
-                StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+                StreamChunk::Delta {
+                    content: text.to_string(),
+                },
+                StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                }),
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
             ]
         }
     }
 
     #[async_trait]
     impl LlmProvider for SequentialProvider {
-        fn model_id(&self) -> &str { "sequential-mock" }
+        fn model_id(&self) -> &str {
+            "sequential-mock"
+        }
 
-        async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
             unimplemented!()
         }
 
-        async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
             unimplemented!()
         }
 
         fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-            let chunks = self.responses.lock().unwrap().pop()
+            let chunks = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop()
                 .expect("SequentialProvider ran out of responses");
             Box::pin(futures::stream::iter(chunks))
         }
@@ -4691,13 +5050,19 @@ mod process_turn_streaming_tests {
         // Plain text that isn't JSON — should succeed because no schema.
         let provider = Arc::new(ChunkProvider::text("just plain text"));
         let mut agent = make_agent(storage, provider);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed");
 
         assert_eq!(result.response, "just plain text");
         assert!(result.structured_output.is_none());
@@ -4709,13 +5074,19 @@ mod process_turn_streaming_tests {
         let valid_json = r#"{"name": "Alice", "score": 95}"#;
         let provider = Arc::new(ChunkProvider::text(valid_json));
         let mut agent = make_schema_agent(storage, provider, test_schema(), 3);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed");
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed");
 
         assert_eq!(
             result.structured_output,
@@ -4724,9 +5095,19 @@ mod process_turn_streaming_tests {
 
         // No retry or failure events should have been emitted.
         let mut events = vec![];
-        while let Ok(e) = rx.try_recv() { events.push(e); }
-        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
-        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4738,13 +5119,19 @@ mod process_turn_streaming_tests {
             SequentialProvider::text_chunks(r#"{"name": "Bob", "score": 42}"#),
         ]));
         let mut agent = make_schema_agent(storage, provider, test_schema(), 3);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let result = agent.process_turn_streaming(req, tx).await.expect("should succeed after retry");
+        let result = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect("should succeed after retry");
 
         assert_eq!(
             result.structured_output,
@@ -4753,8 +5140,11 @@ mod process_turn_streaming_tests {
 
         // Should have emitted exactly one OutputSchemaRetry event.
         let mut events = vec![];
-        while let Ok(e) = rx.try_recv() { events.push(e); }
-        let retry_events: Vec<_> = events.iter()
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        let retry_events: Vec<_> = events
+            .iter()
             .filter(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. }))
             .collect();
         assert_eq!(retry_events.len(), 1, "expected exactly 1 retry event");
@@ -4769,13 +5159,19 @@ mod process_turn_streaming_tests {
             SequentialProvider::text_chunks(r#"{"name": "Y"}"#),
         ]));
         let mut agent = make_schema_agent(storage.clone(), provider, test_schema(), 1);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+        let err = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect_err("should fail");
 
         assert!(
             matches!(err, AgentError::OutputSchemaFailed { attempts: 2 }),
@@ -4784,17 +5180,32 @@ mod process_turn_streaming_tests {
 
         // Should have emitted OutputSchemaRetry (attempt 1) then OutputSchemaFailed.
         let mut events = vec![];
-        while let Ok(e) = rx.try_recv() { events.push(e); }
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }))
+        );
 
         // Turn should be Failed.
-        let turn_id = events.iter().find_map(|e| match e {
-            AgentEvent::TurnStarted { turn_id } => Some(*turn_id),
-            _ => None,
-        }).expect("TurnStarted event must exist");
+        let turn_id = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::TurnStarted { turn_id } => Some(*turn_id),
+                _ => None,
+            })
+            .expect("TurnStarted event must exist");
         let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
-            .await.expect("get_turn").expect("turn exists");
+            .await
+            .expect("get_turn")
+            .expect("turn exists");
         assert_eq!(turn.state, TurnState::Failed);
     }
 
@@ -4804,13 +5215,19 @@ mod process_turn_streaming_tests {
         // Only one response — invalid, and zero retries configured.
         let provider = Arc::new(ChunkProvider::text(r#"{"name": "X"}"#));
         let mut agent = make_schema_agent(storage, provider, test_schema(), 0);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+        let err = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect_err("should fail");
 
         assert!(
             matches!(err, AgentError::OutputSchemaFailed { attempts: 1 }),
@@ -4819,9 +5236,19 @@ mod process_turn_streaming_tests {
 
         // No retry events — only OutputSchemaFailed.
         let mut events = vec![];
-        while let Ok(e) = rx.try_recv() { events.push(e); }
-        assert!(!events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. })));
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. })));
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaRetry { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4830,20 +5257,30 @@ mod process_turn_streaming_tests {
         // Plain text with no extractable JSON.
         let provider = Arc::new(ChunkProvider::text("I don't know what to say"));
         let mut agent = make_schema_agent(storage, provider, test_schema(), 0);
-        agent.create_session(project_id).await.expect("create session");
+        agent
+            .create_session(project_id)
+            .await
+            .expect("create session");
         let session_id = agent.active_session_id.unwrap();
         let thread_id = agent.active_thread_id.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let req = make_turn_request(session_id, thread_id);
-        let err = agent.process_turn_streaming(req, tx).await.expect_err("should fail");
+        let err = agent
+            .process_turn_streaming(req, tx)
+            .await
+            .expect_err("should fail");
 
         assert!(matches!(err, AgentError::OutputSchemaFailed { .. }));
 
         // The failure errors should mention "no JSON found".
         let mut events = vec![];
-        while let Ok(e) = rx.try_recv() { events.push(e); }
-        let failed = events.iter().find(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }));
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        let failed = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::OutputSchemaFailed { .. }));
         if let Some(AgentEvent::OutputSchemaFailed { errors, .. }) = failed {
             assert!(
                 errors.iter().any(|e| e.message.contains("no JSON")),
@@ -4864,14 +5301,13 @@ mod approval_gate_tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use uuid::Uuid;
     use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::{
-        ApprovalStore, TurnState, ThreadState, TurnStore, ThreadStore, SessionStore,
-        model::NewProject,
-        store::ProjectStore,
+        ApprovalStore, SessionStore, ThreadState, ThreadStore, TurnState, TurnStore,
+        model::NewProject, store::ProjectStore,
     };
 
     use crate::approval::{ApprovalChannelRegistrar, ApprovalDecision, ApprovalGateOutcome};
@@ -4939,9 +5375,9 @@ mod approval_gate_tests {
 
     /// Build a minimal NullProvider — never called in gate tests.
     fn null_provider() -> Arc<dyn swage_provider::LlmProvider> {
-        use std::pin::Pin;
         use async_trait::async_trait;
         use futures::Stream;
+        use std::pin::Pin;
         use swage_core::{
             CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
             ToolCompletionRequest, ToolCompletionResponse,
@@ -4950,23 +5386,38 @@ mod approval_gate_tests {
         struct NullProvider;
         #[async_trait]
         impl swage_provider::LlmProvider for NullProvider {
-            fn model_id(&self) -> &str { "null" }
-            async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+            fn model_id(&self) -> &str {
+                "null"
+            }
+            async fn complete(
+                &self,
+                _: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
                 Ok(CompletionResponse {
                     content: String::new(),
-                    input_tokens: 0, output_tokens: 0,
-                    finish_reason: FinishReason::Stop, cost: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cost: None,
                 })
             }
-            async fn complete_with_tools(&self, _: ToolCompletionRequest) -> Result<ToolCompletionResponse, ProviderError> {
+            async fn complete_with_tools(
+                &self,
+                _: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, ProviderError> {
                 Ok(ToolCompletionResponse {
                     content: String::new(),
-                    input_tokens: 0, output_tokens: 0,
-                    finish_reason: FinishReason::Stop, cost: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cost: None,
                     tool_calls: vec![],
                 })
             }
-            fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            fn stream(
+                &self,
+                _: CompletionRequest,
+            ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
                 Box::pin(futures::stream::empty())
             }
         }
@@ -4989,8 +5440,9 @@ mod approval_gate_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn approved_returns_approved_outcome() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5061,14 +5513,23 @@ mod approval_gate_tests {
 
         // Verify events emitted.
         let mut events = vec![];
-        while let Ok(e) = event_rx.try_recv() { events.push(e); }
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        while let Ok(e) = event_rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. }))
+        );
         assert!(events.iter().any(|e| matches!(e, AgentEvent::ApprovalConfirmed { decision, .. } if decision == "approved")));
-        let fingerprint = crate::approval::approval_request_fingerprint(&serde_json::json!({"path": "/tmp/foo"}));
-        assert!(storage
-            .has_approval_memory(_session_id, "write_file", &fingerprint)
-            .await
-            .expect("approval memory query"));
+        let fingerprint =
+            crate::approval::approval_request_fingerprint(&serde_json::json!({"path": "/tmp/foo"}));
+        assert!(
+            storage
+                .has_approval_memory(_session_id, "write_file", &fingerprint)
+                .await
+                .expect("approval memory query")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5077,8 +5538,12 @@ mod approval_gate_tests {
 
         #[async_trait]
         impl Tool for EchoTool {
-            fn name(&self) -> &str { "echo" }
-            fn description(&self) -> &str { "Echoes the given text." }
+            fn name(&self) -> &str {
+                "echo"
+            }
+            fn description(&self) -> &str {
+                "Echoes the given text."
+            }
             fn parameters(&self) -> serde_json::Value {
                 serde_json::json!({
                     "type": "object",
@@ -5096,11 +5561,14 @@ mod approval_gate_tests {
         }
 
         let (storage, session_id, _thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool) as Arc<dyn Tool>).unwrap();
+        registry
+            .register(Arc::new(EchoTool) as Arc<dyn Tool>)
+            .unwrap();
         let dispatcher = swage_tool::dispatch::ToolDispatcher::new(
             Arc::new(registry),
             PermissionConfig {
@@ -5119,7 +5587,8 @@ mod approval_gate_tests {
             false,
         );
 
-        let fingerprint = crate::approval::approval_request_fingerprint(&serde_json::json!({"text": "hello"}));
+        let fingerprint =
+            crate::approval::approval_request_fingerprint(&serde_json::json!({"text": "hello"}));
         storage
             .remember_approval(session_id, "echo", &fingerprint)
             .await
@@ -5161,14 +5630,18 @@ mod approval_gate_tests {
         assert!(!is_error);
         assert_eq!(status, "success");
         assert_eq!(result, "{\"echo\":\"hello\"}");
-        assert!(channels.lock().unwrap().is_empty(), "explicit approval gate should not open");
+        assert!(
+            channels.lock().unwrap().is_empty(),
+            "explicit approval gate should not open"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rejected_returns_rejected_outcome_with_feedback() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5191,10 +5664,14 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Tool,
-                    Some("deploy".into()), None, None,
-                    "Approve deploy?".into(), None,
+                    Some("deploy".into()),
+                    None,
+                    None,
+                    "Approve deploy?".into(),
+                    None,
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
@@ -5227,15 +5704,19 @@ mod approval_gate_tests {
         }
 
         // Turn should be back to Processing (not stuck in AwaitingApproval).
-        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.state, TurnState::Processing);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_with_reject_policy_returns_rejected() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5258,10 +5739,14 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Tool,
-                    Some("deploy".into()), None, None,
-                    "Approve?".into(), None,
+                    Some("deploy".into()),
+                    None,
+                    None,
+                    "Approve?".into(),
+                    None,
                     std::time::Duration::from_millis(50),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
@@ -5282,14 +5767,21 @@ mod approval_gate_tests {
         }
 
         // Turn should be back to Processing.
-        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.state, TurnState::Processing);
 
         // ApprovalExpired event emitted.
         let mut events = vec![];
-        while let Ok(e) = event_rx.try_recv() { events.push(e); }
+        while let Ok(e) = event_rx.try_recv() {
+            events.push(e);
+        }
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::ApprovalExpired { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalExpired { .. })),
             "ApprovalExpired event missing"
         );
     }
@@ -5297,8 +5789,9 @@ mod approval_gate_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_with_interrupt_policy_returns_interrupted() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5320,10 +5813,14 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Tool,
-                    Some("deploy".into()), None, None,
-                    "Approve?".into(), None,
+                    Some("deploy".into()),
+                    None,
+                    None,
+                    "Approve?".into(),
+                    None,
                     std::time::Duration::from_millis(50),
                     swage_core::ApprovalTimeoutPolicy::Interrupt,
                     &event_tx,
@@ -5339,18 +5836,25 @@ mod approval_gate_tests {
         );
 
         // Turn should be Interrupted, thread Idle.
-        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
 
-        let thread = ThreadStore::get(storage.as_ref(), thread_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), thread_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(thread.state, ThreadState::Idle);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_token_interrupts_approval_gate() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5378,10 +5882,14 @@ mod approval_gate_tests {
             async move {
                 agent
                     .handle_approval_gate(
-                        turn_id, thread_id,
+                        turn_id,
+                        thread_id,
                         swage_storage::model::ApprovalKind::Tool,
-                        Some("deploy".into()), None, None,
-                        "Approve?".into(), None,
+                        Some("deploy".into()),
+                        None,
+                        None,
+                        "Approve?".into(),
+                        None,
                         std::time::Duration::from_secs(30),
                         swage_core::ApprovalTimeoutPolicy::Reject,
                         &event_tx,
@@ -5398,10 +5906,16 @@ mod approval_gate_tests {
         );
 
         // Turn should be Interrupted regardless of the timeout policy.
-        let turn = TurnStore::get_turn(storage.as_ref(), turn_id).await.unwrap().unwrap();
+        let turn = TurnStore::get_turn(storage.as_ref(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.state, TurnState::Interrupted);
 
-        let thread = ThreadStore::get(storage.as_ref(), thread_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), thread_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(thread.state, ThreadState::Idle);
     }
 
@@ -5428,10 +5942,14 @@ mod approval_gate_tests {
 
         let outcome = agent
             .handle_approval_gate(
-                turn_id, thread_id,
+                turn_id,
+                thread_id,
                 swage_storage::model::ApprovalKind::Tool,
-                Some("write_file".into()), None, None,
-                "Approve?".into(), None,
+                Some("write_file".into()),
+                None,
+                None,
+                "Approve?".into(),
+                None,
                 std::time::Duration::from_secs(30),
                 swage_core::ApprovalTimeoutPolicy::Reject,
                 &event_tx,
@@ -5454,8 +5972,9 @@ mod approval_gate_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn approval_request_persisted_in_storage() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5479,7 +5998,8 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Tool,
                     Some("execute_command".into()),
                     Some(serde_json::json!({"cmd": "rm -rf /"})),
@@ -5520,8 +6040,9 @@ mod approval_gate_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_driven_approval_uses_hook_kind() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5544,10 +6065,14 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Hook,
-                    Some("deploy".into()), None, None,
-                    "Hook says: confirm deploy".into(), None,
+                    Some("deploy".into()),
+                    None,
+                    None,
+                    "Hook says: confirm deploy".into(),
+                    None,
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,
@@ -5560,13 +6085,20 @@ mod approval_gate_tests {
         let mut locked = channels_clone.lock().unwrap();
         let (_id, sender) = locked.drain().next().unwrap();
         drop(locked);
-        let _ = sender.send(ApprovalDecision { decision: "approved".into(), reason: None });
+        let _ = sender.send(ApprovalDecision {
+            decision: "approved".into(),
+            reason: None,
+        });
         let _ = gate.await;
 
         // Verify the emitted event has kind = "hook".
         let mut events = vec![];
-        while let Ok(e) = event_rx.try_recv() { events.push(e); }
-        let required = events.iter().find(|e| matches!(e, AgentEvent::ApprovalRequired { .. }));
+        while let Ok(e) = event_rx.try_recv() {
+            events.push(e);
+        }
+        let required = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ApprovalRequired { .. }));
         if let Some(AgentEvent::ApprovalRequired { kind, .. }) = required {
             assert_eq!(kind, "hook");
         } else {
@@ -5577,8 +6109,9 @@ mod approval_gate_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sender_dropped_treated_as_timeout() {
         let (storage, _session_id, thread_id, turn_id) = setup().await;
-        let channels: Arc<std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let channels: Arc<
+            std::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let agent = AgentBuilder::new()
             .config(AgentConfig {
@@ -5601,10 +6134,14 @@ mod approval_gate_tests {
         let gate = tokio::spawn(async move {
             agent
                 .handle_approval_gate(
-                    turn_id, thread_id,
+                    turn_id,
+                    thread_id,
                     swage_storage::model::ApprovalKind::Tool,
-                    Some("write_file".into()), None, None,
-                    "Approve?".into(), None,
+                    Some("write_file".into()),
+                    None,
+                    None,
+                    "Approve?".into(),
+                    None,
                     std::time::Duration::from_secs(30),
                     swage_core::ApprovalTimeoutPolicy::Reject,
                     &event_tx,

@@ -113,7 +113,9 @@ fn parse_frontmatter(raw: &str) -> Result<(i32, String), String> {
     let lines: Vec<&str> = raw.lines().collect();
 
     // lines[0] is the opening "---"; find the next line containing only "---".
-    let close_idx = lines.iter().skip(1)
+    let close_idx = lines
+        .iter()
+        .skip(1)
         .position(|line| *line == "---")
         .ok_or_else(|| "frontmatter block is not closed (missing closing `---`)".to_string())?;
 
@@ -155,9 +157,9 @@ fn extract_priority(block: &str) -> Result<i32, String> {
         let value = line[colon + 1..].trim();
 
         if key == "priority" {
-            priority = value.parse::<i32>().map_err(|_| {
-                format!("priority must be an integer, got: {value:?}")
-            })?;
+            priority = value
+                .parse::<i32>()
+                .map_err(|_| format!("priority must be an integer, got: {value:?}"))?;
         }
         // Other keys are silently ignored.
     }
@@ -175,11 +177,11 @@ fn extract_priority(block: &str) -> Result<i32, String> {
 /// among rules at equal priority.
 fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
-        HierarchyLevel::Agent   => 0,
-        HierarchyLevel::Team    => 1,
+        HierarchyLevel::Agent => 0,
+        HierarchyLevel::Team => 1,
         HierarchyLevel::Project => 2,
-        HierarchyLevel::Lens    => 3,
-        HierarchyLevel::Global  => 4,
+        HierarchyLevel::Lens => 3,
+        HierarchyLevel::Global => 4,
     }
 }
 
@@ -197,15 +199,17 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
 /// Missing directories are silently skipped. If both `prompts/` and
 /// `instructions/` exist at the same level, `prompts/` takes precedence and
 /// a warning is added pointing at the `instructions/` directory.
-pub fn load_prompt_rules(levels: &[(HierarchyLevel, &Path)]) -> (Vec<PromptRule>, Vec<PromptRuleWarning>) {
-    let mut rules    = Vec::new();
+pub fn load_prompt_rules(
+    levels: &[(HierarchyLevel, &Path)],
+) -> (Vec<PromptRule>, Vec<PromptRuleWarning>) {
+    let mut rules = Vec::new();
     let mut warnings = Vec::new();
 
     for (level, base_dir) in levels {
-        let prompts_dir      = base_dir.join("prompts");
+        let prompts_dir = base_dir.join("prompts");
         let instructions_dir = base_dir.join("instructions");
 
-        let prompts_exists      = prompts_dir.is_dir();
+        let prompts_exists = prompts_dir.is_dir();
         let instructions_exists = instructions_dir.is_dir();
 
         // Determine which directory to scan, handling the backward-compat case.
@@ -245,7 +249,7 @@ pub fn load_prompt_rules(levels: &[(HierarchyLevel, &Path)]) -> (Vec<PromptRule>
 
         for file_path in md_files {
             match parse_prompt_rule_file(&file_path, level.clone()) {
-                Ok(rule)    => rules.push(rule),
+                Ok(rule) => rules.push(rule),
                 Err(warning) => warnings.push(warning),
             }
         }
@@ -255,7 +259,9 @@ pub fn load_prompt_rules(levels: &[(HierarchyLevel, &Path)]) -> (Vec<PromptRule>
     rules.sort_by(|a, b| {
         b.priority
             .cmp(&a.priority)
-            .then_with(|| level_specificity(&a.source_level).cmp(&level_specificity(&b.source_level)))
+            .then_with(|| {
+                level_specificity(&a.source_level).cmp(&level_specificity(&b.source_level))
+            })
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
 
@@ -275,7 +281,11 @@ mod tests {
     fn file_with_valid_frontmatter_parses_correctly() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rule.md");
-        fs::write(&path, "---\npriority: 100\n---\n\nYou are a helpful assistant.").unwrap();
+        fs::write(
+            &path,
+            "---\npriority: 100\n---\n\nYou are a helpful assistant.",
+        )
+        .unwrap();
 
         let rule = parse_prompt_rule_file(&path, HierarchyLevel::Global).unwrap();
 
@@ -303,7 +313,11 @@ mod tests {
     fn frontmatter_with_unknown_keys_ignores_them_silently() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rule.md");
-        fs::write(&path, "---\npriority: 50\ntitle: My Rule\nauthor: test\n---\n\nContent.").unwrap();
+        fs::write(
+            &path,
+            "---\npriority: 50\ntitle: My Rule\nauthor: test\n---\n\nContent.",
+        )
+        .unwrap();
 
         let rule = parse_prompt_rule_file(&path, HierarchyLevel::Project).unwrap();
 
@@ -320,10 +334,16 @@ mod tests {
 
         let result = parse_prompt_rule_file(&path, HierarchyLevel::Global);
 
-        assert!(result.is_err(), "malformed priority should produce a warning");
+        assert!(
+            result.is_err(),
+            "malformed priority should produce a warning"
+        );
         let warning = result.unwrap_err();
         assert_eq!(warning.file_path, path);
-        assert!(warning.reason.contains("priority"), "reason should mention priority");
+        assert!(
+            warning.reason.contains("priority"),
+            "reason should mention priority"
+        );
     }
 
     /// Frontmatter that is malformed (unclosed block) returns a warning.
@@ -331,14 +351,24 @@ mod tests {
     fn unclosed_frontmatter_block_returns_warning() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rule.md");
-        fs::write(&path, "---\npriority: 10\n\nContent without closing delimiter.").unwrap();
+        fs::write(
+            &path,
+            "---\npriority: 10\n\nContent without closing delimiter.",
+        )
+        .unwrap();
 
         let result = parse_prompt_rule_file(&path, HierarchyLevel::Global);
 
-        assert!(result.is_err(), "unclosed frontmatter should produce a warning");
+        assert!(
+            result.is_err(),
+            "unclosed frontmatter should produce a warning"
+        );
         let warning = result.unwrap_err();
-        assert!(warning.reason.contains("not closed") || warning.reason.contains("missing"),
-            "reason should describe the unclosed block: {:?}", warning.reason);
+        assert!(
+            warning.reason.contains("not closed") || warning.reason.contains("missing"),
+            "reason should describe the unclosed block: {:?}",
+            warning.reason
+        );
     }
 
     /// Frontmatter with an invalid line (no colon) returns a warning.
@@ -350,7 +380,10 @@ mod tests {
 
         let result = parse_prompt_rule_file(&path, HierarchyLevel::Global);
 
-        assert!(result.is_err(), "invalid frontmatter line should produce a warning");
+        assert!(
+            result.is_err(),
+            "invalid frontmatter line should produce a warning"
+        );
     }
 
     /// Frontmatter is stripped and body content is trimmed.
@@ -358,19 +391,27 @@ mod tests {
     fn frontmatter_is_stripped_from_content() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rule.md");
-        fs::write(&path,
+        fs::write(
+            &path,
             "---\npriority: 200\n---\n\nAlways be safe and helpful.\n\nSecond paragraph.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let rule = parse_prompt_rule_file(&path, HierarchyLevel::Global).unwrap();
 
         // Frontmatter must not appear in content.
-        assert!(!rule.content.contains("priority:"),
-            "content should not contain frontmatter");
-        assert!(!rule.content.contains("---"),
-            "content should not contain frontmatter delimiters");
-        assert!(rule.content.contains("Always be safe"),
-            "content should contain the rule body");
+        assert!(
+            !rule.content.contains("priority:"),
+            "content should not contain frontmatter"
+        );
+        assert!(
+            !rule.content.contains("---"),
+            "content should not contain frontmatter delimiters"
+        );
+        assert!(
+            rule.content.contains("Always be safe"),
+            "content should contain the rule body"
+        );
     }
 
     /// Non-existent file returns a warning (not a panic).
@@ -483,9 +524,9 @@ mod tests {
     fn sorting_priority_descending() {
         let dir = TempDir::new().unwrap();
         let prompts = make_prompts_dir(dir.path());
-        write_rule(&prompts, "low.md",  "---\npriority: 5\n---\n\nLow.");
+        write_rule(&prompts, "low.md", "---\npriority: 5\n---\n\nLow.");
         write_rule(&prompts, "high.md", "---\npriority: 100\n---\n\nHigh.");
-        write_rule(&prompts, "mid.md",  "---\npriority: 50\n---\n\nMid.");
+        write_rule(&prompts, "mid.md", "---\npriority: 50\n---\n\nMid.");
 
         let (rules, _) = load_prompt_rules(&[(HierarchyLevel::Global, dir.path())]);
 
@@ -499,22 +540,29 @@ mod tests {
     #[test]
     fn sorting_level_specificity_agent_before_global() {
         let global_dir = TempDir::new().unwrap();
-        let agent_dir  = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
         make_prompts_dir(global_dir.path());
-        write_rule(&global_dir.path().join("prompts"), "rule.md", "Global rule.");
+        write_rule(
+            &global_dir.path().join("prompts"),
+            "rule.md",
+            "Global rule.",
+        );
         make_prompts_dir(agent_dir.path());
         write_rule(&agent_dir.path().join("prompts"), "rule.md", "Agent rule.");
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Agent,  agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
         ];
         let (rules, _) = load_prompt_rules(&levels);
 
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].source_level, HierarchyLevel::Agent,
-            "Agent rule should come before Global at equal priority");
+        assert_eq!(
+            rules[0].source_level,
+            HierarchyLevel::Agent,
+            "Agent rule should come before Global at equal priority"
+        );
         assert_eq!(rules[1].source_level, HierarchyLevel::Global);
     }
 
@@ -530,7 +578,10 @@ mod tests {
         let (rules, _) = load_prompt_rules(&[(HierarchyLevel::Global, dir.path())]);
 
         assert_eq!(rules.len(), 3);
-        assert!(rules[0].file_path.ends_with("a.md"), "a.md should be first alphabetically");
+        assert!(
+            rules[0].file_path.ends_with("a.md"),
+            "a.md should be first alphabetically"
+        );
         assert!(rules[1].file_path.ends_with("b.md"));
         assert!(rules[2].file_path.ends_with("c.md"));
     }
@@ -540,8 +591,8 @@ mod tests {
     fn malformed_file_generates_warning_others_still_load() {
         let dir = TempDir::new().unwrap();
         let prompts = make_prompts_dir(dir.path());
-        write_rule(&prompts, "good.md",    "Good content.");
-        write_rule(&prompts, "bad.md",     "---\npriority: high\n---\n\nBad.");
+        write_rule(&prompts, "good.md", "Good content.");
+        write_rule(&prompts, "bad.md", "---\npriority: high\n---\n\nBad.");
 
         let (rules, warnings) = load_prompt_rules(&[(HierarchyLevel::Global, dir.path())]);
 
@@ -557,7 +608,7 @@ mod tests {
         let prompts = make_prompts_dir(dir.path());
         let instructions = make_instructions_dir(dir.path());
 
-        write_rule(&prompts,      "from_prompts.md",      "From prompts.");
+        write_rule(&prompts, "from_prompts.md", "From prompts.");
         write_rule(&instructions, "from_instructions.md", "From instructions.");
 
         let (rules, warnings) = load_prompt_rules(&[(HierarchyLevel::Global, dir.path())]);
@@ -565,8 +616,10 @@ mod tests {
         assert_eq!(rules.len(), 1, "only prompts/ content should load");
         assert_eq!(rules[0].content, "From prompts.");
         assert_eq!(warnings.len(), 1, "one warning about both dirs existing");
-        assert!(warnings[0].reason.contains("instructions"),
-            "warning should mention instructions/");
+        assert!(
+            warnings[0].reason.contains("instructions"),
+            "warning should mention instructions/"
+        );
     }
 
     /// Only instructions/ (no prompts/): backward compat — rules loaded from instructions/.
@@ -580,6 +633,9 @@ mod tests {
 
         assert_eq!(rules.len(), 1, "instructions/ should be used as fallback");
         assert_eq!(rules[0].content, "From instructions.");
-        assert!(warnings.is_empty(), "no warnings when only instructions/ exists");
+        assert!(
+            warnings.is_empty(),
+            "no warnings when only instructions/ exists"
+        );
     }
 }

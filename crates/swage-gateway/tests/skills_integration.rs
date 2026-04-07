@@ -42,18 +42,18 @@ impl Drop for SwageHomeGuard {
 }
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, TokenUsage,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
@@ -78,16 +78,20 @@ impl FixedResponseProvider {
 
 #[async_trait]
 impl LlmProvider for FixedResponseProvider {
-    fn model_id(&self) -> &str { "mock-skills-model" }
+    fn model_id(&self) -> &str {
+        "mock-skills-model"
+    }
 
     async fn complete(
-        &self, _request: CompletionRequest,
+        &self,
+        _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: ToolCompletionRequest,
+        &self,
+        _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         unimplemented!("not used in streaming tests")
     }
@@ -97,12 +101,16 @@ impl LlmProvider for FixedResponseProvider {
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let chunks = vec![
-            StreamChunk::Delta { content: self.response_text.clone() },
+            StreamChunk::Delta {
+                content: self.response_text.clone(),
+            },
             StreamChunk::Usage(TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
             }),
-            StreamChunk::Done { finish_reason: Some(FinishReason::Stop) },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
         ];
         Box::pin(futures::stream::iter(chunks))
     }
@@ -118,9 +126,7 @@ fn create_skill(base: &std::path::Path, name: &str, description: &str, instructi
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
         skill_dir.join("SKILL.md"),
-        format!(
-            "---\ndescription: {description}\n---\n\n{instructions}"
-        ),
+        format!("---\ndescription: {description}\n---\n\n{instructions}"),
     )
     .unwrap();
 }
@@ -197,15 +203,11 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
 type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -287,11 +289,9 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     let _env_guard = SwageHomeGuard::set(root);
 
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) = start_test_server_with_config(
-        FixedResponseProvider::new("I'll review the code."),
-        config,
-    )
-    .await;
+    let (router, addr, _storage) =
+        start_test_server_with_config(FixedResponseProvider::new("I'll review the code."), config)
+            .await;
 
     // Create a conversation.
     let (status, body) = http(&router, "POST", "/api/conversations").await;
@@ -300,7 +300,11 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
 
     // Connect WebSocket and subscribe to context events.
     let (mut sink, mut stream) = connect_ws(addr, &conversation_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a slash command to activate the skill and start a turn.
     ws_send(
@@ -383,11 +387,9 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) = start_test_server_with_config(
-        FixedResponseProvider::new("Hello! How can I help?"),
-        config,
-    )
-    .await;
+    let (router, addr, _storage) =
+        start_test_server_with_config(FixedResponseProvider::new("Hello! How can I help?"), config)
+            .await;
 
     // Create a conversation — agent-level skills should auto-activate.
     let (status, body) = http(&router, "POST", "/api/conversations").await;
@@ -396,7 +398,11 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
 
     // Connect and subscribe to context events.
     let (mut sink, mut stream) = connect_ws(addr, &conversation_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Send a plain message — no slash command, no skill invocation.
     ws_send(
@@ -459,18 +465,19 @@ async fn activated_skill_persists_across_multiple_turns() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) = start_test_server_with_config(
-        FixedResponseProvider::new("Let me help."),
-        config,
-    )
-    .await;
+    let (router, addr, _storage) =
+        start_test_server_with_config(FixedResponseProvider::new("Let me help."), config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
     assert_eq!(status, StatusCode::CREATED);
     let conversation_id = body["id"].as_str().unwrap().to_string();
 
     let (mut sink, mut stream) = connect_ws(addr, &conversation_id).await;
-    ws_send(&mut sink, json!({"type": "subscribe", "channels": ["context"]})).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["context"]}),
+    )
+    .await;
 
     // Turn 1: activate via slash command (bare — no message forwarded).
     ws_send(
@@ -489,7 +496,9 @@ async fn activated_skill_persists_across_multiple_turns() {
 
     // No turn_complete should appear — bare activation doesn't start a turn.
     assert!(
-        !activation_events.iter().any(|e| e["type"] == "turn_complete"),
+        !activation_events
+            .iter()
+            .any(|e| e["type"] == "turn_complete"),
         "bare slash command should not create a turn"
     );
 
@@ -565,11 +574,8 @@ async fn deactivating_agent_level_skill_returns_error() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) = start_test_server_with_config(
-        FixedResponseProvider::new("ok"),
-        config,
-    )
-    .await;
+    let (router, addr, _storage) =
+        start_test_server_with_config(FixedResponseProvider::new("ok"), config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
     assert_eq!(status, StatusCode::CREATED);
@@ -640,11 +646,8 @@ async fn skills_listing_shows_resolved_skills_with_override() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, _addr, storage) = start_test_server_with_config(
-        FixedResponseProvider::new("ok"),
-        config,
-    )
-    .await;
+    let (router, _addr, storage) =
+        start_test_server_with_config(FixedResponseProvider::new("ok"), config).await;
 
     // Get the default project ID for the query parameter.
     use swage_storage::store::ProjectStore;
@@ -658,7 +661,9 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let skills = body["skills"].as_array().expect("response should have skills array");
+    let skills = body["skills"]
+        .as_array()
+        .expect("response should have skills array");
 
     // code-review should appear once (project shadows global).
     let code_reviews: Vec<&Value> = skills

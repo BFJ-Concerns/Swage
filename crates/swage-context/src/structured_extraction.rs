@@ -208,15 +208,10 @@ fn parse_extraction_response(response: &str) -> Result<Vec<ExtractionCategory>, 
         .strip_prefix("```json")
         .or_else(|| response.trim().strip_prefix("```"))
         .unwrap_or(response.trim());
-    let json_str = json_str
-        .strip_suffix("```")
-        .unwrap_or(json_str)
-        .trim();
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
     serde_json::from_str::<Vec<ExtractionCategory>>(json_str).map_err(|e| {
-        ExtractionError::ParseFailure(format!(
-            "expected JSON array of categories: {e}"
-        ))
+        ExtractionError::ParseFailure(format!("expected JSON array of categories: {e}"))
     })
 }
 
@@ -229,10 +224,7 @@ fn format_extraction(categories: &[ExtractionCategory]) -> String {
     let mut output = String::from("## Conversation Summary (Structured Extraction)\n\n");
 
     for category in categories {
-        output.push_str(&format!(
-            "### {}\n",
-            capitalise_category(&category.name)
-        ));
+        output.push_str(&format!("### {}\n", capitalise_category(&category.name)));
         for item in &category.items {
             let turns: String = item
                 .source_turns
@@ -294,8 +286,8 @@ fn truncate_to_budget(text: &str, budget: usize, tokeniser: &dyn Tokeniser) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::tokeniser::Tokeniser;
+    use async_trait::async_trait;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use swage_core::{
@@ -410,9 +402,15 @@ mod tests {
     fn sample_messages() -> Vec<ChatMessage> {
         vec![
             ChatMessage::new(Role::User, "What database should we use?"),
-            ChatMessage::new(Role::Assistant, "I recommend PostgreSQL for its reliability."),
+            ChatMessage::new(
+                Role::Assistant,
+                "I recommend PostgreSQL for its reliability.",
+            ),
             ChatMessage::new(Role::User, "Budget is limited to 50k."),
-            ChatMessage::new(Role::Assistant, "We can use the free tier. Key decision: PostgreSQL."),
+            ChatMessage::new(
+                Role::Assistant,
+                "We can use the free tier. Key decision: PostgreSQL.",
+            ),
         ]
     }
 
@@ -456,7 +454,10 @@ mod tests {
             .await;
 
         let output = result.expect("extraction should succeed");
-        assert!(!output.truncated, "should not be truncated with generous budget");
+        assert!(
+            !output.truncated,
+            "should not be truncated with generous budget"
+        );
         assert_eq!(output.categories.len(), 3);
 
         // Verify category names.

@@ -147,7 +147,10 @@ mod tests {
         let left = serde_json::json!({"b": 2, "a": 1, "nested": {"z": true, "m": false}});
         let right = serde_json::json!({"nested": {"m": false, "z": true}, "a": 1, "b": 2});
 
-        assert_eq!(approval_request_fingerprint(&left), approval_request_fingerprint(&right));
+        assert_eq!(
+            approval_request_fingerprint(&left),
+            approval_request_fingerprint(&right)
+        );
     }
 
     #[test]
@@ -163,7 +166,12 @@ mod tests {
             context: Some(serde_json::json!({"env": "prod"})),
             timeout: Some(std::time::Duration::from_secs(300)),
         };
-        if let PreToolUseOutcome::RequestApproval { prompt, context, timeout } = outcome {
+        if let PreToolUseOutcome::RequestApproval {
+            prompt,
+            context,
+            timeout,
+        } = outcome
+        {
             assert_eq!(prompt, "Allow deploy?");
             assert!(context.is_some());
             assert_eq!(timeout, Some(std::time::Duration::from_secs(300)));

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use swage_core::StorageError;
 
 /// Track which migrations have been applied.
@@ -30,6 +30,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
         ("011_approval_memory", CREATE_APPROVAL_MEMORY),
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
+        ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
     ]
 }
 
@@ -128,8 +129,7 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_turns_agent_id  ON turns(agent_id);
     CREATE INDEX IF NOT EXISTS idx_turns_state     ON turns(state);
 
-    -- Messages: individual messages within a thread (not scoped to a turn).
-    -- tool_call_id and tool_name allow associating messages with tool activity.
+    -- Messages: individual messages within a thread.
     CREATE TABLE IF NOT EXISTS messages (
         id           TEXT    NOT NULL PRIMARY KEY,
         thread_id    TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -229,6 +229,13 @@ const CREATE_AGENT_MESSAGES: &str = "
         ON agent_messages(correlation_id);
     CREATE INDEX IF NOT EXISTS idx_agent_messages_sender
         ON agent_messages(sender_agent_id);
+";
+
+/// Additive migration: preserve message-to-turn attribution for honest reads.
+const ADD_MESSAGE_TURN_ID: &str = "
+    ALTER TABLE messages ADD COLUMN turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_messages_turn_id ON messages(turn_id);
 ";
 
 /// Delegation chain tracking — nullable parent reference on turns.

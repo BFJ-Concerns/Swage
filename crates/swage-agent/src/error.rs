@@ -227,9 +227,7 @@ mod tests {
 
     #[test]
     fn display_storage_failed() {
-        let err = AgentError::StorageFailed(StorageError::ConnectionFailed(
-            "timeout".into(),
-        ));
+        let err = AgentError::StorageFailed(StorageError::ConnectionFailed("timeout".into()));
         assert_eq!(
             err.to_string(),
             "storage operation failed: connection failed: timeout"
@@ -253,19 +251,13 @@ mod tests {
             hook: "safety".into(),
             reason: "blocked by policy".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "hook 'safety' blocked: blocked by policy"
-        );
+        assert_eq!(err.to_string(), "hook 'safety' blocked: blocked by policy");
     }
 
     #[test]
     fn display_tool_rounds_exceeded() {
         let err = AgentError::ToolRoundsExceeded { max: 5 };
-        assert_eq!(
-            err.to_string(),
-            "exceeded maximum tool call rounds (5)"
-        );
+        assert_eq!(err.to_string(), "exceeded maximum tool call rounds (5)");
     }
 
     #[test]
@@ -278,10 +270,7 @@ mod tests {
     fn display_session_not_found() {
         let id = Uuid::nil();
         let err = AgentError::SessionNotFound(id);
-        assert_eq!(
-            err.to_string(),
-            format!("session not found: {id}")
-        );
+        assert_eq!(err.to_string(), format!("session not found: {id}"));
     }
 
     #[test]
@@ -307,10 +296,7 @@ mod tests {
     #[test]
     fn display_invalid_config() {
         let err = AgentError::InvalidConfig("model required".into());
-        assert_eq!(
-            err.to_string(),
-            "invalid configuration: model required"
-        );
+        assert_eq!(err.to_string(), "invalid configuration: model required");
     }
 
     #[test]

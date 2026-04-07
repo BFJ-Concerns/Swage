@@ -7,9 +7,9 @@
 //! Tests are expected to FAIL until the phase 06 motes are implemented. Each
 //! test documents which motes must combine for it to pass.
 
-use swage_client::websocket::{ClientEvent, ServerEvent};
+use swage_client::websocket::ServerEvent;
 use swage_tui::state::{
-    ActiveTool, ContextReport, ContextSection, DisplayMessage, DisplayToolCall, ProjectInfo,
+    ContextReport, ContextSection, DisplayMessage, DisplayToolCall, ProjectInfo,
 };
 use uuid::Uuid;
 
@@ -103,7 +103,7 @@ fn complete_turn_produces_correct_final_state() {
 #[test]
 fn context_assembled_event_populates_inspector_report() {
     // Build a sample assembly report matching the gateway's format.
-    let report_json = serde_json::json!({
+    let _report_json = serde_json::json!({
         "elements": [
             {"name": "system_prompts", "token_count": 200},
             {"name": "history", "token_count": 1500},
@@ -118,10 +118,22 @@ fn context_assembled_event_populates_inspector_report() {
     // Verify the ContextReport type can represent this data structure.
     let report = ContextReport {
         sections: vec![
-            ContextSection { name: "system_prompts".to_string(), token_count: 200 },
-            ContextSection { name: "history".to_string(), token_count: 1500 },
-            ContextSection { name: "skills".to_string(), token_count: 300 },
-            ContextSection { name: "memory".to_string(), token_count: 100 },
+            ContextSection {
+                name: "system_prompts".to_string(),
+                token_count: 200,
+            },
+            ContextSection {
+                name: "history".to_string(),
+                token_count: 1500,
+            },
+            ContextSection {
+                name: "skills".to_string(),
+                token_count: 300,
+            },
+            ContextSection {
+                name: "memory".to_string(),
+                token_count: 100,
+            },
         ],
         total_tokens: 2100,
         budget_tokens: Some(4096),

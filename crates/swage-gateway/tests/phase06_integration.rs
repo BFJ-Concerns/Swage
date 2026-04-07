@@ -5,7 +5,7 @@
 //! the wiring between the combined binary's CLI dispatch and the gateway.
 
 use clap::Parser;
-use swage_gateway::cli::{Cli, Command, TuiArgs};
+use swage_gateway::cli::{Cli, Command};
 
 // ---------------------------------------------------------------------------
 // CLI dispatch: swage tui subcommand
@@ -51,10 +51,10 @@ fn parse_tui_subcommand_with_url() {
 #[test]
 fn shell_completions_include_tui_subcommand() {
     let mut output = Vec::new();
-    swage_gateway::cli::completions::generate_to_writer(
-        clap_complete::Shell::Fish,
-        &mut output,
-    );
+    swage_gateway::cli::completions::generate_to_writer(clap_complete::Shell::Fish, &mut output);
     let completions = String::from_utf8(output).expect("completions should be valid UTF-8");
-    assert!(completions.contains("tui"), "completions should include 'tui' subcommand");
+    assert!(
+        completions.contains("tui"),
+        "completions should include 'tui' subcommand"
+    );
 }

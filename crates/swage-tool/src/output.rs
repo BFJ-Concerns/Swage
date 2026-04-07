@@ -137,8 +137,7 @@ mod tests {
         };
         let json_val: serde_json::Value = serde_json::to_value(&output).unwrap();
         // The serialised duration must be recoverable as 1234 millis.
-        let decoded: ToolOutput =
-            serde_json::from_value(json_val).unwrap();
+        let decoded: ToolOutput = serde_json::from_value(json_val).unwrap();
         assert_eq!(decoded.duration, Duration::from_millis(1234));
     }
 }

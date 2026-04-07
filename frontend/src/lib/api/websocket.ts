@@ -38,27 +38,6 @@ const BACKOFF_MAX_MS = 30_000;
 const BACKOFF_FACTOR = 2;
 
 // ---------------------------------------------------------------------------
-// Known server event types
-// ---------------------------------------------------------------------------
-
-// Only dispatch events whose type is in this set. Unknown types are silently
-// dropped for forward compatibility with future gateway event additions.
-const KNOWN_EVENT_TYPES = new Set([
-  "token",
-  "turn_complete",
-  "output_schema_failed",
-  "error",
-  "cancelled",
-  "tool_start",
-  "tool_end",
-  "context_assembled",
-  "shutdown",
-  "skill_activated",
-  "skill_already_active",
-  "skill_deactivated",
-]);
-
-// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -138,11 +117,11 @@ export function createWebSocketClient(
           string,
           unknown
         >;
-        if (KNOWN_EVENT_TYPES.has(parsed.type as string)) {
-          for (const handler of eventHandlers)
-            handler(parsed as unknown as ServerEvent);
+        if (typeof parsed.type !== "string") {
+          throw new Error("missing event type");
         }
-        // Unknown event types fall through silently — forward-compatible.
+        for (const handler of eventHandlers)
+          handler(parsed as unknown as ServerEvent);
       } catch {
         emitStatus("error");
         const frameError: ServerEvent = {

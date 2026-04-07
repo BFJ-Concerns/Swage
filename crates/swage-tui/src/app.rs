@@ -377,6 +377,10 @@ impl App {
                         Ok(Some(event)) => {
                             let outcome = handle_server_event(&mut self.state, event);
                             if outcome == EventOutcome::Shutdown {
+                                // TODO Reconnect after shutdown event
+                                // A graceful Shutdown bypasses the Ok(None)/Err reconnect paths and only disconnects here,
+                                // so the TUI stays permanently offline after the gateway restarts.
+                                // ---
                                 self.connection.disconnect().await;
                             }
                         }
@@ -469,6 +473,32 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
+        ServerEvent::OutputSchemaRetry {
+            attempt,
+            max_retries,
+            ..
+        } => {
+            state.push_local_message(
+                "system",
+                format!("Structured output validation retry {attempt}/{max_retries}"),
+            );
+            EventOutcome::Continue
+        }
+
+        ServerEvent::OutputSchemaFailed {
+            attempts, errors, ..
+        } => {
+            let details = errors
+                .first()
+                .map(|error| format!("{}: {}", error.path, error.message))
+                .unwrap_or_else(|| "validation failed".to_string());
+            state.push_local_message(
+                "error",
+                format!("Structured output validation failed after {attempts} attempts: {details}"),
+            );
+            EventOutcome::Continue
+        }
+
         ServerEvent::Shutdown { reason } => {
             state.push_local_message("system", format!("Gateway shutting down — {reason}"));
             EventOutcome::Shutdown
@@ -520,6 +550,36 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
+        ServerEvent::TopologyRunStarted {
+            topology_run_id, ..
+        } => {
+            state.push_local_message("system", format!("Topology run started: {topology_run_id}"));
+            EventOutcome::Continue
+        }
+
+        ServerEvent::TopologyNodeStarted { node_id, .. } => {
+            state.push_local_message("system", format!("Topology node started: {node_id}"));
+            EventOutcome::Continue
+        }
+
+        ServerEvent::TopologyNodeCompleted {
+            node_id, success, ..
+        } => {
+            let status = if success { "succeeded" } else { "failed" };
+            state.push_local_message("system", format!("Topology node {node_id} {status}"));
+            EventOutcome::Continue
+        }
+
+        ServerEvent::TopologyRunCompleted {
+            topology_run_id,
+            success,
+            ..
+        } => {
+            let status = if success { "succeeded" } else { "failed" };
+            state.push_local_message("system", format!("Topology run {topology_run_id} {status}"));
+            EventOutcome::Continue
+        }
+
         ServerEvent::ApprovalRequired { prompt, .. } => {
             state.push_local_message("system", format!("Approval required: {prompt}"));
             EventOutcome::Continue
@@ -540,6 +600,11 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
                 "error",
                 format!("Approval decision failed ({error}): {message}"),
             );
+            EventOutcome::Continue
+        }
+
+        ServerEvent::Unknown { event_type, .. } => {
+            state.push_local_message("system", format!("Unhandled gateway event: {event_type}"));
             EventOutcome::Continue
         }
     }

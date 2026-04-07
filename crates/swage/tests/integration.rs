@@ -14,31 +14,30 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // All imports through the facade — the whole point of these tests.
 // ---------------------------------------------------------------------------
 
+use swage::SwageBuilder;
+use swage::agent::{AgentBuilder, AgentConfig, CompactionThreshold, InboundMessage};
 use swage::core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolError,
+    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolError,
 };
+use swage::hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
 use swage::provider::LlmProvider;
-use swage::tool::tool::Tool;
+use swage::safety::LeakDetector;
+use swage::storage::{
+    MessageStore, ProjectStore, SqliteStorage, Storage, ThreadStore, ToolCallStore, TurnStore,
+};
 use swage::tool::context::ToolContext;
 use swage::tool::dispatch::ToolDispatcher;
 use swage::tool::permission::PermissionConfig;
 use swage::tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage::tool::registry::ToolRegistry;
-use swage::safety::LeakDetector;
-use swage::hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
-use swage::storage::{
-    MessageStore, ProjectStore, SqliteStorage, Storage,
-    ThreadStore, ToolCallStore, TurnStore,
-};
-use swage::agent::{AgentBuilder, AgentConfig, CompactionThreshold, InboundMessage};
-use swage::SwageBuilder;
+use swage::tool::tool::Tool;
 
 // Convenience constructors
 use swage::standard_leak_detector;
@@ -606,7 +605,7 @@ async fn sandboxed_execution() {
     // This test will be enabled once the sandbox binary entry point exists.
     // For now it verifies that the sandbox types are accessible through the
     // facade and that SwageBuilder accepts sandbox configuration.
-    use swage::sandbox::{SandboxConfig as SandboxSandboxConfig};
+    use swage::sandbox::SandboxConfig as SandboxSandboxConfig;
 
     let _config = SandboxSandboxConfig::builder()
         .working_directory(std::env::temp_dir())
@@ -729,8 +728,12 @@ async fn permission_enforcement_end_to_end() {
 
     // Build dispatcher with permissions: allow echo, deny restricted_tool.
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(EchoTool)).expect("register echo");
-    registry.register(Arc::new(DeniedTool)).expect("register denied");
+    registry
+        .register(Arc::new(EchoTool))
+        .expect("register echo");
+    registry
+        .register(Arc::new(DeniedTool))
+        .expect("register denied");
 
     let permissions = PermissionConfig {
         allow: vec!["echo".into()],
@@ -773,7 +776,10 @@ async fn permission_enforcement_end_to_end() {
         .await
         .expect("message processed despite denied tool");
 
-    assert_eq!(response.response, "Done — echo worked, restricted was denied.");
+    assert_eq!(
+        response.response,
+        "Done — echo worked, restricted was denied."
+    );
 
     // Verify the denied tool call is recorded in history.
     let threads = ThreadStore::list_by_session(&*storage, session_id)
@@ -800,8 +806,14 @@ async fn permission_enforcement_end_to_end() {
         }
     }
 
-    assert!(found_denied, "denied tool call recorded in execution history");
-    assert!(found_allowed, "allowed tool call recorded in execution history");
+    assert!(
+        found_denied,
+        "denied tool call recorded in execution history"
+    );
+    assert!(
+        found_allowed,
+        "allowed tool call recorded in execution history"
+    );
 }
 
 // ============================================================================
@@ -815,7 +827,7 @@ async fn permission_enforcement_end_to_end() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_types_accessible_through_facade() {
     // Verify config types are accessible through swage::config.
-    use swage::config::{ResolvedConfig, WorkspaceConfig, ConfigError};
+    use swage::config::{ConfigError, ResolvedConfig, WorkspaceConfig};
 
     // The types exist and are usable — compile-time proof that the
     // config re-exports cover the developer-facing surface.

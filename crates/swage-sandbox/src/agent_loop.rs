@@ -89,7 +89,11 @@ pub(crate) async fn run_loop(
 
     loop {
         match conn.receive_message().await? {
-            IpcMessage::ToolCallRequest { request_id, tool_name, parameters } => {
+            IpcMessage::ToolCallRequest {
+                request_id,
+                tool_name,
+                parameters,
+            } => {
                 match tool_map.get(&tool_name) {
                     Some(tool) => {
                         let start = Instant::now();
@@ -109,7 +113,8 @@ pub(crate) async fn run_loop(
                                     Value::Null,
                                     duration_ms,
                                     Some(e.to_string()),
-                                ).await?;
+                                )
+                                .await?;
                             }
                         }
                     }
@@ -118,7 +123,8 @@ pub(crate) async fn run_loop(
                             Some(request_id),
                             ErrorCategory::ToolExecution,
                             format!("unknown tool: {tool_name}"),
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
             }
@@ -135,7 +141,8 @@ pub(crate) async fn run_loop(
                     None,
                     ErrorCategory::Protocol,
                     format!("unexpected message in agent loop: {unexpected:?}"),
-                ).await?;
+                )
+                .await?;
             }
         }
     }
@@ -179,8 +186,7 @@ pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxErro
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use serde_json::{json, Value};
-    use std::path::{Path, PathBuf};
+    use serde_json::{Value, json};
     use swage_core::ToolError;
     use swage_tool::context::ToolContext;
     use swage_tool::tool::Tool;
@@ -206,9 +212,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "Returns its parameters unchanged." }
-        fn parameters(&self) -> Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Returns its parameters unchanged."
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
         async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
             Ok(params)
         }
@@ -219,11 +231,24 @@ mod tests {
 
     #[async_trait]
     impl Tool for FailingTool {
-        fn name(&self) -> &str { "fail" }
-        fn description(&self) -> &str { "Always errors." }
-        fn parameters(&self) -> Value { json!({"type": "object"}) }
-        async fn execute(&self, _params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-            Err(ToolError::ExecutionFailed { name: "fail".into(), message: "intentional failure".into() })
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn description(&self) -> &str {
+            "Always errors."
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Err(ToolError::ExecutionFailed {
+                name: "fail".into(),
+                message: "intentional failure".into(),
+            })
         }
     }
 
@@ -233,9 +258,7 @@ mod tests {
     async fn loop_sends_ready_on_start() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![]).await
-        });
+        let loop_handle = tokio::spawn(async move { run_loop(conn, vec![]).await });
 
         // The first message from the agent should be Ready.
         let first_msg = host.receive().await.unwrap();
@@ -253,9 +276,7 @@ mod tests {
     async fn loop_handles_shutdown_cleanly() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![]).await
-        });
+        let loop_handle = tokio::spawn(async move { run_loop(conn, vec![]).await });
 
         // Consume Ready.
         let _ = host.receive().await.unwrap();
@@ -274,9 +295,8 @@ mod tests {
     async fn loop_executes_tool_and_sends_result() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![Box::new(EchoTool)]).await
-        });
+        let loop_handle =
+            tokio::spawn(async move { run_loop(conn, vec![Box::new(EchoTool)]).await });
 
         // Consume Ready.
         let _ = host.receive().await.unwrap();
@@ -286,12 +306,19 @@ mod tests {
             request_id: "req-1".into(),
             tool_name: "echo".into(),
             parameters: json!({"text": "hello sandbox"}),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Agent should execute and send back the result.
         let result_msg = host.receive().await.unwrap();
         match result_msg {
-            IpcMessage::ToolCallResult { request_id, output, error, .. } => {
+            IpcMessage::ToolCallResult {
+                request_id,
+                output,
+                error,
+                ..
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(output, json!({"text": "hello sandbox"}));
                 assert!(error.is_none());
@@ -309,9 +336,7 @@ mod tests {
     async fn loop_sends_error_message_for_unknown_tool() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![]).await
-        });
+        let loop_handle = tokio::spawn(async move { run_loop(conn, vec![]).await });
 
         let _ = host.receive().await.unwrap();
 
@@ -319,11 +344,17 @@ mod tests {
             request_id: "req-2".into(),
             tool_name: "nonexistent_tool".into(),
             parameters: json!({}),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let err_msg = host.receive().await.unwrap();
         match err_msg {
-            IpcMessage::ErrorMessage { request_id, category, description } => {
+            IpcMessage::ErrorMessage {
+                request_id,
+                category,
+                description,
+            } => {
                 assert_eq!(request_id, Some("req-2".into()));
                 assert_eq!(category, ErrorCategory::ToolExecution);
                 assert!(description.contains("nonexistent_tool"));
@@ -340,9 +371,8 @@ mod tests {
     async fn loop_sends_tool_result_with_error_on_execution_failure() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![Box::new(FailingTool)]).await
-        });
+        let loop_handle =
+            tokio::spawn(async move { run_loop(conn, vec![Box::new(FailingTool)]).await });
 
         let _ = host.receive().await.unwrap();
 
@@ -350,15 +380,22 @@ mod tests {
             request_id: "req-3".into(),
             tool_name: "fail".into(),
             parameters: json!({}),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Tool execution failed — agent should still send a ToolCallResult
         // with the error field set, so the host can surface the failure.
         let result_msg = host.receive().await.unwrap();
         match result_msg {
-            IpcMessage::ToolCallResult { request_id, error, .. } => {
+            IpcMessage::ToolCallResult {
+                request_id, error, ..
+            } => {
                 assert_eq!(request_id, "req-3");
-                assert!(error.is_some(), "error field should be set on execution failure");
+                assert!(
+                    error.is_some(),
+                    "error field should be set on execution failure"
+                );
                 assert!(error.unwrap().contains("intentional failure"));
             }
             other => panic!("expected ToolCallResult, got {:?}", other),
@@ -373,9 +410,7 @@ mod tests {
     async fn loop_reports_protocol_error_for_unexpected_message() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![]).await
-        });
+        let loop_handle = tokio::spawn(async move { run_loop(conn, vec![]).await });
 
         let _ = host.receive().await.unwrap();
 
@@ -399,9 +434,8 @@ mod tests {
     async fn loop_measures_tool_duration() {
         let (conn, mut host) = make_connection_pair();
 
-        let loop_handle = tokio::spawn(async move {
-            run_loop(conn, vec![Box::new(EchoTool)]).await
-        });
+        let loop_handle =
+            tokio::spawn(async move { run_loop(conn, vec![Box::new(EchoTool)]).await });
 
         let _ = host.receive().await.unwrap();
 
@@ -409,14 +443,19 @@ mod tests {
             request_id: "req-time".into(),
             tool_name: "echo".into(),
             parameters: json!({"x": 1}),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let result = host.receive().await.unwrap();
         match result {
             // Verify duration_ms field is present and is a reasonable value.
             IpcMessage::ToolCallResult { duration_ms, .. } => {
                 // An echo tool should complete far under any sane timeout.
-                assert!(duration_ms < 5_000, "duration_ms should be reasonable, got {duration_ms}");
+                assert!(
+                    duration_ms < 5_000,
+                    "duration_ms should be reasonable, got {duration_ms}"
+                );
             }
             other => panic!("expected ToolCallResult, got {:?}", other),
         }

@@ -141,9 +141,7 @@ fn parse_skill_frontmatter(
         .iter()
         .skip(1)
         .position(|line| *line == "---")
-        .ok_or_else(|| {
-            "frontmatter block is not closed (missing closing `---`)".to_string()
-        })?;
+        .ok_or_else(|| "frontmatter block is not closed (missing closing `---`)".to_string())?;
 
     // Adjust back to the full array (skip(1) offset).
     let close_idx = close_offset + 1;
@@ -218,11 +216,11 @@ fn parse_skill_frontmatter(
 /// Lower return value = more specific = wins when names collide and sorts first.
 fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
-        HierarchyLevel::Agent   => 0,
-        HierarchyLevel::Team    => 1,
+        HierarchyLevel::Agent => 0,
+        HierarchyLevel::Team => 1,
         HierarchyLevel::Project => 2,
-        HierarchyLevel::Lens    => 3,
-        HierarchyLevel::Global  => 4,
+        HierarchyLevel::Lens => 3,
+        HierarchyLevel::Global => 4,
     }
 }
 
@@ -247,7 +245,7 @@ pub fn discover_skills(
     levels: &[(HierarchyLevel, &Path)],
 ) -> (Vec<SkillDefinition>, Vec<SkillWarning>) {
     let mut candidates: Vec<SkillDefinition> = Vec::new();
-    let mut warnings:   Vec<SkillWarning>    = Vec::new();
+    let mut warnings: Vec<SkillWarning> = Vec::new();
 
     for (level, base_dir) in levels {
         let skills_dir = base_dir.join("skills");
@@ -298,7 +296,7 @@ pub fn discover_skills(
             }
 
             match parse_skill_file(&skill_md, &dir_name, level.clone()) {
-                Ok(skill)    => candidates.push(skill),
+                Ok(skill) => candidates.push(skill),
                 Err(warning) => warnings.push(warning),
             }
         }
@@ -347,8 +345,8 @@ fn is_valid_skill_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     // ── SkillDefinition tests ────────────────────────────────────────────────
@@ -372,7 +370,10 @@ mod tests {
         assert!(skill.instructions.contains("## Usage"));
         assert_eq!(skill.tools, vec!["bash", "read"]);
         assert_eq!(skill.level, HierarchyLevel::Global);
-        assert_eq!(skill.source_path, PathBuf::from("/global/skills/my-skill/SKILL.md"));
+        assert_eq!(
+            skill.source_path,
+            PathBuf::from("/global/skills/my-skill/SKILL.md")
+        );
     }
 
     /// SkillDefinition with no display_name (optional field can be None).
@@ -423,7 +424,10 @@ mod tests {
         };
 
         let debug_str = format!("{skill:?}");
-        assert!(debug_str.contains("debuggable"), "debug output should contain the skill name");
+        assert!(
+            debug_str.contains("debuggable"),
+            "debug output should contain the skill name"
+        );
     }
 
     // ── SkillWarning tests ───────────────────────────────────────────────────
@@ -436,7 +440,10 @@ mod tests {
             reason: "missing required `description` field".to_string(),
         };
 
-        assert_eq!(warning.file_path, PathBuf::from("/skills/bad-skill/SKILL.md"));
+        assert_eq!(
+            warning.file_path,
+            PathBuf::from("/skills/bad-skill/SKILL.md")
+        );
         assert!(warning.reason.contains("description"));
     }
 
@@ -491,7 +498,9 @@ mod tests {
     #[test]
     fn valid_skill_file_with_all_fields_parses_correctly() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 name: My Skill
 description: Does something useful.
@@ -503,7 +512,8 @@ tools:
 ## Usage
 
 Run this to do the thing.
-");
+",
+        );
 
         let result = parse_skill_file(&path, "my-skill", HierarchyLevel::Global);
 
@@ -521,20 +531,29 @@ Run this to do the thing.
     #[test]
     fn skill_file_with_only_description_uses_defaults() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: Minimal skill.
 ---
 
 Minimal instructions.
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "minimal", HierarchyLevel::Project).unwrap();
 
         assert_eq!(skill.name, "minimal");
-        assert_eq!(skill.display_name, None, "no name in frontmatter → display_name is None");
+        assert_eq!(
+            skill.display_name, None,
+            "no name in frontmatter → display_name is None"
+        );
         assert_eq!(skill.description, "Minimal skill.");
-        assert!(skill.tools.is_empty(), "no tools in frontmatter → empty list");
+        assert!(
+            skill.tools.is_empty(),
+            "no tools in frontmatter → empty list"
+        );
         assert_eq!(skill.instructions, "Minimal instructions.");
     }
 
@@ -542,16 +561,22 @@ Minimal instructions.
     #[test]
     fn frontmatter_name_maps_to_display_name_not_canonical_name() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 name: Pretty Name
 description: A skill.
 ---
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "canonical-dir", HierarchyLevel::Agent).unwrap();
 
-        assert_eq!(skill.name, "canonical-dir", "canonical name comes from skill_name param");
+        assert_eq!(
+            skill.name, "canonical-dir",
+            "canonical name comes from skill_name param"
+        );
         assert_eq!(skill.display_name, Some("Pretty Name".to_string()));
     }
 
@@ -559,11 +584,14 @@ description: A skill.
     #[test]
     fn empty_body_is_valid() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: A skill with no instructions.
 ---
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "empty-body", HierarchyLevel::Global).unwrap();
 
@@ -574,22 +602,29 @@ description: A skill with no instructions.
     #[test]
     fn missing_description_returns_warning() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 name: Some Skill
 ---
 
 Instructions here.
-");
+",
+        );
 
         let result = parse_skill_file(&path, "missing-desc", HierarchyLevel::Global);
 
-        assert!(result.is_err(), "missing description should produce a warning");
+        assert!(
+            result.is_err(),
+            "missing description should produce a warning"
+        );
         let warning = result.unwrap_err();
         assert_eq!(warning.file_path, path);
         assert!(
             warning.reason.to_lowercase().contains("description"),
-            "reason should mention description: {:?}", warning.reason,
+            "reason should mention description: {:?}",
+            warning.reason,
         );
     }
 
@@ -601,22 +636,31 @@ Instructions here.
 
         let result = parse_skill_file(&path, "no-frontmatter", HierarchyLevel::Global);
 
-        assert!(result.is_err(), "missing frontmatter should produce a warning");
+        assert!(
+            result.is_err(),
+            "missing frontmatter should produce a warning"
+        );
     }
 
     /// Malformed frontmatter (unclosed block) returns a SkillWarning.
     #[test]
     fn malformed_frontmatter_unclosed_returns_warning() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: Skill without closing delimiter.
 instructions here with no closing ---
-");
+",
+        );
 
         let result = parse_skill_file(&path, "bad-frontmatter", HierarchyLevel::Global);
 
-        assert!(result.is_err(), "unclosed frontmatter should produce a warning");
+        assert!(
+            result.is_err(),
+            "unclosed frontmatter should produce a warning"
+        );
     }
 
     /// Non-existent file returns a SkillWarning.
@@ -631,7 +675,9 @@ instructions here with no closing ---
     #[test]
     fn tools_list_parsed_from_yaml_list() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: A tool-rich skill.
 tools:
@@ -639,7 +685,8 @@ tools:
   - grep
   - bash
 ---
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "tool-skill", HierarchyLevel::Global).unwrap();
 
@@ -650,11 +697,14 @@ tools:
     #[test]
     fn source_path_matches_file_path_argument() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: Path check.
 ---
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "path-check", HierarchyLevel::Project).unwrap();
 
@@ -665,18 +715,27 @@ description: Path check.
     #[test]
     fn frontmatter_stripped_from_instructions() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(&dir, "\
+        let path = write_skill(
+            &dir,
+            "\
 ---
 description: Strip check.
 ---
 
 The actual instructions.
-");
+",
+        );
 
         let skill = parse_skill_file(&path, "strip", HierarchyLevel::Global).unwrap();
 
-        assert!(!skill.instructions.contains("---"), "instructions must not contain frontmatter delimiters");
-        assert!(!skill.instructions.contains("description:"), "instructions must not contain frontmatter keys");
+        assert!(
+            !skill.instructions.contains("---"),
+            "instructions must not contain frontmatter delimiters"
+        );
+        assert!(
+            !skill.instructions.contains("description:"),
+            "instructions must not contain frontmatter keys"
+        );
         assert!(skill.instructions.contains("The actual instructions."));
     }
 
@@ -748,8 +807,10 @@ The actual instructions.
         assert!(skills.is_empty());
         assert_eq!(warnings.len(), 1, "one warning for the invalid name");
         assert!(
-            warnings[0].reason.to_lowercase().contains("name") || warnings[0].reason.to_lowercase().contains("invalid"),
-            "warning should describe the invalid name: {:?}", warnings[0].reason,
+            warnings[0].reason.to_lowercase().contains("name")
+                || warnings[0].reason.to_lowercase().contains("invalid"),
+            "warning should describe the invalid name: {:?}",
+            warnings[0].reason,
         );
     }
 
@@ -769,20 +830,35 @@ The actual instructions.
     #[test]
     fn same_name_at_two_levels_keeps_most_specific() {
         let global_dir = TempDir::new().unwrap();
-        let agent_dir  = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
-        make_skill(global_dir.path(), "shared", &minimal_skill_md("Global version."));
-        make_skill(agent_dir.path(),  "shared", &minimal_skill_md("Agent version."));
+        make_skill(
+            global_dir.path(),
+            "shared",
+            &minimal_skill_md("Global version."),
+        );
+        make_skill(
+            agent_dir.path(),
+            "shared",
+            &minimal_skill_md("Agent version."),
+        );
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Agent,  agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
         ];
         let (skills, warnings) = discover_skills(&levels);
 
-        assert_eq!(skills.len(), 1, "only the more specific skill should survive");
-        assert_eq!(skills[0].level, HierarchyLevel::Agent,
-            "agent-level skill should override global");
+        assert_eq!(
+            skills.len(),
+            1,
+            "only the more specific skill should survive"
+        );
+        assert_eq!(
+            skills[0].level,
+            HierarchyLevel::Agent,
+            "agent-level skill should override global"
+        );
         assert_eq!(skills[0].description, "Agent version.");
         assert!(warnings.is_empty());
     }
@@ -790,14 +866,22 @@ The actual instructions.
     /// Unique skills from multiple levels are all returned.
     #[test]
     fn unique_skills_from_multiple_levels_all_returned() {
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
 
-        make_skill(global_dir.path(),  "global-only",  &minimal_skill_md("Global skill."));
-        make_skill(project_dir.path(), "project-only", &minimal_skill_md("Project skill."));
+        make_skill(
+            global_dir.path(),
+            "global-only",
+            &minimal_skill_md("Global skill."),
+        );
+        make_skill(
+            project_dir.path(),
+            "project-only",
+            &minimal_skill_md("Project skill."),
+        );
 
         let levels = [
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
         ];
         let (skills, warnings) = discover_skills(&levels);
@@ -825,8 +909,8 @@ The actual instructions.
     #[test]
     fn skills_within_level_sorted_alphabetically() {
         let dir = TempDir::new().unwrap();
-        make_skill(dir.path(), "zebra",  &minimal_skill_md("Z skill."));
-        make_skill(dir.path(), "alpha",  &minimal_skill_md("A skill."));
+        make_skill(dir.path(), "zebra", &minimal_skill_md("Z skill."));
+        make_skill(dir.path(), "alpha", &minimal_skill_md("A skill."));
         make_skill(dir.path(), "middle", &minimal_skill_md("M skill."));
 
         let (skills, _) = discover_skills(&[(HierarchyLevel::Global, dir.path())]);
@@ -840,24 +924,24 @@ The actual instructions.
     /// Sorting across levels: Agent skills sort before Project, Project before Global.
     #[test]
     fn skills_sorted_agent_before_project_before_global() {
-        let global_dir  = TempDir::new().unwrap();
+        let global_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
-        make_skill(global_dir.path(),  "g-skill", &minimal_skill_md("Global."));
+        make_skill(global_dir.path(), "g-skill", &minimal_skill_md("Global."));
         make_skill(project_dir.path(), "p-skill", &minimal_skill_md("Project."));
-        make_skill(agent_dir.path(),   "a-skill", &minimal_skill_md("Agent."));
+        make_skill(agent_dir.path(), "a-skill", &minimal_skill_md("Agent."));
 
         let levels = [
-            (HierarchyLevel::Global,  global_dir.path()),
+            (HierarchyLevel::Global, global_dir.path()),
             (HierarchyLevel::Project, project_dir.path()),
-            (HierarchyLevel::Agent,   agent_dir.path()),
+            (HierarchyLevel::Agent, agent_dir.path()),
         ];
         let (skills, _) = discover_skills(&levels);
 
         assert_eq!(skills.len(), 3);
-        assert_eq!(skills[0].level, HierarchyLevel::Agent,   "agent first");
+        assert_eq!(skills[0].level, HierarchyLevel::Agent, "agent first");
         assert_eq!(skills[1].level, HierarchyLevel::Project, "project second");
-        assert_eq!(skills[2].level, HierarchyLevel::Global,  "global last");
+        assert_eq!(skills[2].level, HierarchyLevel::Global, "global last");
     }
 }

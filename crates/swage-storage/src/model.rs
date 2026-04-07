@@ -148,14 +148,18 @@ pub struct Turn {
 
 /// A message within a thread.
 ///
-/// Messages are scoped to a thread rather than an individual turn. `position`
-/// is monotonically increasing within the thread so that the full conversation
-/// history can be reconstructed in order without reference to turns.
+/// Messages are scoped to a thread and may optionally reference the turn that
+/// produced them. `position` is monotonically increasing within the thread so
+/// that the full conversation history can be reconstructed in order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: Uuid,
     /// The thread this message belongs to.
     pub thread_id: Uuid,
+    /// The turn that produced this message, when known.
+    ///
+    /// Older rows and synthetic thread bootstrap messages may not have a turn.
+    pub turn_id: Option<Uuid>,
     pub role: String,
     pub content: String,
     /// Monotonically increasing position within the thread.
@@ -832,6 +836,8 @@ pub struct NewTurn {
 #[derive(Debug, Clone)]
 pub struct NewMessage {
     pub thread_id: Uuid,
+    /// The turn that produced this message, when known.
+    pub turn_id: Option<Uuid>,
     pub role: String,
     pub content: String,
     /// Monotonically increasing position within the thread.
@@ -1371,6 +1377,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            turn_id: Some(Uuid::new_v4()),
             role: "user".to_string(),
             content: "hello".to_string(),
             position: 0,
@@ -1401,6 +1408,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            turn_id: None,
             role: "assistant".to_string(),
             content: "sure".to_string(),
             position: 1,
@@ -1422,6 +1430,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let nm = NewMessage {
             thread_id,
+            turn_id: None,
             role: "user".to_string(),
             content: "test".to_string(),
             position: 0,
@@ -1435,6 +1444,7 @@ mod tests {
     fn new_message_is_debug_clone() {
         let original = NewMessage {
             thread_id: Uuid::new_v4(),
+            turn_id: Some(Uuid::new_v4()),
             role: "user".to_string(),
             content: "hi".to_string(),
             position: 0,

@@ -58,7 +58,10 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
 
     // Validate: only lowercase ASCII letters, digits, and hyphens are allowed.
     // Anything else (uppercase, `/`, `.`, etc.) is treated as a non-command.
-    if !candidate.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-')) {
+    if !candidate
+        .chars()
+        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+    {
         return SlashCommandResult::NotACommand;
     }
 
@@ -76,11 +79,11 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
 
 use std::path::Path;
 
-use uuid::Uuid;
 use swage_config::model::HierarchyLevel;
 use swage_config::skill::SkillDefinition;
-use swage_storage::SkillActivationStore;
 use swage_context::tokeniser::Tokeniser;
+use swage_storage::SkillActivationStore;
+use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -161,9 +164,12 @@ impl SkillManager {
         root: &Path,
         project_dir: &Path,
         agent_dir: Option<&Path>,
-    ) -> (Vec<swage_config::skill::SkillDefinition>, Vec<swage_config::skill::SkillWarning>) {
+    ) -> (
+        Vec<swage_config::skill::SkillDefinition>,
+        Vec<swage_config::skill::SkillWarning>,
+    ) {
         let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global,  root),
+            (HierarchyLevel::Global, root),
             (HierarchyLevel::Project, project_dir),
         ];
         if let Some(agent) = agent_dir {
@@ -193,10 +199,13 @@ impl SkillManager {
         // Count tokens and clone all metadata synchronously — before the first
         // await — so we don't hold &dyn Tokeniser across await points (Tokeniser
         // doesn't require Sync, so the reference would make the future !Send).
-        let token_count  = tokeniser.count_text(&skill.instructions);
-        let display_name = skill.display_name.clone().unwrap_or_else(|| skill.name.clone());
-        let name         = skill.name.clone();
-        let description  = skill.description.clone();
+        let token_count = tokeniser.count_text(&skill.instructions);
+        let display_name = skill
+            .display_name
+            .clone()
+            .unwrap_or_else(|| skill.name.clone());
+        let name = skill.name.clone();
+        let description = skill.description.clone();
 
         // Check before storing to give a clean AlreadyActive signal without
         // relying on the INSERT OR IGNORE idempotency as the primary feedback path.
@@ -207,7 +216,12 @@ impl SkillManager {
 
         storage.activate_skill(session_id, skill_name).await?;
 
-        Ok(SkillActivationResult::Activated { name, display_name, description, token_count })
+        Ok(SkillActivationResult::Activated {
+            name,
+            display_name,
+            description,
+            token_count,
+        })
     }
 
     /// Deactivate a skill for a session.
@@ -224,7 +238,9 @@ impl SkillManager {
     ) -> Result<(), SkillError> {
         if let Some(skill) = available.iter().find(|s| s.name == skill_name) {
             if skill.level == HierarchyLevel::Agent {
-                return Err(SkillError::AgentLevelCannotDeactivate(skill_name.to_string()));
+                return Err(SkillError::AgentLevelCannotDeactivate(
+                    skill_name.to_string(),
+                ));
             }
         }
 
@@ -242,7 +258,10 @@ impl SkillManager {
         available: &[SkillDefinition],
         storage: &dyn SkillActivationStore,
     ) -> Result<(), SkillError> {
-        for skill in available.iter().filter(|s| s.level == HierarchyLevel::Agent) {
+        for skill in available
+            .iter()
+            .filter(|s| s.level == HierarchyLevel::Agent)
+        {
             storage.activate_skill(session_id, &skill.name).await?;
         }
         Ok(())
@@ -299,7 +318,7 @@ mod tests {
     use swage_config::model::HierarchyLevel as CfgLevel;
     use swage_config::skill::SkillDefinition;
     use swage_context::tokeniser::TiktokenTokeniser;
-    use swage_storage::{NewProject, NewSession, ProjectStore, SessionStore, SqliteStorage};
+    use swage_storage::{NewSession, ProjectStore, SessionStore, SqliteStorage};
     use tempfile::TempDir;
 
     // ── Test helpers ─────────────────────────────────────────────────────────
@@ -359,7 +378,12 @@ mod tests {
             .unwrap();
 
         match result {
-            SkillActivationResult::Activated { name, display_name, description, token_count } => {
+            SkillActivationResult::Activated {
+                name,
+                display_name,
+                description,
+                token_count,
+            } => {
                 assert_eq!(name, "my-skill");
                 assert_eq!(display_name, "my-skill-display");
                 assert_eq!(description, "my-skill description");
@@ -415,7 +439,10 @@ mod tests {
             .unwrap();
 
         if let SkillActivationResult::Activated { display_name, .. } = result {
-            assert_eq!(display_name, "bare", "canonical name used when display_name is None");
+            assert_eq!(
+                display_name, "bare",
+                "canonical name used when display_name is None"
+            );
         } else {
             panic!("expected Activated");
         }
@@ -476,9 +503,18 @@ mod tests {
         let active = storage.list_active_skills(session_id).await.unwrap();
         let active_names: Vec<&str> = active.iter().map(|r| r.skill_name.as_str()).collect();
 
-        assert!(active_names.contains(&"agent-a"), "agent-a should be active");
-        assert!(active_names.contains(&"agent-b"), "agent-b should be active");
-        assert!(!active_names.contains(&"user-only"), "project skill should not be auto-activated");
+        assert!(
+            active_names.contains(&"agent-a"),
+            "agent-a should be active"
+        );
+        assert!(
+            active_names.contains(&"agent-b"),
+            "agent-b should be active"
+        );
+        assert!(
+            !active_names.contains(&"user-only"),
+            "project skill should not be auto-activated"
+        );
     }
 
     /// auto_activate_agent_skills is idempotent — calling twice doesn't error or duplicate.
@@ -547,13 +583,13 @@ mod tests {
     /// discover_available finds skills across the hierarchy levels.
     #[test]
     fn discover_available_finds_skills_across_levels() {
-        let root_dir    = TempDir::new().unwrap();
+        let root_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
-        let agent_dir   = TempDir::new().unwrap();
+        let agent_dir = TempDir::new().unwrap();
 
-        write_skill_md(root_dir.path(),    "global-skill",  "Global.");
+        write_skill_md(root_dir.path(), "global-skill", "Global.");
         write_skill_md(project_dir.path(), "project-skill", "Project.");
-        write_skill_md(agent_dir.path(),   "agent-skill",   "Agent.");
+        write_skill_md(agent_dir.path(), "agent-skill", "Agent.");
 
         let (skills, warnings) = SkillManager::discover_available(
             root_dir.path(),
@@ -568,17 +604,14 @@ mod tests {
     /// discover_available without agent_dir omits the agent level.
     #[test]
     fn discover_available_without_agent_dir_omits_agent_level() {
-        let root_dir    = TempDir::new().unwrap();
+        let root_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
 
-        write_skill_md(root_dir.path(),    "global-skill",  "Global.");
+        write_skill_md(root_dir.path(), "global-skill", "Global.");
         write_skill_md(project_dir.path(), "project-skill", "Project.");
 
-        let (skills, _) = SkillManager::discover_available(
-            root_dir.path(),
-            project_dir.path(),
-            None,
-        );
+        let (skills, _) =
+            SkillManager::discover_available(root_dir.path(), project_dir.path(), None);
 
         assert_eq!(skills.len(), 2);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
@@ -601,7 +634,10 @@ mod tests {
     fn skill_name_with_remaining_text() {
         let result = parse_slash_command("/code-review fix the bug");
         match result {
-            SlashCommandResult::SkillActivation { skill_name, remaining_text } => {
+            SlashCommandResult::SkillActivation {
+                skill_name,
+                remaining_text,
+            } => {
                 assert_eq!(skill_name, "code-review");
                 assert_eq!(remaining_text, Some("fix the bug".to_string()));
             }

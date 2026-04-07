@@ -1,11 +1,11 @@
-use std::fs;
-use std::path::Path;
+use crate::discovery;
 use crate::error::{ConfigError, ConfigProblem, ConfigProblemKind};
 use crate::instructions;
 use crate::merge::{self, PartialConfig};
 use crate::model::{HierarchyLevel, ResolvedConfig};
 use crate::validation;
-use crate::discovery;
+use std::fs;
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -35,7 +35,10 @@ fn try_load_file(path: &Path, problems: &mut Vec<ConfigProblem>) -> Option<Parti
 
     match validation::parse_and_validate(&content, path) {
         Ok(partial) => Some(partial),
-        Err(errs)   => { problems.extend(errs); None }
+        Err(errs) => {
+            problems.extend(errs);
+            None
+        }
     }
 }
 
@@ -98,16 +101,16 @@ pub fn load_resolved_config_from_with_team(
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Build paths for each hierarchy level.
-    let global_config  = root.join("config.toml");
-    let lens_config    = root.join("lenses").join("default").join("config.toml");
-    let project_dir    = root.join("projects").join(project);
+    let global_config = root.join("config.toml");
+    let lens_config = root.join("lenses").join("default").join("config.toml");
+    let project_dir = root.join("projects").join(project);
     let project_config = project_dir.join("config.toml");
-    let agent_dir      = project_dir.join("agents").join(agent);
-    let agent_config   = agent_dir.join("config.toml");
+    let agent_dir = project_dir.join("agents").join(agent);
+    let agent_config = agent_dir.join("config.toml");
 
-    let global_instrs  = root.join("instructions");
+    let global_instrs = root.join("instructions");
     let project_instrs = project_dir.join("instructions");
-    let agent_instrs   = agent_dir.join("instructions");
+    let agent_instrs = agent_dir.join("instructions");
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
@@ -148,7 +151,7 @@ pub fn load_resolved_config_from_with_team(
     // Build the team instructions path up front so it outlives the levels vec.
     let team_instrs = team_dir.as_ref().map(|td| td.join("instructions"));
     let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
-        (HierarchyLevel::Global,  global_instrs.as_path()),
+        (HierarchyLevel::Global, global_instrs.as_path()),
         (HierarchyLevel::Project, project_instrs.as_path()),
     ];
     if let Some(ref ti) = team_instrs {
@@ -157,7 +160,7 @@ pub fn load_resolved_config_from_with_team(
     levels.push((HierarchyLevel::Agent, agent_instrs.as_path()));
 
     match instructions::assemble_instructions(&levels) {
-        Ok(text)    => resolved.instructions = text,
+        Ok(text) => resolved.instructions = text,
         Err(problem) => return Err(ConfigError::new(vec![problem])),
     }
 
@@ -235,7 +238,7 @@ mod tests {
         }
         fs::create_dir_all(root.join("lenses/default")).unwrap();
         let project_dir = root.join("projects").join(project);
-        let agent_dir   = project_dir.join("agents").join(agent);
+        let agent_dir = project_dir.join("agents").join(agent);
         fs::create_dir_all(&agent_dir).unwrap();
         fs::create_dir_all(project_dir.join("teams")).unwrap();
         if let Some(content) = project_toml {
@@ -258,11 +261,13 @@ mod tests {
             Some("[server]\nport = 4000\n"),
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "proj", "bot")
-            .expect("should succeed");
+        let cfg = load_resolved_config_from(tmp.path(), "proj", "bot").expect("should succeed");
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
-        assert_eq!(cfg.server.port, 4000,        "agent overrides global port");
-        assert_eq!(cfg.provider.model, "claude-opus", "project model should apply");
+        assert_eq!(cfg.server.port, 4000, "agent overrides global port");
+        assert_eq!(
+            cfg.provider.model, "claude-opus",
+            "project model should apply"
+        );
     }
 
     #[test]
@@ -295,7 +300,10 @@ mod tests {
         );
 
         let result = load_resolved_config_from(tmp.path(), "proj", "bot");
-        assert!(result.is_err(), "malformed global config should produce Err");
+        assert!(
+            result.is_err(),
+            "malformed global config should produce Err"
+        );
     }
 
     #[test]
@@ -324,16 +332,23 @@ mod tests {
         // Add team config that overrides provider model.
         let team_dir = tmp.path().join("projects/proj/teams/review-team");
         fs::create_dir_all(&team_dir).unwrap();
-        fs::write(team_dir.join("config.toml"), "[provider]\nmodel = \"claude-haiku\"\n").unwrap();
+        fs::write(
+            team_dir.join("config.toml"),
+            "[provider]\nmodel = \"claude-haiku\"\n",
+        )
+        .unwrap();
 
-        let cfg = load_resolved_config_from_with_team(
-            tmp.path(), "proj", Some("review-team"), "bot",
-        ).expect("should succeed");
+        let cfg =
+            load_resolved_config_from_with_team(tmp.path(), "proj", Some("review-team"), "bot")
+                .expect("should succeed");
 
         // Agent overrides port (agent > team > project > global)
         assert_eq!(cfg.server.port, 4000, "agent should win on port");
         // Team overrides project model, agent doesn't set model so team wins
-        assert_eq!(cfg.provider.model, "claude-haiku", "team should override project model");
+        assert_eq!(
+            cfg.provider.model, "claude-haiku",
+            "team should override project model"
+        );
         // Global host survives (no override)
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
     }
@@ -351,13 +366,19 @@ mod tests {
         );
         let team_dir = tmp.path().join("projects/proj/teams/myteam");
         fs::create_dir_all(&team_dir).unwrap();
-        fs::write(team_dir.join("config.toml"), "[provider]\nmodel = \"team-model\"\n").unwrap();
+        fs::write(
+            team_dir.join("config.toml"),
+            "[provider]\nmodel = \"team-model\"\n",
+        )
+        .unwrap();
 
-        let cfg = load_resolved_config_from_with_team(
-            tmp.path(), "proj", Some("myteam"), "bot",
-        ).expect("should succeed");
+        let cfg = load_resolved_config_from_with_team(tmp.path(), "proj", Some("myteam"), "bot")
+            .expect("should succeed");
 
-        assert_eq!(cfg.provider.model, "agent-model", "agent should override team");
+        assert_eq!(
+            cfg.provider.model, "agent-model",
+            "agent should override team"
+        );
     }
 
     #[test]
@@ -376,9 +397,9 @@ mod tests {
         let team_dir = tmp.path().join("projects/proj/teams/empty-team");
         fs::create_dir_all(&team_dir).unwrap();
 
-        let cfg = load_resolved_config_from_with_team(
-            tmp.path(), "proj", Some("empty-team"), "default",
-        ).expect("should succeed");
+        let cfg =
+            load_resolved_config_from_with_team(tmp.path(), "proj", Some("empty-team"), "default")
+                .expect("should succeed");
         assert_eq!(cfg.server.port, 5000, "global port should survive");
     }
 
@@ -394,14 +415,15 @@ mod tests {
             None,
         );
 
-        let without_team = load_resolved_config_from(tmp.path(), "proj", "bot")
+        let without_team =
+            load_resolved_config_from(tmp.path(), "proj", "bot").expect("should succeed");
+        let with_none_team = load_resolved_config_from_with_team(tmp.path(), "proj", None, "bot")
             .expect("should succeed");
-        let with_none_team = load_resolved_config_from_with_team(
-            tmp.path(), "proj", None, "bot",
-        ).expect("should succeed");
 
-        assert_eq!(without_team, with_none_team,
-            "None team should produce same result as no-team function");
+        assert_eq!(
+            without_team, with_none_team,
+            "None team should produce same result as no-team function"
+        );
     }
 
     // --- Task overlay ---

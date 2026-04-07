@@ -150,6 +150,10 @@ impl ConversationState {
     }
 
     pub fn cancel_streaming(&mut self) {
+        // TODO Clear tool state on cancellation
+        // Cancelling only clears the text buffer, leaving active_tools/completed_tools to leak into
+        // the next successful complete_turn as stale tool entries from the cancelled turn.
+        // ---
         self.streaming_buffer.clear();
         self.is_streaming = false;
     }

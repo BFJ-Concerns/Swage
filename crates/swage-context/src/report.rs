@@ -40,7 +40,10 @@ impl AssemblyOutput {
     /// Use only in contexts where emptiness is a programming error rather than
     /// a runtime condition (e.g. the assembly engine itself, after validation).
     pub fn new_unchecked(messages: Vec<ChatMessage>, report: AssemblyReport) -> Self {
-        assert!(!messages.is_empty(), "AssemblyOutput requires at least one message");
+        assert!(
+            !messages.is_empty(),
+            "AssemblyOutput requires at least one message"
+        );
         Self { messages, report }
     }
 }
@@ -434,7 +437,9 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let decoded: ElementReport = serde_json::from_str(&json).unwrap();
 
-        let named = decoded.named_assembly.expect("named_assembly should be Some");
+        let named = decoded
+            .named_assembly
+            .expect("named_assembly should be Some");
         assert_eq!(named.assembly_name, "summarise");
         assert_eq!(named.resolved_level, "project");
         assert_eq!(named.child_elements.len(), 2);
@@ -465,16 +470,14 @@ mod tests {
         let nested = NamedAssemblyReport {
             assembly_name: "agent-context".to_string(),
             resolved_level: "agent".to_string(),
-            child_elements: vec![
-                ElementReport {
-                    name: "prompts".to_string(),
-                    source: "agent prompts".to_string(),
-                    token_count: 120,
-                    preview: Some("Be concise.".to_string()),
-                    priority: 100,
-                    named_assembly: None,
-                },
-            ],
+            child_elements: vec![ElementReport {
+                name: "prompts".to_string(),
+                source: "agent prompts".to_string(),
+                token_count: 120,
+                preview: Some("Be concise.".to_string()),
+                priority: 100,
+                named_assembly: None,
+            }],
         };
         let json = serde_json::to_string(&nested).unwrap();
         let decoded: NamedAssemblyReport = serde_json::from_str(&json).unwrap();

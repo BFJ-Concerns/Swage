@@ -20,9 +20,8 @@ pub fn resolve_workspace_root(config: &ResolvedConfig) -> PathBuf {
     let raw = PathBuf::from(&config.workspace.path);
     // Canonicalize resolves symlinks and makes the path absolute. If it fails
     // (e.g. the configured path doesn't exist), fall back to current dir.
-    raw.canonicalize().unwrap_or_else(|_| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    })
+    raw.canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
 }
 
 /// Validates that `requested` resolves to a path inside `workspace_root`.
@@ -51,20 +50,14 @@ pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, 
 
     // Reject traversals that escape the workspace.
     if !normalised.starts_with(&canonical_root) {
-        return Err(format!(
-            "Path is outside the workspace: {}",
-            requested
-        ));
+        return Err(format!("Path is outside the workspace: {}", requested));
     }
 
     // If the path exists on disk, canonicalize to catch symlink escapes.
     if normalised.exists() {
         let canonical = normalised.canonicalize().map_err(|e| e.to_string())?;
         if !canonical.starts_with(&canonical_root) {
-            return Err(format!(
-                "Path is outside the workspace: {}",
-                requested
-            ));
+            return Err(format!("Path is outside the workspace: {}", requested));
         }
         Ok(canonical)
     } else {
@@ -91,10 +84,7 @@ pub fn is_binary_content(bytes: &[u8]) -> bool {
     }
 
     // High ratio of non-UTF-8 bytes also suggests binary.
-    let non_utf8 = sample
-        .iter()
-        .filter(|&&b| b >= 0x80)
-        .count();
+    let non_utf8 = sample.iter().filter(|&&b| b >= 0x80).count();
 
     // Threshold: more than 30% non-ASCII bytes → binary.
     non_utf8 * 100 / sample.len() > 30
@@ -298,8 +288,10 @@ mod tests {
         let mut cfg = ResolvedConfig::default();
         cfg.workspace.path = dir.path().to_string_lossy().into_owned();
         let root = resolve_workspace_root(&cfg);
-        assert!(root.starts_with(dir.path().canonicalize().unwrap())
-            || root == dir.path().canonicalize().unwrap());
+        assert!(
+            root.starts_with(dir.path().canonicalize().unwrap())
+                || root == dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

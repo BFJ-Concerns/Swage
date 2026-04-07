@@ -231,12 +231,7 @@ impl AssemblyContext {
 
     /// Construct a context with pre-computed element data from the assembly
     /// engine. This is the primary constructor used at runtime.
-    pub fn with_data(
-        budget: usize,
-        model: String,
-        agent_id: String,
-        data: AssemblyData,
-    ) -> Self {
+    pub fn with_data(budget: usize, model: String, agent_id: String, data: AssemblyData) -> Self {
         let search_levels = data.search_levels.clone();
         Self {
             search_levels,
@@ -330,7 +325,11 @@ const INCLUDE_WRAPPER: &str = concat!(
     "_inc_ns = {}\n",
     "\n",
     "try:\n",
-    "    ", "exec", "(compile(_inc_code, _inc_path, '", "exec", "'), _inc_ns)\n",
+    "    ",
+    "exec",
+    "(compile(_inc_code, _inc_path, '",
+    "exec",
+    "'), _inc_ns)\n",
     "except BaseException:\n",
     "    _inc_err = _tb.format_exc()\n",
     "\n",
@@ -466,11 +465,7 @@ impl AssemblyContext {
     ///
     /// When both are specified, the tighter constraint wins.
     #[pyo3(signature = (budget=None, count=None))]
-    fn history_recent(
-        &self,
-        budget: Option<usize>,
-        count: Option<usize>,
-    ) -> PyResult<PyElement> {
+    fn history_recent(&self, budget: Option<usize>, count: Option<usize>) -> PyResult<PyElement> {
         let data = self.require_data("history_recent")?;
 
         let messages = &data.history_messages;
@@ -544,7 +539,11 @@ impl AssemblyContext {
                 // Take from the end of the older range (most recent older messages).
                 let mut selected = Vec::new();
                 let mut token_sum = 0usize;
-                for (msg, &tok) in older_messages.iter().zip(&per_msg_tokens[..older_end]).rev() {
+                for (msg, &tok) in older_messages
+                    .iter()
+                    .zip(&per_msg_tokens[..older_end])
+                    .rev()
+                {
                     if token_sum + tok > max_budget && !selected.is_empty() {
                         break;
                     }
@@ -606,7 +605,8 @@ impl AssemblyContext {
             // a circular include. Record a warning and bail out.
             if ctx.include_stack.contains(&name) {
                 let chain = ctx.include_stack.join(" \u{2192} "); // →
-                ctx.warnings.push(format!("circular reference: {chain} \u{2192} {name}"));
+                ctx.warnings
+                    .push(format!("circular reference: {chain} \u{2192} {name}"));
                 return Ok(());
             }
 
@@ -620,7 +620,8 @@ impl AssemblyContext {
             let resolved = match resolve_assembly(&name, &levels_ref) {
                 Some(r) => r,
                 None => {
-                    ctx.warnings.push(format!("named assembly '{name}' not found"));
+                    ctx.warnings
+                        .push(format!("named assembly '{name}' not found"));
                     return Ok(());
                 }
             };
@@ -681,7 +682,8 @@ impl AssemblyContext {
             ctx.include_stack.pop();
 
             if let Some(err) = inc_err {
-                ctx.warnings.push(format!("error in named assembly '{name}': {err}"));
+                ctx.warnings
+                    .push(format!("error in named assembly '{name}': {err}"));
             }
 
             // Group elements added during the include into a NamedAssemblyReport.
@@ -690,8 +692,7 @@ impl AssemblyContext {
                 ctx.element_reports.drain(report_snapshot..).collect();
 
             if !child_elements.is_empty() {
-                let total_tokens: usize =
-                    child_elements.iter().map(|e| e.token_count).sum();
+                let total_tokens: usize = child_elements.iter().map(|e| e.token_count).sum();
 
                 ctx.element_reports.push(ElementReport {
                     name: format!("assembly:{name}"),
@@ -964,10 +965,7 @@ mod tests {
             10,
             100,
         );
-        assert_eq!(
-            element.content_preview(),
-            Some("Be helpful and concise.")
-        );
+        assert_eq!(element.content_preview(), Some("Be helpful and concise."));
     }
 
     #[test]
@@ -988,13 +986,7 @@ mod tests {
 
     #[test]
     fn content_preview_none_for_empty_messages() {
-        let element = PyElement::new(
-            "memory".to_string(),
-            "source".to_string(),
-            vec![],
-            0,
-            50,
-        );
+        let element = PyElement::new("memory".to_string(), "source".to_string(), vec![], 0, 50);
         assert!(element.content_preview().is_none());
     }
 
@@ -1201,7 +1193,10 @@ mod tests {
             let ctx_py = Py::new(py, ctx).unwrap();
 
             // Simulate: we're already inside an include of "alpha".
-            ctx_py.borrow_mut(py).include_stack_mut().push("alpha".into());
+            ctx_py
+                .borrow_mut(py)
+                .include_stack_mut()
+                .push("alpha".into());
 
             // Trying to include "alpha" again should detect the cycle.
             let bound = ctx_py.bind(py);
@@ -1243,9 +1238,10 @@ mod tests {
     #[test]
     fn include_with_data_has_search_levels() {
         let mut data = sample_assembly_data();
-        data.search_levels = vec![
-            (swage_config::HierarchyLevel::Project, PathBuf::from("/tmp/project")),
-        ];
+        data.search_levels = vec![(
+            swage_config::HierarchyLevel::Project,
+            PathBuf::from("/tmp/project"),
+        )];
         let ctx = AssemblyContext::with_data(1000, "gpt-4".into(), "agent-1".into(), data);
         assert_eq!(ctx.search_levels.len(), 1);
     }

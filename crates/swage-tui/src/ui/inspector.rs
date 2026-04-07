@@ -5,10 +5,10 @@
 //! placeholder message when no assembly data is available yet.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     text::{Line, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::state::{ContextReport, ContextSection};
@@ -76,9 +76,7 @@ pub fn render_inspector(frame: &mut Frame, area: Rect, context_report: Option<&C
     frame.render_widget(block, area);
 
     let text: Text = match context_report {
-        None => Text::from(
-            "No context data yet — send a message to see the assembly report",
-        ),
+        None => Text::from("No context data yet — send a message to see the assembly report"),
         Some(report) => {
             // When budget is known, bars are relative to budget; otherwise
             // relative to the total so they still convey proportional size.
@@ -91,7 +89,9 @@ pub fn render_inspector(frame: &mut Frame, area: Rect, context_report: Option<&C
                 .collect();
 
             // Visual separator between sections and the summary.
-            lines.push(Line::from("─".repeat(inner.width.saturating_sub(2) as usize)));
+            lines.push(Line::from(
+                "─".repeat(inner.width.saturating_sub(2) as usize),
+            ));
 
             lines.push(Line::from(format_total_line(
                 report.total_tokens,
@@ -109,7 +109,7 @@ pub fn render_inspector(frame: &mut Frame, area: Rect, context_report: Option<&C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContextSection};
+    use crate::state::ContextSection;
 
     // --- make_bar ---
 

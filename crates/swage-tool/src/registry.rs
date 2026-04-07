@@ -7,7 +7,6 @@ use swage_core::ToolError;
 
 use crate::tool::Tool;
 
-
 /// Built-in tool names that cannot be overridden by user-registered tools.
 ///
 /// These names are reserved for Swage's built-in tool implementations.
@@ -61,9 +60,7 @@ impl ToolRegistry {
         if self.protected.contains(name) {
             return Err(ToolError::InvalidParameters {
                 name: name.to_owned(),
-                message: format!(
-                    "'{name}' is a protected built-in name and cannot be overridden"
-                ),
+                message: format!("'{name}' is a protected built-in name and cannot be overridden"),
             });
         }
 
@@ -163,7 +160,10 @@ mod tests {
 
     impl NamedTool {
         fn new(name: &'static str) -> Self {
-            Self { name, description: "A test tool." }
+            Self {
+                name,
+                description: "A test tool.",
+            }
         }
 
         fn with_description(name: &'static str, description: &'static str) -> Self {
@@ -272,7 +272,10 @@ mod tests {
     fn generate_schemas_contains_name_description_parameters() {
         let mut registry = ToolRegistry::new();
         registry
-            .register(Arc::new(NamedTool::with_description("echo", "Repeats input.")))
+            .register(Arc::new(NamedTool::with_description(
+                "echo",
+                "Repeats input.",
+            )))
             .unwrap();
 
         let schemas = registry.generate_schemas();

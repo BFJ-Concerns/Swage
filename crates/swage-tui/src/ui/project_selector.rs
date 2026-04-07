@@ -144,9 +144,8 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
             .map(|p| ListItem::new(p.name.as_str()))
             .collect();
 
-        let list = List::new(items).highlight_style(
-            Style::default().fg(Color::White).bg(Color::Blue),
-        );
+        let list =
+            List::new(items).highlight_style(Style::default().fg(Color::White).bg(Color::Blue));
 
         // Feed our tracked index into ratatui's ListState for rendering.
         let mut list_state = ListState::default();
@@ -158,11 +157,9 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
     }
 
     // ---- Footer hint ----
-    let hint = Paragraph::new(
-        Line::from("↑↓ Navigate  Enter Select  Esc Cancel"),
-    )
-    .style(Style::default().fg(Color::DarkGray))
-    .alignment(Alignment::Center);
+    let hint = Paragraph::new(Line::from("↑↓ Navigate  Enter Select  Esc Cancel"))
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
     frame.render_widget(hint, footer_area);
 }
 
@@ -372,7 +369,7 @@ mod tests {
 
     #[test]
     fn render_does_nothing_when_not_visible() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = ProjectSelectorState::new(); // is_visible = false
@@ -396,7 +393,7 @@ mod tests {
 
     #[test]
     fn render_shows_loading_state() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ProjectSelectorState::new();
@@ -420,7 +417,7 @@ mod tests {
 
     #[test]
     fn render_shows_error_state() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ProjectSelectorState::new();
@@ -444,7 +441,7 @@ mod tests {
 
     #[test]
     fn render_shows_project_list() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ProjectSelectorState::new();
@@ -460,14 +457,23 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("Alpha"), "project list must show 'Alpha'; got: {content:?}");
-        assert!(content.contains("Beta"), "project list must show 'Beta'; got: {content:?}");
-        assert!(content.contains("Gamma"), "project list must show 'Gamma'; got: {content:?}");
+        assert!(
+            content.contains("Alpha"),
+            "project list must show 'Alpha'; got: {content:?}"
+        );
+        assert!(
+            content.contains("Beta"),
+            "project list must show 'Beta'; got: {content:?}"
+        );
+        assert!(
+            content.contains("Gamma"),
+            "project list must show 'Gamma'; got: {content:?}"
+        );
     }
 
     #[test]
     fn render_shows_footer_hint() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ProjectSelectorState::new();
@@ -491,7 +497,7 @@ mod tests {
 
     #[test]
     fn render_shows_select_project_title() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ProjectSelectorState::new();

@@ -129,9 +129,11 @@ impl SwageBuilder {
     ///
     /// Returns [`SwageError`] wrapping a [`GatewayError`] if any required field is missing.
     pub fn build(self) -> Result<Agent, SwageError> {
-        let provider = self.provider.ok_or_else(|| SwageError::Gateway(GatewayError::ConfigError(
-            "provider is required — call .provider(p) before .build()".into(),
-        )))?;
+        let provider = self.provider.ok_or_else(|| {
+            SwageError::Gateway(GatewayError::ConfigError(
+                "provider is required — call .provider(p) before .build()".into(),
+            ))
+        })?;
 
         let agent_id = self.agent_id.ok_or_else(|| {
             SwageError::Gateway(GatewayError::ConfigError(

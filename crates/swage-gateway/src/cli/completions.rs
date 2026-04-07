@@ -52,9 +52,18 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         generate_to_writer(clap_complete::Shell::Zsh, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("start"),  "zsh completions should mention 'start'");
-        assert!(output.contains("stop"),   "zsh completions should mention 'stop'");
-        assert!(output.contains("status"), "zsh completions should mention 'status'");
+        assert!(
+            output.contains("start"),
+            "zsh completions should mention 'start'"
+        );
+        assert!(
+            output.contains("stop"),
+            "zsh completions should mention 'stop'"
+        );
+        assert!(
+            output.contains("status"),
+            "zsh completions should mention 'status'"
+        );
     }
 
     // Fish completions should include the completions subcommand itself.
@@ -79,7 +88,10 @@ mod tests {
         ] {
             let mut buf = Vec::<u8>::new();
             generate_to_writer(shell, &mut buf);
-            assert!(!buf.is_empty(), "completions output for {shell:?} should not be empty");
+            assert!(
+                !buf.is_empty(),
+                "completions output for {shell:?} should not be empty"
+            );
         }
     }
 
