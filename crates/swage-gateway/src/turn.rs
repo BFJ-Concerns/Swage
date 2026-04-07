@@ -6,7 +6,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, GatewayError, Role};
-use swage_storage::model::{NewAgentMessage, NewMessage, NewTurn, TurnState};
+use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_storage::model::{AppendMessage, InboundAudit, NewAgentMessage, NewTurn, TurnState};
 
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 use swage_context::element::ContextElement;
@@ -251,13 +252,76 @@ fn load_session_config(
     state: &AppState,
     project_slug: &str,
     agent_id: &str,
-) -> swage_config::ResolvedConfig {
-    swage_config::load_resolved_config(project_slug, agent_id).unwrap_or_else(|error| {
-        tracing::warn!(
-            "failed to load project config for '{project_slug}' agent '{agent_id}', using startup config: {error}"
-        );
-        state.config.clone()
-    })
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    let Ok(root) = swage_config::discovery::resolve_root() else {
+        return Ok(state.config.clone());
+    };
+
+    let project_dir = root.join("projects").join(project_slug);
+    let project_config_exists = project_dir.join("config.toml").exists();
+    let agent_config_exists = project_dir
+        .join("agents")
+        .join(agent_id)
+        .join("config.toml")
+        .exists();
+
+    if !project_config_exists && !agent_config_exists {
+        return Ok(state.config.clone());
+    }
+
+    swage_config::load_resolved_config_from(&root, project_slug, agent_id)
+        .map_err(|error| GatewayError::ConfigError(error.to_string()))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BeforeInboundDispatchResult {
+    pub canonical_content: String,
+    pub modified_by_hooks: Vec<String>,
+}
+
+fn map_hook_block(reason: String) -> GatewayError {
+    GatewayError::ConfigError(format!(
+        "BeforeInbound hook blocked inbound content: {reason}"
+    ))
+}
+
+pub(crate) async fn dispatch_before_inbound(
+    hook_registry: Option<&Arc<HookRegistry>>,
+    raw_content: &str,
+) -> Result<BeforeInboundDispatchResult, GatewayError> {
+    let Some(hook_registry) = hook_registry else {
+        return Ok(BeforeInboundDispatchResult {
+            canonical_content: raw_content.to_string(),
+            modified_by_hooks: Vec::new(),
+        });
+    };
+
+    let traced = hook_registry
+        .dispatch_traced(HookEvent::BeforeInbound {
+            content: raw_content.to_string(),
+        })
+        .await;
+
+    match traced.outcome {
+        HookOutcome::Continue => Ok(BeforeInboundDispatchResult {
+            canonical_content: raw_content.to_string(),
+            modified_by_hooks: traced.modified_by_hooks,
+        }),
+        HookOutcome::ContinueModified(modified) => match *modified {
+            HookEvent::BeforeInbound { content } => Ok(BeforeInboundDispatchResult {
+                canonical_content: content,
+                modified_by_hooks: traced.modified_by_hooks,
+            }),
+            _ => Ok(BeforeInboundDispatchResult {
+                canonical_content: raw_content.to_string(),
+                modified_by_hooks: traced.modified_by_hooks,
+            }),
+        },
+        HookOutcome::Block(reason) => Err(map_hook_block(reason)),
+        HookOutcome::RequestApproval { .. } => Err(GatewayError::ConfigError(
+            "BeforeInbound hooks cannot request approval".to_string(),
+        )),
+    }
 }
 
 fn resolve_swage_root() -> Option<PathBuf> {
@@ -334,7 +398,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let executor = DelegationExecutor {
             storage: self.state.storage.clone(),
             provider: self.state.provider.clone(),
-            hook_registry: None,
+            hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(build_approval_registrar(
                 self.state.approval_channels.clone(),
@@ -484,10 +548,10 @@ pub(crate) async fn process_turn_with_existing_turn(
         .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
     let project_slug = project.slug.clone();
 
-    // Load project-specific config (model, instructions, etc.). Falls back to
-    // the startup config when no project-level config.toml exists, which is
-    // the normal case for most projects.
-    let config = load_session_config(state, &project_slug, &session.agent_id);
+    // Load project-specific config. Missing project config falls back to the
+    // startup config, but present invalid config fails the turn before any
+    // user message is written.
+    let config = load_session_config(state, &project_slug, &session.agent_id)?;
 
     // Resolve the swage root once — skill discovery, project memory loading,
     // and assembly search-path construction all depend on it.
@@ -551,8 +615,8 @@ pub(crate) async fn process_turn_with_existing_turn(
         vec![]
     };
 
-    // Step 4: Ensure the turn exists before we persist any messages so every
-    // message in this turn can carry an honest turn_id.
+    // Step 4: Ensure the turn exists before any hook execution so the raw
+    // input is recorded durably even when inbound processing blocks the turn.
     let prepared_turn_id = match existing_turn_id {
         Some(turn_id) => turn_id,
         None => {
@@ -562,6 +626,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                     thread_id,
                     agent_id: session.agent_id.clone(),
                     state: TurnState::Pending,
+                    user_input: Some(content.clone()),
                     parent_turn_id: None,
                 })
                 .await?
@@ -576,31 +641,44 @@ pub(crate) async fn process_turn_with_existing_turn(
         turns.insert(session_id, cancel_token.clone());
     }
 
-    // Step 6: Store the user message.
-    // Position is the current count of messages in the thread.
-    let user_position = state
-        .storage
-        .list_messages_by_thread(thread_id)
-        .await
-        .map(|msgs| msgs.len() as i32)
-        .unwrap_or_else(|e| {
-            tracing::warn!("failed to read message count for position, defaulting to 0: {e}");
-            0
-        });
+    // Step 6: Canonicalise inbound content before persisting any thread message.
+    let before_inbound = match dispatch_before_inbound(state.hook_registry.as_ref(), &content).await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            state
+                .storage
+                .update_turn_state(prepared_turn_id, TurnState::Failed)
+                .await?;
+            return Err(error);
+        }
+    };
+
+    if !before_inbound.modified_by_hooks.is_empty() {
+        state
+            .storage
+            .update_inbound_audit(
+                prepared_turn_id,
+                &InboundAudit {
+                    canonical_input: before_inbound.canonical_content.clone(),
+                    modified_by_hooks: before_inbound.modified_by_hooks.clone(),
+                },
+            )
+            .await?;
+    }
 
     state
         .storage
-        .create_message(NewMessage {
+        .append_message(AppendMessage {
             thread_id,
             turn_id: Some(prepared_turn_id),
             role: Role::User.to_string(),
-            content: content.clone(),
-            position: user_position,
+            content: before_inbound.canonical_content.clone(),
             agent_id: session.agent_id.clone(),
         })
         .await?;
 
-    // Steps 7–8: Assemble context via the swage-context assembly engine.
+    // Steps 8–9: Assemble context via the swage-context assembly engine.
     // Loads thread history, project memory, and constructs typed elements.
     // Runs fail-open assembly: custom Python configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
@@ -609,9 +687,14 @@ pub(crate) async fn process_turn_with_existing_turn(
         .into_iter()
         .map(|m| {
             let role = match m.role.as_str() {
+                "user" => Role::User,
                 "assistant" => Role::Assistant,
                 "system" => Role::System,
-                _ => Role::User,
+                "tool" => Role::Tool,
+                unexpected_role => {
+                    tracing::warn!(role = %unexpected_role, "unexpected history role in gateway assembly; treating as user");
+                    Role::User
+                }
             };
             ChatMessage::new(role, m.content)
         })
@@ -698,17 +781,18 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Step 10: Build the Agent that will execute the turn.
     let agent_config =
         build_agent_config(session.agent_id.clone(), &config, output_schema_override);
-    let agent = match AgentBuilder::new()
+    let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
         .storage(state.storage.clone())
         .tool_dispatcher(dispatcher)
         .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
         .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
-        .project_id(project_id)
-        .context_transfer_config(config.communication.context_transfer.clone())
-        .build()
-    {
+        .context_transfer_config(config.communication.context_transfer.clone());
+    if let Some(hook_registry) = state.hook_registry.clone() {
+        agent_builder = agent_builder.hook_registry(hook_registry);
+    }
+    let agent = match agent_builder.build() {
         Ok(a) => a,
         Err(e) => {
             tracing::error!(error = %e, "failed to build agent for turn");
@@ -727,9 +811,13 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     // Step 11: Create the TurnRequest with assembled context and cancellation.
     let turn_request = TurnRequest {
-        session_id,
-        thread_id,
-        user_message: content,
+        execution: swage_agent::context::TurnExecutionContext {
+            session_id,
+            thread_id,
+            turn_id: prepared_turn_id,
+            project_id: Some(project_id),
+        },
+        user_message: before_inbound.canonical_content.clone(),
         assembled_context: assembled_messages,
         parent_turn_id: None,
         existing_turn_id: Some(prepared_turn_id),
@@ -750,7 +838,7 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     // Captures the turn_id emitted by TurnStarted so the agent result match
     // can use it for persistence and logging after the event loop finishes.
-    let mut turn_id = Uuid::nil();
+    let mut turn_id: Option<Uuid> = None;
 
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
@@ -759,16 +847,16 @@ pub(crate) async fn process_turn_with_existing_turn(
             AgentEvent::TurnStarted {
                 turn_id: started_id,
             } => {
-                turn_id = started_id;
+                turn_id = Some(started_id);
                 // Record the turn_id in the tracing span now that the agent
                 // has created the Turn record.
-                tracing::Span::current().record("turn_id", turn_id.to_string());
+                tracing::Span::current().record("turn_id", started_id.to_string());
                 tracing::debug!("processing turn (agent-delegated)");
 
                 // Persist the context snapshot now that we have a turn_id.
                 if let Err(e) = state
                     .storage
-                    .store_snapshot(turn_id, &report_json.to_string())
+                    .store_snapshot(started_id, &report_json.to_string())
                     .await
                 {
                     tracing::warn!(error = %e, "failed to persist context snapshot");
@@ -776,7 +864,7 @@ pub(crate) async fn process_turn_with_existing_turn(
 
                 // Deliver the ContextAssembled event (subscription-gated).
                 let assembled_event = ServerEvent::ContextAssembled {
-                    turn_id,
+                    turn_id: started_id,
                     report: report_json.clone(),
                 };
                 if subscription.lock().await.should_deliver(&assembled_event) {
@@ -924,8 +1012,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                 // We use turn_id for parent_turn_id; child_turn_id is unknown
                 // at this point (the child turn hasn't been created yet).
                 let _ = ws_tx.send(ServerEvent::DelegationStarted {
-                    parent_turn_id: turn_id,
-                    child_turn_id: Uuid::nil(),
+                    parent_turn_id: turn_id.unwrap_or(prepared_turn_id),
+                    child_turn_id: None,
                     target_agent_id,
                 });
             }
@@ -934,8 +1022,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                 success,
             } => {
                 let _ = ws_tx.send(ServerEvent::DelegationCompleted {
-                    parent_turn_id: turn_id,
-                    child_turn_id: Uuid::nil(),
+                    parent_turn_id: turn_id.unwrap_or(prepared_turn_id),
+                    child_turn_id: None,
                     target_agent_id,
                     success,
                 });
@@ -977,7 +1065,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             // The agent already emitted AgentEvent::OutputSchemaFailed through
             // the event channel (forwarded above). Log for server visibility but
             // do not send an additional error to the client.
-            tracing::info!(%turn_id, "output schema validation exhausted all retries");
+            tracing::info!(turn_id = ?turn_id, "output schema validation exhausted all retries");
         }
         Ok(Err(agent_err)) => {
             // The agent already sent an Error event through the channel
@@ -1112,8 +1200,9 @@ pub(crate) mod tests {
     use swage_provider::LlmProvider;
     use swage_storage::{
         model::{
-            ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
-            Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+            ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
+            EdgeEvaluation, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
+            NewMessage,
             NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
             NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
             Project, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
@@ -1332,6 +1421,7 @@ pub(crate) mod tests {
             let p = Project {
                 id: Uuid::new_v4(),
                 name: project.name,
+                is_default: false,
                 slug: project.slug,
                 workspace_path: project.workspace_path,
                 created_at: chrono::Utc::now(),
@@ -1357,18 +1447,28 @@ pub(crate) mod tests {
         }
 
         async fn get_or_create_default(&self) -> Result<Project, StorageError> {
-            if let Some(p) = self.get_by_name("default").await? {
+            if let Some(p) = self
+                .db
+                .lock()
+                .await
+                .projects
+                .values()
+                .find(|project| project.is_default)
+                .cloned()
+            {
                 return Ok(p);
             }
-            ProjectStore::create(
-                self,
-                NewProject {
-                    name: "default".to_string(),
-                    slug: "default".to_string(),
-                    workspace_path: None,
-                },
-            )
-            .await
+            let project = Project {
+                id: Uuid::new_v4(),
+                name: "default".to_string(),
+                is_default: true,
+                slug: "default".to_string(),
+                workspace_path: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.projects.insert(project.id, project.clone());
+            Ok(project)
         }
 
         async fn list_all(&self) -> Result<Vec<Project>, StorageError> {
@@ -2028,7 +2128,8 @@ pub(crate) mod tests {
                 thread_id: turn.thread_id,
                 agent_id: turn.agent_id,
                 state: turn.state,
-                user_input: None,
+                user_input: turn.user_input,
+                inbound_audit: None,
                 assistant_response: None,
                 input_tokens: None,
                 output_tokens: None,
@@ -2135,6 +2236,17 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+
+        async fn update_inbound_audit(
+            &self,
+            id: Uuid,
+            audit: &swage_storage::InboundAudit,
+        ) -> Result<(), StorageError> {
+            if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+                t.inbound_audit = Some(audit.clone());
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -2174,6 +2286,31 @@ pub(crate) mod tests {
             };
             self.db.lock().await.messages.push(m.clone());
             Ok(m)
+        }
+
+        async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError> {
+            let mut db = self.db.lock().await;
+            let position = db
+                .messages
+                .iter()
+                .filter(|existing| existing.thread_id == message.thread_id)
+                .map(|existing| existing.position)
+                .max()
+                .map_or(0, |max_position| max_position + 1);
+            let created = Message {
+                id: Uuid::new_v4(),
+                thread_id: message.thread_id,
+                turn_id: message.turn_id,
+                role: message.role,
+                content: message.content,
+                position,
+                agent_id: message.agent_id,
+                tool_call_id: None,
+                tool_name: None,
+                created_at: chrono::Utc::now(),
+            };
+            db.messages.push(created.clone());
+            Ok(created)
         }
 
         async fn list_messages_by_thread(
@@ -2651,6 +2788,7 @@ pub(crate) mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -2705,6 +2843,7 @@ pub(crate) mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -2829,6 +2968,7 @@ pub(crate) mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -2938,6 +3078,7 @@ pub(crate) mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -3039,6 +3180,7 @@ pub(crate) mod tests {
             )
                 as Arc<dyn crate::tool::Tool>])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -3396,6 +3538,7 @@ pub(crate) mod tests {
             swage_config::ResolvedConfig::default(),
             dispatcher,
             None,
+            None,
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3616,6 +3759,7 @@ pub(crate) mod tests {
                 capture_tool as Arc<dyn crate::tool::Tool>,
             ])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -3700,6 +3844,7 @@ pub(crate) mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -3868,6 +4013,7 @@ pub(crate) mod tests {
             )
                 as Arc<dyn crate::tool::Tool>])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -4032,6 +4178,7 @@ pub(crate) mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(tools)),
             sandbox: Some(sandbox),
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(16);

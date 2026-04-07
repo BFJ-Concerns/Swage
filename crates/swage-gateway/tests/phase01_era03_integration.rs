@@ -141,6 +141,7 @@ async fn start_test_server_with_config(
         config,
         dispatcher,
         None,
+        None,
     );
     let router = build_router(state);
 

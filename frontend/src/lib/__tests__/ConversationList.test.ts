@@ -40,7 +40,8 @@ function makeStore(
     selectConversation: vi.fn().mockResolvedValue(undefined),
     createConversation: vi.fn().mockResolvedValue(undefined),
     deleteConversation: vi.fn().mockResolvedValue(undefined),
-    addMessage: vi.fn(),
+    appendOptimisticUserMessage: vi.fn(),
+    appendAssistantMessage: vi.fn(),
     refreshActiveConversation: vi.fn().mockResolvedValue(undefined),
   };
 }

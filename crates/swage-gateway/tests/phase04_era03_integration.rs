@@ -50,6 +50,7 @@ async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uu
             thread_id: thread.id,
             agent_id: agent_id.to_string(),
             state: TurnState::Processing,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
@@ -155,6 +156,7 @@ async fn delegation_creates_child_turn_with_parent() {
             thread_id: child_thread.id,
             agent_id: "agent-b".into(),
             state: TurnState::Processing,
+            user_input: None,
             parent_turn_id: Some(sender_turn_id),
         })
         .await

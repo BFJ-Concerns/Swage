@@ -242,6 +242,7 @@ mod tests {
                 thread_id,
                 agent_id: "test-agent".into(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

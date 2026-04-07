@@ -7,78 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::context::TurnExecutionContext;
 use swage_core::ChatMessage;
 use swage_storage::TurnState;
-
-/// A message from the caller into the agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboundMessage {
-    /// The user's message text.
-    pub message: String,
-    /// Target session.
-    pub session_id: Uuid,
-    /// Target thread within session; defaults to the active thread if absent.
-    pub thread_id: Option<Uuid>,
-}
-
-#[cfg(test)]
-mod inbound_message_tests {
-    use super::*;
-
-    #[test]
-    fn round_trip_with_thread_id() {
-        let original = InboundMessage {
-            message: "Hello, agent!".into(),
-            session_id: Uuid::new_v4(),
-            thread_id: Some(Uuid::new_v4()),
-        };
-        let json = serde_json::to_string(&original).expect("serialise");
-        let decoded: InboundMessage = serde_json::from_str(&json).expect("deserialise");
-        assert_eq!(decoded.message, original.message);
-        assert_eq!(decoded.session_id, original.session_id);
-        assert_eq!(decoded.thread_id, original.thread_id);
-    }
-
-    #[test]
-    fn round_trip_without_thread_id() {
-        let original = InboundMessage {
-            message: "No thread specified".into(),
-            session_id: Uuid::new_v4(),
-            thread_id: None,
-        };
-        let json = serde_json::to_string(&original).expect("serialise");
-        let decoded: InboundMessage = serde_json::from_str(&json).expect("deserialise");
-        assert_eq!(decoded.message, original.message);
-        assert_eq!(decoded.session_id, original.session_id);
-        assert!(decoded.thread_id.is_none());
-    }
-
-    #[test]
-    fn all_fields_present_in_json() {
-        let session_id = Uuid::new_v4();
-        let thread_id = Uuid::new_v4();
-        let msg = InboundMessage {
-            message: "test".into(),
-            session_id,
-            thread_id: Some(thread_id),
-        };
-        let json = serde_json::to_string(&msg).expect("serialise");
-        // All three fields must appear in the output.
-        assert!(json.contains("\"message\""), "missing message field");
-        assert!(json.contains("\"session_id\""), "missing session_id field");
-        assert!(json.contains("\"thread_id\""), "missing thread_id field");
-    }
-
-    #[test]
-    fn clone_is_equal() {
-        let msg = InboundMessage {
-            message: "clone me".into(),
-            session_id: Uuid::new_v4(),
-            thread_id: None,
-        };
-        assert_eq!(format!("{:?}", msg), format!("{:?}", msg.clone()));
-    }
-}
 
 /// A successful response from the agent to the caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,17 +137,13 @@ mod outbound_message_tests {
 ///
 /// The gateway pre-assembles context from the context engine and passes it here,
 /// so the agent does not rebuild context from thread history in the streaming path.
-/// The user message is already persisted by the gateway. The agent creates the
-/// turn record by default, but callers may also supply a pre-created pending
-/// turn to reuse (for example, the async REST polling path).
+/// The user message is already canonicalised. The agent creates the turn record
+/// by default, but callers may also supply a pre-created pending turn to reuse.
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-    /// Target session for this turn.
-    pub session_id: Uuid,
-    /// Target thread within the session. Required — the streaming path expects
-    /// a specific thread, unlike `InboundMessage` which falls back to the active thread.
-    pub thread_id: Uuid,
-    /// The user's message text, carried for hook invocations.
+    /// Canonical execution metadata for this turn.
+    pub execution: TurnExecutionContext,
+    /// Canonical user input for this turn.
     pub user_message: String,
     /// Pre-assembled message context from the context engine.
     pub assembled_context: Vec<ChatMessage>,
@@ -239,8 +166,12 @@ mod turn_request_tests {
     #[test]
     fn test_turn_request_constructible() {
         let req = TurnRequest {
-            session_id: uuid::Uuid::new_v4(),
-            thread_id: uuid::Uuid::new_v4(),
+            execution: TurnExecutionContext {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                turn_id: uuid::Uuid::new_v4(),
+                project_id: Some(uuid::Uuid::new_v4()),
+            },
             user_message: "hello".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
@@ -252,26 +183,32 @@ mod turn_request_tests {
     }
 
     #[test]
-    fn test_thread_id_is_required() {
-        // thread_id is Uuid (not Option<Uuid>) — must be explicitly provided.
+    fn test_execution_context_is_required() {
         let req = TurnRequest {
-            session_id: uuid::Uuid::new_v4(),
-            thread_id: uuid::Uuid::new_v4(),
+            execution: TurnExecutionContext {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                turn_id: uuid::Uuid::new_v4(),
+                project_id: None,
+            },
             user_message: "test".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
             existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
-        // A non-nil UUID means it was actually provided.
-        assert!(!req.thread_id.is_nil());
+        assert!(!req.execution.thread_id.is_nil());
     }
 
     #[test]
     fn test_cloneable() {
         let req = TurnRequest {
-            session_id: uuid::Uuid::new_v4(),
-            thread_id: uuid::Uuid::new_v4(),
+            execution: TurnExecutionContext {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                turn_id: uuid::Uuid::new_v4(),
+                project_id: Some(uuid::Uuid::new_v4()),
+            },
             user_message: "clone me".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
@@ -280,8 +217,8 @@ mod turn_request_tests {
         };
         let cloned = req.clone();
         assert_eq!(cloned.user_message, req.user_message);
-        assert_eq!(cloned.session_id, req.session_id);
-        assert_eq!(cloned.thread_id, req.thread_id);
+        assert_eq!(cloned.execution.session_id, req.execution.session_id);
+        assert_eq!(cloned.execution.thread_id, req.execution.thread_id);
     }
 
     #[test]
@@ -289,8 +226,12 @@ mod turn_request_tests {
         // CancellationToken::clone() produces a linked token — both cancel together.
         let token = CancellationToken::new();
         let req = TurnRequest {
-            session_id: uuid::Uuid::new_v4(),
-            thread_id: uuid::Uuid::new_v4(),
+            execution: TurnExecutionContext {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                turn_id: uuid::Uuid::new_v4(),
+                project_id: None,
+            },
             user_message: "cancel test".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,
@@ -304,8 +245,12 @@ mod turn_request_tests {
     #[test]
     fn test_debug_format() {
         let req = TurnRequest {
-            session_id: uuid::Uuid::new_v4(),
-            thread_id: uuid::Uuid::new_v4(),
+            execution: TurnExecutionContext {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                turn_id: uuid::Uuid::new_v4(),
+                project_id: None,
+            },
             user_message: "debug".to_string(),
             assembled_context: vec![],
             parent_turn_id: None,

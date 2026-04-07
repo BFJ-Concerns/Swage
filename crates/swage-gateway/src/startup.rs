@@ -139,6 +139,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         config.clone(),
         tool_dispatcher,
         sandbox,
+        None,
     );
     let router = crate::server::build_router(state.clone());
 

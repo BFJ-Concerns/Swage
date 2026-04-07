@@ -389,6 +389,7 @@ mod tests {
                     thread_id,
                     agent_id: "gateway".to_string(),
                     state: TurnState::Processing,
+                    user_input: None,
                     parent_turn_id: None,
                 })
                 .await
@@ -401,6 +402,7 @@ mod tests {
                     thread_id,
                     agent_id: "gateway".to_string(),
                     state: TurnState::Delegating,
+                    user_input: None,
                     parent_turn_id: None,
                 })
                 .await
@@ -415,6 +417,7 @@ mod tests {
                     thread_id,
                     agent_id: "gateway".to_string(),
                     state: TurnState::Processing,
+                    user_input: None,
                     parent_turn_id: None,
                 })
                 .await
@@ -529,6 +532,7 @@ mod tests {
                 thread_id: thread.id,
                 agent_id: "reviewer".to_string(),
                 state: TurnState::Delegating,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -594,6 +598,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

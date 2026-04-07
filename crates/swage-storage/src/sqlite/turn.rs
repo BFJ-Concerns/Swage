@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewTurn, Turn, TurnState};
+use crate::model::{InboundAudit, NewTurn, Turn, TurnState};
 use crate::sqlite::SqliteStorage;
 use crate::store::TurnStore;
 
@@ -43,30 +43,42 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 // Row mapping
 // ---------------------------------------------------------------------------
 
-/// Column order: id, thread_id, agent_id, user_input, assistant_response,
-/// input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-/// structured_output, parent_turn_id
+/// Column order: id, thread_id, agent_id, user_input, inbound_audit,
+/// assistant_response, input_tokens, output_tokens, state, created_at,
+/// completed_at, cost_microcents, structured_output, parent_turn_id
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
-    let state_str: String = row.get(7)?;
-    let created: String = row.get(8)?;
-    let completed: Option<String> = row.get(9)?;
+    let inbound_audit_text: Option<String> = row.get(4)?;
+    let inbound_audit = inbound_audit_text
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(ParseError(e.to_string())),
+            )
+        })?;
+    let state_str: String = row.get(8)?;
+    let created: String = row.get(9)?;
+    let completed: Option<String> = row.get(10)?;
     // structured_output is stored as a JSON text string; deserialise on read.
-    let structured_output_text: Option<String> = row.get(11)?;
+    let structured_output_text: Option<String> = row.get(12)?;
     let structured_output = structured_output_text
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
         .map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(
-                11,
+                12,
                 rusqlite::types::Type::Text,
                 Box::new(ParseError(e.to_string())),
             )
         })?;
-    let parent_turn_id_str: Option<String> = row.get(12)?;
+    let parent_turn_id_str: Option<String> = row.get(13)?;
     let parent_turn_id = parent_turn_id_str.as_deref().map(parse_uuid).transpose()?;
 
     Ok(Turn {
@@ -75,16 +87,17 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         agent_id,
         state: state_str.parse::<TurnState>().map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(
-                7,
+                8,
                 rusqlite::types::Type::Text,
                 Box::new(ParseError(e)),
             )
         })?,
         user_input: row.get(3)?,
-        assistant_response: row.get(4)?,
-        input_tokens: row.get(5)?,
-        output_tokens: row.get(6)?,
-        cost_microcents: row.get(10)?,
+        inbound_audit,
+        assistant_response: row.get(5)?,
+        input_tokens: row.get(6)?,
+        output_tokens: row.get(7)?,
+        cost_microcents: row.get(11)?,
         structured_output,
         parent_turn_id,
         created_at: parse_dt(&created)?,
@@ -108,12 +121,13 @@ impl TurnStore for SqliteStorage {
             let parent_str = turn.parent_turn_id.map(|p| p.to_string());
 
             conn.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, state, created_at, parent_turn_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     id.to_string(),
                     turn.thread_id.to_string(),
                     &turn.agent_id,
+                    &turn.user_input,
                     &state_str,
                     &now_str,
                     &parent_str,
@@ -125,7 +139,8 @@ impl TurnStore for SqliteStorage {
                 thread_id: turn.thread_id,
                 agent_id: turn.agent_id,
                 state: turn.state,
-                user_input: None,
+                user_input: turn.user_input,
+                inbound_audit: None,
                 assistant_response: None,
                 input_tokens: None,
                 output_tokens: None,
@@ -142,7 +157,7 @@ impl TurnStore for SqliteStorage {
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, thread_id, agent_id, user_input, assistant_response,
+                "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id
                  FROM turns WHERE id = ?1",
@@ -157,7 +172,7 @@ impl TurnStore for SqliteStorage {
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, thread_id, agent_id, user_input, assistant_response,
+                "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id
                  FROM turns WHERE thread_id = ?1
@@ -213,7 +228,7 @@ impl TurnStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, thread_id, agent_id, user_input, assistant_response,
+                "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
@@ -230,6 +245,25 @@ impl TurnStore for SqliteStorage {
             conn.execute(
                 "UPDATE turns SET assistant_response = ?1 WHERE id = ?2",
                 params![&response, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_inbound_audit(
+        &self,
+        id: Uuid,
+        inbound_audit: &InboundAudit,
+    ) -> Result<(), StorageError> {
+        let inbound_audit_json =
+            serde_json::to_string(inbound_audit).map_err(|error| StorageError::Serialisation {
+                message: format!("failed to serialise inbound_audit: {error}"),
+            })?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET inbound_audit = ?1 WHERE id = ?2",
+                params![inbound_audit_json, id.to_string()],
             )?;
             Ok(())
         })
@@ -335,6 +369,7 @@ mod tests {
             thread_id,
             agent_id: "test-agent".to_string(),
             state: TurnState::Pending,
+            user_input: None,
             parent_turn_id: None,
         }
     }
@@ -417,6 +452,7 @@ mod tests {
                 thread_id,
                 agent_id: "agent-a".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -426,6 +462,7 @@ mod tests {
                 thread_id,
                 agent_id: "agent-b".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -442,6 +479,7 @@ mod tests {
                 thread_id,
                 agent_id: "agent-a".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -457,6 +495,7 @@ mod tests {
                 thread_id,
                 agent_id: "agent-a".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

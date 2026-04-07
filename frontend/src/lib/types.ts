@@ -9,6 +9,7 @@
 export interface Project {
   id: string;
   name: string;
+  is_default: boolean;
   slug: string;
   workspace_path: string;
   created_at: string;
@@ -116,7 +117,35 @@ export interface SchemaValidationError {
   message: string;
 }
 
-export type ServerEvent =
+export const KNOWN_SERVER_EVENT_TYPES = [
+  "token",
+  "turn_complete",
+  "error",
+  "cancelled",
+  "tool_start",
+  "tool_end",
+  "context_assembled",
+  "output_schema_retry",
+  "output_schema_failed",
+  "delegation_started",
+  "delegation_completed",
+  "topology_run_started",
+  "topology_node_started",
+  "topology_node_completed",
+  "topology_run_completed",
+  "shutdown",
+  "skill_activated",
+  "skill_already_active",
+  "skill_deactivated",
+  "approval_required",
+  "approval_confirmed",
+  "approval_expired",
+  "approval_decision_error",
+] as const;
+
+export type KnownServerEventType = (typeof KNOWN_SERVER_EVENT_TYPES)[number];
+
+export type KnownServerEvent =
   | { type: "token"; content: string }
   | {
       type: "turn_complete";
@@ -172,18 +201,18 @@ export type ServerEvent =
       errors: SchemaValidationError[];
     }
   | {
-      type: "delegation_started";
-      parent_turn_id: string;
-      child_turn_id: string;
-      target_agent_id: string;
-    }
+    type: "delegation_started";
+    parent_turn_id: string;
+    child_turn_id: string | null;
+    target_agent_id: string;
+  }
   | {
-      type: "delegation_completed";
-      parent_turn_id: string;
-      child_turn_id: string;
-      target_agent_id: string;
-      success: boolean;
-    }
+    type: "delegation_completed";
+    parent_turn_id: string;
+    child_turn_id: string | null;
+    target_agent_id: string;
+    success: boolean;
+  }
   | {
       type: "topology_run_started";
       session_id: string;
@@ -268,6 +297,14 @@ export type ServerEvent =
       message: string;
       current_state?: string;
     };
+
+export interface UnknownServerEvent {
+  type: "unknown_event";
+  original_type: string;
+  raw: Record<string, unknown>;
+}
+
+export type ServerEvent = KnownServerEvent | UnknownServerEvent;
 
 // -------------------------------------------------------------------------
 // Connection state

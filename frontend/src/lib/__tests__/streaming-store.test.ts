@@ -40,8 +40,11 @@ function createMockConversationStore() {
   }> = [];
 
   return {
-    addMessage: vi.fn((msg) => {
-      messages.push(msg);
+    appendOptimisticUserMessage: vi.fn((msg) => {
+      messages.push({ role: "user", turn_state: "pending", ...msg });
+    }),
+    appendAssistantMessage: vi.fn((msg) => {
+      messages.push({ role: "assistant", ...msg });
     }),
     getMessages: () => [...messages],
   };
@@ -107,9 +110,8 @@ describe("startTurn", () => {
 
     store.startTurn("What is Rust?");
 
-    expect(conv.addMessage).toHaveBeenCalledOnce();
-    const call = conv.addMessage.mock.calls[0][0];
-    expect(call.role).toBe("user");
+    expect(conv.appendOptimisticUserMessage).toHaveBeenCalledOnce();
+    const call = conv.appendOptimisticUserMessage.mock.calls[0][0];
     expect(call.content).toBe("What is Rust?");
     expect(typeof call.timestamp).toBe("string");
   });
@@ -192,7 +194,7 @@ describe("turn_complete", () => {
     store.handleServerEvent({ type: "token", content: "The answer is 42." });
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
 
-    // First addMessage is the user turn from startTurn.
+    // First message is the optimistic user turn from startTurn.
     // Second is the assistant turn from turn_complete.
     const messages = conv.getMessages();
     expect(messages).toHaveLength(2);

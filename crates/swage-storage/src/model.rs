@@ -89,6 +89,11 @@ impl FromStr for TurnState {
 pub struct Project {
     pub id: Uuid,
     pub name: String,
+    /// True for the single built-in fallback project.
+    ///
+    /// This is structural identity, not presentation. The project may be
+    /// renamed without ceasing to be the default project.
+    pub is_default: bool,
     /// Filesystem-safe identifier used for the project's directory under
     /// `~/.swage/projects/{slug}/`.
     pub slug: String,
@@ -114,6 +119,14 @@ pub struct Session {
 /// Turns belong to a thread (not directly to a session). Each turn captures
 /// one round-trip with the LLM: the user's input, the model's response, and
 /// the token counts for billing and context management.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundAudit {
+    /// Final canonical input after `BeforeInbound` hook processing.
+    pub canonical_input: String,
+    /// Ordered hook names that returned `ContinueModified`.
+    pub modified_by_hooks: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -124,6 +137,10 @@ pub struct Turn {
     pub state: TurnState,
     /// The raw user input that started this turn, if captured.
     pub user_input: Option<String>,
+    /// Audit metadata for canonical inbound rewriting.
+    ///
+    /// Stored only when one or more hooks modified the inbound content.
+    pub inbound_audit: Option<InboundAudit>,
     /// The model's final text response, once the turn completes.
     pub assistant_response: Option<String>,
     /// Prompt tokens consumed by the LLM call.
@@ -825,6 +842,8 @@ pub struct NewTurn {
     pub thread_id: Uuid,
     pub agent_id: String,
     pub state: TurnState,
+    /// Raw user input captured at turn creation time.
+    pub user_input: Option<String>,
     /// Optional parent turn for delegation chain tracking. `None` for
     /// user-initiated turns.
     pub parent_turn_id: Option<Uuid>,
@@ -842,6 +861,20 @@ pub struct NewMessage {
     pub content: String,
     /// Monotonically increasing position within the thread.
     pub position: i32,
+    /// The agent that produced or received this message.
+    pub agent_id: String,
+}
+
+/// Input for appending a new message at the end of a thread.
+///
+/// The storage layer assigns the next monotonic position atomically.
+#[derive(Debug, Clone)]
+pub struct AppendMessage {
+    pub thread_id: Uuid,
+    /// The turn that produced this message, when known.
+    pub turn_id: Option<Uuid>,
+    pub role: String,
+    pub content: String,
     /// The agent that produced or received this message.
     pub agent_id: String,
 }
@@ -1010,6 +1043,7 @@ mod tests {
         let project = Project {
             id,
             name: "my-project".to_string(),
+            is_default: false,
             slug: "my-project".to_string(),
             workspace_path: None,
             created_at: now,
@@ -1514,6 +1548,7 @@ mod tests {
             state: TurnState::Processing,
             parent_turn_id: None,
             user_input: Some("hello".to_string()),
+            inbound_audit: None,
             assistant_response: Some("hi".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
@@ -1544,6 +1579,7 @@ mod tests {
             thread_id,
             agent_id: "agent-2".to_string(),
             state: TurnState::Pending,
+            user_input: None,
             parent_turn_id: None,
         };
         assert_eq!(turn.thread_id, thread_id);
@@ -1565,6 +1601,7 @@ mod tests {
             state: TurnState::Completed,
             parent_turn_id: None,
             user_input: None,
+            inbound_audit: None,
             assistant_response: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
@@ -1591,6 +1628,7 @@ mod tests {
             state: TurnState::Completed,
             parent_turn_id: None,
             user_input: None,
+            inbound_audit: None,
             assistant_response: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
@@ -1620,6 +1658,7 @@ mod tests {
             state: TurnState::Completed,
             parent_turn_id: None,
             user_input: None,
+            inbound_audit: None,
             assistant_response: Some("the answer is Paris".to_string()),
             input_tokens: None,
             output_tokens: None,
@@ -1647,6 +1686,7 @@ mod tests {
             state: TurnState::Pending,
             parent_turn_id: None,
             user_input: None,
+            inbound_audit: None,
             assistant_response: None,
             input_tokens: None,
             output_tokens: None,

@@ -34,6 +34,6 @@ pub use error::AgentError;
 pub use event::AgentEvent;
 pub use expiry::{DEFAULT_EXPIRY_INTERVAL, DEFAULT_MESSAGE_TTL};
 pub use mailbox::{MailboxContents, check_mailbox};
-pub use message::{ErrorResponse, InboundMessage, OutboundMessage, TurnRequest};
+pub use message::{ErrorResponse, OutboundMessage, TurnRequest};
 pub use router::MessageRouter;
 pub use schema_contract::DelegationOutputConfig;

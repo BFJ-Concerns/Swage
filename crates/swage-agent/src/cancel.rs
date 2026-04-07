@@ -283,6 +283,7 @@ mod tests {
                 thread_id: thread.id,
                 agent_id: agent_id.to_string(),
                 state: TurnState::Processing,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -405,6 +406,7 @@ mod tests {
                 thread_id: thread_a.id,
                 agent_id: "agent-b".into(),
                 state: TurnState::Processing,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -425,6 +427,7 @@ mod tests {
                 thread_id: thread_b.id,
                 agent_id: "agent-b".into(),
                 state: TurnState::Processing,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -575,6 +578,7 @@ mod tests {
                 thread_id: thread_a.id,
                 agent_id: "agent-b".into(),
                 state: TurnState::Processing,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -602,6 +606,7 @@ mod tests {
                 thread_id: thread_b.id,
                 agent_id: "agent-b".into(),
                 state: TurnState::Processing,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

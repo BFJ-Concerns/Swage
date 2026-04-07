@@ -13,7 +13,7 @@ use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::{ChatMessage, Role, StorageError};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
-    NewEdgeEvaluation, NewMessage, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
+    NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
     NewTopologyRun, NodeExecutionState, Team, TopologyRunState,
 };
 use swage_storage::store::ThreadStore;
@@ -664,12 +664,11 @@ async fn execute_agent_node(
 
     state
         .storage
-        .create_message(NewMessage {
+        .append_message(swage_storage::model::AppendMessage {
             thread_id: thread.id,
             turn_id: None,
             role: Role::User.to_string(),
             content: rendered_input.clone(),
-            position: 0,
             agent_id: agent_id.to_string(),
         })
         .await?;
@@ -680,7 +679,16 @@ async fn execute_agent_node(
             let role = match message.role.as_str() {
                 "assistant" => Role::Assistant,
                 "system" => Role::System,
-                _ => Role::User,
+                "tool" => Role::Tool,
+                "user" => Role::User,
+                other => {
+                    tracing::warn!(
+                        role = other,
+                        thread_id = %thread.id,
+                        "unexpected stored message role in topology history; defaulting to user"
+                    );
+                    Role::User
+                }
             };
             ChatMessage::new(role, message.content)
         })
@@ -734,7 +742,7 @@ async fn execute_agent_node(
     let dispatcher = build_gateway_dispatcher(state, &config, silent_ws_tx);
     let agent_config =
         build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
-    let agent = AgentBuilder::new()
+    let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
         .storage(state.storage.clone())
@@ -743,16 +751,22 @@ async fn execute_agent_node(
             state.approval_channels.clone(),
         ))
         .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
-        .project_id(project.id)
-        .context_transfer_config(config.communication.context_transfer.clone())
-        .build()?;
+        .context_transfer_config(config.communication.context_transfer.clone());
+    if let Some(hook_registry) = state.hook_registry.clone() {
+        agent_builder = agent_builder.hook_registry(hook_registry);
+    }
+    let agent = agent_builder.build()?;
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let outbound = agent
         .process_turn_streaming(
             TurnRequest {
-                session_id,
-                thread_id: thread.id,
+                execution: swage_agent::context::TurnExecutionContext {
+                    session_id,
+                    thread_id: thread.id,
+                    turn_id: Uuid::new_v4(),
+                    project_id: Some(project.id),
+                },
                 user_message: rendered_input,
                 assembled_context: output.messages,
                 parent_turn_id: None,
@@ -1092,6 +1106,7 @@ mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),

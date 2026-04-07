@@ -171,6 +171,7 @@ async fn start_test_server_with_config(
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        None,
     );
     let router = build_router(state);
 

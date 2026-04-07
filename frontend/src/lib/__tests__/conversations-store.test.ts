@@ -269,46 +269,53 @@ describe("deleteConversation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// addMessage
+// durable local updates
 // ---------------------------------------------------------------------------
 
-describe("addMessage", () => {
-  it("appends a message to the active conversation", async () => {
+describe("durable local updates", () => {
+  it("appends an optimistic user message to the active conversation", async () => {
     const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
     vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
     await store.selectConversation("conv-1");
 
-    store.addMessage({
-      role: "user",
+    store.appendOptimisticUserMessage({
       content: "Hello, Swage!",
       timestamp: "2026-01-01T12:00:00Z",
-      turn_state: "completed",
     });
 
     expect(store.activeConversation!.messages).toHaveLength(1);
     expect(store.activeConversation!.messages[0]).toMatchObject({
       role: "user",
       content: "Hello, Swage!",
+      turn_state: "pending",
     });
+    expect(store.conversations[0].message_preview).toBe("Hello, Swage!");
+    expect(store.conversations[0].last_activity).toBe("2026-01-01T12:00:00Z");
   });
 
   it("does not throw and does not modify state when there is no active conversation", () => {
     const store = createConversationStore();
 
     expect(() =>
-      store.addMessage({
-        role: "user",
+      store.appendOptimisticUserMessage({
         content: "Ignored",
         timestamp: "2026-01-01T00:00:00Z",
-        turn_state: "completed",
       }),
     ).not.toThrow();
 
     expect(store.activeConversation).toBeNull();
   });
 
-  it("preserves existing messages when appending", async () => {
+  it("preserves existing messages when appending an assistant message", async () => {
     const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
     const detailWithMessage = {
       ...makeDetail("conv-1"),
       messages: [
@@ -323,8 +330,7 @@ describe("addMessage", () => {
     vi.mocked(api.getConversation).mockResolvedValueOnce(detailWithMessage);
     await store.selectConversation("conv-1");
 
-    store.addMessage({
-      role: "assistant",
+    store.appendAssistantMessage({
       content: "Reply",
       timestamp: "2026-01-01T00:01:00Z",
       turn_state: "completed",
@@ -332,6 +338,25 @@ describe("addMessage", () => {
 
     expect(store.activeConversation!.messages).toHaveLength(2);
     expect(store.activeConversation!.messages[1].role).toBe("assistant");
+    expect(store.conversations[0].message_preview).toBe("Reply");
+  });
+
+  it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+
+    store.appendAssistantMessage({
+      content: "Partial reply",
+      timestamp: "2026-01-01T00:02:00Z",
+      turn_state: "interrupted",
+    });
+
+    expect(store.conversations[0].has_interrupted_turn).toBe(true);
   });
 });
 

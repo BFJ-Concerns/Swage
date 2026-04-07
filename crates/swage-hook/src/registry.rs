@@ -115,6 +115,12 @@ pub struct HookRegistry {
     hooks: Vec<HookRegistration>,
 }
 
+/// Result of traced hook dispatch.
+pub struct TracedDispatch {
+    pub outcome: HookOutcome,
+    pub modified_by_hooks: Vec<String>,
+}
+
 impl HookRegistry {
     /// Creates an empty registry.
     pub fn new() -> Self {
@@ -137,8 +143,19 @@ impl HookRegistry {
     /// - `ContinueModified` replaces the event for subsequent hooks.
     /// - Timeouts are handled per the hook's `failure_mode`.
     pub async fn dispatch(&self, event: HookEvent) -> HookOutcome {
+        self.dispatch_traced(event).await.outcome
+    }
+
+    /// Dispatches an event while recording which hooks modified it.
+    ///
+    /// The returned hook-name list preserves execution order and includes only
+    /// hooks that returned `ContinueModified`.
+    pub async fn dispatch_traced(&self, event: HookEvent) -> TracedDispatch {
         if self.hooks.is_empty() {
-            return HookOutcome::Continue;
+            return TracedDispatch {
+                outcome: HookOutcome::Continue,
+                modified_by_hooks: Vec::new(),
+            };
         }
 
         // Build a priority-sorted index. Stable sort preserves registration
@@ -148,6 +165,7 @@ impl HookRegistry {
 
         let mut current_event = event;
         let mut was_modified = false;
+        let mut modified_by_hooks = Vec::new();
 
         // Tracks the first RequestApproval seen. Block takes precedence over this
         // and exits the loop immediately. Among multiple approvals, the
@@ -175,12 +193,16 @@ impl HookRegistry {
                     debug!(hook = %hook_name, "hook modified event");
                     current_event = *modified;
                     was_modified = true;
+                    modified_by_hooks.push(hook_name);
                 }
                 HookOutcome::Block(reason) => {
                     // Block is the highest-priority outcome — exit immediately,
                     // discarding any pending approval request.
                     debug!(hook = %hook_name, reason = %reason, "hook blocked execution");
-                    return HookOutcome::Block(reason);
+                    return TracedDispatch {
+                        outcome: HookOutcome::Block(reason),
+                        modified_by_hooks,
+                    };
                 }
                 approval @ HookOutcome::RequestApproval { .. } => {
                     // Only record the first approval: hooks run in priority order
@@ -197,15 +219,23 @@ impl HookRegistry {
 
         // Approval outranks Continue/ContinueModified — surface it if present.
         if let Some(approval) = pending_approval {
-            return approval;
+            return TracedDispatch {
+                outcome: approval,
+                modified_by_hooks,
+            };
         }
 
         // Propagate the final event state to the caller so they can
         // use the modified content (e.g. BeforeInbound content rewriting).
-        if was_modified {
+        let outcome = if was_modified {
             HookOutcome::ContinueModified(Box::new(current_event))
         } else {
             HookOutcome::Continue
+        };
+
+        TracedDispatch {
+            outcome,
+            modified_by_hooks,
         }
     }
 

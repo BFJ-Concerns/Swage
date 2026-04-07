@@ -23,7 +23,6 @@ pub struct AgentBuilder {
     leak_detector: Option<Arc<LeakDetector>>,
     approval_registrar: Option<ApprovalChannelRegistrar>,
     delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
-    project_id: Option<uuid::Uuid>,
     context_transfer_config: Option<swage_config::ContextTransferConfig>,
 }
 
@@ -38,7 +37,6 @@ impl AgentBuilder {
             leak_detector: None,
             approval_registrar: None,
             delegation_handler: None,
-            project_id: None,
             context_transfer_config: None,
         }
     }
@@ -86,11 +84,6 @@ impl AgentBuilder {
         self
     }
 
-    pub fn project_id(mut self, project_id: uuid::Uuid) -> Self {
-        self.project_id = Some(project_id);
-        self
-    }
-
     pub fn context_transfer_config(
         mut self,
         context_transfer_config: swage_config::ContextTransferConfig,
@@ -133,10 +126,7 @@ impl AgentBuilder {
             leak_detector: self.leak_detector,
             approval_registrar: self.approval_registrar,
             delegation_handler: self.delegation_handler,
-            project_id: self.project_id,
             context_transfer_config: self.context_transfer_config.unwrap_or_default(),
-            active_session_id: None,
-            active_thread_id: None,
         })
     }
 }
@@ -162,8 +152,8 @@ mod tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        ContextSnapshotStore, Message, MessageStore, NewMessage, NewSession, NewThread,
-        NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ContextSnapshotStore, InboundAudit, Message, MessageStore, NewMessage, NewSession,
+        NewThread, NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
         ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
     use uuid::Uuid;
@@ -342,11 +332,24 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_inbound_audit(
+            &self,
+            _: Uuid,
+            _: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
     impl MessageStore for StubStorage {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
+        async fn append_message(
+            &self,
+            _: swage_storage::model::AppendMessage,
+        ) -> Result<Message, StorageError> {
             unimplemented!()
         }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
@@ -646,8 +649,6 @@ mod tests {
             .expect("build should succeed with all required deps");
 
         assert_eq!(agent.config.agent_id, "test-agent");
-        assert!(agent.active_session_id.is_none());
-        assert!(agent.active_thread_id.is_none());
         assert!(agent.tool_dispatcher.is_none());
         assert!(agent.hook_registry.is_none());
         assert!(agent.leak_detector.is_none());

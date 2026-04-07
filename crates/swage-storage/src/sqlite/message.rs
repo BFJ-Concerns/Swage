@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{Message, NewMessage};
+use crate::model::{AppendMessage, Message, NewMessage};
 use crate::sqlite::SqliteStorage;
 use crate::store::MessageStore;
 
@@ -86,6 +86,53 @@ impl MessageStore for SqliteStorage {
                 role: message.role,
                 content: message.content,
                 position: message.position,
+                agent_id: message.agent_id,
+                tool_call_id: None,
+                tool_name: None,
+                created_at: now,
+            })
+        })
+        .await
+    }
+
+    async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError> {
+        self.with_conn(|conn| {
+            let id = Uuid::new_v4();
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let position = conn.query_row(
+                "SELECT COALESCE(MAX(position) + 1, 0)
+                 FROM messages
+                 WHERE thread_id = ?1",
+                params![message.thread_id.to_string()],
+                |row| row.get::<_, i32>(0),
+            )?;
+
+            conn.execute(
+                "INSERT INTO messages
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id.to_string(),
+                    message.thread_id.to_string(),
+                    message.turn_id.map(|turn_id| turn_id.to_string()),
+                    &message.role,
+                    &message.content,
+                    position,
+                    &message.agent_id,
+                    Option::<&str>::None,
+                    Option::<&str>::None,
+                    &now_str,
+                ],
+            )?;
+
+            Ok(Message {
+                id,
+                thread_id: message.thread_id,
+                turn_id: message.turn_id,
+                role: message.role,
+                content: message.content,
+                position,
                 agent_id: message.agent_id,
                 tool_call_id: None,
                 tool_name: None,
@@ -225,6 +272,16 @@ mod tests {
         }
     }
 
+    fn append_msg(thread_id: Uuid, role: &str, content: &str) -> AppendMessage {
+        AppendMessage {
+            thread_id,
+            turn_id: None,
+            role: role.into(),
+            content: content.into(),
+            agent_id: "test-agent".to_string(),
+        }
+    }
+
     // --- create_message and list_by_thread ---
 
     #[tokio::test(flavor = "multi_thread")]
@@ -276,6 +333,40 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, "first");
         assert_eq!(msgs[1].content, "second");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_message_assigns_monotonic_positions() {
+        let (storage, _, thread_id) = make_thread().await;
+
+        let first = storage
+            .append_message(append_msg(thread_id, "user", "first"))
+            .await
+            .unwrap();
+        let second = storage
+            .append_message(append_msg(thread_id, "assistant", "second"))
+            .await
+            .unwrap();
+
+        assert_eq!(first.position, 0);
+        assert_eq!(second.position, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_message_continues_after_existing_highest_position() {
+        let (storage, _, thread_id) = make_thread().await;
+
+        storage
+            .create_message(new_msg(thread_id, "user", "seed", 7))
+            .await
+            .unwrap();
+
+        let appended = storage
+            .append_message(append_msg(thread_id, "assistant", "next"))
+            .await
+            .unwrap();
+
+        assert_eq!(appended.position, 8);
     }
 
     // --- get_message ---

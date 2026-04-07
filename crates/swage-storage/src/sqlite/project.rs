@@ -15,15 +15,17 @@ use crate::store::ProjectStore;
 
 fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let id: String = row.get(0)?;
-    // Column order: id(0), name(1), slug(2), workspace_path(3), created_at(4), updated_at(5)
-    let created: String = row.get(4)?;
-    let updated: String = row.get(5)?;
+    // Column order:
+    // id(0), name(1), is_default(2), slug(3), workspace_path(4), created_at(5), updated_at(6)
+    let created: String = row.get(5)?;
+    let updated: String = row.get(6)?;
 
     Ok(Project {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
-        slug: row.get(2)?,
-        workspace_path: row.get(3)?,
+        is_default: row.get::<_, i64>(2)? != 0,
+        slug: row.get(3)?,
+        workspace_path: row.get(4)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
@@ -56,8 +58,8 @@ impl ProjectStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO projects (id, name, slug, workspace_path, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                "INSERT INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5, ?5)",
                 params![
                     id.to_string(),
                     &project.name,
@@ -70,6 +72,7 @@ impl ProjectStore for SqliteStorage {
             Ok(Project {
                 id,
                 name: project.name,
+                is_default: false,
                 slug: project.slug,
                 workspace_path: project.workspace_path,
                 created_at: now,
@@ -82,7 +85,7 @@ impl ProjectStore for SqliteStorage {
     async fn get(&self, id: Uuid) -> Result<Option<Project>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE id = ?1",
                 params![id.to_string()],
                 row_to_project,
@@ -97,7 +100,7 @@ impl ProjectStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE name = ?1",
                 params![&name],
                 row_to_project,
@@ -108,16 +111,42 @@ impl ProjectStore for SqliteStorage {
     }
 
     async fn get_or_create_default(&self) -> Result<Project, StorageError> {
-        // The default project is seeded by migrations, but get_by_name is used
-        // here in case the caller invokes this on a storage not yet seeded.
-        if let Some(project) = self.get_by_name("default").await? {
+        if let Some(project) = self
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
+                     FROM projects
+                     WHERE is_default = 1",
+                    [],
+                    row_to_project,
+                )
+                .optional()
+            })
+            .await?
+        {
             return Ok(project);
         }
 
-        self.create(NewProject {
-            name: "default".into(),
-            slug: "default".into(),
-            workspace_path: None,
+        self.with_conn(|conn| {
+            let id = Uuid::new_v4();
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+
+            conn.execute(
+                "INSERT INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
+                 VALUES (?1, 'default', 1, 'default', NULL, ?2, ?2)",
+                params![id.to_string(), &now_str],
+            )?;
+
+            Ok(Project {
+                id,
+                name: "default".into(),
+                is_default: true,
+                slug: "default".into(),
+                workspace_path: None,
+                created_at: now,
+                updated_at: now,
+            })
         })
         .await
     }
@@ -125,7 +154,7 @@ impl ProjectStore for SqliteStorage {
     async fn list_all(&self) -> Result<Vec<Project>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_project)?;
@@ -138,7 +167,7 @@ impl ProjectStore for SqliteStorage {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE slug = ?1",
                 params![&slug],
                 row_to_project,
@@ -180,7 +209,7 @@ impl ProjectStore for SqliteStorage {
             )?;
 
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE id = ?1",
                 params![id_str],
                 row_to_project,
@@ -193,7 +222,7 @@ impl ProjectStore for SqliteStorage {
         // Pre-flight: fetch the project to check existence and guard the default.
         match self.get(id).await? {
             None => return Ok(false),
-            Some(ref p) if p.name == "default" => {
+            Some(ref p) if p.is_default => {
                 return Err(StorageError::ConstraintViolation(
                     "cannot delete the default project".into(),
                 ));
@@ -297,7 +326,36 @@ mod tests {
     async fn get_or_create_default_returns_default_slug() {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage.get_or_create_default().await.unwrap();
+        assert!(project.is_default);
         assert_eq!(project.slug, "default");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renamed_default_project_remains_structurally_default() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let default_project = storage.get_or_create_default().await.unwrap();
+
+        let renamed = storage
+            .update(
+                default_project.id,
+                Some("Operations".into()),
+                Some("operations".into()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(renamed.is_default);
+        assert_eq!(renamed.name, "Operations");
+
+        let fetched_default = storage.get_or_create_default().await.unwrap();
+        assert_eq!(fetched_default.id, default_project.id);
+
+        let delete_error = storage.delete(default_project.id).await.unwrap_err();
+        assert!(
+            matches!(delete_error, StorageError::ConstraintViolation(_)),
+            "renamed default project should still be protected"
+        );
     }
 
     // ---------------------------------------------------------------------------

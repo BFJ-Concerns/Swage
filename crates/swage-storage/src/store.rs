@@ -4,11 +4,12 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, ApprovalRequest, ApprovalState, EdgeEvaluation, Message,
-    NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
+    EdgeEvaluation, InboundAudit, Message, NewAgentMessage, NewApprovalRequest,
+    NewEdgeEvaluation, NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewSession,
+    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution,
+    NodeExecutionState, NodeRetry, Project, Session, Team, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -152,6 +153,12 @@ pub trait TurnStore: Send + Sync {
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError>;
     /// Persist the assistant's response text onto a completed turn.
     async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError>;
+    /// Persist inbound canonicalisation audit metadata for a turn.
+    async fn update_inbound_audit(
+        &self,
+        id: Uuid,
+        inbound_audit: &InboundAudit,
+    ) -> Result<(), StorageError>;
     /// Persist token counts after the LLM call completes.
     async fn update_tokens(&self, id: Uuid, input: i64, output: i64) -> Result<(), StorageError>;
     /// Persist the computed cost after pricing is applied.
@@ -180,6 +187,12 @@ pub trait TurnStore: Send + Sync {
 pub trait MessageStore: Send + Sync {
     /// Persist a new message. Returns the stored record with its assigned id.
     async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError>;
+
+    /// Persist a new message at the end of the thread.
+    ///
+    /// The storage layer allocates the next monotonic `position` atomically so
+    /// concurrent writers cannot race on client-side `len()` calculations.
+    async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError>;
 
     /// Fetch all messages in a thread ordered by position ascending.
     async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError>;
@@ -731,6 +744,13 @@ mod tests {
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_inbound_audit(
+            &self,
+            _id: Uuid,
+            _inbound_audit: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
         async fn update_structured_output(
             &self,
             _id: Uuid,
@@ -757,6 +777,9 @@ mod tests {
     #[async_trait]
     impl MessageStore for StubStorage {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
+        async fn append_message(&self, _: AppendMessage) -> Result<Message, StorageError> {
             unimplemented!()
         }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {

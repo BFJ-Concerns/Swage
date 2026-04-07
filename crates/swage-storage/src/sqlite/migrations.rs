@@ -31,6 +31,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("011_approval_memory", CREATE_APPROVAL_MEMORY),
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
+        ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
+        ("015_project_default_flag", ADD_PROJECT_DEFAULT_FLAG),
     ]
 }
 
@@ -238,6 +240,29 @@ const ADD_MESSAGE_TURN_ID: &str = "
     CREATE INDEX IF NOT EXISTS idx_messages_turn_id ON messages(turn_id);
 ";
 
+/// Canonical inbound audit metadata: final canonical input plus modifying hooks.
+const ADD_TURN_INBOUND_AUDIT: &str = "
+    ALTER TABLE turns ADD COLUMN inbound_audit TEXT;
+";
+
+/// Structural default-project identity.
+///
+/// The default project is no longer identified by the mutable display name.
+const ADD_PROJECT_DEFAULT_FLAG: &str = "
+    ALTER TABLE projects ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+    UPDATE projects
+    SET is_default = 1
+    WHERE id = (
+        SELECT id
+        FROM projects
+        WHERE name = 'default'
+        ORDER BY created_at ASC
+        LIMIT 1
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_single_default
+        ON projects(is_default) WHERE is_default = 1;
+";
+
 /// Delegation chain tracking — nullable parent reference on turns.
 const ADD_TURN_PARENT_TURN_ID: &str = "
     ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
@@ -403,8 +428,8 @@ fn seed_default_project(conn: &Connection) -> Result<(), StorageError> {
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO projects (id, name, slug, workspace_path, created_at, updated_at)
-         VALUES (?1, 'default', 'default', NULL, ?2, ?2)",
+        "INSERT OR IGNORE INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
+         VALUES (?1, 'default', 1, 'default', NULL, ?2, ?2)",
         params![id, now],
     )
     .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;

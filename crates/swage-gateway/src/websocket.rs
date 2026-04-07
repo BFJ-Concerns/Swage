@@ -173,14 +173,14 @@ pub enum ServerEvent {
     /// sub-agent progress regardless of subscription state.
     DelegationStarted {
         parent_turn_id: Uuid,
-        child_turn_id: Uuid,
+        child_turn_id: Option<Uuid>,
         target_agent_id: String,
     },
     /// A delegation has completed (successfully or with failure).
     /// Always delivered — matches DelegationStarted semantics.
     DelegationCompleted {
         parent_turn_id: Uuid,
-        child_turn_id: Uuid,
+        child_turn_id: Option<Uuid>,
         target_agent_id: String,
         success: bool,
     },
@@ -1653,6 +1653,7 @@ mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
@@ -1698,6 +1699,7 @@ mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),

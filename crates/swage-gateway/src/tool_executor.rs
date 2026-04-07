@@ -13,7 +13,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use swage_core::{SandboxError, ToolError};
 use swage_sandbox::Sandbox;
@@ -111,13 +110,19 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         if tool_name == "python_execute" {
             // Extract call_id and turn_id from the ToolContext. The agent
             // populates these on AgentToolContext before dispatching.
-            let call_id = ctx.call_id().unwrap_or("unknown").to_string();
-            let turn_id = ctx.turn_id().unwrap_or_else(Uuid::nil);
+            let call_id = ctx.call_id().ok_or_else(|| ToolError::ExecutionFailed {
+                name: tool_name.to_owned(),
+                message: "python_execute requires a tool call ID".to_string(),
+            })?;
+            let turn_id = ctx.turn_id().ok_or_else(|| ToolError::ExecutionFailed {
+                name: tool_name.to_owned(),
+                message: "python_execute requires a turn ID".to_string(),
+            })?;
 
             let py_ctx = PythonExecuteContext {
                 ws_tx: self.ws_tx.clone(),
                 turn_id,
-                call_id,
+                call_id: call_id.to_string(),
             };
 
             // Scope the task-local around the tool execution so

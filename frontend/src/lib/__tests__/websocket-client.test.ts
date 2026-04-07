@@ -250,21 +250,25 @@ describe("server event dispatch", () => {
     });
   });
 
-  it("passes unknown event types through to handlers", () => {
+  it("wraps unknown event types without pretending they are known", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    const received: Record<string, unknown>[] = [];
-    client.onEvent((e) =>
-      received.push(e as unknown as Record<string, unknown>),
-    );
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
 
     client.connect("conv-abc");
     latestWs().simulateOpen();
 
-    // A hypothetical future event type — must not be dropped in the client layer.
+    // A hypothetical future event type — must not be dropped or mis-typed as a known event.
     expect(() =>
       latestWs().simulateMessage({ type: "future_event", payload: "x" }),
     ).not.toThrow();
-    expect(received).toEqual([{ type: "future_event", payload: "x" }]);
+    expect(received).toEqual([
+      {
+        type: "unknown_event",
+        original_type: "future_event",
+        raw: { type: "future_event", payload: "x" },
+      },
+    ]);
   });
 
   it("surfaces malformed JSON frames as an error event", () => {

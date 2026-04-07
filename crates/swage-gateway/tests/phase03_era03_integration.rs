@@ -165,6 +165,7 @@ async fn start_test_server_with_config(
         config,
         dispatcher,
         None,
+        None,
     );
     let router = build_router(state);
 
@@ -734,6 +735,7 @@ async fn pending_approval_re_emitted_on_connect() {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -832,6 +834,7 @@ async fn approvals_for_other_session_not_re_emitted_on_connect() {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

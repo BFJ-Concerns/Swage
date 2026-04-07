@@ -639,6 +639,7 @@ pub async fn submit_turn(
             thread_id: thread.id,
             agent_id: session.agent_id.clone(),
             state: swage_storage::TurnState::Pending,
+            user_input: Some(req.message.clone()),
             parent_turn_id: None,
         })
         .await
@@ -677,116 +678,8 @@ pub async fn submit_turn(
         )
         .await;
 
-        // Mirror the agent's real turn result onto the placeholder so the
-        // REST poller sees completion. The agent creates its own turn record
-        // internally — find it and copy the result data across.
         match result {
-            Ok(()) => {
-                match bg_state.storage.list_turns_by_thread(thread_id).await {
-                    Ok(turns) => {
-                        // The real turn is the latest terminal turn that isn't
-                        // the placeholder (different ID, created by the agent).
-                        // Includes Interrupted so cooperatively cancelled turns
-                        // propagate the correct state to the REST poller.
-                        let real_turn = turns.iter().rev().find(|t| {
-                            t.id != turn_id
-                                && matches!(
-                                    t.state,
-                                    swage_storage::TurnState::Completed
-                                        | swage_storage::TurnState::Failed
-                                        | swage_storage::TurnState::Interrupted
-                                )
-                        });
-                        if let Some(real) = real_turn {
-                            if let Err(e) = bg_state
-                                .storage
-                                .update_turn_state(turn_id, real.state.clone())
-                                .await
-                            {
-                                tracing::warn!(
-                                    turn_id = %turn_id,
-                                    mirrored_turn_id = %real.id,
-                                    error = %e,
-                                    "failed to mirror placeholder turn state"
-                                );
-                            }
-                            if let Some(ref resp) = real.assistant_response {
-                                if let Err(e) =
-                                    bg_state.storage.update_response(turn_id, resp).await
-                                {
-                                    tracing::warn!(
-                                        turn_id = %turn_id,
-                                        mirrored_turn_id = %real.id,
-                                        error = %e,
-                                        "failed to mirror placeholder assistant response"
-                                    );
-                                }
-                            }
-                            if let (Some(input), Some(output)) =
-                                (real.input_tokens, real.output_tokens)
-                            {
-                                if let Err(e) =
-                                    bg_state.storage.update_tokens(turn_id, input, output).await
-                                {
-                                    tracing::warn!(
-                                        turn_id = %turn_id,
-                                        mirrored_turn_id = %real.id,
-                                        error = %e,
-                                        "failed to mirror placeholder token counts"
-                                    );
-                                }
-                            }
-                            if let Some(ref so) = real.structured_output {
-                                if let Err(e) =
-                                    bg_state.storage.update_structured_output(turn_id, so).await
-                                {
-                                    tracing::warn!(
-                                        turn_id = %turn_id,
-                                        mirrored_turn_id = %real.id,
-                                        error = %e,
-                                        "failed to mirror placeholder structured output"
-                                    );
-                                }
-                            }
-                            if let Some(cost) = real.cost_microcents {
-                                if let Err(e) = bg_state.storage.update_cost(turn_id, cost).await {
-                                    tracing::warn!(
-                                        turn_id = %turn_id,
-                                        mirrored_turn_id = %real.id,
-                                        error = %e,
-                                        "failed to mirror placeholder cost"
-                                    );
-                                }
-                            }
-                        } else {
-                            // No real turn found in storage — the agent likely failed
-                            // before persisting. Mark as Failed so REST pollers see the
-                            // failure rather than a misleading Completed status.
-                            tracing::warn!(
-                                turn_id = %turn_id,
-                                "process_turn succeeded but no agent turn found; marking placeholder as failed"
-                            );
-                            let _ = bg_state
-                                .storage
-                                .update_turn_state(turn_id, swage_storage::TurnState::Failed)
-                                .await;
-                        }
-                    }
-                    Err(e) => {
-                        // Storage error listing turns — mark the placeholder as
-                        // failed so the REST poller isn't left hanging indefinitely.
-                        tracing::warn!(
-                            turn_id = %turn_id,
-                            error = %e,
-                            "failed to list turns for result mirroring; marking placeholder failed"
-                        );
-                        let _ = bg_state
-                            .storage
-                            .update_turn_state(turn_id, swage_storage::TurnState::Failed)
-                            .await;
-                    }
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 tracing::warn!(turn_id = %turn_id, error = %e, "async turn processing failed");
                 let _ = bg_state
@@ -1264,6 +1157,7 @@ mod tests {
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
@@ -1395,6 +1289,7 @@ mod tests {
                 thread_id: thread.id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::AwaitingApproval,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -2680,6 +2575,7 @@ def build_topology():
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox: None,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),

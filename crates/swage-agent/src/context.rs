@@ -6,6 +6,16 @@
 use std::path::{Path, PathBuf};
 
 use swage_tool::context::{ToolContext, UserInfo};
+use uuid::Uuid;
+
+/// Immutable execution metadata for a single turn.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnExecutionContext {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    pub turn_id: Uuid,
+    pub project_id: Option<Uuid>,
+}
 
 /// Context for tool execution within an agent turn.
 ///
@@ -14,6 +24,7 @@ use swage_tool::context::{ToolContext, UserInfo};
 pub struct AgentToolContext {
     pub agent_id: String,
     pub session_id: String,
+    pub thread_id: Option<Uuid>,
     pub working_directory: PathBuf,
     pub allowed_paths: Vec<PathBuf>,
     pub user_info: Option<UserInfo>,
@@ -36,6 +47,7 @@ impl AgentToolContext {
         Self {
             agent_id: agent_id.into(),
             session_id: session_id.into(),
+            thread_id: None,
             working_directory: working_directory.into(),
             allowed_paths: Vec::new(),
             user_info: None,
@@ -53,6 +65,12 @@ impl AgentToolContext {
     /// Set the turn_id for the currently executing turn.
     pub fn with_turn_id(mut self, turn_id: uuid::Uuid) -> Self {
         self.turn_id = Some(turn_id);
+        self
+    }
+
+    /// Set the thread_id for the current turn.
+    pub fn with_thread_id(mut self, thread_id: Uuid) -> Self {
+        self.thread_id = Some(thread_id);
         self
     }
 }

@@ -540,6 +540,7 @@ pub struct UpdateProjectRequest {
 pub struct ProjectResponse {
     pub id: Uuid,
     pub name: String,
+    pub is_default: bool,
     pub slug: String,
     pub workspace_path: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -729,6 +730,7 @@ fn project_to_response(p: swage_storage::model::Project) -> ProjectResponse {
     ProjectResponse {
         id: p.id,
         name: p.name,
+        is_default: p.is_default,
         slug: p.slug,
         workspace_path: p.workspace_path,
         created_at: p.created_at,
@@ -1346,6 +1348,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -1391,6 +1394,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -1425,6 +1429,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -1528,6 +1533,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -1617,6 +1623,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await
@@ -1708,6 +1715,7 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
                 parent_turn_id: None,
             })
             .await

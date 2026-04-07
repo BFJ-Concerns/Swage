@@ -234,8 +234,8 @@ mod tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        ContextSnapshotStore, Message, MessageStore, NewMessage, NewSession, NewThread,
-        NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ContextSnapshotStore, InboundAudit, Message, MessageStore, NewMessage, NewSession,
+        NewThread, NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
         ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
 
@@ -464,11 +464,24 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_inbound_audit(
+            &self,
+            _: Uuid,
+            _: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
     impl MessageStore for StubStorage {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
+        async fn append_message(
+            &self,
+            _: swage_storage::model::AppendMessage,
+        ) -> Result<Message, StorageError> {
             unimplemented!()
         }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {

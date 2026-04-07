@@ -23,6 +23,7 @@ use swage_tool::dispatch::ToolDispatcher;
 use crate::approval::ApprovalChannelRegistrar;
 use crate::builder::AgentBuilder;
 use crate::config::AgentConfig;
+use crate::context::TurnExecutionContext;
 use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::message::TurnRequest;
@@ -190,9 +191,7 @@ impl DelegationExecutor {
             builder = builder.delegation_handler(delegation_handler.clone());
         }
 
-        builder = builder
-            .project_id(project_id)
-            .context_transfer_config(target_context_transfer_config);
+        builder = builder.context_transfer_config(target_context_transfer_config);
 
         let agent = builder.build()?;
         // Register the cancellation token so handle_cancel can interrupt
@@ -219,8 +218,12 @@ impl DelegationExecutor {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
-            session_id: session.id,
-            thread_id: thread.id,
+            execution: TurnExecutionContext {
+                session_id: session.id,
+                thread_id: thread.id,
+                turn_id: Uuid::new_v4(),
+                project_id: Some(project_id),
+            },
             user_message: task_description.to_string(),
             assembled_context,
             parent_turn_id: Some(sender_turn_id),

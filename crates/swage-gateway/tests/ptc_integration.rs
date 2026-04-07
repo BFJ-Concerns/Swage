@@ -125,6 +125,7 @@ async fn start_ptc_test_server(
         swage_config::ResolvedConfig::default(),
         dispatcher,
         None,
+        None,
     );
     let router = build_router(state);
 

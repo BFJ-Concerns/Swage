@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
+use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
@@ -76,6 +77,8 @@ pub struct AppState {
     /// decision. A plain std mutex is sufficient here — the critical section is a
     /// single HashMap operation with no async work under the lock.
     pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
+    /// Optional lifecycle hooks honoured by gateway-owned execution paths.
+    pub hook_registry: Option<Arc<HookRegistry>>,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
         sandbox: Option<Arc<dyn Sandbox>>,
+        hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
         Self {
@@ -101,6 +105,7 @@ impl AppState {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            hook_registry,
         }
     }
 }
@@ -156,6 +161,7 @@ mod tests {
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
@@ -237,6 +243,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             Some(Arc::clone(&sandbox)),
+            None,
         );
         assert!(state.sandbox.is_some());
     }

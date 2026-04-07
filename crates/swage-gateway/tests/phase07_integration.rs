@@ -91,6 +91,7 @@ async fn start_test_server_with_config(config: ResolvedConfig) -> (Router, Socke
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        None,
     );
     // Clone state for the idle monitor; the router holds its own clone via with_state.
     let state_for_monitor = state.clone();
@@ -126,6 +127,7 @@ async fn start_test_server_with_state(config: ResolvedConfig) -> (Router, Socket
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
         None,
     );
     // Two extra clones: one for the idle monitor task, one for the test to hold.

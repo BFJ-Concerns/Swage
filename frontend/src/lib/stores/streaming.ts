@@ -30,11 +30,14 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and completed
    *  or interrupted assistant turns). */
   conversationStore?: {
-    addMessage(message: {
-      role: string;
+    appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
-      turn_state: MessageView["turn_state"];
+    }): void;
+    appendAssistantMessage(message: {
+      content: string;
+      timestamp: string;
+      turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">;
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -59,13 +62,11 @@ export function createStreamingStore(
 
   // ---- Helpers ----------------------------------------------------------------
 
-  function pushMessage(
-    role: "user" | "assistant",
+  function pushAssistantMessage(
     content: string,
-    turn_state: MessageView["turn_state"],
+    turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">,
   ): void {
-    options?.conversationStore?.addMessage({
-      role,
+    options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
@@ -76,7 +77,7 @@ export function createStreamingStore(
   // turn ends before the server explicitly completes it (error or cancellation).
   function preservePartialResponse(): void {
     if (streamedContent) {
-      pushMessage("assistant", streamedContent, "interrupted");
+      pushAssistantMessage(streamedContent, "interrupted");
     }
   }
 
@@ -178,7 +179,7 @@ export function createStreamingStore(
           // The gateway has committed the full turn. Push the completed
           // assistant message and return to idle state.
           if (streamedContent) {
-            pushMessage("assistant", streamedContent, "completed");
+            pushAssistantMessage(streamedContent, "completed");
           }
           streamedContent = "";
           turnError = null;
@@ -252,6 +253,11 @@ export function createStreamingStore(
           // separately. The case is listed explicitly to avoid a fall-through
           // and to make the handler exhaustive for future extensions.
           break;
+
+        default:
+          // Forward-compatible: ignore gateway events this store does not
+          // understand yet rather than pretending they were impossible.
+          break;
       }
     },
 
@@ -264,7 +270,10 @@ export function createStreamingStore(
 
       // Immediately record the user's message so the conversation history
       // updates before the first token arrives.
-      pushMessage("user", content, "completed");
+      options?.conversationStore?.appendOptimisticUserMessage({
+        content,
+        timestamp: new Date().toISOString(),
+      });
 
       // Dispatch the outgoing message over the WebSocket.
       options?.connectionStore?.sendMessage(content);

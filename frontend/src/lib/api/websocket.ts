@@ -4,7 +4,14 @@
 // send client events, dispatch server events to callbacks, and handle
 // reconnection with exponential backoff.
 
-import type { ClientEvent, ServerEvent, ConnectionStatus } from "../types";
+import {
+  KNOWN_SERVER_EVENT_TYPES,
+  type ClientEvent,
+  type ConnectionStatus,
+  type KnownServerEvent,
+  type KnownServerEventType,
+  type ServerEvent,
+} from "../types";
 
 export type ServerEventHandler = (event: ServerEvent) => void;
 export type StatusChangeHandler = (status: ConnectionStatus) => void;
@@ -22,6 +29,30 @@ export interface WebSocketClientOptions {
   // converting http → ws and https → wss from window.location. Pass an
   // explicit value in tests or non-standard deployments.
   wsBaseUrl?: string;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isKnownServerEventType(type: string): type is KnownServerEventType {
+  return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
+}
+
+function parseServerEventFrame(raw: unknown): ServerEvent {
+  if (!isObjectRecord(raw) || typeof raw.type !== "string") {
+    throw new Error("missing event type");
+  }
+
+  if (isKnownServerEventType(raw.type)) {
+    return raw as KnownServerEvent;
+  }
+
+  return {
+    type: "unknown_event",
+    original_type: raw.type,
+    raw,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -113,15 +144,9 @@ export function createWebSocketClient(
 
     ws.onmessage = (event: MessageEvent) => {
       try {
-        const parsed = JSON.parse(event.data as string) as Record<
-          string,
-          unknown
-        >;
-        if (typeof parsed.type !== "string") {
-          throw new Error("missing event type");
-        }
+        const parsed = parseServerEventFrame(JSON.parse(event.data as string));
         for (const handler of eventHandlers)
-          handler(parsed as unknown as ServerEvent);
+          handler(parsed);
       } catch {
         emitStatus("error");
         const frameError: ServerEvent = {

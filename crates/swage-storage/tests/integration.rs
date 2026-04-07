@@ -67,6 +67,7 @@ async fn create_full_hierarchy(
             thread_id: thread.id,
             agent_id: agent_id.to_string(),
             state: TurnState::Pending,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
@@ -418,6 +419,7 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Pending,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
@@ -428,6 +430,7 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Processing,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
@@ -439,6 +442,7 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Completed,
+            user_input: None,
             parent_turn_id: None,
         })
         .await

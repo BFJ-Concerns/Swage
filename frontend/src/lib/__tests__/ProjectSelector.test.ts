@@ -23,6 +23,7 @@ function makeProject(id: string, name: string) {
   return {
     id,
     name,
+    is_default: name === "default",
     slug: name.toLowerCase().replace(/\s+/g, "-"),
     workspace_path: `/home/user/${id}`,
     created_at: "2026-01-01T00:00:00Z",

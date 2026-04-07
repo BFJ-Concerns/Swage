@@ -150,11 +150,9 @@ impl ConversationState {
     }
 
     pub fn cancel_streaming(&mut self) {
-        // TODO Clear tool state on cancellation
-        // Cancelling only clears the text buffer, leaving active_tools/completed_tools to leak into
-        // the next successful complete_turn as stale tool entries from the cancelled turn.
-        // ---
         self.streaming_buffer.clear();
+        self.active_tools.clear();
+        self.completed_tools.clear();
         self.is_streaming = false;
     }
 
@@ -451,6 +449,21 @@ mod tests {
         state.start_tool("call-1".to_string(), "read_file".to_string());
         state.end_tool("call-99", "success".to_string(), 0);
         assert_eq!(state.active_tools.len(), 1);
+    }
+
+    #[test]
+    fn cancel_streaming_clears_buffers_and_tool_state() {
+        let mut state = ConversationState::new(default_project());
+        state.append_token("partial");
+        state.start_tool("call-1".to_string(), "shell".to_string());
+        state.end_tool("call-1", "success".to_string(), 42);
+
+        state.cancel_streaming();
+
+        assert!(state.streaming_buffer.is_empty());
+        assert!(state.active_tools.is_empty());
+        assert!(state.completed_tools.is_empty());
+        assert!(!state.is_streaming);
     }
 
     // --- complete_turn ---

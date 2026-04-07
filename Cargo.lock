@@ -2570,7 +2570,9 @@ dependencies = [
  "swage-tool",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -194,6 +194,7 @@ async fn start_test_server_with_dispatcher(
         swage_config::ResolvedConfig::default(),
         dispatcher,
         None,
+        None,
     );
     let router = build_router(state);
 
@@ -512,6 +513,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             thread_id: thread_orphan.id,
             agent_id: "gateway".to_string(),
             state: TurnState::Processing,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
@@ -539,6 +541,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             thread_id: thread_ok.id,
             agent_id: "gateway".to_string(),
             state: TurnState::Processing,
+            user_input: None,
             parent_turn_id: None,
         })
         .await
