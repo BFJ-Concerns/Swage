@@ -933,7 +933,7 @@ mod tests {
             &mut state,
             ServerEvent::DelegationStarted {
                 parent_turn_id: Uuid::new_v4(),
-                child_turn_id: Uuid::new_v4(),
+                child_turn_id: Some(Uuid::new_v4()),
                 target_agent_id: "reviewer".to_string(),
             },
         );
@@ -950,7 +950,7 @@ mod tests {
             &mut state,
             ServerEvent::DelegationCompleted {
                 parent_turn_id: Uuid::new_v4(),
-                child_turn_id: Uuid::new_v4(),
+                child_turn_id: Some(Uuid::new_v4()),
                 target_agent_id: "reviewer".to_string(),
                 success: true,
             },

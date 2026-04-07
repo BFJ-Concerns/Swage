@@ -13,8 +13,8 @@ use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::{ChatMessage, Role, StorageError};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
-    NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewSession, NewThread,
-    NewTopologyRun, NodeExecutionState, Team, TopologyRunState,
+    NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewSession, NewThread, NewTopologyRun,
+    NodeExecutionState, Team, TopologyRunState,
 };
 use swage_storage::store::ThreadStore;
 use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind};

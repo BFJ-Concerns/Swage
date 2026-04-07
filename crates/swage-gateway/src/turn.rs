@@ -525,13 +525,16 @@ pub(crate) async fn process_turn_with_existing_turn(
     let thread_id = thread.id;
 
     // Step 2: Guard — reject if a turn is already active for this thread.
-    // Processing, AwaitingApproval, and Delegating all represent in-progress
-    // work; allowing a second turn would interleave history.
+    // Pending, Processing, AwaitingApproval, and Delegating all represent
+    // in-progress work; allowing a second turn would interleave history.
     let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
     if existing_turns.iter().any(|t| {
         matches!(
             t.state,
-            TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating
+            TurnState::Pending
+                | TurnState::Processing
+                | TurnState::AwaitingApproval
+                | TurnState::Delegating
         )
     }) {
         return Err(GatewayError::TurnInProgress { session_id });
@@ -650,6 +653,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                 .storage
                 .update_turn_state(prepared_turn_id, TurnState::Failed)
                 .await?;
+            let mut turns = state.active_turns.lock().await;
+            turns.remove(&session_id);
             return Err(error);
         }
     };
@@ -1197,13 +1202,13 @@ pub(crate) mod tests {
         CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
         ToolCompletionResponse,
     };
+    use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
     use swage_provider::LlmProvider;
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
             EdgeEvaluation, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
-            NewMessage,
-            NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
+            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread,
             NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
             Project, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
             TopologyRunState, Turn, TurnState,
@@ -1378,6 +1383,19 @@ pub(crate) mod tests {
         }
     }
 
+    struct BlockInboundHook;
+
+    #[async_trait]
+    impl Hook for BlockInboundHook {
+        fn name(&self) -> &str {
+            "block-inbound"
+        }
+
+        async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+            HookOutcome::Block("blocked by test hook".to_string())
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Mock storage — in-memory Vec/HashMap backed, usable in tests.
     // -----------------------------------------------------------------------
@@ -1467,7 +1485,11 @@ pub(crate) mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            self.db.lock().await.projects.insert(project.id, project.clone());
+            self.db
+                .lock()
+                .await
+                .projects
+                .insert(project.id, project.clone());
             Ok(project)
         }
 
@@ -3105,6 +3127,78 @@ pub(crate) mod tests {
             matches!(result, Err(GatewayError::TurnInProgress { .. })),
             "expected TurnInProgress, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_turn_rejected_with_turn_in_progress() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+
+        state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = process_turn(
+            &state,
+            session_id,
+            None,
+            "Another message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(GatewayError::TurnInProgress { .. })),
+            "expected TurnInProgress for pending turn, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_inbound_hook_marks_turn_failed_and_clears_active_turn() {
+        let (mut state, session_id) = make_state_with_session(vec![]).await;
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(BlockInboundHook)));
+        state.hook_registry = Some(Arc::new(hook_registry));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = process_turn(
+            &state,
+            session_id,
+            None,
+            "blocked message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(GatewayError::ConfigError(ref message)) if message.contains("blocked by test hook")),
+            "expected blocked inbound hook error, got: {result:?}"
+        );
+        assert!(
+            !state.active_turns.lock().await.contains_key(&session_id),
+            "blocked inbound hook must not leave a stale active_turns entry"
+        );
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+        assert_eq!(turns.len(), 1, "expected placeholder turn to be created");
+        assert_eq!(turns[0].state, TurnState::Failed);
     }
 
     // -----------------------------------------------------------------------

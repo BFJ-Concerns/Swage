@@ -116,14 +116,16 @@ pub enum ServerEvent {
     /// A delegation from one agent to another has started.
     DelegationStarted {
         parent_turn_id: Uuid,
-        child_turn_id: Uuid,
+        #[serde(default)]
+        child_turn_id: Option<Uuid>,
         target_agent_id: String,
     },
 
     /// A delegation has completed.
     DelegationCompleted {
         parent_turn_id: Uuid,
-        child_turn_id: Uuid,
+        #[serde(default)]
+        child_turn_id: Option<Uuid>,
         target_agent_id: String,
         success: bool,
     },
@@ -666,7 +668,27 @@ mod tests {
             panic!("expected DelegationStarted");
         };
         assert_eq!(parent, parent_turn_id);
-        assert_eq!(child, child_turn_id);
+        assert_eq!(child, Some(child_turn_id));
+        assert_eq!(target_agent_id, "reviewer");
+    }
+
+    #[test]
+    fn delegation_started_event_deserialises_with_unknown_child_turn() {
+        let parent_turn_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"delegation_started","parent_turn_id":"{parent_turn_id}","child_turn_id":null,"target_agent_id":"reviewer"}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::DelegationStarted {
+            parent_turn_id: parent,
+            child_turn_id: child,
+            target_agent_id,
+        } = event
+        else {
+            panic!("expected DelegationStarted");
+        };
+        assert_eq!(parent, parent_turn_id);
+        assert_eq!(child, None);
         assert_eq!(target_agent_id, "reviewer");
     }
 
@@ -688,7 +710,29 @@ mod tests {
             panic!("expected DelegationCompleted");
         };
         assert_eq!(parent, parent_turn_id);
-        assert_eq!(child, child_turn_id);
+        assert_eq!(child, Some(child_turn_id));
+        assert_eq!(target_agent_id, "reviewer");
+        assert!(!success);
+    }
+
+    #[test]
+    fn delegation_completed_event_deserialises_with_unknown_child_turn() {
+        let parent_turn_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"delegation_completed","parent_turn_id":"{parent_turn_id}","child_turn_id":null,"target_agent_id":"reviewer","success":false}}"#
+        );
+        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let ServerEvent::DelegationCompleted {
+            parent_turn_id: parent,
+            child_turn_id: child,
+            target_agent_id,
+            success,
+        } = event
+        else {
+            panic!("expected DelegationCompleted");
+        };
+        assert_eq!(parent, parent_turn_id);
+        assert_eq!(child, None);
         assert_eq!(target_agent_id, "reviewer");
         assert!(!success);
     }

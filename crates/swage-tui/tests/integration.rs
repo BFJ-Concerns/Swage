@@ -148,11 +148,17 @@ fn project_switch_updates_active_project_in_state() {
 #[test]
 fn keybinding_dispatch_maps_real_shortcuts() {
     assert_eq!(
-        map_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL), false),
+        map_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            false
+        ),
         Some(AppAction::OpenProjectSelector)
     );
     assert_eq!(
-        map_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL), false),
+        map_key_event(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            false
+        ),
         Some(AppAction::ToggleInspector)
     );
     assert_eq!(
