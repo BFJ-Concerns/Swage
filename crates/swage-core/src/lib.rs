@@ -10,6 +10,7 @@
 pub mod config;
 pub mod error;
 pub mod message;
+pub mod messaging;
 pub mod request;
 pub mod runtime;
 pub mod secret;
@@ -20,12 +21,13 @@ pub mod tool;
 // ---------------------------------------------------------------------------
 
 pub use error::{
-    GatewayError, HookError, PermissionDeniedReason, ProviderError, RuntimeError, SafetyError,
-    SandboxError, SecretError, StorageError, SwageError, ToolError,
+    ApprovalTimeoutPolicy, GatewayError, HookError, PermissionDeniedReason, ProviderError,
+    RuntimeError, SafetyError, SandboxError, SecretError, StorageError, SwageError, ToolError,
 };
 pub use message::{ChatMessage, ContentPart, Role};
+pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
 pub use request::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse,
-    StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse, ToolRound,
+    CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse, StreamChunk,
+    TokenUsage, ToolCompletionRequest, ToolCompletionResponse, ToolRound,
 };
 pub use tool::{ToolCall, ToolDefinition, ToolResult, build_tool_round_messages};

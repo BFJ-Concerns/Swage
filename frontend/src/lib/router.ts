@@ -64,12 +64,16 @@ export function createRouter(options?: RouterOptions): Router {
     if (route.conversationId && options?.conversationStore) {
       try {
         await options.conversationStore.selectConversation(route.conversationId);
-      } catch {
-        // The ID in the URL is stale (conversation deleted or never existed).
-        // Fall back to the root and flag the not-found state so the UI
-        // can show an appropriate notice.
-        currentRoute = { path: "/", conversationId: null, notFound: true };
-        window.history.replaceState(null, "", "/");
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
+          // The ID in the URL is stale (conversation deleted or never existed).
+          // Fall back to the root and flag the not-found state so the UI
+          // can show an appropriate notice.
+          currentRoute = { path: "/", conversationId: null, notFound: true };
+          window.history.replaceState(null, "", "/");
+        } else {
+          throw error;
+        }
       }
     }
   }

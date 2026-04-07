@@ -34,6 +34,10 @@
     event.stopPropagation();
     pendingDelete = null;
   }
+
+  function selectConversation(id: string) {
+    store?.selectConversation(id);
+  }
 </script>
 
 <div class="conversation-list">
@@ -62,45 +66,46 @@
           <li
             class="conversation-item"
             class:active={isActive}
-            onclick={() => store!.selectConversation(conversation.id)}
           >
-            <div class="item-header">
-              <!-- Preview: the last message, or a label for new conversations. -->
-              <span class="preview">
-                {conversation.message_preview ?? "New conversation"}
-              </span>
-
-              <!-- Warn when a turn was interrupted (e.g. by disconnection). -->
-              {#if conversation.has_interrupted_turn}
-                <span class="interrupted" title="A previous response was interrupted">
-                  ⚠
+            <button
+              class="conversation-select-btn"
+              onclick={() => selectConversation(conversation.id)}
+            >
+              <div class="item-header">
+                <!-- Preview: the last message, or a label for new conversations. -->
+                <span class="preview">
+                  {conversation.message_preview ?? "New conversation"}
                 </span>
-              {/if}
-            </div>
 
-            <div class="item-footer">
+                <!-- Warn when a turn was interrupted (e.g. by disconnection). -->
+                {#if conversation.has_interrupted_turn}
+                  <span class="interrupted" title="A previous response was interrupted">
+                    ⚠
+                  </span>
+                {/if}
+              </div>
               <span class="timestamp">{relativeTime(conversation.last_activity)}</span>
+            </button>
 
-              {#if isPendingDelete}
-                <!-- Inline confirmation — no browser dialogs. -->
-                <span class="delete-confirm">
-                  <button
-                    class="confirm-btn"
-                    onclick={(e) => confirmDelete(conversation.id, e)}
-                  >Delete</button>
-                  <button
-                    class="cancel-btn"
-                    onclick={cancelDelete}
-                  >Cancel</button>
-                </span>
-              {:else}
+            {#if isPendingDelete}
+              <!-- Inline confirmation — no browser dialogs. -->
+              <span class="delete-confirm">
+                <button
+                  class="confirm-btn"
+                  onclick={(e) => confirmDelete(conversation.id, e)}
+                >Delete</button>
+                <button
+                  class="cancel-btn"
+                  onclick={cancelDelete}
+                >Cancel</button>
+              </span>
+            {:else}
                 <button
                   class="delete-btn"
                   title="Delete conversation"
                   onclick={(e) => requestDelete(conversation.id, e)}
                 >×</button>
-              {/if}
-            </div>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -176,9 +181,11 @@
   }
 
   .conversation-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 10px 12px;
     border-bottom: 1px solid #f0f0f0;
-    cursor: pointer;
     /* Prevent text selection when clicking rapidly. */
     user-select: none;
   }
@@ -191,6 +198,18 @@
     background: #eef2ff;
     border-left: 3px solid #6366f1;
     padding-left: 9px;
+  }
+
+  .conversation-select-btn {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
   }
 
   /* -------------------------------------------------------------------------
@@ -220,12 +239,6 @@
     color: #d97706;
     /* Align with the top of the preview text. */
     line-height: 1.4;
-  }
-
-  .item-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
   }
 
   .timestamp {

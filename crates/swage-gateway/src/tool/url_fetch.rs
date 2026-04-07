@@ -79,10 +79,7 @@ impl Tool for UrlFetchTool {
 
         let mut response = client.get(&url).send().await.map_err(|e| {
             let message = if e.is_timeout() {
-                format!(
-                    "Request timed out after {}s: {url}",
-                    self.timeout.as_secs()
-                )
+                format!("Request timed out after {}s: {url}", self.timeout.as_secs())
             } else if e.is_connect() || e.is_request() {
                 format!("Failed to reach {url}: {e}")
             } else {
@@ -187,10 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_error_for_missing_url() {
-        let err = tool()
-            .execute(json!({}), &ctx())
-            .await
-            .unwrap_err();
+        let err = tool().execute(json!({}), &ctx()).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
         assert!(err.to_string().contains("url"), "got: {err}");
     }

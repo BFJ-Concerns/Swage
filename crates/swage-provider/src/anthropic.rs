@@ -7,8 +7,8 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmRequest,
-    LlmResponse, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolResult, TokenUsage,
+    LlmResponse, ProviderError, Role, StreamChunk, TokenUsage, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolResult,
 };
 
 use crate::http::{HttpClient, SseEvent};
@@ -184,8 +184,14 @@ impl ToolUseAccumulator {
     fn process_event(&mut self, event: &SseEvent) -> Option<StreamChunk> {
         match event.event_type.as_deref() {
             Some("content_block_start") => {
-                let payload: ContentBlockStartPayload =
-                    serde_json::from_str(&event.data).ok()?;
+                let payload: ContentBlockStartPayload = match serde_json::from_str(&event.data) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return Some(StreamChunk::Error {
+                            message: format!("failed to parse Anthropic tool-use frame: {error}"),
+                        });
+                    }
+                };
                 if payload.content_block.block_type == "tool_use" {
                     let call_id = payload.content_block.id.unwrap_or_default();
                     let name = payload.content_block.name.unwrap_or_default();
@@ -195,8 +201,17 @@ impl ToolUseAccumulator {
             }
             Some("content_block_delta") => {
                 if let Some((_, _, ref mut json_buf)) = self.pending {
-                    let payload: ContentBlockDeltaPayload =
-                        serde_json::from_str(&event.data).ok()?;
+                    let payload: ContentBlockDeltaPayload = match serde_json::from_str(&event.data)
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            return Some(StreamChunk::Error {
+                                message: format!(
+                                    "failed to parse Anthropic tool-use frame: {error}"
+                                ),
+                            });
+                        }
+                    };
                     if payload.delta.block_type == "input_json_delta" {
                         if let Some(fragment) = payload.delta.partial_json {
                             json_buf.push_str(&fragment);
@@ -209,7 +224,11 @@ impl ToolUseAccumulator {
                 if let Some((call_id, name, json_buf)) = self.pending.take() {
                     let arguments = serde_json::from_str(&json_buf)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    Some(StreamChunk::ToolUse { call_id, name, arguments })
+                    Some(StreamChunk::ToolUse {
+                        call_id,
+                        name,
+                        arguments,
+                    })
                 } else {
                     None
                 }
@@ -349,7 +368,9 @@ impl AnthropicProvider {
                         // Extract plain text from ContentPart::Text entries.
                         // Multi-modal messages (with images) are not currently
                         // supported in this code path; image parts are dropped.
-                        let text = m.content.iter()
+                        let text = m
+                            .content
+                            .iter()
                             .filter_map(|p| {
                                 if let swage_core::ContentPart::Text { text } = p {
                                     Some(text.as_str())
@@ -410,8 +431,14 @@ impl AnthropicProvider {
     pub(crate) fn parse_sse_event(event: &SseEvent) -> Option<StreamChunk> {
         match event.event_type.as_deref() {
             Some("content_block_delta") => {
-                let payload: ContentBlockDeltaPayload =
-                    serde_json::from_str(&event.data).ok()?;
+                let payload: ContentBlockDeltaPayload = match serde_json::from_str(&event.data) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return Some(StreamChunk::Error {
+                            message: format!("failed to parse Anthropic SSE payload: {error}"),
+                        });
+                    }
+                };
                 if payload.delta.block_type == "text_delta" {
                     Some(StreamChunk::Delta {
                         content: payload.delta.text.unwrap_or_default(),
@@ -421,10 +448,15 @@ impl AnthropicProvider {
                 }
             }
             Some("message_delta") => {
-                let payload: MessageDeltaPayload =
-                    serde_json::from_str(&event.data).ok()?;
-                let output_tokens =
-                    payload.usage.map(|u| u.output_tokens).unwrap_or(0);
+                let payload: MessageDeltaPayload = match serde_json::from_str(&event.data) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return Some(StreamChunk::Error {
+                            message: format!("failed to parse Anthropic SSE payload: {error}"),
+                        });
+                    }
+                };
+                let output_tokens = payload.usage.map(|u| u.output_tokens).unwrap_or(0);
                 // input_tokens are reported in message_start; we default to 0 here
                 // since the full usage summary comes separately.
                 Some(StreamChunk::Usage(TokenUsage {
@@ -432,9 +464,18 @@ impl AnthropicProvider {
                     output_tokens,
                 }))
             }
-            Some("message_stop") => Some(StreamChunk::Done { finish_reason: None }),
+            Some("message_stop") => Some(StreamChunk::Done {
+                finish_reason: None,
+            }),
             Some("error") => {
-                let payload: ErrorPayload = serde_json::from_str(&event.data).ok()?;
+                let payload: ErrorPayload = match serde_json::from_str(&event.data) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return Some(StreamChunk::Error {
+                            message: format!("failed to parse Anthropic SSE payload: {error}"),
+                        });
+                    }
+                };
                 Some(StreamChunk::Error {
                     message: payload.error.message,
                 })
@@ -455,17 +496,22 @@ impl AnthropicProvider {
 impl AnthropicProvider {
     /// Legacy send_message logic — kept for task [8uce] to adapt into `complete`.
     #[allow(dead_code)]
-    async fn legacy_send_message(&self, request: &LlmRequest) -> Result<LlmResponse, ProviderError> {
+    async fn legacy_send_message(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<LlmResponse, ProviderError> {
         let body = self.build_messages_request(request, false);
         let client = self.make_http_client();
 
-        let response: MessagesResponse =
-            client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
 
         let text = response
             .content
             .into_iter()
-            .filter_map(|b| match b { ContentBlock::Text { text } => Some(text), _ => None })
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("");
 
@@ -565,11 +611,19 @@ impl AnthropicProvider {
             .filter(|m| m.role == Role::System)
             .flat_map(|m| {
                 m.content.iter().filter_map(|p| {
-                    if let ContentPart::Text { text } = p { Some(text.clone()) } else { None }
+                    if let ContentPart::Text { text } = p {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
                 })
             })
             .collect();
-        let system = if system_parts.is_empty() { None } else { Some(system_parts.join("\n")) };
+        let system = if system_parts.is_empty() {
+            None
+        } else {
+            Some(system_parts.join("\n"))
+        };
 
         let wire_messages = messages
             .iter()
@@ -578,17 +632,25 @@ impl AnthropicProvider {
                 let content = match &m.content_blocks {
                     Some(blocks) => MessageContent::Blocks(blocks.clone()),
                     None => {
-                        let text = m.content
+                        let text = m
+                            .content
                             .iter()
                             .filter_map(|p| {
-                                if let ContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+                                if let ContentPart::Text { text } = p {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
                             })
                             .collect::<Vec<_>>()
                             .join("");
                         MessageContent::Text(text)
                     }
                 };
-                AnthropicMessage { role: m.role.to_string(), content }
+                AnthropicMessage {
+                    role: m.role.to_string(),
+                    content,
+                }
             })
             .collect();
 
@@ -600,10 +662,17 @@ impl AnthropicProvider {
     /// System messages are extracted to the top-level `system` field.
     /// The model from the request overrides the provider's configured model
     /// when present.
-    fn build_request_for_completion(&self, request: &CompletionRequest, stream: bool) -> MessagesRequest {
+    fn build_request_for_completion(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> MessagesRequest {
         let (system, messages) = Self::to_anthropic_messages(&request.messages);
         MessagesRequest {
-            model: request.model.clone().unwrap_or_else(|| self.config.model.clone()),
+            model: request
+                .model
+                .clone()
+                .unwrap_or_else(|| self.config.model.clone()),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -637,12 +706,19 @@ impl AnthropicProvider {
                     .or_else(|| def.get("parameters"))
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                Some(AnthropicTool { name, description, input_schema })
+                Some(AnthropicTool {
+                    name,
+                    description,
+                    input_schema,
+                })
             })
             .collect();
 
         MessagesRequest {
-            model: request.model.clone().unwrap_or_else(|| self.config.model.clone()),
+            model: request
+                .model
+                .clone()
+                .unwrap_or_else(|| self.config.model.clone()),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -674,7 +750,10 @@ impl LlmProvider for AnthropicProvider {
         let content = response
             .content
             .into_iter()
-            .filter_map(|b| match b { ContentBlock::Text { text } => Some(text), _ => None })
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("");
 
@@ -703,7 +782,11 @@ impl LlmProvider for AnthropicProvider {
             match block {
                 ContentBlock::Text { text } => content.push_str(&text),
                 ContentBlock::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall { call_id: id, name, arguments: input });
+                    tool_calls.push(ToolCall {
+                        call_id: id,
+                        name,
+                        arguments: input,
+                    });
                 }
             }
         }
@@ -736,7 +819,9 @@ impl LlmProvider for AnthropicProvider {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.unbounded_send(StreamChunk::Error { message: e.to_string() });
+                    let _ = tx.unbounded_send(StreamChunk::Error {
+                        message: e.to_string(),
+                    });
                     return;
                 }
             };
@@ -747,7 +832,9 @@ impl LlmProvider for AnthropicProvider {
             while let Some(result) = sse_stream.next().await {
                 let event = match result {
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error { message: e.to_string() });
+                        let _ = tx.unbounded_send(StreamChunk::Error {
+                            message: e.to_string(),
+                        });
                         break;
                     }
                     Ok(ev) => ev,
@@ -820,7 +907,10 @@ mod tests {
         let chunk = AnthropicProvider::parse_sse_event(&ev).unwrap();
         assert!(matches!(
             chunk,
-            StreamChunk::Usage(TokenUsage { output_tokens: 42, .. })
+            StreamChunk::Usage(TokenUsage {
+                output_tokens: 42,
+                ..
+            })
         ));
     }
 
@@ -851,8 +941,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_event_reports_malformed_payload() {
+        let ev = event("message_delta", "{not-json");
+        let chunk = AnthropicProvider::parse_sse_event(&ev).unwrap();
+        assert!(matches!(
+            chunk,
+            StreamChunk::Error { message } if message.contains("failed to parse Anthropic SSE payload")
+        ));
+    }
+
+    #[test]
     fn parse_event_without_event_type_returns_none() {
-        let ev = SseEvent { event_type: None, data: "data".to_owned() };
+        let ev = SseEvent {
+            event_type: None,
+            data: "data".to_owned(),
+        };
         assert!(AnthropicProvider::parse_sse_event(&ev).is_none());
     }
 
@@ -919,9 +1022,7 @@ mod tests {
                 "required": ["command"]
             }),
         };
-        let req = LlmRequest::builder("model")
-            .tools(vec![tool])
-            .build();
+        let req = LlmRequest::builder("model").tools(vec![tool]).build();
 
         let body = provider.build_messages_request(&req, false);
         let json = serde_json::to_value(&body).unwrap();
@@ -1001,11 +1102,8 @@ mod tests {
             is_error: false,
         }];
 
-        let messages = AnthropicProvider::build_tool_result_messages(
-            &tool_calls,
-            &tool_results,
-            "",
-        );
+        let messages =
+            AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
 
         // Must produce exactly two messages: assistant (with tool_use) + user (with tool_result).
         assert_eq!(messages.len(), 2);
@@ -1026,12 +1124,17 @@ mod tests {
             is_error: false,
         }];
 
-        let messages = AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
+        let messages =
+            AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
         let json = serde_json::to_value(&messages[0]).unwrap();
 
-        let blocks = json["content"].as_array().expect("assistant content should be array");
+        let blocks = json["content"]
+            .as_array()
+            .expect("assistant content should be array");
         // Tool_use block must appear with Anthropic's required fields.
-        let tool_use = blocks.iter().find(|b| b["type"] == "tool_use")
+        let tool_use = blocks
+            .iter()
+            .find(|b| b["type"] == "tool_use")
             .expect("must have a tool_use block");
         assert_eq!(tool_use["id"], "toolu_01");
         assert_eq!(tool_use["name"], "bash");
@@ -1051,10 +1154,13 @@ mod tests {
             is_error: false,
         }];
 
-        let messages = AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
+        let messages =
+            AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
         let json = serde_json::to_value(&messages[1]).unwrap();
 
-        let blocks = json["content"].as_array().expect("user content should be array");
+        let blocks = json["content"]
+            .as_array()
+            .expect("user content should be array");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "tool_result");
         // Anthropic uses tool_use_id to match result to call.
@@ -1077,7 +1183,8 @@ mod tests {
             is_error: true,
         }];
 
-        let messages = AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
+        let messages =
+            AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
         let json = serde_json::to_value(&messages[1]).unwrap();
         let blocks = json["content"].as_array().unwrap();
         assert_eq!(blocks[0]["is_error"], true);
@@ -1108,7 +1215,9 @@ mod tests {
         let blocks = json["content"].as_array().unwrap();
 
         // Must contain both a text block and a tool_use block.
-        let text_block = blocks.iter().find(|b| b["type"] == "text")
+        let text_block = blocks
+            .iter()
+            .find(|b| b["type"] == "text")
             .expect("must include text block when assistant_text is non-empty");
         assert_eq!(text_block["text"], "Let me run that for you.");
         assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
@@ -1119,22 +1228,51 @@ mod tests {
         // Multiple tool calls in one turn must each get their own tool_use and
         // tool_result block, matched by call_id.
         let tool_calls = vec![
-            ToolCall { call_id: "toolu_01".into(), name: "bash".into(), arguments: serde_json::json!({}) },
-            ToolCall { call_id: "toolu_02".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            ToolCall {
+                call_id: "toolu_01".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                call_id: "toolu_02".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({}),
+            },
         ];
         let tool_results = vec![
-            ToolResult { call_id: "toolu_01".into(), content: "result1".into(), is_error: false },
-            ToolResult { call_id: "toolu_02".into(), content: "result2".into(), is_error: false },
+            ToolResult {
+                call_id: "toolu_01".into(),
+                content: "result1".into(),
+                is_error: false,
+            },
+            ToolResult {
+                call_id: "toolu_02".into(),
+                content: "result2".into(),
+                is_error: false,
+            },
         ];
 
-        let messages = AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
+        let messages =
+            AnthropicProvider::build_tool_result_messages(&tool_calls, &tool_results, "");
         let json_asst = serde_json::to_value(&messages[0]).unwrap();
         let json_user = serde_json::to_value(&messages[1]).unwrap();
 
         let asst_blocks = json_asst["content"].as_array().unwrap();
         let user_blocks = json_user["content"].as_array().unwrap();
-        assert_eq!(asst_blocks.iter().filter(|b| b["type"] == "tool_use").count(), 2);
-        assert_eq!(user_blocks.iter().filter(|b| b["type"] == "tool_result").count(), 2);
+        assert_eq!(
+            asst_blocks
+                .iter()
+                .filter(|b| b["type"] == "tool_use")
+                .count(),
+            2
+        );
+        assert_eq!(
+            user_blocks
+                .iter()
+                .filter(|b| b["type"] == "tool_result")
+                .count(),
+            2
+        );
     }
 
     // --- multi-block content for tool results ---
@@ -1153,13 +1291,11 @@ mod tests {
     fn anthropic_message_with_blocks_serialises_as_array() {
         let msg = AnthropicMessage {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": "toolu_01",
-                    "content": "command output"
-                }),
-            ]),
+            content: MessageContent::Blocks(vec![serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": "toolu_01",
+                "content": "command output"
+            })]),
         };
         let json = serde_json::to_value(&msg).unwrap();
         let blocks = json["content"].as_array().expect("content should be array");
@@ -1197,9 +1333,15 @@ mod tests {
             "content_block_stop",
             r#"{"type":"content_block_stop","index":1}"#,
         );
-        let chunk = acc.process_event(&stop).expect("should emit ToolUse on stop");
+        let chunk = acc
+            .process_event(&stop)
+            .expect("should emit ToolUse on stop");
         match chunk {
-            StreamChunk::ToolUse { call_id, name, arguments } => {
+            StreamChunk::ToolUse {
+                call_id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(call_id, "toolu_01abc");
                 assert_eq!(name, "bash");
                 assert_eq!(arguments, serde_json::json!({"command": "ls"}));
@@ -1232,6 +1374,18 @@ mod tests {
         let mut acc = ToolUseAccumulator::new();
         let ev = event("message_start", r#"{"type":"message_start"}"#);
         assert!(acc.process_event(&ev).is_none());
+    }
+
+    #[test]
+    fn accumulator_reports_malformed_tool_use_frame() {
+        let mut acc = ToolUseAccumulator::new();
+        let ev = event("content_block_start", "{not-json");
+        let chunk = acc.process_event(&ev).unwrap();
+        assert!(matches!(
+            chunk,
+            StreamChunk::Error { message }
+                if message.contains("failed to parse Anthropic tool-use frame")
+        ));
     }
 
     #[test]
@@ -1287,7 +1441,10 @@ mod tests {
     #[test]
     fn map_stop_reason_unknown_and_none_map_to_unknown() {
         use swage_core::FinishReason;
-        assert_eq!(map_stop_reason(Some("content_filter")), FinishReason::Unknown);
+        assert_eq!(
+            map_stop_reason(Some("content_filter")),
+            FinishReason::Unknown
+        );
         assert_eq!(map_stop_reason(None), FinishReason::Unknown);
     }
 
@@ -1440,8 +1597,14 @@ mod tests {
         let json = serde_json::to_value(&body).unwrap();
         let tools = json["tools"].as_array().unwrap();
         // Anthropic requires input_schema — not parameters — in the wire format.
-        assert!(tools[0].get("input_schema").is_some(), "input_schema should be present");
-        assert!(tools[0].get("parameters").is_none(), "parameters must not appear in Anthropic wire format");
+        assert!(
+            tools[0].get("input_schema").is_some(),
+            "input_schema should be present"
+        );
+        assert!(
+            tools[0].get("parameters").is_none(),
+            "parameters must not appear in Anthropic wire format"
+        );
     }
 
     #[test]
@@ -1472,10 +1635,12 @@ mod tests {
             "content_block_delta",
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp\"}"}}"#,
         ));
-        let second = acc.process_event(&event(
-            "content_block_stop",
-            r#"{"type":"content_block_stop","index":1}"#,
-        )).unwrap();
+        let second = acc
+            .process_event(&event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ))
+            .unwrap();
         match second {
             StreamChunk::ToolUse { call_id, name, .. } => {
                 assert_eq!(call_id, "toolu_02");

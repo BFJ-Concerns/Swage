@@ -4,7 +4,14 @@
 // send client events, dispatch server events to callbacks, and handle
 // reconnection with exponential backoff.
 
-import type { ClientEvent, ServerEvent, ConnectionStatus } from "../types";
+import {
+  KNOWN_SERVER_EVENT_TYPES,
+  type ClientEvent,
+  type ConnectionStatus,
+  type KnownServerEvent,
+  type KnownServerEventType,
+  type ServerEvent,
+} from "../types";
 
 export type ServerEventHandler = (event: ServerEvent) => void;
 export type StatusChangeHandler = (status: ConnectionStatus) => void;
@@ -24,6 +31,30 @@ export interface WebSocketClientOptions {
   wsBaseUrl?: string;
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isKnownServerEventType(type: string): type is KnownServerEventType {
+  return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
+}
+
+function parseServerEventFrame(raw: unknown): ServerEvent {
+  if (!isObjectRecord(raw) || typeof raw.type !== "string") {
+    throw new Error("missing event type");
+  }
+
+  if (isKnownServerEventType(raw.type)) {
+    return raw as KnownServerEvent;
+  }
+
+  return {
+    type: "unknown_event",
+    original_type: raw.type,
+    raw,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Reconnection backoff constants
 // ---------------------------------------------------------------------------
@@ -36,21 +67,6 @@ const BACKOFF_MAX_MS = 30_000;
 
 // Each failed reconnect multiplies the delay by this factor.
 const BACKOFF_FACTOR = 2;
-
-// ---------------------------------------------------------------------------
-// Known server event types
-// ---------------------------------------------------------------------------
-
-// Only dispatch events whose type is in this set. Unknown types are silently
-// dropped for forward compatibility with future gateway event additions.
-const KNOWN_EVENT_TYPES = new Set([
-  "token",
-  "turn_complete",
-  "error",
-  "cancelled",
-  "tool_start",
-  "tool_end",
-]);
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -119,21 +135,26 @@ export function createWebSocketClient(
       // open+drop cycles (e.g. a flapping connection) back off progressively
       // rather than hammering the server at the base rate on every recovery.
       emitStatus("connected");
+
+      // Subscribe to the "tools" channel so ToolStart/ToolEnd events are
+      // delivered. The gateway gates these events behind subscription state;
+      // without this the web UI would not receive tool activity events.
+      ws!.send(JSON.stringify({ type: "subscribe", channels: ["tools"] }));
     };
 
     ws.onmessage = (event: MessageEvent) => {
       try {
-        const parsed = JSON.parse(event.data as string) as Record<
-          string,
-          unknown
-        >;
-        if (KNOWN_EVENT_TYPES.has(parsed.type as string)) {
-          for (const handler of eventHandlers)
-            handler(parsed as unknown as ServerEvent);
-        }
-        // Unknown event types fall through silently — forward-compatible.
+        const parsed = parseServerEventFrame(JSON.parse(event.data as string));
+        for (const handler of eventHandlers)
+          handler(parsed);
       } catch {
-        // Malformed JSON frame — discard without surfacing an error.
+        emitStatus("error");
+        const frameError: ServerEvent = {
+          type: "error",
+          code: "invalid_frame",
+          message: "Received a malformed WebSocket frame from the gateway.",
+        };
+        for (const handler of eventHandlers) handler(frameError);
       }
     };
 

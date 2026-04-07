@@ -41,6 +41,14 @@ pub enum AgentError {
 
     #[error("context exceeds capacity even after compaction")]
     ContextTooLong,
+
+    /// Output schema validation failed after all retry attempts were exhausted.
+    #[error("output schema validation failed after {attempts} attempt(s)")]
+    OutputSchemaFailed { attempts: u32 },
+
+    /// The turn was cancelled by the caller via the cancellation token.
+    #[error("turn cancelled")]
+    Cancelled,
 }
 
 impl AgentError {
@@ -64,6 +72,10 @@ impl AgentError {
             AgentError::ThreadNotFound(_) => false,
             AgentError::InvalidConfig(_) => false,
             AgentError::ContextTooLong => false,
+            // Schema validation exhausted all retries — not transient.
+            AgentError::OutputSchemaFailed { .. } => false,
+            // Cancellation is not a transient failure — the caller chose to stop.
+            AgentError::Cancelled => false,
         }
     }
 }
@@ -215,9 +227,7 @@ mod tests {
 
     #[test]
     fn display_storage_failed() {
-        let err = AgentError::StorageFailed(StorageError::ConnectionFailed(
-            "timeout".into(),
-        ));
+        let err = AgentError::StorageFailed(StorageError::ConnectionFailed("timeout".into()));
         assert_eq!(
             err.to_string(),
             "storage operation failed: connection failed: timeout"
@@ -241,19 +251,13 @@ mod tests {
             hook: "safety".into(),
             reason: "blocked by policy".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "hook 'safety' blocked: blocked by policy"
-        );
+        assert_eq!(err.to_string(), "hook 'safety' blocked: blocked by policy");
     }
 
     #[test]
     fn display_tool_rounds_exceeded() {
         let err = AgentError::ToolRoundsExceeded { max: 5 };
-        assert_eq!(
-            err.to_string(),
-            "exceeded maximum tool call rounds (5)"
-        );
+        assert_eq!(err.to_string(), "exceeded maximum tool call rounds (5)");
     }
 
     #[test]
@@ -266,10 +270,7 @@ mod tests {
     fn display_session_not_found() {
         let id = Uuid::nil();
         let err = AgentError::SessionNotFound(id);
-        assert_eq!(
-            err.to_string(),
-            format!("session not found: {id}")
-        );
+        assert_eq!(err.to_string(), format!("session not found: {id}"));
     }
 
     #[test]
@@ -295,10 +296,7 @@ mod tests {
     #[test]
     fn display_invalid_config() {
         let err = AgentError::InvalidConfig("model required".into());
-        assert_eq!(
-            err.to_string(),
-            "invalid configuration: model required"
-        );
+        assert_eq!(err.to_string(), "invalid configuration: model required");
     }
 
     #[test]
@@ -307,6 +305,21 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "context exceeds capacity even after compaction"
+        );
+    }
+
+    #[test]
+    fn output_schema_failed_not_retriable() {
+        let err = AgentError::OutputSchemaFailed { attempts: 3 };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn display_output_schema_failed() {
+        let err = AgentError::OutputSchemaFailed { attempts: 3 };
+        assert_eq!(
+            err.to_string(),
+            "output schema validation failed after 3 attempt(s)"
         );
     }
 }

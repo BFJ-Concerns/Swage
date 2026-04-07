@@ -10,7 +10,6 @@ use swage_core::SandboxError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::bubblewrap::find_bwrap;
 use crate::config::SandboxConfig;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
@@ -31,14 +30,14 @@ use crate::socket::SocketManager;
 /// comes back as `LlmResponse`. Stripping these vars is a defence-in-depth
 /// measure: even if the isolation layer is bypassed, the agent cannot call
 /// providers directly without keys.
-const CREDENTIAL_ENV_VARS: &[&str] =
-    &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
+const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // Platform detection
 // ---------------------------------------------------------------------------
 
 /// Which sandbox implementation is available on the current platform.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxPlatform {
     /// `bwrap` is installed — full namespace isolation is available.
@@ -48,8 +47,9 @@ pub enum SandboxPlatform {
 }
 
 /// Returns the strongest sandbox implementation available on this platform.
+#[cfg(test)]
 pub fn detect_platform() -> SandboxPlatform {
-    if find_bwrap().is_ok() {
+    if crate::bubblewrap::find_bwrap().is_ok() {
         SandboxPlatform::Bubblewrap
     } else {
         SandboxPlatform::FallbackOnly
@@ -127,10 +127,9 @@ impl Sandbox for FallbackSandbox {
 
         // Re-run the host binary in sandbox mode. In production, the agent
         // entry point is selected by --sandbox-mode and sets up run_agent_loop.
-        let agent_binary =
-            std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
-                message: format!("cannot determine agent binary path: {e}"),
-            })?;
+        let agent_binary = std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
+            message: format!("cannot determine agent binary path: {e}"),
+        })?;
 
         let mut cmd = tokio::process::Command::new(&agent_binary);
         cmd.arg("--sandbox-mode");
@@ -147,8 +146,10 @@ impl Sandbox for FallbackSandbox {
         tracing::debug!(pid = process.pid(), "fallback sandbox agent spawned");
 
         // Accept the agent's incoming connection.
-        let (stream, _addr) =
-            listener.accept().await.map_err(|e| SandboxError::SpawnFailed {
+        let (stream, _addr) = listener
+            .accept()
+            .await
+            .map_err(|e| SandboxError::SpawnFailed {
                 message: format!("IPC accept failed: {e}"),
             })?;
 
@@ -230,7 +231,11 @@ impl Sandbox for FallbackSandbox {
                             ),
                         });
                     }
-                    return Ok(ToolCallResult { output, duration_ms, error });
+                    return Ok(ToolCallResult {
+                        output,
+                        duration_ms,
+                        error,
+                    });
                 }
 
                 IpcMessage::LlmRequest {
@@ -280,7 +285,9 @@ impl Sandbox for FallbackSandbox {
                 }
 
                 IpcMessage::ErrorMessage { description, .. } => {
-                    return Err(SandboxError::IpcError { message: description });
+                    return Err(SandboxError::IpcError {
+                        message: description,
+                    });
                 }
 
                 other => {
@@ -347,9 +354,9 @@ mod tests {
     use swage_core::{CompletionResponse, FinishReason, SandboxError};
     use tokio::net::UnixStream;
 
-    use super::{detect_platform, FallbackSandbox, SandboxPlatform, CREDENTIAL_ENV_VARS};
+    use super::{CREDENTIAL_ENV_VARS, FallbackSandbox, SandboxPlatform, detect_platform};
     use crate::config::SandboxConfig;
-    use crate::ipc::message::{IpcMessage, TokenUsage};
+    use crate::ipc::message::IpcMessage;
     use crate::ipc::transport::IpcTransport;
     use crate::llm_handler::HostLlmHandler;
     use crate::sandbox::Sandbox;
@@ -415,7 +422,10 @@ mod tests {
         // one of the two valid variants — the function must not panic or error.
         let platform = detect_platform();
         assert!(
-            matches!(platform, SandboxPlatform::Bubblewrap | SandboxPlatform::FallbackOnly),
+            matches!(
+                platform,
+                SandboxPlatform::Bubblewrap | SandboxPlatform::FallbackOnly
+            ),
             "detect_platform must return a valid SandboxPlatform, got: {platform:?}"
         );
     }
@@ -449,9 +459,10 @@ mod tests {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
         // Agent side: receive the request and respond with a result.
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("echo", json!({"text": "hello"})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(
+                async move { sandbox.execute_tool("echo", json!({"text": "hello"})).await },
+            );
 
         // Receive ToolCallRequest.
         let msg = agent.receive().await.unwrap();
@@ -483,7 +494,9 @@ mod tests {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
         let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("think", json!({"query": "answer"})).await
+            sandbox
+                .execute_tool("think", json!({"query": "answer"}))
+                .await
         });
 
         // Agent: receive ToolCallRequest.
@@ -533,9 +546,8 @@ mod tests {
         // The dispatch loop must handle more than one interleaved LlmRequest.
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("complex_tool", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("complex_tool", json!({})).await });
 
         let msg = agent.receive().await.unwrap();
         let req_id = match &msg {
@@ -580,9 +592,8 @@ mod tests {
     async fn execute_tool_returns_error_on_error_message() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("bad_tool", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("bad_tool", json!({})).await });
 
         // Receive the request.
         let _ = agent.receive().await.unwrap();
@@ -624,9 +635,8 @@ mod tests {
     async fn execute_tool_returns_error_on_request_id_mismatch() {
         let (sandbox, mut agent) = sandbox_with_mock_agent();
 
-        let sandbox_handle = tokio::spawn(async move {
-            sandbox.execute_tool("echo", json!({})).await
-        });
+        let sandbox_handle =
+            tokio::spawn(async move { sandbox.execute_tool("echo", json!({})).await });
 
         // Receive the request (we'll ignore the request_id intentionally).
         let _ = agent.receive().await.unwrap();
@@ -663,7 +673,10 @@ mod tests {
     async fn shutdown_before_spawn_is_idempotent() {
         let mut sandbox = FallbackSandbox::new(test_config(), no_op_llm_handler());
         // No process, no connection — should succeed silently.
-        sandbox.shutdown().await.expect("shutdown before spawn must succeed");
+        sandbox
+            .shutdown()
+            .await
+            .expect("shutdown before spawn must succeed");
     }
 
     #[tokio::test]
@@ -677,7 +690,10 @@ mod tests {
         assert!(matches!(msg, IpcMessage::Shutdown));
         agent.send(&IpcMessage::ShutdownAck).await.unwrap();
 
-        shutdown_handle.await.unwrap().expect("shutdown must succeed");
+        shutdown_handle
+            .await
+            .unwrap()
+            .expect("shutdown must succeed");
     }
 
     #[tokio::test]
@@ -700,6 +716,9 @@ mod tests {
         );
 
         // _agent_stream kept alive but sends nothing — host will time out.
-        sandbox.shutdown().await.expect("shutdown must succeed even without ShutdownAck");
+        sandbox
+            .shutdown()
+            .await
+            .expect("shutdown must succeed even without ShutdownAck");
     }
 }

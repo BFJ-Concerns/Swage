@@ -3,8 +3,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,10 +38,7 @@ impl ProviderConfig {
     }
 
     /// Construct a config without an API key (local endpoints like Ollama).
-    pub fn keyless(
-        model: impl Into<String>,
-        base_url: impl Into<String>,
-    ) -> Self {
+    pub fn keyless(model: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: None,
             model: model.into(),
@@ -58,13 +55,8 @@ impl TryFrom<&swage_config::ProviderConfig> for ProviderConfig {
     /// Reads the API key from the environment variable named in `api_key_env`.
     /// Returns `ProviderError::Auth` if the variable is not set.
     fn try_from(config: &swage_config::ProviderConfig) -> Result<Self, Self::Error> {
-        let api_key = std::env::var(&config.api_key_env).map_err(|_| {
-            ProviderError::Auth {
-                provider: format!(
-                    "environment variable '{}' is not set",
-                    config.api_key_env
-                ),
-            }
+        let api_key = std::env::var(&config.api_key_env).map_err(|_| ProviderError::Auth {
+            provider: format!("environment variable '{}' is not set", config.api_key_env),
         })?;
 
         // Derive the provider base URL from the configured protocol.
@@ -118,10 +110,8 @@ pub trait LlmProvider: Send + Sync {
 
     /// Send a completion request and return a stream of chunks for progressive
     /// rendering.
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>;
+    fn stream(&self, request: CompletionRequest)
+    -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +163,8 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use swage_core::{
-        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, Role,
-        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, Role, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse,
     };
 
     // -----------------------------------------------------------------------
@@ -226,10 +216,18 @@ mod tests {
         ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             // Three delta chunks followed by Done — the standard stream shape.
             Box::pin(futures::stream::iter(vec![
-                StreamChunk::Delta { content: "chunk1".into() },
-                StreamChunk::Delta { content: "chunk2".into() },
-                StreamChunk::Delta { content: "chunk3".into() },
-                StreamChunk::Done { finish_reason: None },
+                StreamChunk::Delta {
+                    content: "chunk1".into(),
+                },
+                StreamChunk::Delta {
+                    content: "chunk2".into(),
+                },
+                StreamChunk::Delta {
+                    content: "chunk3".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
             ]))
         }
     }
@@ -319,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_complete_with_tools_returns_tool_calls() {
-        use swage_core::{ToolCompletionRequest, FinishReason};
+        use swage_core::{FinishReason, ToolCompletionRequest};
 
         let provider = MockProvider;
         let request = ToolCompletionRequest {

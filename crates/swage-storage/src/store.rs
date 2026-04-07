@@ -4,8 +4,12 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session,
-    Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
+    InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+    NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall,
+    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    TurnState,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,11 +51,89 @@ pub trait SessionStore: Send + Sync {
     /// List sessions in the project ordered by updated_at DESC.
     async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError>;
     /// List sessions belonging to an agent, ordered by updated_at DESC.
-    async fn list_sessions_by_agent_id(&self, agent_id: &str) -> Result<Vec<Session>, StorageError>;
+    async fn list_sessions_by_agent_id(&self, agent_id: &str)
+    -> Result<Vec<Session>, StorageError>;
     /// Delete a session. Returns true if it existed and was removed.
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+}
+
+#[async_trait]
+pub trait TeamStore: Send + Sync {
+    async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError>;
+    async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
+    async fn get_team_by_name(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Team>, StorageError>;
+    /// List teams in a project ordered by created_at ascending.
+    async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError>;
+    /// Partially update a team. Only `Some` fields are changed.
+    async fn update_team(
+        &self,
+        id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        entry_agent_id: Option<String>,
+        members: Option<Vec<String>>,
+    ) -> Result<Team, StorageError>;
+    /// Delete a team. Returns true if it existed and was removed.
+    async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait TopologyTraceStore: Send + Sync {
+    async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError>;
+    async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError>;
+    async fn list_topology_runs_by_team(
+        &self,
+        team_id: Uuid,
+    ) -> Result<Vec<TopologyRun>, StorageError>;
+    async fn list_topology_runs_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<TopologyRun>, StorageError>;
+    async fn update_topology_run(
+        &self,
+        id: Uuid,
+        state: TopologyRunState,
+        final_output: Option<&serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    async fn create_node_execution(
+        &self,
+        execution: NewNodeExecution,
+    ) -> Result<NodeExecution, StorageError>;
+    async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError>;
+    async fn list_node_executions_by_run(
+        &self,
+        topology_run_id: Uuid,
+    ) -> Result<Vec<NodeExecution>, StorageError>;
+    async fn update_node_execution(
+        &self,
+        id: Uuid,
+        state: NodeExecutionState,
+        output_json: Option<&serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    async fn create_edge_evaluation(
+        &self,
+        evaluation: NewEdgeEvaluation,
+    ) -> Result<EdgeEvaluation, StorageError>;
+    async fn list_edge_evaluations_by_run(
+        &self,
+        topology_run_id: Uuid,
+    ) -> Result<Vec<EdgeEvaluation>, StorageError>;
+
+    async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError>;
+    async fn list_node_retries(
+        &self,
+        node_execution_id: Uuid,
+    ) -> Result<Vec<NodeRetry>, StorageError>;
 }
 
 #[async_trait]
@@ -65,24 +147,52 @@ pub trait TurnStore: Send + Sync {
     /// State is consumer-driven — the storage layer records whatever state is
     /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
-    /// Find all turns in Pending or Processing state for a given agent.
+    /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
     ///
-    /// Used by startup recovery to identify orphaned in-flight turns.
+    /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError>;
     /// Persist the assistant's response text onto a completed turn.
     async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError>;
+    /// Persist inbound canonicalisation audit metadata for a turn.
+    async fn update_inbound_audit(
+        &self,
+        id: Uuid,
+        inbound_audit: &InboundAudit,
+    ) -> Result<(), StorageError>;
     /// Persist token counts after the LLM call completes.
     async fn update_tokens(&self, id: Uuid, input: i64, output: i64) -> Result<(), StorageError>;
+    /// Persist the computed cost after pricing is applied.
+    ///
+    /// `cost` is in microcents (see `PricingConfig::compute_cost`). Only called
+    /// when pricing was configured for the model; absent turns remain NULL.
+    async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError>;
+    /// Persist the validated structured output for a completed turn.
+    ///
+    /// Called when output schema validation succeeds. The `output` value is
+    /// serialised as JSON text for storage. Subsequent `get_turn` calls will
+    /// return it deserialised in `Turn::structured_output`.
+    async fn update_structured_output(
+        &self,
+        id: Uuid,
+        output: &serde_json::Value,
+    ) -> Result<(), StorageError>;
 }
 
 /// Store for message CRUD operations.
 ///
-/// Messages belong to threads (not turns). `position` is monotonically
-/// increasing within a thread and is used to reconstruct conversation order.
+/// Messages belong to threads and may optionally reference the turn that
+/// produced them. `position` is monotonically increasing within a thread and
+/// is used to reconstruct conversation order.
 #[async_trait]
 pub trait MessageStore: Send + Sync {
     /// Persist a new message. Returns the stored record with its assigned id.
     async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError>;
+
+    /// Persist a new message at the end of the thread.
+    ///
+    /// The storage layer allocates the next monotonic `position` atomically so
+    /// concurrent writers cannot race on client-side `len()` calculations.
+    async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError>;
 
     /// Fetch all messages in a thread ordered by position ascending.
     async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError>;
@@ -139,6 +249,20 @@ pub trait ToolCallStore: Send + Sync {
     ) -> Result<Vec<ToolCallRecord>, StorageError>;
 }
 
+/// Store for context assembly report snapshots.
+///
+/// One snapshot per turn — stores the serialised JSON of an `AssemblyReport`
+/// produced by the context assembly engine. Using raw JSON avoids coupling the
+/// storage layer to the `AssemblyReport` type.
+#[async_trait]
+pub trait ContextSnapshotStore: Send + Sync {
+    /// Persist an assembly report for `turn_id`. Replaces any existing entry.
+    async fn store_snapshot(&self, turn_id: Uuid, report_json: &str) -> Result<(), StorageError>;
+    /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
+    /// was stored for that turn.
+    async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
+}
+
 /// Store for thread CRUD operations.
 ///
 /// Threads scope a single agent's execution within a session. Each agent
@@ -167,6 +291,203 @@ pub trait ThreadStore: Send + Sync {
 
     /// Delete a thread. Returns `true` if it existed and was removed.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Create a branch from `parent_thread_id` at `branched_from_message_id`.
+    async fn create_branch(
+        &self,
+        parent_thread_id: Uuid,
+        branched_from_message_id: Uuid,
+    ) -> Result<ThreadBranch, StorageError>;
+
+    /// List branch lineage rows for a session ordered by creation time.
+    async fn list_branches_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ThreadBranch>, StorageError>;
+
+    /// Fetch the branch lineage row for a child thread, if it is a branch.
+    async fn get_branch(&self, child_thread_id: Uuid)
+    -> Result<Option<ThreadBranch>, StorageError>;
+}
+
+/// Store for per-session skill activation state.
+///
+/// Tracks which skills are currently active for a session. State survives
+/// client disconnections and gateway restarts because it is persisted in
+/// the `active_skills` table, which cascades on session delete.
+#[async_trait]
+pub trait SkillActivationStore: Send + Sync {
+    /// Mark a skill as active for a session. Idempotent — calling this for
+    /// an already-active skill is a no-op (INSERT OR IGNORE).
+    async fn activate_skill(&self, session_id: Uuid, skill_name: &str) -> Result<(), StorageError>;
+
+    /// Remove a skill from the active set.
+    ///
+    /// Returns `true` if the skill was active and has been removed, or `false`
+    /// if the skill was not in the active set (nothing to remove).
+    async fn deactivate_skill(
+        &self,
+        session_id: Uuid,
+        skill_name: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// List all skills currently active for a session, ordered by activation
+    /// time ascending (the order in which they were activated).
+    async fn list_active_skills(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ActiveSkillRecord>, StorageError>;
+
+    /// Remove all active skills for a session in one operation.
+    ///
+    /// Used when resetting or closing a session without deleting it.
+    async fn clear_active_skills(&self, session_id: Uuid) -> Result<(), StorageError>;
+}
+
+/// Store for human-in-the-loop approval requests.
+///
+/// Each approval request is created when an agent turn hits an approval gate
+/// (tool dispatch or hook). The turn is suspended in
+/// `TurnState::AwaitingApproval` until the request reaches a terminal state
+/// (Approved / Rejected / Expired).
+#[async_trait]
+pub trait ApprovalStore: Send + Sync {
+    /// Persist a new approval request. Assigns `id`, sets `state = Pending`,
+    /// and leaves `decided_at` as `None`. Returns the stored record.
+    async fn create_approval(
+        &self,
+        approval: NewApprovalRequest,
+    ) -> Result<ApprovalRequest, StorageError>;
+
+    /// Fetch a single approval request by id. Returns `None` if not found.
+    async fn get_approval(&self, id: Uuid) -> Result<Option<ApprovalRequest>, StorageError>;
+
+    /// List all pending approval requests for a specific agent.
+    ///
+    /// Used by the agent runtime to check which of its own turns are
+    /// suspended. Ordered by `created_at` ascending.
+    async fn list_pending_by_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<ApprovalRequest>, StorageError>;
+
+    /// List pending approval requests scoped to a specific session.
+    ///
+    /// Joins through turns → threads → session to return only approvals whose
+    /// turn belongs to the given session. Used by the WebSocket handler to
+    /// re-emit approvals without leaking cross-session data.
+    async fn list_pending_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ApprovalRequest>, StorageError>;
+
+    /// List all pending approval requests across all agents.
+    ///
+    /// Used during startup recovery and by the gateway to re-emit pending
+    /// approvals to newly connected clients.
+    async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError>;
+
+    /// Transition an approval request from Pending to `state`.
+    ///
+    /// Sets `decision_reason` and `decided_at` atomically. Returns `true` if
+    /// the update succeeded (the request was in Pending state), or `false` if
+    /// the request was already in a terminal state (concurrent decision). Only
+    /// non-Pending → terminal transitions are valid.
+    async fn update_approval_state(
+        &self,
+        id: Uuid,
+        state: ApprovalState,
+        reason: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
+    /// Mark as Expired any pending approval whose parent turn no longer exists.
+    ///
+    /// Called during startup recovery to handle the case where an agent was
+    /// killed with approvals in flight. Returns the number of rows updated.
+    async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError>;
+
+    /// Persist approval memory for a specific session and tool request fingerprint.
+    ///
+    /// Used for session-scoped auto-approval: once a user approves a matching
+    /// request, subsequent identical tool invocations in the same session can
+    /// skip the explicit approval gate.
+    async fn remember_approval(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Return whether a matching approval memory entry exists for this session.
+    async fn has_approval_memory(
+        &self,
+        session_id: Uuid,
+        tool_name: &str,
+        request_fingerprint: &str,
+    ) -> Result<bool, StorageError>;
+}
+
+/// Persistent mailbox for inter-agent messages.
+///
+/// Follows actor-model semantics: messages are store-and-forward for durable
+/// kinds (Delegate, Result, Cancel, Shutdown) and at-most-once for Notify.
+/// Status transitions are atomic — only one transition from Pending to a
+/// terminal state succeeds.
+#[async_trait]
+pub trait AgentMessageStore: Send + Sync {
+    /// Persist a new agent message with status = Pending.
+    async fn create_agent_message(
+        &self,
+        msg: NewAgentMessage,
+    ) -> Result<AgentMessage, StorageError>;
+
+    /// Retrieve a single message by ID.
+    async fn get_agent_message(&self, id: Uuid) -> Result<Option<AgentMessage>, StorageError>;
+
+    /// List all pending messages for a recipient agent, ordered by creation time.
+    ///
+    /// Used by the mailbox on agent instantiation to discover queued work.
+    async fn list_pending_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<AgentMessage>, StorageError>;
+
+    /// Atomically transition a message to a terminal status (Delivered or Failed).
+    ///
+    /// Returns `true` if the transition succeeded (message was Pending), `false`
+    /// if the message was already in a terminal state (concurrent delivery).
+    /// Sets `delivered_at` when transitioning to Delivered.
+    async fn update_agent_message_status(
+        &self,
+        id: Uuid,
+        status: swage_core::MessageStatus,
+        failure_reason: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
+    /// Update the payload of an existing message.
+    ///
+    /// Used by `DelegationExecutor` to annotate delegate messages with the
+    /// child thread_id after creation, enabling scoped cancel fallback.
+    async fn update_agent_message_payload(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// List all messages sharing a correlation ID, ordered by creation time.
+    ///
+    /// Used to trace delegation chains (Delegate → Result/Cancel).
+    async fn list_by_correlation(
+        &self,
+        correlation_id: Uuid,
+    ) -> Result<Vec<AgentMessage>, StorageError>;
+
+    /// Expire pending messages older than `max_age`, transitioning them to
+    /// Failed with reason "delivery timeout". Returns the count of expired messages.
+    async fn expire_stale_messages(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<u64, StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,13 +499,37 @@ pub trait ThreadStore: Send + Sync {
 /// `ProjectStore` is not included — it is independently available and consumers
 /// that need project operations import it separately.
 pub trait Storage:
-    SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    TeamStore
+    + SessionStore
+    + ThreadStore
+    + TurnStore
+    + MessageStore
+    + ToolCallStore
+    + ContextSnapshotStore
+    + SkillActivationStore
+    + ApprovalStore
+    + AgentMessageStore
+    + TopologyTraceStore
+    + Send
+    + Sync
 {
 }
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: SessionStore + ThreadStore + TurnStore + MessageStore + ToolCallStore + Send + Sync
+    T: TeamStore
+        + SessionStore
+        + ThreadStore
+        + TurnStore
+        + MessageStore
+        + ToolCallStore
+        + ContextSnapshotStore
+        + SkillActivationStore
+        + ApprovalStore
+        + AgentMessageStore
+        + TopologyTraceStore
+        + Send
+        + Sync
 {
 }
 
@@ -196,6 +541,7 @@ impl<T> Storage for T where
 mod tests {
     use super::*;
     use crate::model::{NewToolCall, ToolCallRecord};
+    use crate::store::ContextSnapshotStore;
 
     /// Compile-time check: a type implementing all sub-traits satisfies Storage.
     ///
@@ -223,7 +569,13 @@ mod tests {
         async fn get_by_slug(&self, _: &str) -> Result<Option<Project>, StorageError> {
             unimplemented!()
         }
-        async fn update(&self, _: Uuid, _: Option<String>, _: Option<String>, _: Option<String>) -> Result<Project, StorageError> {
+        async fn update(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<Project, StorageError> {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -254,6 +606,111 @@ mod tests {
     }
 
     #[async_trait]
+    impl TeamStore for StubStorage {
+        async fn create_team(&self, _: NewTeam) -> Result<Team, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team(&self, _: Uuid) -> Result<Option<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_teams_by_project(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_team(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<Vec<String>>,
+        ) -> Result<Team, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TopologyTraceStore for StubStorage {
+        async fn create_topology_run(
+            &self,
+            _: NewTopologyRun,
+        ) -> Result<TopologyRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_topology_run(&self, _: Uuid) -> Result<Option<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_team(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_topology_run(
+            &self,
+            _: Uuid,
+            _: TopologyRunState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_execution(
+            &self,
+            _: NewNodeExecution,
+        ) -> Result<NodeExecution, StorageError> {
+            unimplemented!()
+        }
+        async fn get_node_execution(&self, _: Uuid) -> Result<Option<NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_executions_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_node_execution(
+            &self,
+            _: Uuid,
+            _: NodeExecutionState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_edge_evaluation(
+            &self,
+            _: NewEdgeEvaluation,
+        ) -> Result<EdgeEvaluation, StorageError> {
+            unimplemented!()
+        }
+        async fn list_edge_evaluations_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<EdgeEvaluation>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_retry(&self, _: NewNodeRetry) -> Result<NodeRetry, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_retries(&self, _: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()
@@ -267,13 +724,52 @@ mod tests {
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn find_in_progress_by_agent(&self, _agent_id: &str) -> Result<Vec<Turn>, StorageError> {
+        async fn find_in_progress_by_agent(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Vec<Turn>, StorageError> {
             unimplemented!()
         }
         async fn update_response(&self, _id: Uuid, _response: &str) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn update_tokens(&self, _id: Uuid, _input: i64, _output: i64) -> Result<(), StorageError> {
+        async fn update_tokens(
+            &self,
+            _id: Uuid,
+            _input: i64,
+            _output: i64,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_inbound_audit(
+            &self,
+            _id: Uuid,
+            _inbound_audit: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_structured_output(
+            &self,
+            _id: Uuid,
+            _output: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ContextSnapshotStore for StubStorage {
+        async fn store_snapshot(
+            &self,
+            _turn_id: Uuid,
+            _report_json: &str,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
     }
@@ -281,6 +777,9 @@ mod tests {
     #[async_trait]
     impl MessageStore for StubStorage {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
+        async fn append_message(&self, _: AppendMessage) -> Result<Message, StorageError> {
             unimplemented!()
         }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
@@ -317,20 +816,26 @@ mod tests {
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
+        async fn create_branch(&self, _: Uuid, _: Uuid) -> Result<ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+        async fn list_branches_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_branch(&self, _: Uuid) -> Result<Option<ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
     impl ToolCallStore for StubStorage {
-        async fn create_tool_call(
-            &self,
-            _: NewToolCall,
-        ) -> Result<ToolCallRecord, StorageError> {
+        async fn create_tool_call(&self, _: NewToolCall) -> Result<ToolCallRecord, StorageError> {
             unimplemented!()
         }
-        async fn get_tool_call(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<ToolCallRecord>, StorageError> {
+        async fn get_tool_call(&self, _: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
         async fn update_tool_call_result(
@@ -349,6 +854,112 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<ToolCallRecord>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl SkillActivationStore for StubStorage {
+        async fn activate_skill(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_active_skills(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ActiveSkillRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: NewApprovalRequest,
+        ) -> Result<ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(&self, _: Uuid) -> Result<Option<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn remember_approval(&self, _: Uuid, _: &str, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn has_approval_memory(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AgentMessageStore for StubStorage {
+        async fn create_agent_message(
+            &self,
+            _: NewAgentMessage,
+        ) -> Result<AgentMessage, StorageError> {
+            unimplemented!()
+        }
+        async fn get_agent_message(&self, _: Uuid) -> Result<Option<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_for_agent(&self, _: &str) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_status(
+            &self,
+            _: Uuid,
+            _: swage_core::MessageStatus,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_correlation(&self, _: Uuid) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }
@@ -434,5 +1045,101 @@ mod tests {
         _assert_turn_store(&stub);
         // The existence of the impl above is enough — if the new methods are missing
         // from StubStorage, the trait impl won't compile.
+    }
+
+    /// Compile-time check: TurnStore has update_cost.
+    #[test]
+    fn turn_store_update_cost_compile_check() {
+        fn _assert<T: TurnStore>(t: &T) {
+            let _ = t.update_cost(Uuid::new_v4(), 42);
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: ContextSnapshotStore is accessible and has the expected methods.
+    #[test]
+    fn context_snapshot_store_compile_check() {
+        fn _assert<T: ContextSnapshotStore>(t: &T) {
+            let _ = t.store_snapshot(Uuid::new_v4(), "{\"total_tokens\":100}");
+            let _ = t.get_snapshot(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: SkillActivationStore has the expected methods.
+    #[test]
+    fn skill_activation_store_compile_check() {
+        fn _assert<T: SkillActivationStore>(t: &T) {
+            let _ = t.activate_skill(Uuid::new_v4(), "forge");
+            let _ = t.deactivate_skill(Uuid::new_v4(), "forge");
+            let _ = t.list_active_skills(Uuid::new_v4());
+            let _ = t.clear_active_skills(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies SkillActivationStore.
+    #[test]
+    fn storage_supertrait_includes_skill_activation_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.activate_skill(Uuid::new_v4(), "forge");
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: TopologyTraceStore has the expected methods.
+    #[test]
+    fn topology_trace_store_compile_check() {
+        fn _assert<T: TopologyTraceStore>(t: &T) {
+            let _ = t.get_topology_run(Uuid::new_v4());
+            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
+            let _ = t.list_topology_runs_by_session(Uuid::new_v4());
+            let _ = t.get_node_execution(Uuid::new_v4());
+            let _ = t.list_node_executions_by_run(Uuid::new_v4());
+            let _ = t.list_edge_evaluations_by_run(Uuid::new_v4());
+            let _ = t.list_node_retries(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies TopologyTraceStore.
+    #[test]
+    fn storage_supertrait_includes_topology_trace_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: ApprovalStore has the expected methods.
+    #[test]
+    fn approval_store_compile_check() {
+        fn _assert<T: ApprovalStore>(t: &T) {
+            let _ = t.get_approval(Uuid::new_v4());
+            let _ = t.list_pending_by_agent("agent-1");
+            let _ = t.list_all_pending();
+            let _ = t.cleanup_orphaned_approvals();
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    /// Compile-time check: Storage implies ApprovalStore.
+    ///
+    /// `list_all_pending` is unique to ApprovalStore. Calling it via a
+    /// `T: Storage` bound only compiles when Storage ⊇ ApprovalStore.
+    #[test]
+    fn storage_supertrait_includes_approval_store() {
+        fn _assert<T: Storage>(t: &T) {
+            let _ = t.list_all_pending();
+        }
+        let stub = StubStorage;
+        _assert(&stub);
     }
 }

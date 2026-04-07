@@ -155,9 +155,8 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
 /// Remove the oldest non-system messages, keeping the most recent ones that
 /// bring the total below the threshold. System messages are always preserved.
 fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<ChatMessage> {
-    let (system_msgs, non_system): (Vec<_>, Vec<_>) = messages
-        .into_iter()
-        .partition(|m| m.role == Role::System);
+    let (system_msgs, non_system): (Vec<_>, Vec<_>) =
+        messages.into_iter().partition(|m| m.role == Role::System);
 
     let target_keep = match threshold {
         CompactionThreshold::MessageCount(max) => {
@@ -206,9 +205,8 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
 ///
 /// This is the last-resort tier before declaring the context uncompactable.
 fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    let (system_msgs, non_system): (Vec<_>, Vec<_>) = messages
-        .into_iter()
-        .partition(|m| m.role == Role::System);
+    let (system_msgs, non_system): (Vec<_>, Vec<_>) =
+        messages.into_iter().partition(|m| m.role == Role::System);
 
     let mut result = system_msgs;
     if let Some(last) = non_system.into_iter().last() {
@@ -236,9 +234,9 @@ mod tests {
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        Message, MessageStore, NewMessage, NewSession, NewThread, NewToolCall, NewTurn, Session,
-        SessionStore, Thread, ThreadState, ThreadStore, ToolCallRecord, ToolCallStore, Turn,
-        TurnState, TurnStore,
+        ContextSnapshotStore, InboundAudit, Message, MessageStore, NewMessage, NewSession,
+        NewThread, NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
 
     use super::*;
@@ -255,7 +253,9 @@ mod tests {
 
     impl SummaryProvider {
         fn new(summary: impl Into<String>) -> Arc<Self> {
-            Arc::new(Self { summary: summary.into() })
+            Arc::new(Self {
+                summary: summary.into(),
+            })
         }
     }
 
@@ -306,7 +306,9 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
-            Err(ProviderError::InvalidResponse("provider unavailable in test".into()))
+            Err(ProviderError::InvalidResponse(
+                "provider unavailable in test".into(),
+            ))
         }
 
         async fn complete_with_tools(
@@ -338,16 +340,52 @@ mod tests {
         async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_sessions_by_agent_id(
-            &self,
-            _: &str,
-        ) -> Result<Vec<Session>, StorageError> {
+        async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn delete_session(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::TeamStore for StubStorage {
+        async fn create_team(
+            &self,
+            _: swage_storage::NewTeam,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team(&self, _: Uuid) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team_by_name(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_teams_by_project(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_team(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<Vec<String>>,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -370,6 +408,25 @@ mod tests {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_branch(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<swage_storage::ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+        async fn list_branches_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_branch(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::ThreadBranch>, StorageError> {
             unimplemented!()
         }
     }
@@ -397,6 +454,23 @@ mod tests {
         async fn update_tokens(&self, _: Uuid, _: i64, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_structured_output(
+            &self,
+            _: Uuid,
+            _: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_inbound_audit(
+            &self,
+            _: Uuid,
+            _: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -404,13 +478,16 @@ mod tests {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
             unimplemented!()
         }
+        async fn append_message(
+            &self,
+            _: swage_storage::model::AppendMessage,
+        ) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
             unimplemented!()
         }
-        async fn get_latest_for_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<Message>, StorageError> {
+        async fn get_latest_for_session(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
             unimplemented!()
         }
         async fn get_message(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
@@ -423,16 +500,10 @@ mod tests {
 
     #[async_trait]
     impl ToolCallStore for StubStorage {
-        async fn create_tool_call(
-            &self,
-            _: NewToolCall,
-        ) -> Result<ToolCallRecord, StorageError> {
+        async fn create_tool_call(&self, _: NewToolCall) -> Result<ToolCallRecord, StorageError> {
             unimplemented!()
         }
-        async fn get_tool_call(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<ToolCallRecord>, StorageError> {
+        async fn get_tool_call(&self, _: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
         async fn update_tool_call_result(
@@ -456,6 +527,225 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+
+    #[async_trait]
+    impl ContextSnapshotStore for StubStorage {
+        async fn store_snapshot(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn get_snapshot(&self, _: Uuid) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::SkillActivationStore for StubStorage {
+        async fn activate_skill(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_active_skills(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::TopologyTraceStore for StubStorage {
+        async fn create_topology_run(
+            &self,
+            _: swage_storage::NewTopologyRun,
+        ) -> Result<swage_storage::TopologyRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_topology_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_team(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_topology_run(
+            &self,
+            _: Uuid,
+            _: swage_storage::TopologyRunState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_execution(
+            &self,
+            _: swage_storage::NewNodeExecution,
+        ) -> Result<swage_storage::NodeExecution, StorageError> {
+            unimplemented!()
+        }
+        async fn get_node_execution(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_executions_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_node_execution(
+            &self,
+            _: Uuid,
+            _: swage_storage::NodeExecutionState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_edge_evaluation(
+            &self,
+            _: swage_storage::NewEdgeEvaluation,
+        ) -> Result<swage_storage::EdgeEvaluation, StorageError> {
+            unimplemented!()
+        }
+        async fn list_edge_evaluations_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::EdgeEvaluation>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_retry(
+            &self,
+            _: swage_storage::NewNodeRetry,
+        ) -> Result<swage_storage::NodeRetry, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_retries(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeRetry>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: swage_storage::model::NewApprovalRequest,
+        ) -> Result<swage_storage::model::ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(
+            &self,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::model::ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn remember_approval(&self, _: Uuid, _: &str, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn has_approval_memory(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::AgentMessageStore for StubStorage {
+        async fn create_agent_message(
+            &self,
+            _: swage_storage::model::NewAgentMessage,
+        ) -> Result<swage_storage::model::AgentMessage, StorageError> {
+            unimplemented!()
+        }
+        async fn get_agent_message(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_for_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_status(
+            &self,
+            _: Uuid,
+            _: swage_core::MessageStatus,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_correlation(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 
@@ -477,7 +767,10 @@ mod tests {
             text_msg(Role::User, "hello"),
             text_msg(Role::Assistant, "hi there"),
         ];
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::MessageCount(5)));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(5)
+        ));
     }
 
     #[test]
@@ -488,7 +781,10 @@ mod tests {
             text_msg(Role::User, "b"),
             text_msg(Role::User, "c"),
         ];
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::MessageCount(3)));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(3)
+        ));
     }
 
     #[test]
@@ -499,7 +795,10 @@ mod tests {
             text_msg(Role::User, "c"),
             text_msg(Role::User, "d"),
         ];
-        assert!(exceeds_threshold(&messages, &CompactionThreshold::MessageCount(3)));
+        assert!(exceeds_threshold(
+            &messages,
+            &CompactionThreshold::MessageCount(3)
+        ));
     }
 
     #[test]
@@ -507,8 +806,14 @@ mod tests {
         // "hello world" = 11 chars → ~2 tokens (11/4 = 2). Threshold of 1 should
         // exceed; threshold of 10 should not.
         let messages = vec![text_msg(Role::User, "hello world")];
-        assert!(exceeds_threshold(&messages, &CompactionThreshold::TokenCount(1)));
-        assert!(!exceeds_threshold(&messages, &CompactionThreshold::TokenCount(10)));
+        assert!(exceeds_threshold(
+            &messages,
+            &CompactionThreshold::TokenCount(1)
+        ));
+        assert!(!exceeds_threshold(
+            &messages,
+            &CompactionThreshold::TokenCount(10)
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -628,7 +933,10 @@ mod tests {
 
         match result {
             Err(AgentError::CompactionFailed(_)) => {}
-            Ok(msgs) => panic!("expected CompactionFailed, got Ok with {} messages", msgs.len()),
+            Ok(msgs) => panic!(
+                "expected CompactionFailed, got Ok with {} messages",
+                msgs.len()
+            ),
             Err(e) => panic!("expected CompactionFailed, got different error: {e}"),
         }
     }

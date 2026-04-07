@@ -44,8 +44,8 @@ where
     }
 
     // Safe to create a new runtime since we're not in an existing one.
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|e| RuntimeError::CreationFailed(e.to_string()))?;
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|e| RuntimeError::CreationFailed(e.to_string()))?;
 
     Ok(runtime.block_on(future))
 }

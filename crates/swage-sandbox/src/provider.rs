@@ -6,7 +6,7 @@
 //! interchangeable with in-process providers at the type level.
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, SandboxError, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, SandboxError, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 use tokio::sync::Mutex;
@@ -32,7 +32,9 @@ pub struct IpcCompletionProvider {
 impl IpcCompletionProvider {
     /// Wrap an `AgentConnection` in a completion provider.
     pub fn new(connection: AgentConnection) -> Self {
-        Self { connection: Mutex::new(connection) }
+        Self {
+            connection: Mutex::new(connection),
+        }
     }
 
     /// Request a text-only LLM completion through the host.
@@ -49,13 +51,15 @@ impl IpcCompletionProvider {
     ) -> Result<CompletionResponse, SandboxError> {
         let mut conn = self.connection.lock().await;
 
-        let response = conn.send_llm_request(
-            request.messages,
-            request.model,
-            request.max_tokens,
-            request.temperature,
-            None, // no tool definitions for a plain completion
-        ).await?;
+        let response = conn
+            .send_llm_request(
+                request.messages,
+                request.model,
+                request.max_tokens,
+                request.temperature,
+                None, // no tool definitions for a plain completion
+            )
+            .await?;
 
         Ok(CompletionResponse {
             content: response.content,
@@ -86,13 +90,15 @@ impl IpcCompletionProvider {
             Some(request.tool_definitions)
         };
 
-        let response = conn.send_llm_request(
-            request.messages,
-            request.model,
-            request.max_tokens,
-            request.temperature,
-            tool_defs,
-        ).await?;
+        let response = conn
+            .send_llm_request(
+                request.messages,
+                request.model,
+                request.max_tokens,
+                request.temperature,
+                tool_defs,
+            )
+            .await?;
 
         Ok(ToolCompletionResponse {
             content: response.content,
@@ -113,10 +119,8 @@ impl IpcCompletionProvider {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use swage_core::{
-        ChatMessage, CompletionRequest, FinishReason, Role, ToolCompletionRequest,
-    };
     use swage_core::tool::ToolCall;
+    use swage_core::{ChatMessage, CompletionRequest, FinishReason, Role, ToolCompletionRequest};
     use tokio::net::UnixStream;
 
     use super::IpcCompletionProvider;
@@ -143,30 +147,36 @@ mod tests {
             let msg = host_transport.receive().await.unwrap();
             match msg {
                 IpcMessage::LlmRequest { request_id, .. } => {
-                    host_transport.send(&IpcMessage::LlmResponse {
-                        request_id,
-                        content: "Hello, world!".into(),
-                        token_usage: TokenUsage {
-                            prompt_tokens: 8,
-                            completion_tokens: 3,
-                            total_tokens: 11,
-                        },
-                        finish_reason: FinishReason::Stop,
-                        tool_calls: None,
-                    }).await.unwrap();
+                    host_transport
+                        .send(&IpcMessage::LlmResponse {
+                            request_id,
+                            content: "Hello, world!".into(),
+                            token_usage: TokenUsage {
+                                prompt_tokens: 8,
+                                completion_tokens: 3,
+                                total_tokens: 11,
+                            },
+                            finish_reason: FinishReason::Stop,
+                            tool_calls: None,
+                        })
+                        .await
+                        .unwrap();
                 }
                 other => panic!("expected LlmRequest, got {:?}", other),
             }
         });
 
-        let response = provider.complete(CompletionRequest {
-            messages: vec![ChatMessage::new(Role::User, "Hi")],
-            model: None,
-            max_tokens: Some(50),
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-        }).await.unwrap();
+        let response = provider
+            .complete(CompletionRequest {
+                messages: vec![ChatMessage::new(Role::User, "Hi")],
+                model: None,
+                max_tokens: Some(50),
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
 
         host_handle.await.unwrap();
 
@@ -182,32 +192,48 @@ mod tests {
         let provider = IpcCompletionProvider::new(agent_conn);
 
         let agent_handle = tokio::spawn(async move {
-            provider.complete(CompletionRequest {
-                messages: vec![ChatMessage::new(Role::User, "test")],
-                model: Some("claude-3-opus".into()),
-                max_tokens: Some(512),
-                temperature: Some(0.5),
-                stop_sequences: None,
-                metadata: None,
-            }).await
+            provider
+                .complete(CompletionRequest {
+                    messages: vec![ChatMessage::new(Role::User, "test")],
+                    model: Some("claude-3-opus".into()),
+                    max_tokens: Some(512),
+                    temperature: Some(0.5),
+                    stop_sequences: None,
+                    metadata: None,
+                })
+                .await
         });
 
         let received = host_transport.receive().await.unwrap();
         match received {
-            IpcMessage::LlmRequest { request_id, model, max_tokens, temperature, messages, .. } => {
+            IpcMessage::LlmRequest {
+                request_id,
+                model,
+                max_tokens,
+                temperature,
+                messages,
+                ..
+            } => {
                 assert!(!request_id.is_empty());
                 assert_eq!(model, Some("claude-3-opus".into()));
                 assert_eq!(max_tokens, Some(512));
                 assert_eq!(temperature, Some(0.5));
                 assert_eq!(messages.len(), 1);
 
-                host_transport.send(&IpcMessage::LlmResponse {
-                    request_id,
-                    content: "done".into(),
-                    token_usage: TokenUsage { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                    finish_reason: FinishReason::Stop,
-                    tool_calls: None,
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::LlmResponse {
+                        request_id,
+                        content: "done".into(),
+                        token_usage: TokenUsage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        tool_calls: None,
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("expected LlmRequest, got {:?}", other),
         }
@@ -222,33 +248,51 @@ mod tests {
         let provider = IpcCompletionProvider::new(agent_conn);
 
         let agent_handle = tokio::spawn(async move {
-            provider.complete(CompletionRequest {
-                messages: vec![ChatMessage::new(Role::User, "hi")],
-                model: None,
-                max_tokens: None,
-                temperature: None,
-                stop_sequences: None,
-                metadata: None,
-            }).await
+            provider
+                .complete(CompletionRequest {
+                    messages: vec![ChatMessage::new(Role::User, "hi")],
+                    model: None,
+                    max_tokens: None,
+                    temperature: None,
+                    stop_sequences: None,
+                    metadata: None,
+                })
+                .await
         });
 
         let msg = host_transport.receive().await.unwrap();
         let serialised = serde_json::to_string(&msg).unwrap();
 
         // Common API key prefixes must not appear in the wire message.
-        assert!(!serialised.contains("sk-"), "OpenAI key prefix found in IPC message");
-        assert!(!serialised.contains("sk-ant"), "Anthropic key prefix found in IPC message");
-        assert!(!serialised.contains("api_key"), "'api_key' field found in IPC message");
+        assert!(
+            !serialised.contains("sk-"),
+            "OpenAI key prefix found in IPC message"
+        );
+        assert!(
+            !serialised.contains("sk-ant"),
+            "Anthropic key prefix found in IPC message"
+        );
+        assert!(
+            !serialised.contains("api_key"),
+            "'api_key' field found in IPC message"
+        );
 
         match msg {
             IpcMessage::LlmRequest { request_id, .. } => {
-                host_transport.send(&IpcMessage::LlmResponse {
-                    request_id,
-                    content: "clean".into(),
-                    token_usage: TokenUsage { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                    finish_reason: FinishReason::Stop,
-                    tool_calls: None,
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::LlmResponse {
+                        request_id,
+                        content: "clean".into(),
+                        token_usage: TokenUsage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        tool_calls: None,
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("expected LlmRequest, got {:?}", other),
         }
@@ -274,35 +318,51 @@ mod tests {
         });
 
         let agent_handle = tokio::spawn(async move {
-            provider.complete_with_tools(ToolCompletionRequest {
-                messages: vec![ChatMessage::new(Role::User, "list files")],
-                model: None,
-                max_tokens: None,
-                temperature: None,
-                stop_sequences: None,
-                metadata: None,
-                tool_definitions: vec![tool_def],
-            }).await
+            provider
+                .complete_with_tools(ToolCompletionRequest {
+                    messages: vec![ChatMessage::new(Role::User, "list files")],
+                    model: None,
+                    max_tokens: None,
+                    temperature: None,
+                    stop_sequences: None,
+                    metadata: None,
+                    tool_definitions: vec![tool_def],
+                })
+                .await
         });
 
         let received = host_transport.receive().await.unwrap();
         match received {
-            IpcMessage::LlmRequest { request_id, tool_definitions, .. } => {
+            IpcMessage::LlmRequest {
+                request_id,
+                tool_definitions,
+                ..
+            } => {
                 // Tool definitions must be forwarded to the host.
-                assert!(tool_definitions.is_some(), "tool_definitions should be present");
+                assert!(
+                    tool_definitions.is_some(),
+                    "tool_definitions should be present"
+                );
                 assert_eq!(tool_definitions.unwrap().len(), 1);
 
-                host_transport.send(&IpcMessage::LlmResponse {
-                    request_id,
-                    content: "".into(),
-                    token_usage: TokenUsage { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
-                    finish_reason: FinishReason::ToolUse,
-                    tool_calls: Some(vec![ToolCall {
-                        call_id: "call_1".into(),
-                        name: "bash".into(),
-                        arguments: json!({"command": "ls"}),
-                    }]),
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::LlmResponse {
+                        request_id,
+                        content: "".into(),
+                        token_usage: TokenUsage {
+                            prompt_tokens: 5,
+                            completion_tokens: 2,
+                            total_tokens: 7,
+                        },
+                        finish_reason: FinishReason::ToolUse,
+                        tool_calls: Some(vec![ToolCall {
+                            call_id: "call_1".into(),
+                            name: "bash".into(),
+                            arguments: json!({"command": "ls"}),
+                        }]),
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("expected LlmRequest, got {:?}", other),
         }
@@ -322,27 +382,36 @@ mod tests {
         let provider = IpcCompletionProvider::new(agent_conn);
 
         let agent_handle = tokio::spawn(async move {
-            provider.complete_with_tools(ToolCompletionRequest {
-                messages: vec![ChatMessage::new(Role::User, "just say hi")],
-                model: None,
-                max_tokens: None,
-                temperature: None,
-                stop_sequences: None,
-                metadata: None,
-                tool_definitions: vec![],
-            }).await
+            provider
+                .complete_with_tools(ToolCompletionRequest {
+                    messages: vec![ChatMessage::new(Role::User, "just say hi")],
+                    model: None,
+                    max_tokens: None,
+                    temperature: None,
+                    stop_sequences: None,
+                    metadata: None,
+                    tool_definitions: vec![],
+                })
+                .await
         });
 
         let received = host_transport.receive().await.unwrap();
         match received {
             IpcMessage::LlmRequest { request_id, .. } => {
-                host_transport.send(&IpcMessage::LlmResponse {
-                    request_id,
-                    content: "Hi!".into(),
-                    token_usage: TokenUsage { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
-                    finish_reason: FinishReason::Stop,
-                    tool_calls: None, // model responded with text, no tool calls
-                }).await.unwrap();
+                host_transport
+                    .send(&IpcMessage::LlmResponse {
+                        request_id,
+                        content: "Hi!".into(),
+                        token_usage: TokenUsage {
+                            prompt_tokens: 2,
+                            completion_tokens: 2,
+                            total_tokens: 4,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        tool_calls: None, // model responded with text, no tool calls
+                    })
+                    .await
+                    .unwrap();
             }
             other => panic!("expected LlmRequest, got {:?}", other),
         }

@@ -40,8 +40,11 @@ function createMockConversationStore() {
   }> = [];
 
   return {
-    addMessage: vi.fn((msg) => {
-      messages.push(msg);
+    appendOptimisticUserMessage: vi.fn((msg) => {
+      messages.push({ role: "user", turn_state: "pending", ...msg });
+    }),
+    appendAssistantMessage: vi.fn((msg) => {
+      messages.push({ role: "assistant", ...msg });
     }),
     getMessages: () => [...messages],
   };
@@ -107,9 +110,8 @@ describe("startTurn", () => {
 
     store.startTurn("What is Rust?");
 
-    expect(conv.addMessage).toHaveBeenCalledOnce();
-    const call = conv.addMessage.mock.calls[0][0];
-    expect(call.role).toBe("user");
+    expect(conv.appendOptimisticUserMessage).toHaveBeenCalledOnce();
+    const call = conv.appendOptimisticUserMessage.mock.calls[0][0];
     expect(call.content).toBe("What is Rust?");
     expect(typeof call.timestamp).toBe("string");
   });
@@ -192,7 +194,7 @@ describe("turn_complete", () => {
     store.handleServerEvent({ type: "token", content: "The answer is 42." });
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
 
-    // First addMessage is the user turn from startTurn.
+    // First message is the optimistic user turn from startTurn.
     // Second is the assistant turn from turn_complete.
     const messages = conv.getMessages();
     expect(messages).toHaveLength(2);
@@ -626,6 +628,127 @@ describe("cancelled preserves activeToolCalls", () => {
 // ---------------------------------------------------------------------------
 // startTurn clears activeToolCalls from the previous turn
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// shutdown events
+// ---------------------------------------------------------------------------
+
+describe("shutdown events", () => {
+  it("sets isStreaming to false", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(store.isStreaming).toBe(false);
+  });
+
+  it("records a turnError with code 'gateway_shutdown' and the reason as the message", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(store.turnError).toEqual({
+      code: "gateway_shutdown",
+      message: "idle_timeout",
+    });
+  });
+
+  it("preserves partial response in the conversation store", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+
+    const assistantMessages = conv
+      .getMessages()
+      .filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].content).toBe("partial");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// output_schema_failed events
+// ---------------------------------------------------------------------------
+
+describe("output_schema_failed events", () => {
+  it("sets isStreaming to false and records a protocol-facing turn error", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      turn_id: "t-1",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    expect(store.isStreaming).toBe(false);
+    expect(store.turnError).toEqual({
+      code: "output_schema_failed",
+      message:
+        "Structured output validation failed after 3 attempts: /answer: is required",
+    });
+  });
+
+  it("preserves partial response in the conversation store", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      turn_id: "t-1",
+      attempts: 2,
+      errors: [{ path: "", message: "response was not valid JSON" }],
+    });
+
+    const assistantMessages = conv
+      .getMessages()
+      .filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].content).toBe("partial");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// context_assembled events
+// ---------------------------------------------------------------------------
+
+describe("context_assembled events", () => {
+  it("does not throw or crash the streaming store", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    expect(() =>
+      store.handleServerEvent({
+        type: "context_assembled",
+        turn_id: "t-1",
+        report: { elements: [], errors: [] },
+      }),
+    ).not.toThrow();
+  });
+
+  it("does not change isStreaming state", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "context_assembled",
+      turn_id: "t-1",
+      report: { errors: [] },
+    });
+
+    // Assembly reporting does not affect the streaming lifecycle.
+    expect(store.isStreaming).toBe(true);
+  });
+});
 
 describe("startTurn clears activeToolCalls", () => {
   it("resets activeToolCalls when a new turn begins", () => {

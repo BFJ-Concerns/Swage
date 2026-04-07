@@ -31,11 +31,12 @@ vi.mock("../api/projects", () => ({
 function makeProject(
   id: string,
   name: string,
-  extra: Partial<{ slug: string; workspace_path: string }> = {},
+  extra: Partial<{ slug: string; workspace_path: string; is_default: boolean }> = {},
 ) {
   return {
     id,
     name,
+    is_default: extra.is_default ?? false,
     slug: extra.slug ?? name.toLowerCase().replace(/\s+/g, "-"),
     workspace_path: extra.workspace_path ?? `/home/user/${id}`,
     created_at: "2026-01-01T00:00:00Z",
@@ -44,6 +45,7 @@ function makeProject(
 
 // The default project — special-cased: cannot be deleted.
 const defaultProject = makeProject("proj-default", "default", {
+  is_default: true,
   workspace_path: "/home/user/default",
 });
 
@@ -94,7 +96,7 @@ describe("loadProjects", () => {
     expect(store.projects[0].id).toBe("proj-a");
   });
 
-  it("auto-selects the project named 'default' on load", async () => {
+  it("auto-selects the project flagged as default on load", async () => {
     const store = createProjectStore();
     vi.mocked(api.listProjects).mockResolvedValueOnce([
       projectA,
@@ -108,7 +110,7 @@ describe("loadProjects", () => {
     expect(store.currentProject?.id).toBe("proj-default");
   });
 
-  it("leaves currentProject null when there is no default project", async () => {
+  it("leaves currentProject null when no project is flagged as default", async () => {
     const store = createProjectStore();
     vi.mocked(api.listProjects).mockResolvedValueOnce([projectA, projectB]);
 

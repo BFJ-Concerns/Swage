@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use swage_core::SandboxError;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::ipc::message::IpcMessage;
 
@@ -85,10 +85,7 @@ impl IpcTransport {
 
     /// Receive a message, returning `SandboxError::IpcError` if `timeout`
     /// elapses before a complete line arrives.
-    pub async fn receive_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<IpcMessage, SandboxError> {
+    pub async fn receive_timeout(&mut self, timeout: Duration) -> Result<IpcMessage, SandboxError> {
         tokio::time::timeout(timeout, self.receive())
             .await
             .map_err(|_| SandboxError::IpcError {
@@ -139,7 +136,11 @@ mod tests {
 
         let received = receiver.receive().await.unwrap();
         match received {
-            IpcMessage::ToolCallRequest { request_id, tool_name, parameters } => {
+            IpcMessage::ToolCallRequest {
+                request_id,
+                tool_name,
+                parameters,
+            } => {
                 assert_eq!(request_id, "req-99");
                 assert_eq!(tool_name, "fs_read");
                 assert_eq!(parameters["path"], "/tmp/test");
@@ -161,9 +162,18 @@ mod tests {
         sender.send(&IpcMessage::Shutdown).await.unwrap();
         sender.send(&IpcMessage::ShutdownAck).await.unwrap();
 
-        assert!(matches!(receiver.receive().await.unwrap(), IpcMessage::Ready));
-        assert!(matches!(receiver.receive().await.unwrap(), IpcMessage::Shutdown));
-        assert!(matches!(receiver.receive().await.unwrap(), IpcMessage::ShutdownAck));
+        assert!(matches!(
+            receiver.receive().await.unwrap(),
+            IpcMessage::Ready
+        ));
+        assert!(matches!(
+            receiver.receive().await.unwrap(),
+            IpcMessage::Shutdown
+        ));
+        assert!(matches!(
+            receiver.receive().await.unwrap(),
+            IpcMessage::ShutdownAck
+        ));
     }
 
     // --- Timeout: no data arrives before deadline ---

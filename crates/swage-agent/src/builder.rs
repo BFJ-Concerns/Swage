@@ -9,9 +9,9 @@ use swage_storage::Storage;
 use swage_tool::dispatch::ToolDispatcher;
 
 use crate::agent::Agent;
+use crate::approval::ApprovalChannelRegistrar;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-
 
 /// Constructs an [`Agent`] with all required and optional dependencies.
 pub struct AgentBuilder {
@@ -21,6 +21,9 @@ pub struct AgentBuilder {
     tool_dispatcher: Option<ToolDispatcher>,
     hook_registry: Option<Arc<HookRegistry>>,
     leak_detector: Option<Arc<LeakDetector>>,
+    approval_registrar: Option<ApprovalChannelRegistrar>,
+    delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
+    context_transfer_config: Option<swage_config::ContextTransferConfig>,
 }
 
 impl AgentBuilder {
@@ -32,6 +35,9 @@ impl AgentBuilder {
             tool_dispatcher: None,
             hook_registry: None,
             leak_detector: None,
+            approval_registrar: None,
+            delegation_handler: None,
+            context_transfer_config: None,
         }
     }
 
@@ -62,6 +68,27 @@ impl AgentBuilder {
 
     pub fn leak_detector(mut self, detector: Arc<LeakDetector>) -> Self {
         self.leak_detector = Some(detector);
+        self
+    }
+
+    pub fn approval_registrar(mut self, registrar: ApprovalChannelRegistrar) -> Self {
+        self.approval_registrar = Some(registrar);
+        self
+    }
+
+    pub fn delegation_handler(
+        mut self,
+        handler: Arc<dyn crate::delegation::DelegationHandler>,
+    ) -> Self {
+        self.delegation_handler = Some(handler);
+        self
+    }
+
+    pub fn context_transfer_config(
+        mut self,
+        context_transfer_config: swage_config::ContextTransferConfig,
+    ) -> Self {
+        self.context_transfer_config = Some(context_transfer_config);
         self
     }
 
@@ -97,8 +124,9 @@ impl AgentBuilder {
             tool_dispatcher: self.tool_dispatcher,
             hook_registry: self.hook_registry,
             leak_detector: self.leak_detector,
-            active_session_id: None,
-            active_thread_id: None,
+            approval_registrar: self.approval_registrar,
+            delegation_handler: self.delegation_handler,
+            context_transfer_config: self.context_transfer_config.unwrap_or_default(),
         })
     }
 }
@@ -119,14 +147,14 @@ mod tests {
     use futures::Stream;
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, FinishReason, ProviderError, StorageError,
-        StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ProviderError, StorageError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_provider::LlmProvider;
     use swage_storage::{
-        Message, MessageStore, NewMessage, NewSession, NewThread, NewToolCall, NewTurn, Session,
-        SessionStore, Thread, ThreadState, ThreadStore, ToolCallRecord, ToolCallStore, Turn,
-        TurnState, TurnStore,
+        ContextSnapshotStore, InboundAudit, Message, MessageStore, NewMessage, NewSession,
+        NewThread, NewToolCall, NewTurn, Session, SessionStore, Thread, ThreadState, ThreadStore,
+        ToolCallRecord, ToolCallStore, Turn, TurnState, TurnStore,
     };
     use uuid::Uuid;
 
@@ -180,16 +208,52 @@ mod tests {
         async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_sessions_by_agent_id(
-            &self,
-            _: &str,
-        ) -> Result<Vec<Session>, StorageError> {
+        async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn delete_session(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::TeamStore for StubStorage {
+        async fn create_team(
+            &self,
+            _: swage_storage::NewTeam,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team(&self, _: Uuid) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_team_by_name(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<Option<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_teams_by_project(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::Team>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_team(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<Vec<String>>,
+        ) -> Result<swage_storage::Team, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -212,6 +276,25 @@ mod tests {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_branch(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<swage_storage::ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+        async fn list_branches_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_branch(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::ThreadBranch>, StorageError> {
             unimplemented!()
         }
     }
@@ -239,6 +322,23 @@ mod tests {
         async fn update_tokens(&self, _: Uuid, _: i64, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn update_cost(&self, _: Uuid, _: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_structured_output(
+            &self,
+            _: Uuid,
+            _: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn update_inbound_audit(
+            &self,
+            _: Uuid,
+            _: &InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -246,13 +346,16 @@ mod tests {
         async fn create_message(&self, _: NewMessage) -> Result<Message, StorageError> {
             unimplemented!()
         }
+        async fn append_message(
+            &self,
+            _: swage_storage::model::AppendMessage,
+        ) -> Result<Message, StorageError> {
+            unimplemented!()
+        }
         async fn list_messages_by_thread(&self, _: Uuid) -> Result<Vec<Message>, StorageError> {
             unimplemented!()
         }
-        async fn get_latest_for_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<Message>, StorageError> {
+        async fn get_latest_for_session(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
             unimplemented!()
         }
         async fn get_message(&self, _: Uuid) -> Result<Option<Message>, StorageError> {
@@ -292,6 +395,224 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+
+    #[async_trait]
+    impl ContextSnapshotStore for StubStorage {
+        async fn store_snapshot(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn get_snapshot(&self, _: Uuid) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::SkillActivationStore for StubStorage {
+        async fn activate_skill(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn deactivate_skill(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn list_active_skills(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ActiveSkillRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::TopologyTraceStore for StubStorage {
+        async fn create_topology_run(
+            &self,
+            _: swage_storage::NewTopologyRun,
+        ) -> Result<swage_storage::TopologyRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_topology_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_team(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topology_runs_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::TopologyRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_topology_run(
+            &self,
+            _: Uuid,
+            _: swage_storage::TopologyRunState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_execution(
+            &self,
+            _: swage_storage::NewNodeExecution,
+        ) -> Result<swage_storage::NodeExecution, StorageError> {
+            unimplemented!()
+        }
+        async fn get_node_execution(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_executions_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeExecution>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_node_execution(
+            &self,
+            _: Uuid,
+            _: swage_storage::NodeExecutionState,
+            _: Option<&serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_edge_evaluation(
+            &self,
+            _: swage_storage::NewEdgeEvaluation,
+        ) -> Result<swage_storage::EdgeEvaluation, StorageError> {
+            unimplemented!()
+        }
+        async fn list_edge_evaluations_by_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::EdgeEvaluation>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_node_retry(
+            &self,
+            _: swage_storage::NewNodeRetry,
+        ) -> Result<swage_storage::NodeRetry, StorageError> {
+            unimplemented!()
+        }
+        async fn list_node_retries(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::NodeRetry>, StorageError> {
+            unimplemented!()
+        }
+    }
+    #[async_trait]
+    impl swage_storage::store::ApprovalStore for StubStorage {
+        async fn create_approval(
+            &self,
+            _: swage_storage::model::NewApprovalRequest,
+        ) -> Result<swage_storage::model::ApprovalRequest, StorageError> {
+            unimplemented!()
+        }
+        async fn get_approval(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_all_pending(
+            &self,
+        ) -> Result<Vec<swage_storage::model::ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_approval_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::model::ApprovalState,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn cleanup_orphaned_approvals(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn remember_approval(&self, _: Uuid, _: &str, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn has_approval_memory(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::AgentMessageStore for StubStorage {
+        async fn create_agent_message(
+            &self,
+            _: swage_storage::model::NewAgentMessage,
+        ) -> Result<swage_storage::model::AgentMessage, StorageError> {
+            unimplemented!()
+        }
+        async fn get_agent_message(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_for_agent(
+            &self,
+            _: &str,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_status(
+            &self,
+            _: Uuid,
+            _: swage_core::MessageStatus,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_by_correlation(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::model::AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+        async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 
@@ -301,6 +622,8 @@ mod tests {
             max_tool_rounds: 10,
             compaction_threshold: CompactionThreshold::TokenCount(50_000),
             metadata: HashMap::new(),
+            output_schema: None,
+            max_output_retries: 3,
         }
     }
 
@@ -326,8 +649,6 @@ mod tests {
             .expect("build should succeed with all required deps");
 
         assert_eq!(agent.config.agent_id, "test-agent");
-        assert!(agent.active_session_id.is_none());
-        assert!(agent.active_thread_id.is_none());
         assert!(agent.tool_dispatcher.is_none());
         assert!(agent.hook_registry.is_none());
         assert!(agent.leak_detector.is_none());

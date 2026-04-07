@@ -1,0 +1,33 @@
+[package]
+name = "swage-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+swage-client = { path = "../swage-client" }
+
+# TUI framework
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialisation (assembly report parsing)
+serde_json = { workspace = true }
+
+# Identifiers
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Markdown rendering in terminal
+textwrap = "0.16"
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }

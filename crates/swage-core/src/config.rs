@@ -62,9 +62,7 @@ impl ProviderConfig {
             let scheme = parsed.scheme();
             if scheme != "http" && scheme != "https" {
                 return Err(ProviderError::InvalidConfig {
-                    message: format!(
-                        "base URL must use http or https scheme, got '{scheme}'"
-                    ),
+                    message: format!("base URL must use http or https scheme, got '{scheme}'"),
                 });
             }
         }
@@ -105,7 +103,11 @@ mod tests {
 
     #[test]
     fn protocol_serialisation_roundtrip() {
-        let variants = [Protocol::OpenAiCompatible, Protocol::Anthropic, Protocol::Google];
+        let variants = [
+            Protocol::OpenAiCompatible,
+            Protocol::Anthropic,
+            Protocol::Google,
+        ];
         for protocol in &variants {
             let json = serde_json::to_string(protocol).unwrap();
             let restored: Protocol = serde_json::from_str(&json).unwrap();

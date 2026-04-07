@@ -58,7 +58,12 @@ pub fn build_bwrap_command(
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
     let bwrap_path = find_bwrap()?;
-    Ok(build_bwrap_command_with_path(&bwrap_path, config, socket_path, agent_binary))
+    Ok(build_bwrap_command_with_path(
+        &bwrap_path,
+        config,
+        socket_path,
+        agent_binary,
+    ))
 }
 
 /// Constructs the `bwrap` command given an explicit path to the binary.
@@ -292,7 +297,13 @@ mod tests {
         let bind_positions: Vec<usize> = args
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| if *a == OsStr::new("--bind") { Some(i) } else { None })
+            .filter_map(|(i, a)| {
+                if *a == OsStr::new("--bind") {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let output_bind = bind_positions.iter().any(|&pos| {
@@ -300,7 +311,10 @@ mod tests {
                 && args.get(pos + 2) == Some(&OsStr::new("/tmp/output"))
         });
 
-        assert!(output_bind, "--bind /tmp/output /tmp/output not found; args: {args:?}");
+        assert!(
+            output_bind,
+            "--bind /tmp/output /tmp/output not found; args: {args:?}"
+        );
     }
 
     #[test]
@@ -324,7 +338,13 @@ mod tests {
         let ro_bind_positions: Vec<usize> = args
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| if *a == OsStr::new("--ro-bind") { Some(i) } else { None })
+            .filter_map(|(i, a)| {
+                if *a == OsStr::new("--ro-bind") {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let lib_bind = ro_bind_positions.iter().any(|&pos| {
@@ -332,7 +352,10 @@ mod tests {
                 && args.get(pos + 2) == Some(&OsStr::new("/usr/lib"))
         });
 
-        assert!(lib_bind, "--ro-bind /usr/lib /usr/lib not found; args: {args:?}");
+        assert!(
+            lib_bind,
+            "--ro-bind /usr/lib /usr/lib not found; args: {args:?}"
+        );
     }
 
     #[test]

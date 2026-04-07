@@ -1,0 +1,368 @@
+//! Message routing service for inter-agent communication.
+//!
+//! Central service that validates, routes, persists, and delivers messages
+//! between agents, with hook dispatch at each lifecycle stage.
+
+use std::sync::Arc;
+
+use uuid::Uuid;
+
+use swage_core::{MessageKind, MessageStatus};
+use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_storage::Storage;
+use swage_storage::model::{AgentMessage, NewAgentMessage};
+
+use crate::error::AgentError;
+
+/// Routes inter-agent messages through validation, hooks, and persistence.
+///
+/// The router does NOT instantiate agents — that's the DelegationExecutor's job.
+/// It handles message lifecycle: create, persist, deliver, fail.
+pub struct MessageRouter {
+    storage: Arc<dyn Storage>,
+    hook_registry: Option<Arc<HookRegistry>>,
+}
+
+impl MessageRouter {
+    pub fn new(storage: Arc<dyn Storage>, hook_registry: Option<Arc<HookRegistry>>) -> Self {
+        Self {
+            storage,
+            hook_registry,
+        }
+    }
+
+    /// Send a new inter-agent message.
+    ///
+    /// 1. Validates correlation_id requirements (required on Result/Cancel).
+    /// 2. Dispatches MessageSend hook — if blocked, returns error.
+    /// 3. For Notify: not persisted (at-most-once semantics).
+    /// 4. For durable kinds: persists via AgentMessageStore.
+    pub async fn send_message(&self, msg: NewAgentMessage) -> Result<AgentMessage, AgentError> {
+        msg.validate()
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+
+        // Dispatch MessageSend hook — may block message creation.
+        if let Some(ref registry) = self.hook_registry {
+            let event = HookEvent::MessageSend {
+                sender_agent_id: msg.sender_agent_id.clone(),
+                recipient_agent_id: msg.recipient_agent_id.clone(),
+                kind: msg.kind.to_string(),
+                payload: msg.payload.clone(),
+            };
+            match registry.dispatch(event).await {
+                HookOutcome::Block(reason) => {
+                    return Err(AgentError::HookBlocked {
+                        hook: "MessageSend".into(),
+                        reason,
+                    });
+                }
+                // Fail-open: hook errors don't prevent message creation.
+                _ => {}
+            }
+        }
+
+        // Notify is ephemeral — not persisted. Return a synthetic message.
+        if msg.kind == MessageKind::Notify {
+            let now = chrono::Utc::now();
+            return Ok(AgentMessage {
+                id: Uuid::new_v4(),
+                sender_agent_id: msg.sender_agent_id,
+                recipient_agent_id: msg.recipient_agent_id,
+                kind: msg.kind,
+                correlation_id: msg.correlation_id,
+                payload: msg.payload,
+                status: MessageStatus::Delivered,
+                failure_reason: None,
+                created_at: now,
+                delivered_at: Some(now),
+            });
+        }
+
+        // Durable kinds: persist with pending status.
+        let stored = self.storage.create_agent_message(msg).await?;
+        Ok(stored)
+    }
+
+    /// Deliver a message to its target agent.
+    ///
+    /// Dispatches MessageDeliver and MessageReceive hooks. If either blocks,
+    /// the message transitions to Failed. Otherwise, transitions to Delivered.
+    pub async fn deliver_message(&self, msg: &AgentMessage) -> Result<(), AgentError> {
+        self.dispatch_blocking_hook(
+            msg,
+            HookEvent::MessageDeliver {
+                message_id: msg.id.to_string(),
+                sender_agent_id: msg.sender_agent_id.clone(),
+                recipient_agent_id: msg.recipient_agent_id.clone(),
+                kind: msg.kind.to_string(),
+                payload: msg.payload.clone(),
+            },
+            "MessageDeliver",
+        )
+        .await?;
+
+        self.dispatch_blocking_hook(
+            msg,
+            HookEvent::MessageReceive {
+                message_id: msg.id.to_string(),
+                sender_agent_id: msg.sender_agent_id.clone(),
+                recipient_agent_id: msg.recipient_agent_id.clone(),
+                kind: msg.kind.to_string(),
+                payload: msg.payload.clone(),
+            },
+            "MessageReceive",
+        )
+        .await?;
+
+        // Transition to Delivered.
+        self.storage
+            .update_agent_message_status(msg.id, MessageStatus::Delivered, None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Dispatch a hook that may block message delivery.
+    ///
+    /// If the hook registry blocks the event, the message is failed in storage
+    /// and a HookBlocked error is returned. No-ops if no hook registry is configured.
+    async fn dispatch_blocking_hook(
+        &self,
+        msg: &AgentMessage,
+        event: HookEvent,
+        hook_name: &str,
+    ) -> Result<(), AgentError> {
+        if let Some(ref registry) = self.hook_registry {
+            if let HookOutcome::Block(reason) = registry.dispatch(event).await {
+                self.fail_message(msg.id, &reason).await?;
+                return Err(AgentError::HookBlocked {
+                    hook: hook_name.into(),
+                    reason,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Transition a message to Failed with the given reason.
+    pub async fn fail_message(&self, id: Uuid, reason: &str) -> Result<(), AgentError> {
+        self.storage
+            .update_agent_message_status(id, MessageStatus::Failed, Some(reason))
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swage_storage::SqliteStorage;
+
+    async fn make_router() -> MessageRouter {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        MessageRouter::new(storage, None)
+    }
+
+    fn delegate_msg() -> NewAgentMessage {
+        NewAgentMessage {
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({"task": "summarise"}),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_delegate_persists() {
+        let router = make_router().await;
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        assert_eq!(msg.kind, MessageKind::Delegate);
+        assert_eq!(msg.status, MessageStatus::Pending);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_notify_not_persisted() {
+        let router = make_router().await;
+        let msg = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Notify,
+                correlation_id: None,
+                payload: serde_json::json!({"progress": 50}),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(msg.status, MessageStatus::Delivered);
+        let fetched = router.storage.get_agent_message(msg.id).await.unwrap();
+        assert!(fetched.is_none(), "Notify should not be persisted");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn result_without_correlation_fails() {
+        let router = make_router().await;
+        let result = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-b".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deliver_transitions_to_delivered() {
+        let router = make_router().await;
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        router.deliver_message(&msg).await.unwrap();
+
+        let updated = router
+            .storage
+            .get_agent_message(msg.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MessageStatus::Delivered);
+        assert!(updated.delivered_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fail_message_transitions_to_failed() {
+        let router = make_router().await;
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        router
+            .fail_message(msg.id, "agent not found")
+            .await
+            .unwrap();
+
+        let updated = router
+            .storage
+            .get_agent_message(msg.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MessageStatus::Failed);
+        assert_eq!(updated.failure_reason.as_deref(), Some("agent not found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_blocks_message_send() {
+        use swage_hook::{Hook, HookRegistration};
+
+        struct BlockHook;
+
+        #[async_trait::async_trait]
+        impl Hook for BlockHook {
+            fn name(&self) -> &str {
+                "block-hook"
+            }
+
+            async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+                HookOutcome::Block("policy: no delegation".into())
+            }
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut registry = HookRegistry::new();
+
+        fn is_message_send(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageSend { .. })
+        }
+
+        registry.register(HookRegistration {
+            hook: Arc::new(BlockHook),
+            event_filter: Some(is_message_send),
+            matcher: None,
+            priority: 0,
+            failure_mode: swage_hook::FailureMode::FailOpen,
+            timeout: std::time::Duration::from_secs(30),
+        });
+
+        let registry = Arc::new(registry);
+        let router = MessageRouter::new(storage.clone(), Some(registry));
+
+        let result = router.send_message(delegate_msg()).await;
+        assert!(result.is_err());
+
+        // No message should have been persisted.
+        let pending = storage.list_pending_for_agent("agent-b").await.unwrap();
+        assert!(pending.is_empty());
+    }
+
+    // --- Hook blocking tests ---
+
+    /// A hook that blocks every event it sees.
+    struct AlwaysBlockHook(&'static str);
+
+    #[async_trait::async_trait]
+    impl swage_hook::Hook for AlwaysBlockHook {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+            HookOutcome::Block(format!("policy: blocked by {}", self.0))
+        }
+    }
+
+    fn make_router_with_blocking_hook(
+        storage: Arc<dyn Storage>,
+        filter: fn(&HookEvent) -> bool,
+    ) -> MessageRouter {
+        let mut registry = HookRegistry::new();
+        let mut reg = swage_hook::HookRegistration::new(Arc::new(AlwaysBlockHook("blocker")));
+        reg.event_filter = Some(filter);
+        registry.register(reg);
+        MessageRouter::new(storage, Some(Arc::new(registry)))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_blocks_deliver_message_deliver_event() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        fn is_deliver(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageDeliver { .. })
+        }
+
+        let router = make_router_with_blocking_hook(storage.clone(), is_deliver);
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        let result = router.deliver_message(&msg).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::HookBlocked { hook, .. } => assert_eq!(hook, "MessageDeliver"),
+            other => panic!("expected HookBlocked, got {other:?}"),
+        }
+
+        // Message should be Failed in storage (not stuck in Pending).
+        let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, MessageStatus::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_blocks_deliver_message_receive_event() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        fn is_receive(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageReceive { .. })
+        }
+
+        let router = make_router_with_blocking_hook(storage.clone(), is_receive);
+        let msg = router.send_message(delegate_msg()).await.unwrap();
+        let result = router.deliver_message(&msg).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::HookBlocked { hook, .. } => assert_eq!(hook, "MessageReceive"),
+            other => panic!("expected HookBlocked, got {other:?}"),
+        }
+
+        let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, MessageStatus::Failed);
+    }
+}

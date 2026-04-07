@@ -3,7 +3,7 @@
 // Accumulates tokens during an active turn, tracks whether the agent is
 // generating, and controls the send/stop toggle state.
 
-import type { ServerEvent, ToolCallView } from "../types";
+import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 export interface StreamingStore {
   readonly isStreaming: boolean;
@@ -30,11 +30,14 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and completed
    *  or interrupted assistant turns). */
   conversationStore?: {
-    addMessage(message: {
-      role: string;
+    appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
-      turn_state: string;
+    }): void;
+    appendAssistantMessage(message: {
+      content: string;
+      timestamp: string;
+      turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">;
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -59,13 +62,11 @@ export function createStreamingStore(
 
   // ---- Helpers ----------------------------------------------------------------
 
-  function pushMessage(
-    role: "user" | "assistant",
+  function pushAssistantMessage(
     content: string,
-    turn_state: string,
+    turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">,
   ): void {
-    options?.conversationStore?.addMessage({
-      role,
+    options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
@@ -76,7 +77,7 @@ export function createStreamingStore(
   // turn ends before the server explicitly completes it (error or cancellation).
   function preservePartialResponse(): void {
     if (streamedContent) {
-      pushMessage("assistant", streamedContent, "interrupted");
+      pushAssistantMessage(streamedContent, "interrupted");
     }
   }
 
@@ -178,7 +179,7 @@ export function createStreamingStore(
           // The gateway has committed the full turn. Push the completed
           // assistant message and return to idle state.
           if (streamedContent) {
-            pushMessage("assistant", streamedContent, "completed");
+            pushAssistantMessage(streamedContent, "completed");
           }
           streamedContent = "";
           turnError = null;
@@ -199,12 +200,63 @@ export function createStreamingStore(
           // in-flight when the error occurred.
           break;
 
+        case "output_schema_failed": {
+          preservePartialResponse();
+          const details = event.errors
+            .map((error) =>
+              error.path
+                ? `${error.path}: ${error.message}`
+                : error.message,
+            )
+            .join("; ");
+          turnError = {
+            code: "output_schema_failed",
+            message: details
+              ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
+              : `Structured output validation failed after ${event.attempts} attempts.`,
+          };
+          isStreaming = false;
+          break;
+        }
+
         case "cancelled":
           // User-initiated cancel. Preserve partial content (they may want
           // to read what was generated before they stopped it).
           preservePartialResponse();
           isStreaming = false;
           // activeToolCalls preserved — same rationale as the error case.
+          break;
+
+        case "shutdown":
+          // The gateway is shutting down. Preserve any partial content and
+          // surface the shutdown as a turn error so the UI can notify the user.
+          // The WebSocket will close shortly after this event arrives.
+          preservePartialResponse();
+          turnError = { code: "gateway_shutdown", message: event.reason };
+          isStreaming = false;
+          break;
+
+        case "context_assembled":
+        case "output_schema_retry":
+        case "delegation_started":
+        case "delegation_completed":
+        case "topology_run_started":
+        case "topology_node_started":
+        case "topology_node_completed":
+        case "topology_run_completed":
+        case "approval_required":
+        case "approval_confirmed":
+        case "approval_expired":
+        case "approval_decision_error":
+          // Diagnostic event carrying the context assembly report for this turn.
+          // No action required in the streaming store — display is handled
+          // separately. The case is listed explicitly to avoid a fall-through
+          // and to make the handler exhaustive for future extensions.
+          break;
+
+        default:
+          // Forward-compatible: ignore gateway events this store does not
+          // understand yet rather than pretending they were impossible.
           break;
       }
     },
@@ -218,7 +270,10 @@ export function createStreamingStore(
 
       // Immediately record the user's message so the conversation history
       // updates before the first token arrives.
-      pushMessage("user", content, "completed");
+      options?.conversationStore?.appendOptimisticUserMessage({
+        content,
+        timestamp: new Date().toISOString(),
+      });
 
       // Dispatch the outgoing message over the WebSocket.
       options?.connectionStore?.sendMessage(content);

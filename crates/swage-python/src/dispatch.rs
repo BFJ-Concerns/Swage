@@ -190,7 +190,10 @@ mod tests {
             tool_name: "shell".into(),
             arguments: serde_json::json!({"command": "echo hi"}),
         };
-        if let DispatchEvent::Started { call_id, tool_name, .. } = &event {
+        if let DispatchEvent::Started {
+            call_id, tool_name, ..
+        } = &event
+        {
             assert_eq!(call_id, "call_123");
             assert_eq!(tool_name, "shell");
         } else {
@@ -209,7 +212,13 @@ mod tests {
             },
             duration_ms: 42,
         };
-        if let DispatchEvent::Completed { call_id, duration_ms, result, .. } = &event {
+        if let DispatchEvent::Completed {
+            call_id,
+            duration_ms,
+            result,
+            ..
+        } = &event
+        {
             assert_eq!(call_id, "call_456");
             assert_eq!(*duration_ms, 42);
             assert!(!result.is_error);

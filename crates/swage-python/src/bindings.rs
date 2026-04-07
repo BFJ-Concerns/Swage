@@ -169,7 +169,7 @@ pub fn inject_swage_module(py: Python<'_>) -> PyResult<()> {
 mod tests {
     use super::*;
     use crate::dispatch::{DispatchResult, ToolDispatcher};
-    use crate::execute::{execute_code, DISPATCHER};
+    use crate::execute::{DISPATCHER, execute_code};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -294,8 +294,16 @@ print(result)"#,
             Arc::new(RecordingDispatcher),
         );
         // Should dispatch to "memory" with operation "read" and no file key.
-        assert!(result.output.contains("ok:memory:"), "got: {}", result.output);
-        assert!(result.output.contains("\"operation\":\"read\""), "got: {}", result.output);
+        assert!(
+            result.output.contains("ok:memory:"),
+            "got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("\"operation\":\"read\""),
+            "got: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -305,7 +313,11 @@ print(result)"#,
             Duration::from_secs(5),
             Arc::new(RecordingDispatcher),
         );
-        assert!(result.output.contains("ok:memory:"), "got: {}", result.output);
+        assert!(
+            result.output.contains("ok:memory:"),
+            "got: {}",
+            result.output
+        );
         assert!(result.output.contains("notes.md"), "got: {}", result.output);
     }
 
@@ -316,10 +328,22 @@ print(result)"#,
             Duration::from_secs(5),
             Arc::new(RecordingDispatcher),
         );
-        assert!(result.output.contains("ok:memory:"), "got: {}", result.output);
-        assert!(result.output.contains("\"operation\":\"write\""), "got: {}", result.output);
+        assert!(
+            result.output.contains("ok:memory:"),
+            "got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("\"operation\":\"write\""),
+            "got: {}",
+            result.output
+        );
         assert!(result.output.contains("notes.md"), "got: {}", result.output);
-        assert!(result.output.contains("hello world"), "got: {}", result.output);
+        assert!(
+            result.output.contains("hello world"),
+            "got: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -329,8 +353,16 @@ print(result)"#,
             Duration::from_secs(5),
             Arc::new(RecordingDispatcher),
         );
-        assert!(result.output.contains("ok:memory:"), "got: {}", result.output);
-        assert!(result.output.contains("\"operation\":\"list\""), "got: {}", result.output);
+        assert!(
+            result.output.contains("ok:memory:"),
+            "got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("\"operation\":\"list\""),
+            "got: {}",
+            result.output
+        );
     }
 
     #[test]

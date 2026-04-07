@@ -9,6 +9,7 @@
 //! execute → leak detection → assemble ToolOutput.
 
 pub mod context;
+pub mod delegate;
 pub mod dispatch;
 pub mod output;
 pub mod params;

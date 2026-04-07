@@ -55,6 +55,7 @@ afterEach(() => {
 const sampleProject = {
   id: "proj-1",
   name: "My Project",
+  is_default: false,
   slug: "my-project",
   workspace_path: "/home/user/my-project",
   created_at: "2026-01-01T00:00:00Z",

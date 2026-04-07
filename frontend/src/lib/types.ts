@@ -9,6 +9,7 @@
 export interface Project {
   id: string;
   name: string;
+  is_default: boolean;
   slug: string;
   workspace_path: string;
   created_at: string;
@@ -69,11 +70,23 @@ export interface ToolCallView {
 
 /** A single message in a conversation. */
 export interface MessageView {
+  thread_id?: string;
+  turn_id?: string | null;
   role: "user" | "assistant";
   content: string;
   timestamp: string;
-  turn_state: "completed" | "interrupted" | "failed" | "in_progress";
-  // Present only on assistant messages that invoked tools.
+  turn_state:
+    | "pending"
+    | "processing"
+    | "completed"
+    | "failed"
+    | "interrupted"
+    | "awaiting_approval"
+    | "delegating"
+    | null;
+  // Present on every message in the conversation API; empty when no tool calls
+  // were recorded for that message. Kept optional here so local client-created
+  // message objects do not need to synthesise it eagerly.
   tool_calls?: ToolCallView[];
 }
 
@@ -86,18 +99,62 @@ export interface ConversationResponse {
 }
 
 // -------------------------------------------------------------------------
-// WebSocket event types (mirror gateway's wire protocol)
+// WebSocket event types
 // -------------------------------------------------------------------------
 
 /** Client → Server events. */
 export type ClientEvent =
-  | { type: "send_message"; content: string }
-  | { type: "cancel" };
+  | { type: "send_message"; content: string; thread_id?: string }
+  | { type: "cancel" }
+  // Subscribe to one or more observability channels (e.g. "tools", "context").
+  | { type: "subscribe"; channels: string[] }
+  // Unsubscribe from previously subscribed channels.
+  | { type: "unsubscribe"; channels: string[] };
 
 /** Server → Client events. */
-export type ServerEvent =
+export interface SchemaValidationError {
+  path: string;
+  message: string;
+}
+
+export const KNOWN_SERVER_EVENT_TYPES = [
+  "token",
+  "turn_complete",
+  "error",
+  "cancelled",
+  "tool_start",
+  "tool_end",
+  "context_assembled",
+  "output_schema_retry",
+  "output_schema_failed",
+  "delegation_started",
+  "delegation_completed",
+  "topology_run_started",
+  "topology_node_started",
+  "topology_node_completed",
+  "topology_run_completed",
+  "shutdown",
+  "skill_activated",
+  "skill_already_active",
+  "skill_deactivated",
+  "approval_required",
+  "approval_confirmed",
+  "approval_expired",
+  "approval_decision_error",
+] as const;
+
+export type KnownServerEventType = (typeof KNOWN_SERVER_EVENT_TYPES)[number];
+
+export type KnownServerEvent =
   | { type: "token"; content: string }
-  | { type: "turn_complete"; turn_id: string }
+  | {
+      type: "turn_complete";
+      turn_id: string;
+      input_tokens?: number;
+      output_tokens?: number;
+      cost_microcents?: number;
+      structured_output?: Record<string, unknown>;
+    }
   | { type: "error"; code: string; message: string }
   | { type: "cancelled" }
   // Fires when the gateway begins executing a tool call.
@@ -121,7 +178,133 @@ export type ServerEvent =
       total_bytes: number | null;
       // Mirrors parent_call_id from the corresponding tool_start.
       parent_call_id?: string;
+    }
+  // Fires once per turn after context assembly completes, before streaming begins.
+  // Contains a diagnostic report that includes token budgets and any assembly errors.
+  // Always delivered when the report has errors; otherwise requires a "context" subscription.
+  | {
+      type: "context_assembled";
+      turn_id: string;
+      report: Record<string, unknown>;
+    }
+  | {
+      type: "output_schema_retry";
+      turn_id: string;
+      attempt: number;
+      max_retries: number;
+      errors: SchemaValidationError[];
+    }
+  | {
+      type: "output_schema_failed";
+      turn_id: string;
+      attempts: number;
+      errors: SchemaValidationError[];
+    }
+  | {
+    type: "delegation_started";
+    parent_turn_id: string;
+    child_turn_id: string | null;
+    target_agent_id: string;
+  }
+  | {
+    type: "delegation_completed";
+    parent_turn_id: string;
+    child_turn_id: string | null;
+    target_agent_id: string;
+    success: boolean;
+  }
+  | {
+      type: "topology_run_started";
+      session_id: string;
+      topology_run_id: string;
+      team_id: string;
+    }
+  | {
+      type: "topology_node_started";
+      session_id: string;
+      topology_run_id: string;
+      node_execution_id: string;
+      node_id: string;
+    }
+  | {
+      type: "topology_node_completed";
+      session_id: string;
+      topology_run_id: string;
+      node_execution_id: string;
+      node_id: string;
+      success: boolean;
+    }
+  | {
+      type: "topology_run_completed";
+      session_id: string;
+      topology_run_id: string;
+      success: boolean;
+      final_output?: Record<string, unknown>;
+    }
+  // Fired by the gateway before it shuts down. Clients should surface this as
+  // a disconnection notice; the WebSocket will close shortly after.
+  | {
+      type: "shutdown";
+      reason: string;
+    }
+  // A skill was successfully activated for the current session. Includes metadata
+  // so the client can display the skill without a separate lookup.
+  | {
+      type: "skill_activated";
+      name: string;
+      display_name: string;
+      description: string;
+      token_count: number;
+    }
+  // A skill was already active — no state change occurred.
+  | {
+      type: "skill_already_active";
+      name: string;
+    }
+  // A skill was successfully deactivated for the current session.
+  | {
+      type: "skill_deactivated";
+      name: string;
+    }
+  | {
+      type: "approval_required";
+      approval_id: string;
+      turn_id: string;
+      agent_id: string;
+      kind: string;
+      tool_name?: string;
+      tool_arguments?: Record<string, unknown>;
+      prompt: string;
+      context?: Record<string, unknown>;
+      timeout_at: string;
+      timeout_policy: string;
+    }
+  | {
+      type: "approval_confirmed";
+      approval_id: string;
+      decision: string;
+      reason?: string;
+    }
+  | {
+      type: "approval_expired";
+      approval_id: string;
+      timeout_policy: string;
+    }
+  | {
+      type: "approval_decision_error";
+      approval_id: string;
+      error: string;
+      message: string;
+      current_state?: string;
     };
+
+export interface UnknownServerEvent {
+  type: "unknown_event";
+  original_type: string;
+  raw: Record<string, unknown>;
+}
+
+export type ServerEvent = KnownServerEvent | UnknownServerEvent;
 
 // -------------------------------------------------------------------------
 // Connection state

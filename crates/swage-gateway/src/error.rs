@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 
@@ -15,6 +15,31 @@ pub struct ApiError(pub GatewayError);
 impl From<GatewayError> for ApiError {
     fn from(err: GatewayError) -> Self {
         ApiError(err)
+    }
+}
+
+impl ApiError {
+    /// 404 Not Found for a named entity.
+    pub fn not_found(entity: &str, id: uuid::Uuid) -> Self {
+        ApiError(GatewayError::Storage(swage_core::StorageError::NotFound {
+            entity: entity.to_string(),
+            id: id.to_string(),
+        }))
+    }
+
+    /// 500 Internal Server Error with a free-form message.
+    pub fn internal(message: String) -> Self {
+        ApiError(GatewayError::ConfigError(message))
+    }
+
+    /// 409 Conflict.
+    pub fn conflict(message: String) -> Self {
+        ApiError(GatewayError::ProjectConflict(message))
+    }
+
+    /// 422 Validation Error.
+    pub fn validation(message: String) -> Self {
+        ApiError(GatewayError::ValidationError(message))
     }
 }
 
@@ -39,6 +64,12 @@ fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
         GatewayError::ProjectConflict(_) => (StatusCode::CONFLICT, "conflict"),
         GatewayError::ValidationError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
         GatewayError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
+        GatewayError::Storage(swage_core::StorageError::NotFound { .. }) => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
+        GatewayError::Storage(swage_core::StorageError::ConstraintViolation(_)) => {
+            (StatusCode::CONFLICT, "conflict")
+        }
         // All other variants are unexpected internal failures.
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
@@ -67,10 +98,8 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_not_found_maps_to_404() {
-        let (status, code) = status_and_code(GatewayError::ConversationNotFound {
-            id: Uuid::new_v4(),
-        })
-        .await;
+        let (status, code) =
+            status_and_code(GatewayError::ConversationNotFound { id: Uuid::new_v4() }).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(code, "not_found");
     }
@@ -87,9 +116,9 @@ mod tests {
 
     #[tokio::test]
     async fn provider_error_maps_to_502() {
-        let (status, code) = status_and_code(GatewayError::Provider(
-            ProviderError::StreamError("overloaded".to_string()),
-        ))
+        let (status, code) = status_and_code(GatewayError::Provider(ProviderError::StreamError(
+            "overloaded".to_string(),
+        )))
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(code, "provider_error");

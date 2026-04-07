@@ -66,22 +66,21 @@ impl Tool for FileWriteTool {
             .to_string();
 
         // Validate the target path. The file may not exist yet.
-        let resolved =
-            validate_path(&self.workspace_root, &path_str).map_err(|msg| {
-                ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: msg,
-                }
-            })?;
+        let resolved = validate_path(&self.workspace_root, &path_str).map_err(|msg| {
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: msg,
+            }
+        })?;
 
         // Create parent directories so the write doesn't fail on a missing tree.
         if let Some(parent) = resolved.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                ToolError::ExecutionFailed {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
                     message: format!("Permission denied: {path_str}: {e}"),
-                }
-            })?;
+                })?;
         }
 
         let byte_count = content.len();
@@ -133,7 +132,10 @@ mod tests {
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().contains("5 bytes"));
-        assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[tokio::test]
@@ -141,7 +143,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("existing.txt"), b"old content").unwrap();
         tool(&dir)
-            .execute(json!({ "path": "existing.txt", "content": "new content" }), &ctx())
+            .execute(
+                json!({ "path": "existing.txt", "content": "new content" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -154,7 +159,10 @@ mod tests {
     async fn creates_parent_directories() {
         let dir = TempDir::new().unwrap();
         tool(&dir)
-            .execute(json!({ "path": "a/b/c/file.txt", "content": "deep" }), &ctx())
+            .execute(
+                json!({ "path": "a/b/c/file.txt", "content": "deep" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(dir.path().join("a/b/c/file.txt").exists());
@@ -164,7 +172,10 @@ mod tests {
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "path": "../../etc/passwd", "content": "bad" }), &ctx())
+            .execute(
+                json!({ "path": "../../etc/passwd", "content": "bad" }),
+                &ctx(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("outside"), "got: {}", err);

@@ -24,8 +24,7 @@ impl SocketManager {
     /// can coexist without path collisions. Returns the manager (which owns
     /// cleanup) and the bound listener ready to accept connections.
     pub fn create(prefix: &str) -> Result<(Self, UnixListener), SandboxError> {
-        let path = std::env::temp_dir()
-            .join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
 
         let listener = UnixListener::bind(&path).map_err(|e| SandboxError::SpawnFailed {
             message: format!("failed to bind Unix socket at {}: {e}", path.display()),
@@ -48,6 +47,7 @@ impl SocketManager {
     ///
     /// Returns false if the path does not exist, the socket is still active,
     /// or the connection result is ambiguous.
+    #[cfg(test)]
     pub fn is_stale(path: &Path) -> bool {
         if !path.exists() {
             return false;
@@ -55,7 +55,7 @@ impl SocketManager {
         // Use a synchronous connect attempt — async would require a running
         // runtime which is not guaranteed at this call site.
         match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => false,  // Someone is listening — active socket.
+            Ok(_) => false, // Someone is listening — active socket.
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
             Err(_) => false, // Other error — cannot confidently call it stale.
         }
@@ -84,6 +84,7 @@ impl SocketManager {
     /// Intended for use at startup to clean up sockets left by a previous
     /// crash. Only removes sockets that pass the [`is_stale`] check —
     /// active sockets from concurrently running sandboxes are left alone.
+    #[cfg(test)]
     pub fn cleanup_stale(prefix: &str) {
         let temp_dir = std::env::temp_dir();
         let name_prefix = format!("{prefix}-");
@@ -127,15 +128,30 @@ impl Drop for SocketManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     const TEST_PREFIX: &str = "swage-test-socket";
+
+    fn wait_until_stale(path: &Path) {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            if SocketManager::is_stale(path) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            SocketManager::is_stale(path),
+            "socket file with no listener should be detected as stale"
+        );
+    }
 
     // -- Create ---------------------------------------------------------------
 
     #[tokio::test]
     async fn create_produces_socket_file() {
-        let (mgr, _listener) = SocketManager::create(TEST_PREFIX)
-            .expect("create should succeed");
+        let (mgr, _listener) = SocketManager::create(TEST_PREFIX).expect("create should succeed");
 
         assert!(mgr.path().exists(), "socket file should exist after create");
 
@@ -145,8 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn socket_name_includes_prefix() {
-        let (mgr, _listener) = SocketManager::create(TEST_PREFIX)
-            .expect("create should succeed");
+        let (mgr, _listener) = SocketManager::create(TEST_PREFIX).expect("create should succeed");
 
         let filename = mgr.path().file_name().unwrap().to_string_lossy();
         assert!(
@@ -164,8 +179,8 @@ mod tests {
     #[tokio::test]
     async fn drop_removes_socket_file() {
         let path = {
-            let (mgr, _listener) = SocketManager::create(TEST_PREFIX)
-                .expect("create should succeed");
+            let (mgr, _listener) =
+                SocketManager::create(TEST_PREFIX).expect("create should succeed");
             let p = mgr.path().to_path_buf();
             assert!(p.exists(), "socket file should exist before drop");
             p
@@ -179,8 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_removes_socket_file() {
-        let (mgr, _listener) = SocketManager::create(TEST_PREFIX)
-            .expect("create should succeed");
+        let (mgr, _listener) = SocketManager::create(TEST_PREFIX).expect("create should succeed");
 
         let path = mgr.path().to_path_buf();
 
@@ -213,8 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_stale_false_for_active_socket() {
-        let (mgr, _listener) = SocketManager::create(TEST_PREFIX)
-            .expect("create should succeed");
+        let (mgr, _listener) = SocketManager::create(TEST_PREFIX).expect("create should succeed");
 
         // Socket has an active listener — should not be stale.
         assert!(
@@ -227,17 +240,16 @@ mod tests {
     fn is_stale_true_for_abandoned_socket() {
         use std::os::unix::net::UnixListener as StdUnixListener;
 
-        let path = std::env::temp_dir()
-            .join(format!("{}-stale-test-{}.sock", TEST_PREFIX, uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "{}-stale-test-{}.sock",
+            TEST_PREFIX,
+            uuid::Uuid::new_v4()
+        ));
 
         // Bind and immediately drop — leaves the file but no listener.
         let listener = StdUnixListener::bind(&path).expect("bind should succeed");
         drop(listener);
-
-        assert!(
-            SocketManager::is_stale(&path),
-            "socket file with no listener should be detected as stale"
-        );
+        wait_until_stale(&path);
 
         // Clean up the test file.
         std::fs::remove_file(&path).ok();
@@ -263,6 +275,8 @@ mod tests {
 
         assert!(path1.exists());
         assert!(path2.exists());
+        wait_until_stale(&path1);
+        wait_until_stale(&path2);
 
         SocketManager::cleanup_stale(&prefix);
 
@@ -277,8 +291,7 @@ mod tests {
         let prefix = format!("swage-ap-{short_id}");
 
         // Create an active socket (still listening).
-        let (mgr, _listener) = SocketManager::create(&prefix)
-            .expect("create should succeed");
+        let (mgr, _listener) = SocketManager::create(&prefix).expect("create should succeed");
         let path = mgr.path().to_path_buf();
 
         // cleanup_stale should leave the active socket alone.
@@ -290,6 +303,9 @@ mod tests {
         // Clean up regardless of assertion outcome.
         std::fs::remove_file(&path).ok();
 
-        assert!(still_exists, "active socket should not be removed by cleanup_stale");
+        assert!(
+            still_exists,
+            "active socket should not be removed by cleanup_stale"
+        );
     }
 }

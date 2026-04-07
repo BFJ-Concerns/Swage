@@ -52,7 +52,7 @@ export function createProjectStore(): ProjectStore {
 
         // Auto-select the default project on load. The default project is
         // identified by name so it works regardless of its generated ID.
-        const defaultProject = projects.find((p) => p.name === "default");
+        const defaultProject = projects.find((p) => p.is_default);
         if (defaultProject) {
           currentProject = defaultProject;
         }
@@ -88,7 +88,7 @@ export function createProjectStore(): ProjectStore {
       // Guard: the default project is the fallback for all conversations
       // and cannot be removed — doing so would leave the system in an
       // inconsistent state.
-      if (target?.name === "default") {
+      if (target?.is_default) {
         throw new Error("Cannot delete the default project");
       }
 

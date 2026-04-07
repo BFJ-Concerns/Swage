@@ -85,8 +85,8 @@
   // requestAnimationFrame lets the DOM paint the new content first.
   $effect(() => {
     // These accesses establish reactive tracking once the stores use $state.
-    const _msgCount = store?.activeConversation?.messages?.length ?? 0;
-    const _streamLen = streamingStore?.streamedContent?.length ?? 0;
+    void (store?.activeConversation?.messages?.length ?? 0);
+    void (streamingStore?.streamedContent?.length ?? 0);
 
     if (!userScrolledUp && scrollEl) {
       requestAnimationFrame(() => {

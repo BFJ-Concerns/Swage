@@ -14,15 +14,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use swage_core::ToolError;
 use swage_safety::LeakDetector;
 use swage_tool::context::MockToolContext;
 use swage_tool::dispatch::ToolDispatcher;
-use swage_tool::output::ToolOutput;
 use swage_tool::permission::PermissionConfig;
-use swage_tool::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
+use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_tool::registry::ToolRegistry;
 use swage_tool::tool::Tool;
 
@@ -67,44 +66,6 @@ impl Tool for LeakyEchoTool {
     }
 }
 
-/// A tool that declares a sensitive parameter key.
-struct SensitiveTool;
-
-#[async_trait]
-impl Tool for SensitiveTool {
-    fn name(&self) -> &str {
-        "sensitive_tool"
-    }
-
-    fn description(&self) -> &str {
-        "A tool with a sensitive parameter for testing redaction"
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "api_key": { "type": "string" }
-            },
-            "required": ["query"]
-        })
-    }
-
-    fn sensitive_keys(&self) -> &[&str] {
-        &["api_key"]
-    }
-
-    async fn execute(
-        &self,
-        params: Value,
-        _ctx: &dyn swage_tool::context::ToolContext,
-    ) -> Result<Value, ToolError> {
-        let query = params["query"].as_str().unwrap_or("");
-        Ok(json!({ "result": format!("searched: {query}") }))
-    }
-}
-
 /// A minimal tool that always succeeds — used to test rate limiting by
 /// invoking repeatedly without caring about the output content.
 struct CounterTool;
@@ -146,6 +107,8 @@ fn test_context() -> MockToolContext {
         working_directory: PathBuf::from("/tmp/test"),
         allowed_paths: vec![PathBuf::from("/tmp/test")],
         user_info: None,
+        call_id: None,
+        turn_id: None,
     }
 }
 
@@ -173,6 +136,7 @@ async fn dispatch_pipeline_end_to_end_with_leak_detection() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let rate_limiter = RateLimiter::new();
@@ -252,6 +216,7 @@ async fn dispatch_pipeline_debug_mode_preserves_raw_output() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -314,6 +279,7 @@ async fn dispatch_denies_explicitly_denied_tool() {
         allow: vec!["*".into()],
         deny: vec!["counter".into()],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -360,6 +326,7 @@ async fn dispatch_denies_unlisted_tool() {
         allow: vec![],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -411,6 +378,7 @@ async fn dispatch_rate_limits_after_threshold() {
         allow: vec!["counter".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let rate_limiter = Arc::new(RateLimiter::new());
@@ -437,10 +405,7 @@ async fn dispatch_rate_limits_after_threshold() {
         let result = dispatcher
             .dispatch("counter", json!({}), &ctx, "test-agent")
             .await;
-        assert!(
-            result.is_ok(),
-            "call {i} should succeed within rate limit"
-        );
+        assert!(result.is_ok(), "call {i} should succeed within rate limit");
     }
 
     // Third call should be rate-limited.
@@ -477,6 +442,7 @@ async fn dispatch_rejects_invalid_parameters() {
         allow: vec!["leaky_echo".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(
@@ -528,6 +494,7 @@ async fn dispatch_returns_not_found_for_unknown_tool() {
         allow: vec!["*".into()],
         deny: vec![],
         bundles: HashMap::new(),
+        require_approval: vec![],
     };
 
     let dispatcher = ToolDispatcher::new(

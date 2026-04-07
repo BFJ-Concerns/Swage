@@ -10,7 +10,7 @@
  *   - open event → "connected" status
  *   - send() serialises ClientEvent to JSON
  *   - incoming messages dispatched to handlers
- *   - unknown event types ignored silently (forward-compat with Phase 04)
+ *   - event payloads forwarded without a hard-coded allow-list
  *   - disconnect() closes cleanly, no reconnect
  *   - unexpected close after open → "reconnecting" + backoff retry
  *   - close before open (handshake rejection / 409) → "error", no retry
@@ -166,9 +166,11 @@ describe("send", () => {
 
     client.send({ type: "send_message", content: "Hello, Swage" });
 
+    // sentMessages[0] is the automatic tools subscribe sent on open;
+    // sentMessages[1] is the explicit send_message call.
     const sent = latestWs().sentMessages;
-    expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toEqual({
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1])).toEqual({
       type: "send_message",
       content: "Hello, Swage",
     });
@@ -181,7 +183,9 @@ describe("send", () => {
 
     client.send({ type: "cancel" });
 
-    expect(JSON.parse(latestWs().sentMessages[0])).toEqual({ type: "cancel" });
+    // sentMessages[0] is the automatic tools subscribe; sentMessages[1] is cancel.
+    const sent = latestWs().sentMessages;
+    expect(JSON.parse(sent[sent.length - 1])).toEqual({ type: "cancel" });
   });
 
   it("does not throw when called before the socket is open", () => {
@@ -224,7 +228,29 @@ describe("server event dispatch", () => {
     expect(received[0]).toEqual({ type: "turn_complete", turn_id: "t-42" });
   });
 
-  it("ignores unknown event types silently (forward-compat for future events)", () => {
+  it("passes output_schema_failed events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({
+      type: "output_schema_failed",
+      turn_id: "t-42",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    expect(received[0]).toEqual({
+      type: "output_schema_failed",
+      turn_id: "t-42",
+      attempts: 3,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+  });
+
+  it("wraps unknown event types without pretending they are known", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
     const received: ServerEvent[] = [];
     client.onEvent((e) => received.push(e));
@@ -232,23 +258,36 @@ describe("server event dispatch", () => {
     client.connect("conv-abc");
     latestWs().simulateOpen();
 
-    // A hypothetical future event type — must not throw or dispatch.
+    // A hypothetical future event type — must not be dropped or mis-typed as a known event.
     expect(() =>
       latestWs().simulateMessage({ type: "future_event", payload: "x" }),
     ).not.toThrow();
-    expect(received).toHaveLength(0);
+    expect(received).toEqual([
+      {
+        type: "unknown_event",
+        original_type: "future_event",
+        raw: { type: "future_event", payload: "x" },
+      },
+    ]);
   });
 
-  it("ignores malformed JSON frames silently", () => {
+  it("surfaces malformed JSON frames as an error event", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    client.onEvent(() => {
-      throw new Error("should not dispatch");
-    });
+    const statuses: string[] = [];
+    const received: ServerEvent[] = [];
+    client.onStatusChange((status) => statuses.push(status));
+    client.onEvent((event) => received.push(event));
 
     client.connect("conv-abc");
     latestWs().simulateOpen();
 
     expect(() => latestWs().simulateRawMessage("not-json{{")).not.toThrow();
+    expect(statuses).toContain("error");
+    expect(received).toContainEqual({
+      type: "error",
+      code: "invalid_frame",
+      message: "Received a malformed WebSocket frame from the gateway.",
+    });
   });
 });
 
@@ -351,6 +390,55 @@ describe("reconnection on unexpected close", () => {
     latestWs().simulateUnexpectedClose();
     vi.advanceTimersByTime(1_000);
     expect(MockWebSocket.instances).toHaveLength(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tools subscription on open
+// ---------------------------------------------------------------------------
+
+describe("tools channel subscription", () => {
+  it("sends a subscribe message for 'tools' immediately on open", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+
+    const sent = latestWs().sentMessages;
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: "subscribe",
+      channels: ["tools"],
+    });
+  });
+
+  it("dispatches context_assembled events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({
+      type: "context_assembled",
+      turn_id: "t-1",
+      report: { errors: [] },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("context_assembled");
+  });
+
+  it("dispatches shutdown events to handlers", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "shutdown", reason: "idle_timeout" });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("shutdown");
   });
 });
 

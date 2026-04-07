@@ -95,7 +95,10 @@ impl PythonRuntime {
                 info!(?candidate, "discovered bundled Python runtime");
                 return Self::verify_interpreter(Some(candidate.clone()));
             }
-            debug!(?candidate, "candidate path not found or incomplete, skipping");
+            debug!(
+                ?candidate,
+                "candidate path not found or incomplete, skipping"
+            );
         }
 
         // --- Fallback: system Python (acceptable for dev/tests) ---
@@ -167,9 +170,7 @@ impl PythonRuntime {
         // code injection.
         Python::with_gil(|py| {
             py.eval(SMOKE_TEST, None, None).map_err(|e| {
-                PythonError::InitialisationFailed(format!(
-                    "interpreter smoke test failed: {e}"
-                ))
+                PythonError::InitialisationFailed(format!("interpreter smoke test failed: {e}"))
             })?;
 
             debug!("Python interpreter smoke test passed");
@@ -225,8 +226,7 @@ mod tests {
 
     #[test]
     fn is_available_true_after_successful_init() {
-        let runtime =
-            PythonRuntime::new(None).expect("system Python should be available in dev");
+        let runtime = PythonRuntime::new(None).expect("system Python should be available in dev");
         assert!(runtime.is_available());
     }
 
@@ -236,7 +236,10 @@ mod tests {
             path: PathBuf::from("/some/path"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("/some/path"), "display should include the path");
+        assert!(
+            msg.contains("/some/path"),
+            "display should include the path"
+        );
         assert!(
             msg.contains("not found"),
             "display should mention 'not found'"
@@ -260,8 +263,7 @@ mod tests {
 
     #[test]
     fn runtime_path_accessor() {
-        let runtime =
-            PythonRuntime::new(None).expect("system Python should be available in dev");
+        let runtime = PythonRuntime::new(None).expect("system Python should be available in dev");
         // System Python fallback means no explicit path was resolved.
         // This is fine — the accessor should return None for system fallback.
         let _path = runtime.runtime_path();

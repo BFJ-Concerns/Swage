@@ -26,7 +26,13 @@ pub struct FileSearchTool {
 /// Directories to skip during the tree walk — they are either generated output
 /// or version control internals that rarely contain useful search targets.
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", ".svn", "__pycache__", ".venv", "venv",
+    ".git",
+    "node_modules",
+    "target",
+    ".svn",
+    "__pycache__",
+    ".venv",
+    "venv",
 ];
 
 #[async_trait]
@@ -104,17 +110,12 @@ fn search_dir(dir: &Path, workspace_root: &Path, pattern: &str, results: &mut Ve
         Err(_) => return,
     };
 
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     // Sort for deterministic output order.
     paths.sort();
 
     for path in paths {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if path.is_dir() {
             // Skip hidden directories and known build/vcs dirs.
@@ -274,7 +275,11 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.len() <= 50, "output should be truncated: len={}", output.len());
+        assert!(
+            output.len() <= 50,
+            "output should be truncated: len={}",
+            output.len()
+        );
     }
 
     #[tokio::test]

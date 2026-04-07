@@ -11,8 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 
 use crate::provider::LlmProvider;
@@ -71,7 +71,10 @@ impl RetryProvider {
     /// `Arc<dyn LlmProvider>` or placed inside other decorators without
     /// propagating the concrete type through the call chain.
     pub fn new(inner: impl LlmProvider + 'static, config: RetryConfig) -> Self {
-        Self { inner: Arc::new(inner), config }
+        Self {
+            inner: Arc::new(inner),
+            config,
+        }
     }
 
     /// Wrap a provider with the default retry configuration (3 retries, 1 s
@@ -86,7 +89,10 @@ impl RetryProvider {
     /// `CircuitBreakerProvider` → `RetryProvider`) without exposing concrete
     /// type parameters through the entire stack.
     pub fn new_erased(inner: Box<dyn LlmProvider>, config: RetryConfig) -> Self {
-        Self { inner: Arc::from(inner), config }
+        Self {
+            inner: Arc::from(inner),
+            config,
+        }
     }
 
     /// Shared backoff core: `initial × 2^attempt`, capped at `max_backoff`, with
@@ -120,8 +126,7 @@ impl RetryProvider {
         };
 
         // Honour the provider's retry-after hint — always wait at least that long.
-        Self::jittered_backoff(&self.config, attempt)
-            .max(retry_after.unwrap_or(Duration::ZERO))
+        Self::jittered_backoff(&self.config, attempt).max(retry_after.unwrap_or(Duration::ZERO))
     }
 }
 
@@ -194,8 +199,7 @@ impl LlmProvider for RetryProvider {
             futures::stream::once(async move {
                 let mut attempt = 0u32;
                 loop {
-                    let chunks: Vec<StreamChunk> =
-                        inner.stream(request.clone()).collect().await;
+                    let chunks: Vec<StreamChunk> = inner.stream(request.clone()).collect().await;
 
                     // Scan for an error chunk in this attempt.
                     let error_msg = chunks.iter().find_map(|c| {
@@ -306,15 +310,13 @@ mod tests {
                 error,
             }
         }
-
-        fn total_calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
-        }
     }
 
     #[async_trait]
     impl LlmProvider for FailN {
-        fn model_id(&self) -> &str { "mock" }
+        fn model_id(&self) -> &str {
+            "mock"
+        }
 
         async fn complete(
             &self,
@@ -349,20 +351,21 @@ mod tests {
             }
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             let mut n = self.call_count.lock().unwrap();
             *n += 1;
             if *n <= self.fail_count {
-                Box::pin(futures::stream::iter(vec![
-                    StreamChunk::Error { message: "transient stream error".into() },
-                ]))
+                Box::pin(futures::stream::iter(vec![StreamChunk::Error {
+                    message: "transient stream error".into(),
+                }]))
             } else {
                 Box::pin(futures::stream::iter(vec![
-                    StreamChunk::Delta { content: "hello".into() },
-                    StreamChunk::Done { finish_reason: None },
+                    StreamChunk::Delta {
+                        content: "hello".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
                 ]))
             }
         }
@@ -379,17 +382,18 @@ mod tests {
 
     impl AlwaysFail {
         fn new(error: ProviderError) -> Self {
-            Self { call_count: Arc::new(Mutex::new(0)), error }
-        }
-
-        fn total_calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
+            Self {
+                call_count: Arc::new(Mutex::new(0)),
+                error,
+            }
         }
     }
 
     #[async_trait]
     impl LlmProvider for AlwaysFail {
-        fn model_id(&self) -> &str { "mock" }
+        fn model_id(&self) -> &str {
+            "mock"
+        }
 
         async fn complete(
             &self,
@@ -407,14 +411,11 @@ mod tests {
             Err(self.error.clone())
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             *self.call_count.lock().unwrap() += 1;
-            Box::pin(futures::stream::iter(vec![
-                StreamChunk::Error { message: "persistent error".into() },
-            ]))
+            Box::pin(futures::stream::iter(vec![StreamChunk::Error {
+                message: "persistent error".into(),
+            }]))
         }
     }
 
@@ -436,10 +437,13 @@ mod tests {
 
     #[tokio::test]
     async fn complete_succeeds_on_first_attempt() {
-        let retry = RetryProvider::with_defaults(FailN::new(0, ProviderError::Network {
-            provider: "mock".into(),
-            message: "err".into(),
-        }));
+        let retry = RetryProvider::with_defaults(FailN::new(
+            0,
+            ProviderError::Network {
+                provider: "mock".into(),
+                message: "err".into(),
+            },
+        ));
         let result = retry.complete(completion_req()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "success");
@@ -448,10 +452,13 @@ mod tests {
     #[tokio::test]
     async fn complete_retries_twice_and_succeeds() {
         // Fails on calls 1 and 2, succeeds on call 3 — caller gets valid response.
-        let provider = FailN::new(2, ProviderError::Network {
-            provider: "mock".into(),
-            message: "timeout".into(),
-        });
+        let provider = FailN::new(
+            2,
+            ProviderError::Network {
+                provider: "mock".into(),
+                message: "timeout".into(),
+            },
+        );
         let retry = RetryProvider::new(provider, zero_backoff());
         let result = retry.complete(completion_req()).await;
         assert!(result.is_ok());
@@ -461,7 +468,9 @@ mod tests {
     #[tokio::test]
     async fn complete_permanent_error_returned_without_retry() {
         // Auth errors are permanent — the decorator must not retry.
-        let inner = AlwaysFail::new(ProviderError::Auth { provider: "mock".into() });
+        let inner = AlwaysFail::new(ProviderError::Auth {
+            provider: "mock".into(),
+        });
         // Borrow the call_count Arc before moving `inner` into RetryProvider.
         let call_count = Arc::clone(&inner.call_count);
         let retry = RetryProvider::new(inner, zero_backoff());
@@ -497,10 +506,13 @@ mod tests {
         let retry_after_hint = Duration::from_secs(5);
 
         let retry = RetryProvider::new(
-            FailN::new(1, ProviderError::RateLimited {
-                provider: "mock".into(),
-                retry_after: Some(retry_after_hint),
-            }),
+            FailN::new(
+                1,
+                ProviderError::RateLimited {
+                    provider: "mock".into(),
+                    retry_after: Some(retry_after_hint),
+                },
+            ),
             RetryConfig {
                 max_retries: 3,
                 initial_backoff: Duration::ZERO,
@@ -527,10 +539,13 @@ mod tests {
     #[tokio::test]
     async fn complete_with_tools_retries_and_succeeds() {
         let retry = RetryProvider::new(
-            FailN::new(2, ProviderError::Timeout {
-                provider: "mock".into(),
-                duration: Duration::from_secs(30),
-            }),
+            FailN::new(
+                2,
+                ProviderError::Timeout {
+                    provider: "mock".into(),
+                    duration: Duration::from_secs(30),
+                },
+            ),
             zero_backoff(),
         );
         let result = retry.complete_with_tools(tool_req()).await;
@@ -548,7 +563,10 @@ mod tests {
 
         let result = retry.complete_with_tools(tool_req()).await;
 
-        assert!(matches!(result.unwrap_err(), ProviderError::InvalidConfig { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::InvalidConfig { .. }
+        ));
         assert_eq!(*call_count.lock().unwrap(), 1);
     }
 
@@ -558,12 +576,17 @@ mod tests {
 
     #[tokio::test]
     async fn stream_succeeds_on_first_attempt() {
-        let retry = RetryProvider::with_defaults(FailN::new(0, ProviderError::StreamError(
-            "unused".into(),
-        )));
+        let retry = RetryProvider::with_defaults(FailN::new(
+            0,
+            ProviderError::StreamError("unused".into()),
+        ));
         let chunks: Vec<StreamChunk> = retry.stream(completion_req()).collect().await;
 
-        assert!(chunks.iter().any(|c| matches!(c, StreamChunk::Delta { .. })));
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Delta { .. }))
+        );
         assert!(matches!(chunks.last(), Some(StreamChunk::Done { .. })));
     }
 
@@ -578,10 +601,16 @@ mod tests {
         let chunks: Vec<StreamChunk> = retry.stream(completion_req()).collect().await;
 
         assert!(
-            chunks.iter().all(|c| !matches!(c, StreamChunk::Error { .. })),
+            chunks
+                .iter()
+                .all(|c| !matches!(c, StreamChunk::Error { .. })),
             "no error chunks expected: {chunks:?}"
         );
-        assert!(chunks.iter().any(|c| matches!(c, StreamChunk::Delta { content } if content == "hello")));
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Delta { content } if content == "hello"))
+        );
         assert!(matches!(chunks.last(), Some(StreamChunk::Done { .. })));
     }
 
@@ -595,7 +624,9 @@ mod tests {
         let chunks: Vec<StreamChunk> = retry.stream(completion_req()).collect().await;
 
         assert!(
-            chunks.iter().any(|c| matches!(c, StreamChunk::Error { .. })),
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Error { .. })),
             "expected an error chunk when retries are exhausted"
         );
     }

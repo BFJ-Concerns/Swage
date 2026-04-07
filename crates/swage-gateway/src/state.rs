@@ -1,18 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
+use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
-use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher};
+use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -33,10 +35,10 @@ pub struct AppState {
     pub config: ResolvedConfig,
     /// Maps session_id → CancellationToken for turns currently being processed.
     /// Used by `cancel_turn` and by graceful shutdown to interrupt active work.
-    pub active_turns: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
+    pub active_turns: Arc<AsyncMutex<HashMap<Uuid, CancellationToken>>>,
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
-    pub active_connections: Arc<Mutex<HashSet<Uuid>>>,
+    pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
@@ -51,6 +53,32 @@ pub struct AppState {
     /// Used by the idle lifecycle monitor to trigger automatic shutdown when
     /// no activity has been seen for a configured duration.
     pub activity_tracker: Arc<ActivityTracker>,
+
+    /// Broadcast channel for server-wide event delivery.
+    ///
+    /// Used by the shutdown endpoint to push a `Shutdown` event to all
+    /// connected WebSocket clients before the gateway terminates. Each
+    /// WebSocket connection subscribes a receiver and merges it with its
+    /// per-turn `mpsc` channel in the forwarding task.
+    pub broadcast: broadcast::Sender<ServerEvent>,
+
+    /// Cancellation token that triggers graceful shutdown on demand.
+    ///
+    /// The HTTP shutdown endpoint signals this token; the server's shutdown
+    /// future awaits it alongside SIGTERM so either mechanism causes an
+    /// orderly drain.
+    pub shutdown_signal: CancellationToken,
+
+    /// Routes approval decisions from WebSocket handlers to waiting agent tasks.
+    ///
+    /// When an agent suspends on a tool awaiting human approval it inserts a
+    /// `oneshot::Sender<ApprovalDecision>` keyed by `approval_id`. The WebSocket
+    /// and REST handlers remove the sender and fire it when the client submits a
+    /// decision. A plain std mutex is sufficient here — the critical section is a
+    /// single HashMap operation with no async work under the lock.
+    pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
+    /// Optional lifecycle hooks honoured by gateway-owned execution paths.
+    pub hook_registry: Option<Arc<HookRegistry>>,
 }
 
 impl AppState {
@@ -61,17 +89,23 @@ impl AppState {
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
         sandbox: Option<Arc<dyn Sandbox>>,
+        hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
+        let (broadcast, _) = broadcast::channel(16);
         Self {
             storage,
             project_store,
             provider,
             config,
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(HashSet::new())),
+            active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(tool_dispatcher),
             sandbox,
             activity_tracker: Arc::new(ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            hook_registry,
         }
     }
 }
@@ -89,7 +123,6 @@ mod tests {
     use serde_json::Value;
     use swage_core::SandboxError;
     use swage_sandbox::{Sandbox, ToolCallResult};
-    use tokio::sync::Mutex;
 
     use super::*;
     use crate::turn::tests::{MockProvider, MockStorage};
@@ -118,30 +151,85 @@ mod tests {
 
     fn make_minimal_state(sandbox: Option<Arc<dyn Sandbox>>) -> AppState {
         let storage = Arc::new(MockStorage::new());
+        let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(HashSet::new())),
+            active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox,
+            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast,
+            shutdown_signal: CancellationToken::new(),
+            approval_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     #[test]
     fn sandbox_is_none_when_constructed_with_none() {
         let state = make_minimal_state(None);
-        assert!(state.sandbox.is_none(), "sandbox should be None when not provided");
+        assert!(
+            state.sandbox.is_none(),
+            "sandbox should be None when not provided"
+        );
     }
 
     #[test]
     fn sandbox_is_some_when_constructed_with_sandbox() {
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
         let state = make_minimal_state(Some(sandbox));
-        assert!(state.sandbox.is_some(), "sandbox should be Some when provided");
+        assert!(
+            state.sandbox.is_some(),
+            "sandbox should be Some when provided"
+        );
+    }
+
+    #[test]
+    fn approval_channels_starts_empty() {
+        // Newly constructed state must have an empty approval_channels map —
+        // no leftover entries from a previous session.
+        let state = make_minimal_state(None);
+        let guard = state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            guard.is_empty(),
+            "approval_channels should be empty on construction"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_decision_roundtrip() {
+        // An agent inserts a oneshot sender keyed by approval_id;
+        // the WebSocket handler removes it and fires the decision.
+        let state = make_minimal_state(None);
+        let approval_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
+        state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(approval_id, tx);
+        let sender = state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&approval_id)
+            .expect("sender should be present");
+        sender
+            .send(ApprovalDecision {
+                decision: "approved".to_string(),
+                reason: None,
+            })
+            .unwrap();
+        let decision = rx.await.expect("receiver should get decision");
+        assert_eq!(decision.decision, "approved");
+        assert_eq!(decision.reason, None);
     }
 
     #[test]
@@ -155,6 +243,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             Some(Arc::clone(&sandbox)),
+            None,
         );
         assert!(state.sandbox.is_some());
     }

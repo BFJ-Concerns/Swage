@@ -16,6 +16,13 @@ swage-provider = { path = "../swage-provider" }
 swage-storage = { path = "../swage-storage" }
 swage-python = { path = "../swage-python" }
 swage-sandbox = { path = "../swage-sandbox" }
+swage-agent = { path = "../swage-agent" }
+swage-safety = { path = "../swage-safety" }
+swage-context = { path = "../swage-context" }
+swage-client = { path = "../swage-client" }
+swage-tui = { path = "../swage-tui" }
+swage-topology = { path = "../swage-topology" }
+swage-hook = { path = "../swage-hook" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
@@ -28,14 +35,18 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+libc = { workspace = true }
 tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json"] }
 html2text = "0.12"
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 [dev-dependencies]
 swage-safety = { path = "../swage-safety" }
+swage-hook = { path = "../swage-hook" }
 tower = { version = "0.4", features = ["util"] }
 tokio-tungstenite = "0.24"
 tempfile = { workspace = true }

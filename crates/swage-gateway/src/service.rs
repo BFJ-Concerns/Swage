@@ -1,14 +1,22 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use swage_core::GatewayError;
 use serde_json::Value as JsonValue;
+use swage_core::{GatewayError, StorageError};
 use swage_storage::{
-    model::{NewProject, NewSession, NewThread, TurnState},
+    model::{
+        EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry, Team,
+        ThreadBranch, TopologyRun, TurnState,
+    },
     store::{ProjectStore, Storage},
+};
+
+use crate::{
+    state::AppState,
+    topology::{TopologyExecutionRequest, TopologyExecutor},
 };
 
 // ---------------------------------------------------------------------------
@@ -46,6 +54,34 @@ pub struct ConversationDetail {
     pub messages: Vec<MessageView>,
 }
 
+/// Branch metadata for a child thread within a conversation.
+#[derive(Debug, Serialize)]
+pub struct ConversationBranchResponse {
+    pub child_thread_id: Uuid,
+    pub parent_thread_id: Uuid,
+    pub branched_from_message_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request body for creating a branch from a thread/message pair.
+#[derive(Debug, Deserialize)]
+pub struct CreateConversationBranchRequest {
+    pub thread_id: Uuid,
+    pub from_message_id: Uuid,
+}
+
+/// Detailed view of a single thread within a conversation.
+#[derive(Debug, Serialize)]
+pub struct ConversationThreadDetail {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub state: String,
+    pub messages: Vec<MessageView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<ConversationBranchResponse>,
+}
+
 /// A tool call that occurred within a turn, as surfaced by the conversation API.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallView {
@@ -69,15 +105,17 @@ pub struct ToolCallView {
 /// A single message in a conversation, annotated with its turn's lifecycle state.
 #[derive(Debug, Serialize)]
 pub struct MessageView {
+    pub thread_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<Uuid>,
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
-    /// State of the last turn in the thread this message belongs to.
-    pub turn_state: TurnState,
+    /// Lifecycle state of the turn that produced this message, when known.
+    pub turn_state: Option<TurnState>,
     /// Tool calls that occurred in this message's turn.
     ///
-    /// Populated for assistant messages; empty for user messages.
-    /// Always present (empty array) so the frontend schema is consistent.
+    /// Populated for assistant messages when the originating turn is known.
     pub tool_calls: Vec<ToolCallView>,
 }
 
@@ -97,7 +135,10 @@ pub struct ConversationService {
 
 impl ConversationService {
     pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
-        Self { storage, project_store }
+        Self {
+            storage,
+            project_store,
+        }
     }
 
     /// Create a new conversation in the default project.
@@ -114,7 +155,8 @@ impl ConversationService {
             })
             .await?;
 
-        // Create the default thread. The gateway uses one thread per session.
+        // Create the conversation's root thread. Additional branch threads may
+        // be added later under the same session.
         self.storage
             .create(NewThread {
                 session_id: session.id,
@@ -145,9 +187,7 @@ impl ConversationService {
                 .map(|m| m.content);
 
             // Check whether any thread has an Interrupted turn.
-            let has_interrupted_turn = self
-                .has_interrupted_turn_in_session(session.id)
-                .await?;
+            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -162,10 +202,7 @@ impl ConversationService {
     }
 
     /// Get a conversation with its full message history.
-    pub async fn get_conversation(
-        &self,
-        id: Uuid,
-    ) -> Result<ConversationDetail, GatewayError> {
+    pub async fn get_conversation(&self, id: Uuid) -> Result<ConversationDetail, GatewayError> {
         let session = self
             .storage
             .get_session(id)
@@ -173,75 +210,58 @@ impl ConversationService {
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
         // Collect messages and tool calls across all threads for this session.
-        // The gateway uses one thread per session; this handles the general case.
         let threads = self.storage.list_by_session(id).await?;
 
         let mut all_messages = Vec::new();
-        // All tool calls across all turns in all threads.
-        let mut all_tool_call_views: Vec<ToolCallView> = Vec::new();
-        // State of the last turn across all threads; default to Completed when none.
-        let mut last_turn_state = TurnState::Completed;
+        let mut tool_calls_by_turn: HashMap<Uuid, Vec<ToolCallView>> = HashMap::new();
+        let mut turn_state_by_turn: HashMap<Uuid, TurnState> = HashMap::new();
 
         for thread in &threads {
-            // Messages for this thread, already ordered by position.
             let messages = self.storage.list_messages_by_thread(thread.id).await?;
             all_messages.extend(messages);
 
-            // Turns for this thread — the last turn's state represents the thread's
-            // final LLM interaction result.
             let turns = self.storage.list_turns_by_thread(thread.id).await?;
-            if let Some(last) = turns.last() {
-                last_turn_state = last.state.clone();
-            }
-
-            // Collect tool call views for every turn in this thread.
-            // Note: in a single-thread/single-turn session this is exact. For
-            // multi-turn threads, all tool calls are surfaced on every assistant
-            // message — a known limitation until Message gains a turn_id link.
-            for turn in &turns {
-                let records = self.storage.list_tool_calls_by_turn(turn.id).await?;
-                for r in records {
-                    let arguments = serde_json::from_str(&r.arguments)
-                        .unwrap_or(JsonValue::String(r.arguments));
-                    let result = r.result.map(|text| {
-                        serde_json::from_str(&text).unwrap_or(JsonValue::String(text))
-                    });
-                    all_tool_call_views.push(ToolCallView {
-                        call_id: r.call_id,
-                        tool: r.tool,
-                        arguments,
-                        result,
-                        status: r.status,
-                        duration_ms: r.duration_ms.map(|ms| ms.max(0) as u64),
-                        truncated: r.truncated,
-                        total_bytes: r.total_bytes.map(|b| b.max(0) as u64),
-                        parent_call_id: r.parent_call_id,
-                    });
-                }
+            for turn in turns {
+                let turn_id = turn.id;
+                turn_state_by_turn.insert(turn_id, turn.state);
+                let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
+                tool_calls_by_turn.insert(
+                    turn_id,
+                    records.into_iter().map(tool_call_record_to_view).collect(),
+                );
             }
         }
 
-        // Sort all messages by position (threads use per-thread position, so sort
-        // by created_at if positions overlap across threads).
         all_messages.sort_by(|a, b| {
-            a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at))
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.thread_id.cmp(&b.thread_id))
+                .then(a.position.cmp(&b.position))
         });
 
         let message_views = all_messages
             .into_iter()
-            .map(|m| {
-                // Tool calls are attached to assistant messages only.
-                let tool_calls = if m.role == "assistant" {
-                    all_tool_call_views.clone()
+            .map(|message| {
+                let turn_id = message.turn_id;
+                let turn_state = turn_id
+                    .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id).cloned());
+                let tool_calls = if message.role == "assistant" {
+                    turn_id
+                        .and_then(|message_turn_id| {
+                            tool_calls_by_turn.get(&message_turn_id).cloned()
+                        })
+                        .unwrap_or_default()
                 } else {
-                    vec![]
+                    Vec::new()
                 };
 
                 MessageView {
-                    role: m.role,
-                    content: m.content,
-                    timestamp: m.created_at,
-                    turn_state: last_turn_state.clone(),
+                    thread_id: message.thread_id,
+                    turn_id,
+                    role: message.role,
+                    content: message.content,
+                    timestamp: message.created_at,
+                    turn_state,
                     tool_calls,
                 }
             })
@@ -280,9 +300,7 @@ impl ConversationService {
                 .await?
                 .map(|m| m.content);
 
-            let has_interrupted_turn = self
-                .has_interrupted_turn_in_session(session.id)
-                .await?;
+            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
 
             summaries.push(ConversationSummary {
                 id: session.id,
@@ -311,7 +329,10 @@ impl ConversationService {
 
         let session = self
             .storage
-            .create_session(NewSession { project_id, agent_id: "gateway".to_string() })
+            .create_session(NewSession {
+                project_id,
+                agent_id: "gateway".to_string(),
+            })
             .await?;
 
         // Create the default thread for the new session.
@@ -342,6 +363,119 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Create a branch thread from a message within an existing conversation.
+    pub async fn create_branch(
+        &self,
+        session_id: Uuid,
+        req: CreateConversationBranchRequest,
+    ) -> Result<ConversationBranchResponse, GatewayError> {
+        self.storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+
+        let thread = self.storage.get(req.thread_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "thread".into(),
+                id: req.thread_id.to_string(),
+            })
+        })?;
+        if thread.session_id != session_id {
+            return Err(GatewayError::ValidationError(
+                "thread does not belong to this conversation".into(),
+            ));
+        }
+
+        let branch = self
+            .storage
+            .create_branch(req.thread_id, req.from_message_id)
+            .await?;
+
+        Ok(thread_branch_to_response(branch))
+    }
+
+    /// List branches created within a conversation.
+    pub async fn list_branches(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ConversationBranchResponse>, GatewayError> {
+        self.storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+
+        self.storage
+            .list_branches_by_session(session_id)
+            .await
+            .map(|branches| {
+                branches
+                    .into_iter()
+                    .map(thread_branch_to_response)
+                    .collect()
+            })
+            .map_err(GatewayError::Storage)
+    }
+
+    /// Fetch a single thread with its copied history and branch metadata.
+    pub async fn get_thread_detail(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<ConversationThreadDetail, GatewayError> {
+        let thread = self.storage.get(thread_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "thread".into(),
+                id: thread_id.to_string(),
+            })
+        })?;
+
+        let messages = self.storage.list_messages_by_thread(thread.id).await?;
+        let turns = self.storage.list_turns_by_thread(thread.id).await?;
+        let mut turn_state_by_turn = HashMap::new();
+        let mut tool_calls_by_turn = HashMap::new();
+        for turn in turns {
+            let turn_id = turn.id;
+            turn_state_by_turn.insert(turn_id, turn.state);
+            let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
+            tool_calls_by_turn.insert(
+                turn_id,
+                records.into_iter().map(tool_call_record_to_view).collect(),
+            );
+        }
+        let branch = self.storage.get_branch(thread.id).await?;
+
+        Ok(ConversationThreadDetail {
+            id: thread.id,
+            session_id: thread.session_id,
+            agent_id: thread.agent_id,
+            state: thread.state.to_string(),
+            messages: messages
+                .into_iter()
+                .map(|message| {
+                    let is_assistant = message.role == "assistant";
+                    MessageView {
+                        thread_id: message.thread_id,
+                        turn_id: message.turn_id,
+                        role: message.role,
+                        content: message.content,
+                        timestamp: message.created_at,
+                        turn_state: message
+                            .turn_id
+                            .and_then(|turn_id| turn_state_by_turn.get(&turn_id).cloned()),
+                        tool_calls: if is_assistant {
+                            message
+                                .turn_id
+                                .and_then(|turn_id| tool_calls_by_turn.get(&turn_id).cloned())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
+                    }
+                })
+                .collect(),
+            branch: branch.map(thread_branch_to_response),
+        })
+    }
+
     // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
@@ -359,6 +493,26 @@ impl ConversationService {
             }
         }
         Ok(false)
+    }
+}
+
+fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> ToolCallView {
+    let arguments =
+        serde_json::from_str(&record.arguments).unwrap_or(JsonValue::String(record.arguments));
+    let result = record
+        .result
+        .map(|text| serde_json::from_str(&text).unwrap_or(JsonValue::String(text)));
+
+    ToolCallView {
+        call_id: record.call_id,
+        tool: record.tool,
+        arguments,
+        result,
+        status: record.status,
+        duration_ms: record.duration_ms.map(|ms| ms.max(0) as u64),
+        truncated: record.truncated,
+        total_bytes: record.total_bytes.map(|bytes| bytes.max(0) as u64),
+        parent_call_id: record.parent_call_id,
     }
 }
 
@@ -386,6 +540,7 @@ pub struct UpdateProjectRequest {
 pub struct ProjectResponse {
     pub id: Uuid,
     pub name: String,
+    pub is_default: bool,
     pub slug: String,
     pub workspace_path: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -412,7 +567,9 @@ pub fn slugify(name: &str) -> String {
 
 /// Returns the base directory for all project data: `~/.swage/projects/`.
 fn projects_base_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".swage").join("projects"))
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".swage").join("projects"))
 }
 
 /// Mediates between HTTP project handlers and storage.
@@ -437,7 +594,9 @@ impl ProjectService {
     ) -> Result<ProjectResponse, GatewayError> {
         // Validate non-empty name.
         if req.name.trim().is_empty() {
-            return Err(GatewayError::ValidationError("name must not be empty".into()));
+            return Err(GatewayError::ValidationError(
+                "name must not be empty".into(),
+            ));
         }
 
         // Check workspace_path exists on disk if provided.
@@ -464,14 +623,24 @@ impl ProjectService {
             let project_dir = base.join(&slug);
             let memory_dir = project_dir.join("memory");
             // Non-fatal: best-effort directory creation.
-            let _ = std::fs::create_dir_all(&memory_dir);
+            if let Err(error) = std::fs::create_dir_all(&memory_dir) {
+                tracing::warn!(
+                    slug,
+                    path = %memory_dir.display(),
+                    %error,
+                    "failed to create project memory directory"
+                );
+            }
         }
 
-        let project = self.project_store.create(NewProject {
-            name: req.name,
-            slug,
-            workspace_path: req.workspace_path,
-        }).await?;
+        let project = self
+            .project_store
+            .create(NewProject {
+                name: req.name,
+                slug,
+                workspace_path: req.workspace_path,
+            })
+            .await?;
 
         Ok(project_to_response(project))
     }
@@ -504,7 +673,9 @@ impl ProjectService {
         // Validate name if provided.
         if let Some(ref name) = req.name {
             if name.trim().is_empty() {
-                return Err(GatewayError::ValidationError("name must not be empty".into()));
+                return Err(GatewayError::ValidationError(
+                    "name must not be empty".into(),
+                ));
             }
         }
 
@@ -520,7 +691,8 @@ impl ProjectService {
         // Derive the new slug from the new name, if name is being updated.
         let new_slug = req.name.as_deref().map(slugify);
 
-        let project = self.project_store
+        let project = self
+            .project_store
             .update(id, req.name, new_slug, req.workspace_path)
             .await
             .map_err(|e| match e {
@@ -558,9 +730,535 @@ fn project_to_response(p: swage_storage::model::Project) -> ProjectResponse {
     ProjectResponse {
         id: p.id,
         name: p.name,
+        is_default: p.is_default,
         slug: p.slug,
         workspace_path: p.workspace_path,
         created_at: p.created_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Team service — request/response types and service logic
+// ---------------------------------------------------------------------------
+
+/// Request body for creating a team within a project.
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub entry_agent_id: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// Request body for partially updating a team.
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub entry_agent_id: Option<String>,
+    pub members: Option<Vec<String>>,
+}
+
+/// API response for a single team.
+#[derive(Debug, Serialize)]
+pub struct TeamResponse {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub entry_agent_id: String,
+    pub members: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// API response for the list-teams endpoint.
+#[derive(Debug, Serialize)]
+pub struct TeamListResponse {
+    pub teams: Vec<TeamResponse>,
+}
+
+/// Mediates between HTTP team handlers and storage.
+#[derive(Clone)]
+pub struct TeamService {
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) project_store: Arc<dyn ProjectStore>,
+}
+
+impl TeamService {
+    pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
+        Self {
+            storage,
+            project_store,
+        }
+    }
+
+    pub async fn create_team(
+        &self,
+        project_id: Uuid,
+        req: CreateTeamRequest,
+    ) -> Result<TeamResponse, GatewayError> {
+        self.ensure_project_exists(project_id).await?;
+        validate_team_name(&req.name)?;
+        validate_agent_id(&req.entry_agent_id, "entry_agent_id")?;
+
+        if self
+            .storage
+            .get_team_by_name(project_id, &req.name)
+            .await?
+            .is_some()
+        {
+            return Err(GatewayError::Storage(StorageError::ConstraintViolation(
+                format!(
+                    "a team named '{}' already exists in project {project_id}",
+                    req.name
+                ),
+            )));
+        }
+
+        let members = normalise_members(req.members, &req.entry_agent_id)?;
+        let team = self
+            .storage
+            .create_team(NewTeam {
+                project_id,
+                name: req.name,
+                description: req.description,
+                entry_agent_id: req.entry_agent_id,
+                members,
+            })
+            .await?;
+
+        Ok(team_to_response(team))
+    }
+
+    pub async fn list_teams(&self, project_id: Uuid) -> Result<TeamListResponse, GatewayError> {
+        self.ensure_project_exists(project_id).await?;
+        let teams = self.storage.list_teams_by_project(project_id).await?;
+        Ok(TeamListResponse {
+            teams: teams.into_iter().map(team_to_response).collect(),
+        })
+    }
+
+    pub async fn get_team(&self, id: Uuid) -> Result<TeamResponse, GatewayError> {
+        self.storage
+            .get_team(id)
+            .await?
+            .map(team_to_response)
+            .ok_or_else(|| team_not_found(id))
+    }
+
+    pub async fn update_team(
+        &self,
+        id: Uuid,
+        req: UpdateTeamRequest,
+    ) -> Result<TeamResponse, GatewayError> {
+        let UpdateTeamRequest {
+            name,
+            description,
+            entry_agent_id,
+            members,
+        } = req;
+
+        let existing = self
+            .storage
+            .get_team(id)
+            .await?
+            .ok_or_else(|| team_not_found(id))?;
+
+        if let Some(ref name) = name {
+            validate_team_name(name)?;
+            if let Some(conflict) = self
+                .storage
+                .get_team_by_name(existing.project_id, name)
+                .await?
+            {
+                if conflict.id != id {
+                    return Err(GatewayError::Storage(StorageError::ConstraintViolation(
+                        format!(
+                            "a team named '{}' already exists in project {}",
+                            name, existing.project_id
+                        ),
+                    )));
+                }
+            }
+        }
+
+        if let Some(ref entry_agent_id) = entry_agent_id {
+            validate_agent_id(entry_agent_id, "entry_agent_id")?;
+        }
+
+        let resolved_entry_agent_id = entry_agent_id
+            .clone()
+            .unwrap_or_else(|| existing.entry_agent_id.clone());
+        let members = match members {
+            Some(members) => Some(normalise_members(members, &resolved_entry_agent_id)?),
+            None if resolved_entry_agent_id != existing.entry_agent_id
+                && !existing
+                    .members
+                    .iter()
+                    .any(|member| member == &resolved_entry_agent_id) =>
+            {
+                Some(normalise_members(
+                    existing.members.clone(),
+                    &resolved_entry_agent_id,
+                )?)
+            }
+            None => None,
+        };
+
+        let team = self
+            .storage
+            .update_team(id, name, description, entry_agent_id, members)
+            .await?;
+
+        Ok(team_to_response(team))
+    }
+
+    pub async fn delete_team(&self, id: Uuid) -> Result<(), GatewayError> {
+        if !self.storage.delete_team(id).await? {
+            return Err(team_not_found(id));
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_project_exists(&self, project_id: Uuid) -> Result<(), GatewayError> {
+        self.project_store
+            .get(project_id)
+            .await?
+            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+        Ok(())
+    }
+}
+
+fn validate_team_name(name: &str) -> Result<(), GatewayError> {
+    if name.trim().is_empty() {
+        return Err(GatewayError::ValidationError(
+            "name must not be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_id(agent_id: &str, field_name: &str) -> Result<(), GatewayError> {
+    if agent_id.trim().is_empty() {
+        return Err(GatewayError::ValidationError(format!(
+            "{field_name} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn normalise_members(
+    members: Vec<String>,
+    entry_agent_id: &str,
+) -> Result<Vec<String>, GatewayError> {
+    let mut normalised = Vec::new();
+
+    let entry_agent_id = entry_agent_id.trim();
+    if entry_agent_id.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "entry_agent_id must not be empty".into(),
+        ));
+    }
+
+    normalised.push(entry_agent_id.to_string());
+    for member in members {
+        let member = member.trim();
+        if member.is_empty() {
+            return Err(GatewayError::ValidationError(
+                "members must not contain empty agent IDs".into(),
+            ));
+        }
+        if !normalised.iter().any(|existing| existing == member) {
+            normalised.push(member.to_string());
+        }
+    }
+
+    Ok(normalised)
+}
+
+fn team_not_found(id: Uuid) -> GatewayError {
+    GatewayError::Storage(StorageError::NotFound {
+        entity: "team".into(),
+        id: id.to_string(),
+    })
+}
+
+fn team_to_response(team: Team) -> TeamResponse {
+    TeamResponse {
+        id: team.id,
+        project_id: team.project_id,
+        name: team.name,
+        description: team.description,
+        entry_agent_id: team.entry_agent_id,
+        members: team.members,
+        created_at: team.created_at,
+        updated_at: team.updated_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Topology run service
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTopologyRunRequest {
+    pub topology_source: String,
+    pub message: String,
+    pub session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopologyRunResponse {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub session_id: Uuid,
+    pub state: String,
+    pub final_output: Option<JsonValue>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeExecutionResponse {
+    pub id: Uuid,
+    pub topology_run_id: Uuid,
+    pub node_id: String,
+    pub node_kind: String,
+    pub agent_id: Option<String>,
+    pub task_name: Option<String>,
+    pub state: String,
+    pub input_json: Option<JsonValue>,
+    pub output_json: Option<JsonValue>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EdgeEvaluationResponse {
+    pub id: Uuid,
+    pub topology_run_id: Uuid,
+    pub source_node_execution_id: Uuid,
+    pub edge_id: String,
+    pub target_node_id: String,
+    pub condition_expression: Option<String>,
+    pub matched: bool,
+    pub payload_json: Option<JsonValue>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeRetryResponse {
+    pub id: Uuid,
+    pub node_execution_id: Uuid,
+    pub attempt_number: i32,
+    pub failure_kind: String,
+    pub error_message: String,
+    pub recovery_guidance: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopologyRunDetailResponse {
+    pub run: TopologyRunResponse,
+    pub nodes: Vec<NodeExecutionResponse>,
+    pub edges: Vec<EdgeEvaluationResponse>,
+    pub retries: Vec<NodeRetryResponse>,
+}
+
+#[derive(Clone)]
+pub struct TopologyRunService {
+    pub(crate) state: AppState,
+}
+
+impl TopologyRunService {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+
+    pub async fn create_run(
+        &self,
+        team_id: Uuid,
+        req: CreateTopologyRunRequest,
+    ) -> Result<TopologyRunDetailResponse, GatewayError> {
+        if req.topology_source.trim().is_empty() {
+            return Err(GatewayError::ValidationError(
+                "topology_source must not be empty".into(),
+            ));
+        }
+        if req.message.trim().is_empty() {
+            return Err(GatewayError::ValidationError(
+                "message must not be empty".into(),
+            ));
+        }
+
+        let team = self.state.storage.get_team(team_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "team".into(),
+                id: team_id.to_string(),
+            })
+        })?;
+
+        let mut known_agents: std::collections::HashSet<String> =
+            team.members.iter().cloned().collect();
+        known_agents.insert(team.entry_agent_id.clone());
+        let catalog = swage_topology::TopologyEntityCatalog {
+            known_agents,
+            known_tasks: Default::default(),
+            known_handlers: ["identity", "collect-results"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        };
+
+        let graph = swage_python::topology::execute_topology_source(
+            &req.topology_source,
+            &format!("team-run:{team_id}"),
+            std::time::Duration::from_secs(self.state.config.context.timeout),
+            catalog,
+        )
+        .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+
+        let result = TopologyExecutor::new(self.state.clone())
+            .execute(TopologyExecutionRequest {
+                team,
+                graph,
+                initial_input: serde_json::json!({ "message": req.message }),
+                session_id: req.session_id,
+                source_turn_id: None,
+            })
+            .await
+            .map_err(|error| match error {
+                crate::topology::TopologyEngineError::Storage(storage_error) => {
+                    GatewayError::Storage(storage_error)
+                }
+                crate::topology::TopologyEngineError::TeamProjectMissing { project_id, .. } => {
+                    GatewayError::ProjectNotFound { id: project_id }
+                }
+                crate::topology::TopologyEngineError::SessionMissing { session_id } => {
+                    GatewayError::ConversationNotFound { id: session_id }
+                }
+                other => GatewayError::ValidationError(other.to_string()),
+            })?;
+
+        self.get_run(result.topology_run_id).await
+    }
+
+    pub async fn get_run(
+        &self,
+        topology_run_id: Uuid,
+    ) -> Result<TopologyRunDetailResponse, GatewayError> {
+        let run = self
+            .state
+            .storage
+            .get_topology_run(topology_run_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::Storage(StorageError::NotFound {
+                    entity: "topology_run".into(),
+                    id: topology_run_id.to_string(),
+                })
+            })?;
+        let nodes = self
+            .state
+            .storage
+            .list_node_executions_by_run(topology_run_id)
+            .await?;
+        let edges = self
+            .state
+            .storage
+            .list_edge_evaluations_by_run(topology_run_id)
+            .await?;
+        let mut retries = Vec::new();
+        for node in &nodes {
+            retries.extend(self.state.storage.list_node_retries(node.id).await?);
+        }
+
+        Ok(TopologyRunDetailResponse {
+            run: topology_run_to_response(run),
+            nodes: nodes.into_iter().map(node_execution_to_response).collect(),
+            edges: edges.into_iter().map(edge_evaluation_to_response).collect(),
+            retries: retries.into_iter().map(node_retry_to_response).collect(),
+        })
+    }
+
+    pub async fn list_runs(&self, team_id: Uuid) -> Result<Vec<TopologyRunResponse>, GatewayError> {
+        self.state
+            .storage
+            .list_topology_runs_by_team(team_id)
+            .await
+            .map(|runs| runs.into_iter().map(topology_run_to_response).collect())
+            .map_err(GatewayError::Storage)
+    }
+}
+
+fn topology_run_to_response(run: TopologyRun) -> TopologyRunResponse {
+    TopologyRunResponse {
+        id: run.id,
+        team_id: run.team_id,
+        session_id: run.session_id,
+        state: run.state.to_string(),
+        final_output: run.final_output,
+        error_message: run.error_message,
+        created_at: run.created_at,
+        completed_at: run.completed_at,
+    }
+}
+
+fn node_execution_to_response(node: NodeExecution) -> NodeExecutionResponse {
+    NodeExecutionResponse {
+        id: node.id,
+        topology_run_id: node.topology_run_id,
+        node_id: node.node_id,
+        node_kind: node.node_kind,
+        agent_id: node.agent_id,
+        task_name: node.task_name,
+        state: node.state.to_string(),
+        input_json: node.input_json,
+        output_json: node.output_json,
+        error_message: node.error_message,
+        created_at: node.created_at,
+        completed_at: node.completed_at,
+    }
+}
+
+fn edge_evaluation_to_response(edge: EdgeEvaluation) -> EdgeEvaluationResponse {
+    EdgeEvaluationResponse {
+        id: edge.id,
+        topology_run_id: edge.topology_run_id,
+        source_node_execution_id: edge.source_node_execution_id,
+        edge_id: edge.edge_id,
+        target_node_id: edge.target_node_id,
+        condition_expression: edge.condition_expression,
+        matched: edge.matched,
+        payload_json: edge.payload_json,
+        created_at: edge.created_at,
+    }
+}
+
+fn node_retry_to_response(retry: NodeRetry) -> NodeRetryResponse {
+    NodeRetryResponse {
+        id: retry.id,
+        node_execution_id: retry.node_execution_id,
+        attempt_number: retry.attempt_number,
+        failure_kind: retry.failure_kind,
+        error_message: retry.error_message,
+        recovery_guidance: retry.recovery_guidance,
+        created_at: retry.created_at,
+    }
+}
+
+fn thread_branch_to_response(branch: ThreadBranch) -> ConversationBranchResponse {
+    ConversationBranchResponse {
+        child_thread_id: branch.child_thread_id,
+        parent_thread_id: branch.parent_thread_id,
+        branched_from_message_id: branch.branched_from_message_id,
+        created_at: branch.created_at,
     }
 }
 
@@ -574,10 +1272,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use swage_storage::{
-        model::{NewMessage, NewToolCall, NewTurn, TurnState},
-        store::{SessionStore, TurnStore},
-    };
+    use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -598,7 +1293,10 @@ mod tests {
     async fn create_conversation_returns_valid_response() {
         let svc = make_service();
 
-        let resp = svc.create_conversation().await.expect("create should succeed");
+        let resp = svc
+            .create_conversation()
+            .await
+            .expect("create should succeed");
 
         // Non-nil UUID expected.
         assert_ne!(resp.id, Uuid::nil());
@@ -650,6 +1348,8 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -657,6 +1357,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".to_string(),
                 content: "Hello!".to_string(),
                 position: 0,
@@ -693,6 +1394,8 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -726,6 +1429,8 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -733,6 +1438,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".to_string(),
                 content: "Hi".to_string(),
                 position: 0,
@@ -743,6 +1449,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".to_string(),
                 content: "Hello!".to_string(),
                 position: 1,
@@ -761,7 +1468,7 @@ mod tests {
         assert_eq!(detail.messages.len(), 2);
         assert_eq!(detail.messages[0].role, "user");
         assert_eq!(detail.messages[0].content, "Hi");
-        assert_eq!(detail.messages[0].turn_state, TurnState::Completed);
+        assert_eq!(detail.messages[0].turn_state, Some(TurnState::Completed));
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Hello!");
     }
@@ -788,7 +1495,9 @@ mod tests {
         let svc = make_service();
         let resp = svc.create_conversation().await.unwrap();
 
-        svc.delete_conversation(resp.id).await.expect("delete should succeed");
+        svc.delete_conversation(resp.id)
+            .await
+            .expect("delete should succeed");
 
         let err = svc.get_conversation(resp.id).await.unwrap_err();
         assert!(matches!(err, GatewayError::ConversationNotFound { .. }));
@@ -824,6 +1533,8 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -831,6 +1542,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "user".into(),
                 content: "list files".into(),
                 position: 0,
@@ -842,6 +1554,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "I'll run ls for you.".into(),
                 position: 1,
@@ -879,7 +1592,10 @@ mod tests {
         // User message should have no tool calls.
         let user_msg = &detail.messages[0];
         assert_eq!(user_msg.role, "user");
-        assert!(user_msg.tool_calls.is_empty(), "user message should have no tool calls");
+        assert!(
+            user_msg.tool_calls.is_empty(),
+            "user message should have no tool calls"
+        );
 
         // Assistant message should carry the tool call.
         let asst_msg = &detail.messages[1];
@@ -907,6 +1623,8 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
@@ -914,6 +1632,7 @@ mod tests {
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "Ran python".into(),
                 position: 0,
@@ -971,7 +1690,10 @@ mod tests {
 
         let native = &tool_calls[0];
         assert_eq!(native.call_id, "py_01");
-        assert!(native.parent_call_id.is_none(), "native call should have no parent");
+        assert!(
+            native.parent_call_id.is_none(),
+            "native call should have no parent"
+        );
 
         let sub = &tool_calls[1];
         assert_eq!(sub.call_id, "sub_01");
@@ -993,12 +1715,15 @@ mod tests {
                 thread_id,
                 agent_id: "gateway".to_string(),
                 state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
             })
             .await
             .unwrap();
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                turn_id: Some(turn.id),
                 role: "assistant".into(),
                 content: "Hello".into(),
                 position: 0,

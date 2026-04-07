@@ -28,11 +28,7 @@ struct SearchResult {
 /// tool's execute path.
 #[async_trait]
 trait SearchProvider: Send + Sync {
-    async fn search(
-        &self,
-        query: &str,
-        max_results: usize,
-    ) -> Result<Vec<SearchResult>, String>;
+    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,21 +56,13 @@ struct SearxNgResult {
 
 #[async_trait]
 impl SearchProvider for SearxNgProvider {
-    async fn search(
-        &self,
-        query: &str,
-        max_results: usize,
-    ) -> Result<Vec<SearchResult>, String> {
+    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
         let url = format!("{}/search", self.base_url.trim_end_matches('/'));
 
         let response = self
             .client
             .get(&url)
-            .query(&[
-                ("q", query),
-                ("format", "json"),
-                ("pageno", "1"),
-            ])
+            .query(&[("q", query), ("format", "json"), ("pageno", "1")])
             .send()
             .await
             .map_err(|e| format!("Failed to reach search provider: {e}"))?;
@@ -145,12 +133,14 @@ impl Tool for WebSearchTool {
 
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Require search to be configured.
-        let config = self.provider_config.as_ref().ok_or_else(|| {
-            ToolError::ExecutionFailed {
+        let config = self
+            .provider_config
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: "Web search is not configured. Set [tools.search] in your project config.".to_owned(),
-            }
-        })?;
+                message: "Web search is not configured. Set [tools.search] in your project config."
+                    .to_owned(),
+            })?;
 
         let query = params["query"]
             .as_str()
@@ -170,13 +160,12 @@ impl Tool for WebSearchTool {
             }),
         };
 
-        let results = provider
-            .search(&query, max_results)
-            .await
-            .map_err(|msg| ToolError::ExecutionFailed {
+        let results = provider.search(&query, max_results).await.map_err(|msg| {
+            ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: msg,
-            })?;
+            }
+        })?;
 
         if results.is_empty() {
             return Ok(json!({"output": format!("No results found for: {query}")}));
@@ -203,7 +192,9 @@ mod tests {
     use swage_tool::context::MockToolContext;
 
     fn unconfigured_tool() -> WebSearchTool {
-        WebSearchTool { provider_config: None }
+        WebSearchTool {
+            provider_config: None,
+        }
     }
 
     fn configured_tool() -> WebSearchTool {
@@ -226,11 +217,7 @@ mod tests {
             .execute(json!({ "query": "rust programming" }), &ctx())
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("[tools.search]"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("[tools.search]"), "got: {}", err);
     }
 
     #[tokio::test]

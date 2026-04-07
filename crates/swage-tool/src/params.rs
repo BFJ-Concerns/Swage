@@ -74,7 +74,7 @@ pub fn redact_params(params: &Value, sensitive_keys: &[&str]) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use swage_core::ToolError;
 
     use super::{redact_params, require_param, require_str};

@@ -30,9 +30,7 @@ use swage_storage::SqliteStorage;
 ///
 /// Use [`swage_provider::builder::ProviderChainBuilder`] directly when you
 /// need custom thresholds or a failover across multiple backends.
-pub fn provider_with_reliability(
-    provider: impl LlmProvider + 'static,
-) -> Box<dyn LlmProvider> {
+pub fn provider_with_reliability(provider: impl LlmProvider + 'static) -> Box<dyn LlmProvider> {
     ProviderChainBuilder::new()
         .provider(provider)
         .with_circuit_breaker(CircuitBreakerConfig::default())

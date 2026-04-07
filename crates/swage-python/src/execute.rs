@@ -7,8 +7,8 @@
 
 use std::cell::RefCell;
 use std::ffi::CString;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -97,11 +97,16 @@ pub fn execute_code(
             result
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            debug!(timeout_secs = timeout.as_secs(), "Python execution timed out, interrupting");
+            debug!(
+                timeout_secs = timeout.as_secs(),
+                "Python execution timed out, interrupting"
+            );
             // Interrupt the Python thread by raising KeyboardInterrupt.
             // We use PyErr_SetInterrupt which is GIL-safe and simpler
             // than PyThreadState_SetAsyncExc.
-            unsafe { pyo3::ffi::PyErr_SetInterrupt(); }
+            unsafe {
+                pyo3::ffi::PyErr_SetInterrupt();
+            }
             // Wait briefly for the interrupted thread to finish.
             let _ = result_rx.recv_timeout(Duration::from_secs(2));
 
@@ -145,7 +150,11 @@ const WRAPPER_TEMPLATE: &str = concat!(
     "_err_output = None\n",
     "\n",
     "try:\n",
-    "    ", "exec", "(compile(_code, '<python_execute>', '", "exec", "'))\n",
+    "    ",
+    "exec",
+    "(compile(_code, '<python_execute>', '",
+    "exec",
+    "'))\n",
     "except SyntaxError:\n",
     "    _sys.stdout = _old_stdout\n",
     "    _err_output = _tb.format_exc()\n",

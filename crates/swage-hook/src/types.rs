@@ -30,10 +30,7 @@ pub enum HookEvent {
     SessionEnd { session_id: String },
 
     /// A tool is about to be executed. Hooks can block this.
-    PreToolUse {
-        tool_name: String,
-        params: Value,
-    },
+    PreToolUse { tool_name: String, params: Value },
 
     /// A tool has finished executing. Hooks can observe but not block.
     PostToolUse {
@@ -53,6 +50,93 @@ pub enum HookEvent {
 
     /// An agent has stopped execution.
     AgentStop { agent_id: String },
+
+    /// A topology run is starting.
+    TopologyStart {
+        topology_run_id: String,
+        team_id: String,
+        session_id: String,
+    },
+
+    /// A topology run has finished.
+    TopologyEnd {
+        topology_run_id: String,
+        team_id: String,
+        session_id: String,
+        success: bool,
+    },
+
+    /// A node within a topology run is starting execution.
+    NodeStart {
+        topology_run_id: String,
+        node_execution_id: String,
+        node_id: String,
+        agent_id: Option<String>,
+    },
+
+    /// A node within a topology run has finished.
+    NodeEnd {
+        topology_run_id: String,
+        node_execution_id: String,
+        node_id: String,
+        success: bool,
+        output: Option<Value>,
+    },
+
+    /// A fan-out edge has spawned branch activations.
+    FanOutSpawn {
+        topology_run_id: String,
+        source_node_execution_id: String,
+        edge_id: String,
+        branch_count: u32,
+    },
+
+    /// A fan-out edge has finished collecting its branch payloads.
+    FanOutCollect {
+        topology_run_id: String,
+        source_node_execution_id: String,
+        edge_id: String,
+        branch_count: u32,
+    },
+
+    /// A message is about to be sent from one agent to another.
+    ///
+    /// Hooks can block this event to prevent the message from being created.
+    /// This fires for all durable message kinds.
+    MessageSend {
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "notify").
+        kind: String,
+        payload: Value,
+    },
+
+    /// A message has been delivered to the recipient agent's mailbox.
+    ///
+    /// Hooks can block to transition the message to Failed. This event does
+    /// not fire for Notify messages (ephemeral, no delivery confirmation).
+    /// Enforcement of the Notify exclusion is the caller's responsibility.
+    MessageDeliver {
+        message_id: String,
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "cancel").
+        kind: String,
+        payload: Value,
+    },
+
+    /// A message has been received and is about to be processed by the agent.
+    ///
+    /// Hooks can block to reject the message before the agent acts on it,
+    /// transitioning the message to Failed.
+    MessageReceive {
+        message_id: String,
+        sender_agent_id: String,
+        recipient_agent_id: String,
+        /// Snake_case message kind string (e.g. "delegate", "result").
+        kind: String,
+        payload: Value,
+    },
 }
 
 impl HookEvent {
@@ -68,6 +152,15 @@ impl HookEvent {
             HookEvent::AfterResponse { .. } => "AfterResponse",
             HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
+            HookEvent::TopologyStart { .. } => "TopologyStart",
+            HookEvent::TopologyEnd { .. } => "TopologyEnd",
+            HookEvent::NodeStart { .. } => "NodeStart",
+            HookEvent::NodeEnd { .. } => "NodeEnd",
+            HookEvent::FanOutSpawn { .. } => "FanOutSpawn",
+            HookEvent::FanOutCollect { .. } => "FanOutCollect",
+            HookEvent::MessageSend { .. } => "MessageSend",
+            HookEvent::MessageDeliver { .. } => "MessageDeliver",
+            HookEvent::MessageReceive { .. } => "MessageReceive",
         }
     }
 }
@@ -81,6 +174,22 @@ pub enum HookOutcome {
     ContinueModified(Box<HookEvent>),
     /// Block execution with a reason.
     Block(String),
+    /// Pause execution and request human approval before proceeding.
+    ///
+    /// Priority in the dispatch chain sits between `Block` (higher) and
+    /// `Continue` (lower): if any hook blocks, approval requests from
+    /// lower-priority hooks are never surfaced. If one hook requests approval
+    /// and another continues, the approval request takes effect.
+    RequestApproval {
+        /// Human-readable explanation of why this action needs review.
+        prompt: String,
+        /// Structured data the reviewer may inspect (tool name, parameters,
+        /// risk level, etc.). `None` when the prompt alone is sufficient.
+        context: Option<Value>,
+        /// Per-request timeout override. When `None`, the agent's configured
+        /// HITL timeout applies.
+        timeout: Option<std::time::Duration>,
+    },
 }
 
 /// Async trait for lifecycle hook implementations.

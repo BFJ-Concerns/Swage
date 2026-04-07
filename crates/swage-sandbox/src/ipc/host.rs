@@ -48,11 +48,9 @@ impl HostConnection {
 
         match msg {
             IpcMessage::Ready => Ok(()),
-            IpcMessage::ErrorMessage { description, .. } => {
-                Err(SandboxError::IpcError {
-                    message: format!("agent reported error during startup: {description}"),
-                })
-            }
+            IpcMessage::ErrorMessage { description, .. } => Err(SandboxError::IpcError {
+                message: format!("agent reported error during startup: {description}"),
+            }),
             other => Err(SandboxError::IpcError {
                 message: format!("expected Ready signal, got unexpected message: {other:?}"),
             }),
@@ -99,7 +97,11 @@ impl HostConnection {
                         ),
                     });
                 }
-                Ok(ToolCallResult { output, duration_ms, error })
+                Ok(ToolCallResult {
+                    output,
+                    duration_ms,
+                    error,
+                })
             }
             IpcMessage::ErrorMessage { description, .. } => Err(SandboxError::IpcError {
                 message: description,
@@ -189,7 +191,9 @@ impl HostConnection {
     /// `LlmRequest` messages while waiting for a `ToolCallResult`. Called in
     /// a loop after `begin_tool_call` to drive the dispatch protocol.
     pub async fn receive_any(&mut self) -> Result<IpcMessage, SandboxError> {
-        self.transport.receive_timeout(self.config.tool_call_timeout).await
+        self.transport
+            .receive_timeout(self.config.tool_call_timeout)
+            .await
     }
 
     /// Send an `ErrorMessage` to the agent.
@@ -204,7 +208,11 @@ impl HostConnection {
         description: String,
     ) -> Result<(), SandboxError> {
         self.transport
-            .send(&IpcMessage::ErrorMessage { request_id, category, description })
+            .send(&IpcMessage::ErrorMessage {
+                request_id,
+                category,
+                description,
+            })
             .await
     }
 
@@ -300,9 +308,10 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
         let mut agent_transport = IpcTransport::new(agent_stream);
 
-        let host_handle = tokio::spawn(async move {
-            host.send_tool_call("echo", json!({"text": "hello"})).await
-        });
+        let host_handle =
+            tokio::spawn(
+                async move { host.send_tool_call("echo", json!({"text": "hello"})).await },
+            );
 
         // Agent receives the request and sends a result.
         let msg = agent_transport.receive().await.unwrap();
@@ -333,9 +342,8 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
         let mut agent_transport = IpcTransport::new(agent_stream);
 
-        let host_handle = tokio::spawn(async move {
-            host.send_tool_call("fail_tool", json!({})).await
-        });
+        let host_handle =
+            tokio::spawn(async move { host.send_tool_call("fail_tool", json!({})).await });
 
         let msg = agent_transport.receive().await.unwrap();
         let request_id = match &msg {
@@ -364,9 +372,8 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
         let mut agent_transport = IpcTransport::new(agent_stream);
 
-        let host_handle = tokio::spawn(async move {
-            host.send_tool_call("badtool", json!({})).await
-        });
+        let host_handle =
+            tokio::spawn(async move { host.send_tool_call("badtool", json!({})).await });
 
         let msg = agent_transport.receive().await.unwrap();
         let request_id = match &msg {
@@ -440,7 +447,11 @@ mod tests {
         // Agent receives the response.
         let response_msg = agent_transport.receive().await.unwrap();
         match response_msg {
-            IpcMessage::LlmResponse { request_id, content, .. } => {
+            IpcMessage::LlmResponse {
+                request_id,
+                content,
+                ..
+            } => {
                 assert_eq!(request_id, "llm-42");
                 assert_eq!(content, "Answer here.");
             }
@@ -462,7 +473,10 @@ mod tests {
         // Agent receives Shutdown and acknowledges.
         let msg = agent_transport.receive().await.unwrap();
         assert!(matches!(msg, IpcMessage::Shutdown));
-        agent_transport.send(&IpcMessage::ShutdownAck).await.unwrap();
+        agent_transport
+            .send(&IpcMessage::ShutdownAck)
+            .await
+            .unwrap();
 
         host_handle.await.unwrap().unwrap();
     }
@@ -480,7 +494,10 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
 
         let result = host.send_shutdown().await;
-        assert!(result.is_err(), "expected timeout error when no ShutdownAck");
+        assert!(
+            result.is_err(),
+            "expected timeout error when no ShutdownAck"
+        );
     }
 
     // --- begin_tool_call: sends request, returns request_id ----------------
@@ -492,7 +509,8 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
         let mut agent_transport = IpcTransport::new(agent_stream);
 
-        let returned_id = host.begin_tool_call("bash", serde_json::json!({"cmd": "ls"}))
+        let returned_id = host
+            .begin_tool_call("bash", serde_json::json!({"cmd": "ls"}))
             .await
             .unwrap();
 
@@ -500,8 +518,15 @@ mod tests {
 
         let msg = agent_transport.receive().await.unwrap();
         match msg {
-            IpcMessage::ToolCallRequest { request_id, tool_name, parameters } => {
-                assert_eq!(request_id, returned_id, "agent request_id must match returned id");
+            IpcMessage::ToolCallRequest {
+                request_id,
+                tool_name,
+                parameters,
+            } => {
+                assert_eq!(
+                    request_id, returned_id,
+                    "agent request_id must match returned id"
+                );
                 assert_eq!(tool_name, "bash");
                 assert_eq!(parameters["cmd"], "ls");
             }
@@ -538,7 +563,10 @@ mod tests {
         let mut host = HostConnection::new(IpcTransport::new(host_stream), &config);
 
         let result = host.receive_any().await;
-        assert!(result.is_err(), "receive_any should time out on idle socket");
+        assert!(
+            result.is_err(),
+            "receive_any should time out on idle socket"
+        );
     }
 
     // --- send_error_response: sends ErrorMessage to agent -------------------
@@ -560,7 +588,11 @@ mod tests {
 
         let msg = agent_transport.receive().await.unwrap();
         match msg {
-            IpcMessage::ErrorMessage { request_id, category, description } => {
+            IpcMessage::ErrorMessage {
+                request_id,
+                category,
+                description,
+            } => {
                 assert_eq!(request_id, Some("req-77".into()));
                 assert_eq!(category, ErrorCategory::Provider);
                 assert!(description.contains("rate-limited"));

@@ -1,9 +1,15 @@
+pub mod agent_message;
+pub mod approval;
+pub mod context_snapshot;
 pub mod message;
 pub mod migrations;
 pub mod project;
 pub mod session;
+pub mod skill_activation;
+pub mod team;
 pub mod thread;
 pub mod tool_call;
+pub mod topology;
 pub mod turn;
 
 use std::path::Path;
@@ -22,8 +28,8 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     /// Open a file-backed database at `path`, applying migrations on first run.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
-        let conn = Connection::open(path)
-            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+        let conn =
+            Connection::open(path).map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
         Self::configure_and_migrate(conn)
     }
 
@@ -50,7 +56,9 @@ impl SqliteStorage {
 
         run_migrations(&conn)?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Acquire the connection lock and run a blocking closure.
@@ -127,9 +135,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         let mode: String = storage
-            .with_conn(|conn| {
-                conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            })
+            .with_conn(|conn| conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
             .await
             .expect("pragma query should succeed");
 
@@ -149,9 +155,7 @@ mod tests {
         let storage = SqliteStorage::open(&path).expect("open should succeed");
 
         let mode: String = storage
-            .with_conn(|conn| {
-                conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            })
+            .with_conn(|conn| conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
             .await
             .expect("pragma query should succeed");
 

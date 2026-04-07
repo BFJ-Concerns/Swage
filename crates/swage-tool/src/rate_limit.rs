@@ -210,13 +210,22 @@ mod tests {
         };
 
         // Exhaust the budget.
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
 
         // Third call should be limited.
         match limiter.check("agent-1", "tool-a", &config) {
             RateLimitDecision::Limited { retry_after } => {
-                assert!(retry_after > Duration::ZERO, "retry_after should be positive");
+                assert!(
+                    retry_after > Duration::ZERO,
+                    "retry_after should be positive"
+                );
                 assert!(
                     retry_after <= Duration::from_secs(60),
                     "retry_after should not exceed window: {retry_after:?}"
@@ -237,7 +246,10 @@ mod tests {
         };
 
         // Exhaust the single-call budget.
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
 
         // Two more limited calls — neither should increment the counter.
         assert!(matches!(
@@ -273,7 +285,10 @@ mod tests {
         };
 
         // agent-1 exhausts its budget.
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
         assert!(matches!(
             limiter.check("agent-1", "tool-a", &config),
             RateLimitDecision::Limited { .. }
@@ -298,7 +313,10 @@ mod tests {
         };
 
         // tool-a exhausts its budget.
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
         assert!(matches!(
             limiter.check("agent-1", "tool-a", &config),
             RateLimitDecision::Limited { .. }
@@ -322,8 +340,14 @@ mod tests {
             requests_per_hour: Some(2),
         };
 
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
 
         match limiter.check("agent-1", "tool-a", &config) {
             RateLimitDecision::Limited { retry_after } => {
@@ -349,7 +373,10 @@ mod tests {
             requests_per_hour: Some(1),
         };
 
-        assert_eq!(limiter.check("agent-1", "tool-a", &config), RateLimitDecision::Allowed);
+        assert_eq!(
+            limiter.check("agent-1", "tool-a", &config),
+            RateLimitDecision::Allowed
+        );
 
         match limiter.check("agent-1", "tool-a", &config) {
             RateLimitDecision::Limited { retry_after } => {

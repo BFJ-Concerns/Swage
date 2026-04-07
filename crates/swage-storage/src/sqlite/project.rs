@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -15,29 +15,34 @@ use crate::store::ProjectStore;
 
 fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let id: String = row.get(0)?;
-    // Column order: id(0), name(1), slug(2), workspace_path(3), created_at(4), updated_at(5)
-    let created: String = row.get(4)?;
-    let updated: String = row.get(5)?;
+    // Column order:
+    // id(0), name(1), is_default(2), slug(3), workspace_path(4), created_at(5), updated_at(6)
+    let created: String = row.get(5)?;
+    let updated: String = row.get(6)?;
 
     Ok(Project {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
-        slug: row.get(2)?,
-        workspace_path: row.get(3)?,
+        is_default: row.get::<_, i64>(2)? != 0,
+        slug: row.get(3)?,
+        workspace_path: row.get(4)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
 }
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
-    s.parse::<Uuid>()
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+    s.parse::<Uuid>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -53,14 +58,21 @@ impl ProjectStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO projects (id, name, slug, workspace_path, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![id.to_string(), &project.name, &project.slug, &project.workspace_path, &now_str],
+                "INSERT INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5, ?5)",
+                params![
+                    id.to_string(),
+                    &project.name,
+                    &project.slug,
+                    &project.workspace_path,
+                    &now_str
+                ],
             )?;
 
             Ok(Project {
                 id,
                 name: project.name,
+                is_default: false,
                 slug: project.slug,
                 workspace_path: project.workspace_path,
                 created_at: now,
@@ -73,7 +85,7 @@ impl ProjectStore for SqliteStorage {
     async fn get(&self, id: Uuid) -> Result<Option<Project>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE id = ?1",
                 params![id.to_string()],
                 row_to_project,
@@ -88,7 +100,7 @@ impl ProjectStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE name = ?1",
                 params![&name],
                 row_to_project,
@@ -99,20 +111,50 @@ impl ProjectStore for SqliteStorage {
     }
 
     async fn get_or_create_default(&self) -> Result<Project, StorageError> {
-        // The default project is seeded by migrations, but get_by_name is used
-        // here in case the caller invokes this on a storage not yet seeded.
-        if let Some(project) = self.get_by_name("default").await? {
+        if let Some(project) = self
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
+                     FROM projects
+                     WHERE is_default = 1",
+                    [],
+                    row_to_project,
+                )
+                .optional()
+            })
+            .await?
+        {
             return Ok(project);
         }
 
-        self.create(NewProject { name: "default".into(), slug: "default".into(), workspace_path: None })
-            .await
+        self.with_conn(|conn| {
+            let id = Uuid::new_v4();
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+
+            conn.execute(
+                "INSERT INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
+                 VALUES (?1, 'default', 1, 'default', NULL, ?2, ?2)",
+                params![id.to_string(), &now_str],
+            )?;
+
+            Ok(Project {
+                id,
+                name: "default".into(),
+                is_default: true,
+                slug: "default".into(),
+                workspace_path: None,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await
     }
 
     async fn list_all(&self) -> Result<Vec<Project>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_project)?;
@@ -125,7 +167,7 @@ impl ProjectStore for SqliteStorage {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE slug = ?1",
                 params![&slug],
                 row_to_project,
@@ -167,7 +209,7 @@ impl ProjectStore for SqliteStorage {
             )?;
 
             conn.query_row(
-                "SELECT id, name, slug, workspace_path, created_at, updated_at
+                "SELECT id, name, is_default, slug, workspace_path, created_at, updated_at
                  FROM projects WHERE id = ?1",
                 params![id_str],
                 row_to_project,
@@ -180,10 +222,10 @@ impl ProjectStore for SqliteStorage {
         // Pre-flight: fetch the project to check existence and guard the default.
         match self.get(id).await? {
             None => return Ok(false),
-            Some(ref p) if p.name == "default" => {
+            Some(ref p) if p.is_default => {
                 return Err(StorageError::ConstraintViolation(
                     "cannot delete the default project".into(),
-                ))
+                ));
             }
             Some(_) => {}
         }
@@ -208,14 +250,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_project() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let new = NewProject { name: "my-project".into(), slug: "my-project".into(), workspace_path: Some("/tmp".into()) };
+        let new = NewProject {
+            name: "my-project".into(),
+            slug: "my-project".into(),
+            workspace_path: Some("/tmp".into()),
+        };
         let created = storage.create(new).await.unwrap();
 
         assert_eq!(created.name, "my-project");
         assert_eq!(created.slug, "my-project");
         assert_eq!(created.workspace_path, Some("/tmp".into()));
 
-        let fetched = storage.get(created.id).await.unwrap().expect("should exist");
+        let fetched = storage
+            .get(created.id)
+            .await
+            .unwrap()
+            .expect("should exist");
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.name, "my-project");
         assert_eq!(fetched.slug, "my-project");
@@ -232,7 +282,11 @@ mod tests {
     async fn get_by_name_finds_existing() {
         let storage = SqliteStorage::in_memory().unwrap();
         storage
-            .create(NewProject { name: "find-me".into(), slug: "find-me".into(), workspace_path: None })
+            .create(NewProject {
+                name: "find-me".into(),
+                slug: "find-me".into(),
+                workspace_path: None,
+            })
             .await
             .unwrap();
 
@@ -260,7 +314,11 @@ mod tests {
         let created = storage.create(new).await.unwrap();
         assert_eq!(created.slug, "slugged-project");
 
-        let fetched = storage.get(created.id).await.unwrap().expect("should exist");
+        let fetched = storage
+            .get(created.id)
+            .await
+            .unwrap()
+            .expect("should exist");
         assert_eq!(fetched.slug, "slugged-project");
     }
 
@@ -268,7 +326,36 @@ mod tests {
     async fn get_or_create_default_returns_default_slug() {
         let storage = SqliteStorage::in_memory().unwrap();
         let project = storage.get_or_create_default().await.unwrap();
+        assert!(project.is_default);
         assert_eq!(project.slug, "default");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renamed_default_project_remains_structurally_default() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let default_project = storage.get_or_create_default().await.unwrap();
+
+        let renamed = storage
+            .update(
+                default_project.id,
+                Some("Operations".into()),
+                Some("operations".into()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(renamed.is_default);
+        assert_eq!(renamed.name, "Operations");
+
+        let fetched_default = storage.get_or_create_default().await.unwrap();
+        assert_eq!(fetched_default.id, default_project.id);
+
+        let delete_error = storage.delete(default_project.id).await.unwrap_err();
+        assert!(
+            matches!(delete_error, StorageError::ConstraintViolation(_)),
+            "renamed default project should still be protected"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -279,13 +366,31 @@ mod tests {
     async fn list_all_returns_projects_ordered_by_created_at() {
         let storage = SqliteStorage::in_memory().unwrap();
         // The seeded default project already exists; add two more.
-        storage.create(NewProject { name: "alpha".into(), slug: "alpha".into(), workspace_path: None }).await.unwrap();
-        storage.create(NewProject { name: "beta".into(),  slug: "beta".into(),  workspace_path: None }).await.unwrap();
+        storage
+            .create(NewProject {
+                name: "alpha".into(),
+                slug: "alpha".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .create(NewProject {
+                name: "beta".into(),
+                slug: "beta".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
 
         let all = storage.list_all().await.unwrap();
 
         // At least 3 projects (default + alpha + beta).
-        assert!(all.len() >= 3, "expected at least 3 projects, got {}", all.len());
+        assert!(
+            all.len() >= 3,
+            "expected at least 3 projects, got {}",
+            all.len()
+        );
 
         // Must be ordered by created_at ASC.
         let is_sorted = all.windows(2).all(|w| w[0].created_at <= w[1].created_at);
@@ -299,7 +404,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn get_by_slug_returns_matching_project() {
         let storage = SqliteStorage::in_memory().unwrap();
-        storage.create(NewProject { name: "Slug Test".into(), slug: "slug-test".into(), workspace_path: None }).await.unwrap();
+        storage
+            .create(NewProject {
+                name: "Slug Test".into(),
+                slug: "slug-test".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
 
         let found = storage.get_by_slug("slug-test").await.unwrap();
         assert!(found.is_some(), "get_by_slug should find the project");
@@ -320,14 +432,24 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn update_changes_provided_fields() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let created = storage.create(NewProject { name: "Old Name".into(), slug: "old-name".into(), workspace_path: None }).await.unwrap();
+        let created = storage
+            .create(NewProject {
+                name: "Old Name".into(),
+                slug: "old-name".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
 
-        let updated = storage.update(
-            created.id,
-            Some("New Name".into()),
-            Some("new-name".into()),
-            None,
-        ).await.unwrap();
+        let updated = storage
+            .update(
+                created.id,
+                Some("New Name".into()),
+                Some("new-name".into()),
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(updated.name, "New Name");
         assert_eq!(updated.slug, "new-name");
@@ -338,10 +460,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn update_partial_leaves_unspecified_fields_unchanged() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let created = storage.create(NewProject { name: "Stable".into(), slug: "stable".into(), workspace_path: Some("/opt".into()) }).await.unwrap();
+        let created = storage
+            .create(NewProject {
+                name: "Stable".into(),
+                slug: "stable".into(),
+                workspace_path: Some("/opt".into()),
+            })
+            .await
+            .unwrap();
 
         // Only update workspace_path — name and slug stay.
-        let updated = storage.update(created.id, None, None, Some("/new".into())).await.unwrap();
+        let updated = storage
+            .update(created.id, None, None, Some("/new".into()))
+            .await
+            .unwrap();
 
         assert_eq!(updated.name, "Stable");
         assert_eq!(updated.slug, "stable");
@@ -352,8 +484,13 @@ mod tests {
     async fn update_errors_for_unknown_id() {
         let storage = SqliteStorage::in_memory().unwrap();
         let nonexistent = Uuid::new_v4();
-        let result = storage.update(nonexistent, Some("X".into()), None, None).await;
-        assert!(result.is_err(), "update on unknown id should return an error");
+        let result = storage
+            .update(nonexistent, Some("X".into()), None, None)
+            .await;
+        assert!(
+            result.is_err(),
+            "update on unknown id should return an error"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -363,13 +500,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_removes_project_and_returns_true() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let created = storage.create(NewProject { name: "Gone".into(), slug: "gone".into(), workspace_path: None }).await.unwrap();
+        let created = storage
+            .create(NewProject {
+                name: "Gone".into(),
+                slug: "gone".into(),
+                workspace_path: None,
+            })
+            .await
+            .unwrap();
 
         let deleted = storage.delete(created.id).await.unwrap();
         assert!(deleted, "delete should return true for an existing project");
 
         let fetched = storage.get(created.id).await.unwrap();
-        assert!(fetched.is_none(), "project should no longer exist after delete");
+        assert!(
+            fetched.is_none(),
+            "project should no longer exist after delete"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -386,6 +533,9 @@ mod tests {
         let default_project = storage.get_or_create_default().await.unwrap();
 
         let result = storage.delete(default_project.id).await;
-        assert!(result.is_err(), "deleting the default project should return an error");
+        assert!(
+            result.is_err(),
+            "deleting the default project should return an error"
+        );
     }
 }

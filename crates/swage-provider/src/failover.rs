@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use tokio::time::Instant;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
+use tokio::time::Instant;
 
 use crate::provider::LlmProvider;
 
@@ -31,7 +31,9 @@ pub struct FailoverConfig {
 
 impl Default for FailoverConfig {
     fn default() -> Self {
-        Self { cooldown_duration: Duration::from_secs(60) }
+        Self {
+            cooldown_duration: Duration::from_secs(60),
+        }
     }
 }
 
@@ -84,10 +86,7 @@ impl FailoverProvider {
     /// configuration.
     ///
     /// Providers are tried in the given order, subject to cooldown state.
-    pub fn new(
-        providers: Vec<Arc<dyn LlmProvider>>,
-        config: FailoverConfig,
-    ) -> Self {
+    pub fn new(providers: Vec<Arc<dyn LlmProvider>>, config: FailoverConfig) -> Self {
         let n = providers.len();
         Self {
             providers,
@@ -157,7 +156,8 @@ impl LlmProvider for FailoverProvider {
     /// this failover group. The actual model used on any given request may
     /// differ when failover occurs.
     fn model_id(&self) -> &str {
-        self.providers.first()
+        self.providers
+            .first()
             .map(|p| p.as_ref().model_id())
             .unwrap_or("")
     }
@@ -220,7 +220,10 @@ impl LlmProvider for FailoverProvider {
         let mut last_error: Option<ProviderError> = None;
 
         for idx in order {
-            match self.providers[idx].complete_with_tools(request.clone()).await {
+            match self.providers[idx]
+                .complete_with_tools(request.clone())
+                .await
+            {
                 Ok(response) => {
                     self.clear_cooldown(idx);
                     return Ok(response);
@@ -402,25 +405,20 @@ mod tests {
                 results: StdMutex::new(results),
             })
         }
-
-        fn calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
-        }
     }
 
     #[async_trait]
     impl LlmProvider for SequencedProvider {
-        fn model_id(&self) -> &str { self.name }
+        fn model_id(&self) -> &str {
+            self.name
+        }
 
         async fn complete(
             &self,
             _: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             *self.call_count.lock().unwrap() += 1;
-            self.results
-                .lock()
-                .unwrap()
-                .remove(0)
+            self.results.lock().unwrap().remove(0)
         }
 
         async fn complete_with_tools(
@@ -442,20 +440,19 @@ mod tests {
                 })
         }
 
-        fn stream(
-            &self,
-            _: CompletionRequest,
-        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             *self.call_count.lock().unwrap() += 1;
             let result = self.results.lock().unwrap().remove(0);
             match result {
                 Ok(r) => Box::pin(futures::stream::iter(vec![
                     StreamChunk::Delta { content: r.content },
-                    StreamChunk::Done { finish_reason: None },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
                 ])),
-                Err(_) => Box::pin(futures::stream::iter(vec![
-                    StreamChunk::Error { message: "stream error".into() },
-                ])),
+                Err(_) => Box::pin(futures::stream::iter(vec![StreamChunk::Error {
+                    message: "stream error".into(),
+                }])),
             }
         }
     }
@@ -492,9 +489,13 @@ mod tests {
     #[tokio::test]
     async fn complete_falls_through_to_next_on_transient_failure() {
         // p1 fails transiently, p2 succeeds — caller gets p2's response.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "down".into() }),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![Err(ProviderError::Network {
+                provider: "p1".into(),
+                message: "down".into(),
+            })],
+        );
         let p2 = SequencedProvider::new("p2", vec![Ok(ok_completion("from-p2"))]);
         let p1_calls = Arc::clone(&p1.call_count);
         let p2_calls = Arc::clone(&p2.call_count);
@@ -510,12 +511,20 @@ mod tests {
     #[tokio::test]
     async fn complete_falls_through_all_three_to_last_provider() {
         // First two fail transiently; third receives and handles the request.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Timeout { provider: "p1".into(), duration: Duration::from_secs(5) }),
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Err(ProviderError::Network { provider: "p2".into(), message: "err".into() }),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![Err(ProviderError::Timeout {
+                provider: "p1".into(),
+                duration: Duration::from_secs(5),
+            })],
+        );
+        let p2 = SequencedProvider::new(
+            "p2",
+            vec![Err(ProviderError::Network {
+                provider: "p2".into(),
+                message: "err".into(),
+            })],
+        );
         let p3 = SequencedProvider::new("p3", vec![Ok(ok_completion("from-p3"))]);
         let p3_calls = Arc::clone(&p3.call_count);
 
@@ -529,9 +538,12 @@ mod tests {
     #[tokio::test]
     async fn complete_returns_permanent_error_without_failover() {
         // Auth errors must not trigger failover — returned immediately.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Auth { provider: "p1".into() }),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![Err(ProviderError::Auth {
+                provider: "p1".into(),
+            })],
+        );
         let p2 = SequencedProvider::new("p2", vec![]);
         let p2_calls = Arc::clone(&p2.call_count);
 
@@ -539,17 +551,29 @@ mod tests {
         let result = failover.complete(completion_req()).await;
 
         assert!(matches!(result.unwrap_err(), ProviderError::Auth { .. }));
-        assert_eq!(*p2_calls.lock().unwrap(), 0, "p2 must not be called on permanent error");
+        assert_eq!(
+            *p2_calls.lock().unwrap(),
+            0,
+            "p2 must not be called on permanent error"
+        );
     }
 
     #[tokio::test]
     async fn complete_returns_last_error_when_all_providers_fail() {
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "err1".into() }),
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Err(ProviderError::Network { provider: "p2".into(), message: "err2".into() }),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![Err(ProviderError::Network {
+                provider: "p1".into(),
+                message: "err1".into(),
+            })],
+        );
+        let p2 = SequencedProvider::new(
+            "p2",
+            vec![Err(ProviderError::Network {
+                provider: "p2".into(),
+                message: "err2".into(),
+            })],
+        );
 
         let failover = FailoverProvider::with_defaults(vec![p1, p2]);
         let err = failover.complete(completion_req()).await.unwrap_err();
@@ -568,20 +592,31 @@ mod tests {
     #[tokio::test]
     async fn failed_provider_skipped_during_cooldown() {
         // p1 fails → enters cooldown. Second request skips p1 and goes to p2.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "err".into() }),
-            // p1 should NOT be called on the second request (still in cooldown).
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Ok(ok_completion("second-from-p2")),
-            Ok(ok_completion("third-from-p2")),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![
+                Err(ProviderError::Network {
+                    provider: "p1".into(),
+                    message: "err".into(),
+                }),
+                // p1 should NOT be called on the second request (still in cooldown).
+            ],
+        );
+        let p2 = SequencedProvider::new(
+            "p2",
+            vec![
+                Ok(ok_completion("second-from-p2")),
+                Ok(ok_completion("third-from-p2")),
+            ],
+        );
         let p1_calls = Arc::clone(&p1.call_count);
         let p2_calls = Arc::clone(&p2.call_count);
 
         let failover = FailoverProvider::new(
             vec![p1, p2],
-            FailoverConfig { cooldown_duration: Duration::from_secs(60) },
+            FailoverConfig {
+                cooldown_duration: Duration::from_secs(60),
+            },
         );
 
         // First request fails on p1, succeeds on p2.
@@ -602,18 +637,24 @@ mod tests {
         let cooldown = Duration::from_secs(5);
 
         // p1 fails on call 1, then succeeds on call 2 (after cooldown expires).
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "err".into() }),
-            Ok(ok_completion("p1-recovered")),
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Ok(ok_completion("p2-temporary")),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![
+                Err(ProviderError::Network {
+                    provider: "p1".into(),
+                    message: "err".into(),
+                }),
+                Ok(ok_completion("p1-recovered")),
+            ],
+        );
+        let p2 = SequencedProvider::new("p2", vec![Ok(ok_completion("p2-temporary"))]);
         let p1_calls = Arc::clone(&p1.call_count);
 
         let failover = FailoverProvider::new(
             vec![p1, p2],
-            FailoverConfig { cooldown_duration: cooldown },
+            FailoverConfig {
+                cooldown_duration: cooldown,
+            },
         );
 
         // Request 1: p1 fails → p2 handles.
@@ -625,7 +666,11 @@ mod tests {
         // Request 2: p1's cooldown is expired, it should be tried first again.
         let result = failover.complete(completion_req()).await.unwrap();
         assert_eq!(result.content, "p1-recovered");
-        assert_eq!(*p1_calls.lock().unwrap(), 2, "p1 should have been called twice");
+        assert_eq!(
+            *p1_calls.lock().unwrap(),
+            2,
+            "p1 should have been called twice"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -634,18 +679,35 @@ mod tests {
 
         // p1 fails at t=0, p2 fails at t=1s — both enter cooldown.
         // When we request at t=2s (both still cooled), p1 (earliest start) goes first.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "err".into() }),
-            Ok(ok_completion("p1-probed")),
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Err(ProviderError::Network { provider: "p2".into(), message: "err".into() }),
-            // p2 should not be called after p1 succeeds.
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![
+                Err(ProviderError::Network {
+                    provider: "p1".into(),
+                    message: "err".into(),
+                }),
+                Ok(ok_completion("p1-probed")),
+            ],
+        );
+        let p2 = SequencedProvider::new(
+            "p2",
+            vec![
+                Err(ProviderError::Network {
+                    provider: "p2".into(),
+                    message: "err".into(),
+                }),
+                // p2 should not be called after p1 succeeds.
+            ],
+        );
         let p1_calls = Arc::clone(&p1.call_count);
         let p2_calls = Arc::clone(&p2.call_count);
 
-        let failover = FailoverProvider::new(vec![p1, p2], FailoverConfig { cooldown_duration: cooldown });
+        let failover = FailoverProvider::new(
+            vec![p1, p2],
+            FailoverConfig {
+                cooldown_duration: cooldown,
+            },
+        );
 
         // t=0: first request — p1 fails, p2 gets it (but also fails).
         let _ = failover.complete(completion_req()).await;
@@ -671,9 +733,13 @@ mod tests {
 
     #[tokio::test]
     async fn complete_with_tools_falls_through_on_transient_failure() {
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::Timeout { provider: "p1".into(), duration: Duration::from_secs(5) }),
-        ]);
+        let p1 = SequencedProvider::new(
+            "p1",
+            vec![Err(ProviderError::Timeout {
+                provider: "p1".into(),
+                duration: Duration::from_secs(5),
+            })],
+        );
         let p2 = SequencedProvider::new("p2", vec![Ok(ok_completion("p2-tools"))]);
         let p2_calls = Arc::clone(&p2.call_count);
 
@@ -691,9 +757,7 @@ mod tests {
     #[tokio::test]
     async fn stream_falls_through_to_next_on_stream_error() {
         // p1's stream emits an error; p2's stream succeeds.
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::StreamError("oops".into())),
-        ]);
+        let p1 = SequencedProvider::new("p1", vec![Err(ProviderError::StreamError("oops".into()))]);
         let p2 = SequencedProvider::new("p2", vec![Ok(ok_completion("p2-stream"))]);
         let p2_calls = Arc::clone(&p2.call_count);
 
@@ -702,27 +766,31 @@ mod tests {
 
         // No error chunk in result.
         assert!(
-            chunks.iter().all(|c| !matches!(c, StreamChunk::Error { .. })),
+            chunks
+                .iter()
+                .all(|c| !matches!(c, StreamChunk::Error { .. })),
             "expected no error chunks: {chunks:?}"
         );
-        assert!(chunks.iter().any(|c| matches!(c, StreamChunk::Delta { content } if content == "p2-stream")));
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Delta { content } if content == "p2-stream"))
+        );
         assert_eq!(*p2_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
     async fn stream_returns_error_when_all_providers_fail() {
-        let p1 = SequencedProvider::new("p1", vec![
-            Err(ProviderError::StreamError("err1".into())),
-        ]);
-        let p2 = SequencedProvider::new("p2", vec![
-            Err(ProviderError::StreamError("err2".into())),
-        ]);
+        let p1 = SequencedProvider::new("p1", vec![Err(ProviderError::StreamError("err1".into()))]);
+        let p2 = SequencedProvider::new("p2", vec![Err(ProviderError::StreamError("err2".into()))]);
 
         let failover = FailoverProvider::with_defaults(vec![p1, p2]);
         let chunks: Vec<StreamChunk> = failover.stream(completion_req()).collect().await;
 
         assert!(
-            chunks.iter().any(|c| matches!(c, StreamChunk::Error { .. })),
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Error { .. })),
             "expected an error chunk when all providers fail"
         );
     }
@@ -740,17 +808,23 @@ mod tests {
                 SequencedProvider::new("p1", {
                     // Pre-load enough failures for concurrent requests.
                     (0..20)
-                        .map(|_| Err(ProviderError::Network {
-                            provider: "p1".into(),
-                            message: "down".into(),
-                        }))
+                        .map(|_| {
+                            Err(ProviderError::Network {
+                                provider: "p1".into(),
+                                message: "down".into(),
+                            })
+                        })
                         .collect()
                 }),
                 SequencedProvider::new("p2", {
-                    (0..20).map(|i| Ok(ok_completion(&format!("r{i}")))).collect()
+                    (0..20)
+                        .map(|i| Ok(ok_completion(&format!("r{i}"))))
+                        .collect()
                 }),
             ],
-            FailoverConfig { cooldown_duration: Duration::from_secs(60) },
+            FailoverConfig {
+                cooldown_duration: Duration::from_secs(60),
+            },
         ));
 
         let handles: Vec<_> = (0..10)

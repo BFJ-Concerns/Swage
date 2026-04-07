@@ -5,10 +5,16 @@ pub mod sqlite;
 pub mod store;
 
 pub use model::{
-    Message, NewMessage, NewProject, NewSession, NewThread, NewToolCall, NewTurn, Project, Session,
-    Thread, ThreadState, Turn, ToolCallRecord, TurnState,
+    ActiveSkillRecord, AgentMessage, ApprovalKind, ApprovalRequest, ApprovalState, EdgeEvaluation,
+    InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+    NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall,
+    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    TurnState,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
-    MessageStore, ProjectStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+    AgentMessageStore, ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore,
+    SessionStore, SkillActivationStore, Storage, TeamStore, ThreadStore, ToolCallStore,
+    TopologyTraceStore, TurnStore,
 };

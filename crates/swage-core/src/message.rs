@@ -88,7 +88,9 @@ impl ChatMessage {
         Self {
             id: Uuid::new_v4(),
             role,
-            content: vec![ContentPart::Text { text: content.into() }],
+            content: vec![ContentPart::Text {
+                text: content.into(),
+            }],
             created_at: Utc::now(),
             name: None,
             tool_call_id: None,
@@ -197,7 +199,12 @@ mod tests {
     fn new_creates_text_message_with_id_and_timestamp() {
         let msg = ChatMessage::new(Role::User, "hello");
         assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content, vec![ContentPart::Text { text: "hello".into() }]);
+        assert_eq!(
+            msg.content,
+            vec![ContentPart::Text {
+                text: "hello".into()
+            }]
+        );
         // id should be a non-nil UUID
         assert_ne!(msg.id, Uuid::nil());
         // created_at should be recent (within last 5 seconds)
@@ -218,8 +225,12 @@ mod tests {
     #[test]
     fn new_parts_creates_multimodal_message() {
         let parts = vec![
-            ContentPart::Text { text: "Look at this:".into() },
-            ContentPart::ImageUrl { url: "https://example.com/photo.jpg".into() },
+            ContentPart::Text {
+                text: "Look at this:".into(),
+            },
+            ContentPart::ImageUrl {
+                url: "https://example.com/photo.jpg".into(),
+            },
         ];
         let msg = ChatMessage::new_parts(Role::User, parts.clone());
         assert_eq!(msg.content, parts);
@@ -243,7 +254,10 @@ mod tests {
     fn role_serialises_lowercase() {
         assert_eq!(serde_json::to_string(&Role::System).unwrap(), "\"system\"");
         assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
-        assert_eq!(serde_json::to_string(&Role::Assistant).unwrap(), "\"assistant\"");
+        assert_eq!(
+            serde_json::to_string(&Role::Assistant).unwrap(),
+            "\"assistant\""
+        );
         assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
     }
 
@@ -260,8 +274,12 @@ mod tests {
         let original = ChatMessage::new_parts(
             Role::User,
             vec![
-                ContentPart::Text { text: "What is this?".into() },
-                ContentPart::ImageUrl { url: "https://example.com/img.png".into() },
+                ContentPart::Text {
+                    text: "What is this?".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://example.com/img.png".into(),
+                },
             ],
         );
         // Attach optional fields manually to test their round-trip.
@@ -317,11 +335,9 @@ mod tests {
 
     #[test]
     fn chat_message_with_blocks_serde_round_trip() {
-        let blocks = vec![
-            serde_json::json!({
-                "type": "tool_use", "id": "call_1", "name": "echo", "input": {}
-            }),
-        ];
+        let blocks = vec![serde_json::json!({
+            "type": "tool_use", "id": "call_1", "name": "echo", "input": {}
+        })];
         let msg = ChatMessage::with_blocks(Role::Assistant, blocks);
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("content_blocks"));
@@ -424,8 +440,7 @@ mod tests {
             m
         };
 
-        let sanitized =
-            sanitize_tool_messages(vec![assistant_msg, valid_tool, orphaned_tool]);
+        let sanitized = sanitize_tool_messages(vec![assistant_msg, valid_tool, orphaned_tool]);
         assert_eq!(sanitized.len(), 2);
         assert_eq!(sanitized[0].role, Role::Assistant);
         assert_eq!(sanitized[1].role, Role::Tool);

@@ -97,7 +97,9 @@
     // call time so ConversationList doesn't need to know about projects.
     createConversation: createAndNavigate,
     deleteConversation: (id) => conversationStore.deleteConversation(id),
-    addMessage: (msg) => conversationStore.addMessage(msg),
+    appendOptimisticUserMessage: (msg) =>
+      conversationStore.appendOptimisticUserMessage(msg),
+    appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
   };

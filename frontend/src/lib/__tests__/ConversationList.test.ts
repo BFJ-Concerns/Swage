@@ -40,7 +40,8 @@ function makeStore(
     selectConversation: vi.fn().mockResolvedValue(undefined),
     createConversation: vi.fn().mockResolvedValue(undefined),
     deleteConversation: vi.fn().mockResolvedValue(undefined),
-    addMessage: vi.fn(),
+    appendOptimisticUserMessage: vi.fn(),
+    appendAssistantMessage: vi.fn(),
     refreshActiveConversation: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -258,7 +259,9 @@ describe("ConversationList", () => {
     const store = makeStore([conv]);
     component = mount(ConversationList, { target: document.body, props: { store } });
 
-    const entry = document.querySelector(".conversation-item") as HTMLElement;
+    const entry = document.querySelector(
+      ".conversation-item .conversation-select-btn",
+    ) as HTMLButtonElement;
     entry.click();
     await Promise.resolve();
 

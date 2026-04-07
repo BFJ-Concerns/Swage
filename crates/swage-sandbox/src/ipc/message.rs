@@ -48,7 +48,6 @@ pub enum ErrorCategory {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IpcMessage {
     // --- Tool dispatch (host → agent → host) --------------------------------
-
     /// Host dispatches a tool invocation to the agent.
     ToolCallRequest {
         request_id: String,
@@ -68,7 +67,6 @@ pub enum IpcMessage {
     },
 
     // --- LLM proxying (agent → host → agent) --------------------------------
-
     /// Agent requests an LLM completion through the host (credentials stay
     /// in the host process; the agent never sees API keys).
     LlmRequest {
@@ -97,7 +95,6 @@ pub enum IpcMessage {
     },
 
     // --- Lifecycle signals --------------------------------------------------
-
     /// Agent signals that it has initialised and is ready to receive requests.
     Ready,
 
@@ -108,7 +105,6 @@ pub enum IpcMessage {
     ShutdownAck,
 
     // --- Error reporting ----------------------------------------------------
-
     /// Either side reports a protocol or execution error.
     ///
     /// `request_id` is absent for connection-level errors that cannot be
@@ -180,7 +176,7 @@ pub struct LlmResponse {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::{ErrorCategory, IpcMessage, TokenUsage};
 
@@ -225,7 +221,10 @@ mod tests {
     fn ipc_message_kind_discriminator() {
         let msg = IpcMessage::Ready;
         let json: Value = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["kind"], "ready", "lifecycle signals must carry 'kind' field");
+        assert_eq!(
+            json["kind"], "ready",
+            "lifecycle signals must carry 'kind' field"
+        );
     }
 
     // --- ToolCallRequest roundtrip ---
@@ -245,7 +244,11 @@ mod tests {
 
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
-            IpcMessage::ToolCallRequest { request_id, tool_name, parameters } => {
+            IpcMessage::ToolCallRequest {
+                request_id,
+                tool_name,
+                parameters,
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(tool_name, "echo");
                 assert_eq!(parameters, json!({"text": "hello"}));
@@ -319,7 +322,12 @@ mod tests {
 
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
-            IpcMessage::LlmRequest { request_id, model, max_tokens, .. } => {
+            IpcMessage::LlmRequest {
+                request_id,
+                model,
+                max_tokens,
+                ..
+            } => {
                 assert_eq!(request_id, "llm-1");
                 assert_eq!(model.unwrap(), "claude-3");
                 assert_eq!(max_tokens.unwrap(), 512);
@@ -351,7 +359,11 @@ mod tests {
 
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
-            IpcMessage::LlmResponse { content, token_usage, .. } => {
+            IpcMessage::LlmResponse {
+                content,
+                token_usage,
+                ..
+            } => {
                 assert_eq!(content, "The answer is 42.");
                 assert_eq!(token_usage.total_tokens, 15);
             }
@@ -363,11 +375,20 @@ mod tests {
 
     #[test]
     fn lifecycle_signals_roundtrip() {
-        for msg in [IpcMessage::Ready, IpcMessage::Shutdown, IpcMessage::ShutdownAck] {
+        for msg in [
+            IpcMessage::Ready,
+            IpcMessage::Shutdown,
+            IpcMessage::ShutdownAck,
+        ] {
             let serialised = serde_json::to_value(&msg).unwrap();
             // Every lifecycle signal serialises to just {"kind": "..."} — no other fields.
             let obj = serialised.as_object().unwrap();
-            assert_eq!(obj.len(), 1, "lifecycle signals carry only 'kind', got: {:?}", obj);
+            assert_eq!(
+                obj.len(),
+                1,
+                "lifecycle signals carry only 'kind', got: {:?}",
+                obj
+            );
             assert!(obj.contains_key("kind"));
 
             let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
@@ -393,7 +414,11 @@ mod tests {
 
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
-            IpcMessage::ErrorMessage { request_id, description, .. } => {
+            IpcMessage::ErrorMessage {
+                request_id,
+                description,
+                ..
+            } => {
                 assert_eq!(request_id.unwrap(), "req-1");
                 assert_eq!(description, "upstream timeout");
             }

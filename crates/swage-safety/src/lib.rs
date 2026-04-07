@@ -76,10 +76,7 @@ impl LeakDetector {
                 }
                 PatternKind::Regex(regex_str) => {
                     let regex = Regex::new(&regex_str).map_err(|e| {
-                        format!(
-                            "invalid regex for pattern '{}': {}",
-                            pattern.name, e
-                        )
+                        format!("invalid regex for pattern '{}': {}", pattern.name, e)
                     })?;
                     regex_patterns.push(CompiledRegex {
                         regex,

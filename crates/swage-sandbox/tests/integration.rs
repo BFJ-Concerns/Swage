@@ -7,9 +7,7 @@
 
 use serde_json::json;
 use std::time::Duration;
-use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, Role, SandboxError,
-};
+use swage_core::{ChatMessage, CompletionRequest, CompletionResponse, FinishReason, Role};
 use swage_sandbox::ipc::agent::AgentConnection;
 use swage_sandbox::ipc::host::HostConnection;
 use swage_sandbox::ipc::message::IpcMessage;
@@ -106,10 +104,7 @@ async fn llm_proxy_completion_through_ipc() {
         let provider = IpcCompletionProvider::new(agent_conn);
         provider
             .complete(CompletionRequest {
-                messages: vec![ChatMessage::new(
-                    Role::User,
-                    "What is the meaning of life?",
-                )],
+                messages: vec![ChatMessage::new(Role::User, "What is the meaning of life?")],
                 model: None,
                 max_tokens: Some(100),
                 temperature: None,

@@ -201,11 +201,8 @@ impl ProviderBuilder {
 
     /// Seal the current entry and move it into the chain's finalized list.
     fn finalize_into_chain(self) -> ProviderChainBuilder {
-        let entry = ProviderChainBuilder::finalize_entry(
-            self.current,
-            self.retry_config,
-            self.cb_config,
-        );
+        let entry =
+            ProviderChainBuilder::finalize_entry(self.current, self.retry_config, self.cb_config);
         let mut chain = self.chain;
         chain.finalized.push(entry);
         chain
@@ -225,8 +222,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 
 struct ArcProvider(Arc<dyn LlmProvider>);
@@ -321,25 +318,20 @@ mod tests {
                 responses: Mutex::new(responses),
             }
         }
-
-        fn calls(&self) -> u32 {
-            *self.call_count.lock().unwrap()
-        }
     }
 
     #[async_trait]
     impl LlmProvider for TrackingProvider {
-        fn model_id(&self) -> &str { self.name }
+        fn model_id(&self) -> &str {
+            self.name
+        }
 
         async fn complete(
             &self,
             _: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
             *self.call_count.lock().unwrap() += 1;
-            self.responses
-                .lock()
-                .unwrap()
-                .remove(0)
+            self.responses.lock().unwrap().remove(0)
         }
 
         async fn complete_with_tools(
@@ -355,8 +347,12 @@ mod tests {
         ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
             *self.call_count.lock().unwrap() += 1;
             Box::pin(futures::stream::iter(vec![
-                StreamChunk::Delta { content: self.name.into() },
-                StreamChunk::Done { finish_reason: None },
+                StreamChunk::Delta {
+                    content: self.name.into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
             ]))
         }
     }
@@ -368,7 +364,10 @@ mod tests {
     #[tokio::test]
     async fn bare_provider_builds_and_routes_to_inner() {
         let provider = ProviderChainBuilder::new()
-            .provider(TrackingProvider::new("bare", vec![Ok(ok_completion("hello"))]))
+            .provider(TrackingProvider::new(
+                "bare",
+                vec![Ok(ok_completion("hello"))],
+            ))
             .build();
 
         let result = provider.complete(completion_req()).await.unwrap();
@@ -384,8 +383,14 @@ mod tests {
     async fn provider_with_retry_retries_on_transient_failure() {
         // Two failures then success — caller gets the successful response.
         let responses = vec![
-            Err(ProviderError::Network { provider: "p".into(), message: "err".into() }),
-            Err(ProviderError::Network { provider: "p".into(), message: "err".into() }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err".into(),
+            }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err".into(),
+            }),
             Ok(ok_completion("after-retry")),
         ];
 
@@ -410,8 +415,14 @@ mod tests {
     async fn provider_with_circuit_breaker_opens_after_threshold() {
         // Threshold = 2 — two failures should open the circuit.
         let responses = vec![
-            Err(ProviderError::Network { provider: "p".into(), message: "err1".into() }),
-            Err(ProviderError::Network { provider: "p".into(), message: "err2".into() }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err1".into(),
+            }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err2".into(),
+            }),
             // Circuit is now open — this response must never be consumed.
             Ok(ok_completion("unreachable")),
         ];
@@ -442,7 +453,10 @@ mod tests {
         // Threshold = 3, retry = 1 max retry.
         // First call fails once → retry → succeeds. Circuit never opens.
         let responses = vec![
-            Err(ProviderError::Network { provider: "p".into(), message: "err".into() }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err".into(),
+            }),
             Ok(ok_completion("recovered")),
         ];
 
@@ -469,9 +483,13 @@ mod tests {
 
     #[tokio::test]
     async fn two_providers_with_failover_falls_through_on_transient_failure() {
-        let p1 = TrackingProvider::new("p1", vec![
-            Err(ProviderError::Network { provider: "p1".into(), message: "down".into() }),
-        ]);
+        let p1 = TrackingProvider::new(
+            "p1",
+            vec![Err(ProviderError::Network {
+                provider: "p1".into(),
+                message: "down".into(),
+            })],
+        );
         let p2 = TrackingProvider::new("p2", vec![Ok(ok_completion("from-p2"))]);
         let p2_calls = Arc::clone(&p2.call_count);
 
@@ -490,9 +508,13 @@ mod tests {
     async fn multiple_providers_without_explicit_failover_still_wraps_in_failover() {
         // Two providers, no .with_failover() call — failover should be applied
         // automatically with default config.
-        let p1 = TrackingProvider::new("p1", vec![
-            Err(ProviderError::Timeout { provider: "p1".into(), duration: std::time::Duration::from_secs(1) }),
-        ]);
+        let p1 = TrackingProvider::new(
+            "p1",
+            vec![Err(ProviderError::Timeout {
+                provider: "p1".into(),
+                duration: std::time::Duration::from_secs(1),
+            })],
+        );
         let p2 = TrackingProvider::new("p2", vec![Ok(ok_completion("auto-failover"))]);
 
         let provider = ProviderChainBuilder::new()
@@ -512,7 +534,12 @@ mod tests {
     async fn full_stack_routes_through_to_second_provider_on_failure() {
         // p1 fails consistently — after retry exhaustion, failover sends to p2.
         let p1_responses: Vec<_> = (0..4)
-            .map(|_| Err(ProviderError::Network { provider: "p1".into(), message: "err".into() }))
+            .map(|_| {
+                Err(ProviderError::Network {
+                    provider: "p1".into(),
+                    message: "err".into(),
+                })
+            })
             .collect();
 
         let p1 = TrackingProvider::new("p1", p1_responses);
@@ -521,15 +548,15 @@ mod tests {
 
         let provider = ProviderChainBuilder::new()
             .provider(p1)
-                .with_retry(RetryConfig {
-                    max_retries: 3,
-                    initial_backoff: std::time::Duration::ZERO,
-                    max_backoff: std::time::Duration::ZERO,
-                })
-                .with_circuit_breaker(CircuitBreakerConfig {
-                    failure_threshold: 10,  // high threshold — CB won't open in this test
-                    recovery_timeout: std::time::Duration::from_secs(60),
-                })
+            .with_retry(RetryConfig {
+                max_retries: 3,
+                initial_backoff: std::time::Duration::ZERO,
+                max_backoff: std::time::Duration::ZERO,
+            })
+            .with_circuit_breaker(CircuitBreakerConfig {
+                failure_threshold: 10, // high threshold — CB won't open in this test
+                recovery_timeout: std::time::Duration::from_secs(60),
+            })
             .provider(p2)
             .with_failover(FailoverConfig {
                 cooldown_duration: std::time::Duration::from_secs(60),
@@ -538,7 +565,11 @@ mod tests {
 
         let result = provider.complete(completion_req()).await.unwrap();
         assert_eq!(result.content, "p2-success");
-        assert_eq!(*p2_calls.lock().unwrap(), 1, "p2 should have handled the request");
+        assert_eq!(
+            *p2_calls.lock().unwrap(),
+            1,
+            "p2 should have handled the request"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -568,7 +599,10 @@ mod tests {
         // If the order were reversed (CB wraps Retry), the retry would occur
         // inside the CB, resetting the CB count on each attempt — wrong behaviour.
         let responses = vec![
-            Err(ProviderError::Network { provider: "p".into(), message: "err".into() }),
+            Err(ProviderError::Network {
+                provider: "p".into(),
+                message: "err".into(),
+            }),
             // CB opened after above failure (threshold=1). Further calls never
             // reach this response.
         ];
@@ -576,7 +610,7 @@ mod tests {
         let provider = ProviderChainBuilder::new()
             .provider(TrackingProvider::new("order-test", responses))
             .with_circuit_breaker(CircuitBreakerConfig {
-                failure_threshold: 1,  // opens after one failure
+                failure_threshold: 1, // opens after one failure
                 recovery_timeout: std::time::Duration::from_secs(60),
             })
             .with_retry(RetryConfig {
@@ -591,6 +625,9 @@ mod tests {
         // After max_retries, retry gives up and returns the circuit-open error.
         let err = provider.complete(completion_req()).await.unwrap_err();
         // The final error is a circuit-open error (Network), confirming Retry wraps CB.
-        assert!(err.is_retriable(), "final error should be the retriable circuit-open error");
+        assert!(
+            err.is_retriable(),
+            "final error should be the retriable circuit-open error"
+        );
     }
 }

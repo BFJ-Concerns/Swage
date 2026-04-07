@@ -17,7 +17,15 @@ export interface ConversationStore {
   // threading projectId through every intermediate component.
   createConversation(projectId?: string): Promise<void>;
   deleteConversation(id: string): Promise<void>;
-  addMessage(message: { role: string; content: string; timestamp: string; turn_state: string }): void;
+  appendOptimisticUserMessage(message: {
+    content: string;
+    timestamp: string;
+  }): void;
+  appendAssistantMessage(message: {
+    content: string;
+    timestamp: string;
+    turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">;
+  }): void;
   refreshActiveConversation(): Promise<void>;
 }
 
@@ -36,6 +44,59 @@ export function createConversationStore(): ConversationStore {
   let conversations: ConversationSummary[] = [];
   let activeConversation: ConversationDetail | null = null;
   let isLoading = false;
+
+  function updateConversationSummary(
+    conversationId: string,
+    message: {
+      content: string;
+      timestamp: string;
+      turn_state: MessageView["turn_state"];
+    },
+  ): void {
+    const updatedSummary = conversations.find((c) => c.id === conversationId);
+    if (!updatedSummary) return;
+
+    const nextSummary: ConversationSummary = {
+      ...updatedSummary,
+      last_activity: message.timestamp,
+      message_preview: message.content,
+      has_interrupted_turn:
+        updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
+    };
+
+    conversations = sortByRecency(
+      conversations.map((conversation) =>
+        conversation.id === conversationId ? nextSummary : conversation,
+      ),
+    );
+  }
+
+  function appendMessage(
+    message: {
+      role: MessageView["role"];
+      content: string;
+      timestamp: string;
+      turn_state: MessageView["turn_state"];
+    },
+  ): void {
+    if (!activeConversation) return;
+
+    activeConversation = {
+      ...activeConversation,
+      last_activity: message.timestamp,
+      messages: [
+        ...activeConversation.messages,
+        {
+          role: message.role,
+          content: message.content,
+          timestamp: message.timestamp,
+          turn_state: message.turn_state,
+        },
+      ],
+    };
+
+    updateConversationSummary(activeConversation.id, message);
+  }
 
   return {
     // ---------------------------------------------------------------------------
@@ -79,6 +140,10 @@ export function createConversationStore(): ConversationStore {
     },
 
     async createConversation(projectId) {
+      if (!projectId) {
+        throw new Error("projectId is required to create a conversation");
+      }
+
       const resp = await api.createConversation(projectId);
 
       // Build the detail object locally — avoids an extra round-trip.
@@ -120,24 +185,22 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    addMessage(message) {
-      // No-op if there's nothing to append to. This happens if the streaming
-      // store fires before a conversation is selected (shouldn't occur in
-      // normal use, but guards against race conditions).
-      if (!activeConversation) return;
+    appendOptimisticUserMessage(message) {
+      appendMessage({
+        role: "user",
+        content: message.content,
+        timestamp: message.timestamp,
+        turn_state: "pending",
+      });
+    },
 
-      activeConversation = {
-        ...activeConversation,
-        messages: [
-          ...activeConversation.messages,
-          {
-            role: message.role as MessageView["role"],
-            content: message.content,
-            timestamp: message.timestamp,
-            turn_state: message.turn_state as MessageView["turn_state"],
-          },
-        ],
-      };
+    appendAssistantMessage(message) {
+      appendMessage({
+        role: "assistant",
+        content: message.content,
+        timestamp: message.timestamp,
+        turn_state: message.turn_state,
+      });
     },
 
     async refreshActiveConversation() {

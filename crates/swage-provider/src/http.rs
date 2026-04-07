@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use swage_core::ProviderError;
 
@@ -134,9 +134,9 @@ fn sse_stream_from_bytes(
             let text = match std::str::from_utf8(&bytes) {
                 Ok(s) => s.to_owned(),
                 Err(e) => {
-                    let _ = tx.unbounded_send(Err(ProviderError::StreamError(
-                        format!("invalid UTF-8 in stream: {e}"),
-                    )));
+                    let _ = tx.unbounded_send(Err(ProviderError::StreamError(format!(
+                        "invalid UTF-8 in stream: {e}"
+                    ))));
                     break;
                 }
             };
@@ -208,11 +208,7 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
 /// Server errors (500, 502, 503, 504) are classified as `Network` — transient
 /// and retriable. This is critical for the reliability stack: retry, circuit
 /// breaker, and failover decorators all key off `is_retriable()`.
-pub(crate) fn map_http_error(
-    status: u16,
-    body: String,
-    retry_after: Option<u64>,
-) -> ProviderError {
+pub(crate) fn map_http_error(status: u16, body: String, retry_after: Option<u64>) -> ProviderError {
     match status {
         401 => ProviderError::Auth { provider: body },
         // 429 (Too Many Requests) and 529 (Anthropic overloaded) are both rate limits.
@@ -324,13 +320,25 @@ mod tests {
     #[test]
     fn map_429_to_rate_limited_with_retry_after() {
         let err = map_http_error(429, "Too Many Requests".into(), Some(30));
-        assert!(matches!(err, ProviderError::RateLimited { retry_after: Some(_), .. }));
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited {
+                retry_after: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn map_429_to_rate_limited_without_retry_after() {
         let err = map_http_error(429, "rate limited".into(), None);
-        assert!(matches!(err, ProviderError::RateLimited { retry_after: None, .. }));
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited {
+                retry_after: None,
+                ..
+            }
+        ));
     }
 
     #[test]

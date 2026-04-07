@@ -186,10 +186,7 @@ mod tests {
     #[tokio::test]
     async fn returns_error_for_missing_path_argument() {
         let dir = TempDir::new().unwrap();
-        let err = tool(&dir)
-            .execute(json!({}), &ctx())
-            .await
-            .unwrap_err();
+        let err = tool(&dir).execute(json!({}), &ctx()).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
     }
 }

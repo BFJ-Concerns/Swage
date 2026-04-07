@@ -6,7 +6,6 @@ use swage_core::{ToolDefinition, ToolError};
 
 use crate::context::ToolContext;
 
-
 /// The contract every tool must satisfy.
 ///
 /// Tools are Send + Sync so they can be held in a shared registry and invoked
@@ -58,11 +57,7 @@ pub trait Tool: Send + Sync {
     ///
     /// Returns the raw output `Value`; the framework wraps it into a
     /// `ToolOutput` (measuring wall-clock time, running leak detection, etc.).
-    async fn execute(
-        &self,
-        params: Value,
-        ctx: &dyn ToolContext,
-    ) -> Result<Value, ToolError>;
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError>;
 
     /// Build a `ToolDefinition` from this tool's metadata.
     ///
@@ -109,11 +104,7 @@ mod tests {
             })
         }
 
-        async fn execute(
-            &self,
-            params: Value,
-            _ctx: &dyn ToolContext,
-        ) -> Result<Value, ToolError> {
+        async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
             let a = params["a"]
                 .as_f64()
                 .ok_or_else(|| ToolError::InvalidParameters {

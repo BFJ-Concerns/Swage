@@ -12,29 +12,48 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use swage::{SwageBuilder, sqlite_storage, standard_leak_detector};
-//! use swage::agent::InboundMessage;
-//! use swage::storage::ProjectStore;
+//! use swage::agent::TurnRequest;
+//! use swage::storage::{ProjectStore, SessionStore, ThreadStore};
+//! use swage::storage::{NewSession, NewThread};
+//! use tokio::sync::mpsc;
+//! use tokio_util::sync::CancellationToken;
 //!
 //! // 1. Open storage (":memory:" for transient use, a file path for production).
 //! let storage = Arc::new(sqlite_storage(":memory:")?);
 //!
 //! // 2. Build the agent — supply your LLM provider.
-//! let mut agent = SwageBuilder::new()
+//! let agent = SwageBuilder::new()
 //!     .provider(my_provider)
 //!     .agent_id("my-agent")
 //!     .storage(storage.clone())
 //!     .leak_detector(standard_leak_detector())
 //!     .build()?;
 //!
-//! // 3. Create a project and session, then send messages.
+//! // 3. Create a project, session, and thread, then submit a streaming turn.
 //! let project = ProjectStore::get_or_create_default(&*storage).await?;
-//! let session_id = agent.create_session(project.id).await?;
-//!
-//! let response = agent.process_message(InboundMessage {
-//!     message: "Hello, what can you do?".into(),
-//!     session_id,
-//!     thread_id: None,
+//! let session = SessionStore::create_session(&*storage, NewSession {
+//!     project_id: project.id,
+//!     agent_id: "my-agent".into(),
 //! }).await?;
+//! let thread = ThreadStore::create(&*storage, NewThread {
+//!     session_id: session.id,
+//!     agent_id: "my-agent".into(),
+//! }).await?;
+//!
+//! let (event_tx, _event_rx) = mpsc::unbounded_channel();
+//! let response = agent.process_turn_streaming(TurnRequest {
+//!     execution: swage::agent::context::TurnExecutionContext {
+//!         session_id: session.id,
+//!         thread_id: thread.id,
+//!         turn_id: uuid::Uuid::new_v4(),
+//!         project_id: Some(project.id),
+//!     },
+//!     user_message: "Hello, what can you do?".into(),
+//!     assembled_context: vec![swage::ChatMessage::new(swage::Role::User, "Hello, what can you do?")],
+//!     parent_turn_id: None,
+//!     existing_turn_id: None,
+//!     cancellation_token: CancellationToken::new(),
+//! }, event_tx).await?;
 //!
 //! println!("{}", response.response);
 //! # Ok::<(), swage::SwageError>(())

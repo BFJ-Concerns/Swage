@@ -8,5 +8,5 @@
 pub mod registry;
 pub mod types;
 
-pub use registry::{HookRegistration, HookRegistry};
+pub use registry::{HookRegistration, HookRegistry, TracedDispatch};
 pub use types::{FailureMode, Hook, HookEvent, HookOutcome};

@@ -156,9 +156,13 @@
           <li
             class="project-item"
             class:active={isActive}
-            onclick={() => selectProject(project.id)}
           >
-            <span class="project-name">{project.name}</span>
+            <button
+              class="project-select-btn"
+              onclick={() => selectProject(project.id)}
+            >
+              <span class="project-name">{project.name}</span>
+            </button>
 
             {#if isPendingDelete}
               <!-- Inline delete confirmation — no browser dialogs. -->
@@ -320,7 +324,6 @@
     display: flex;
     align-items: center;
     padding: 8px 12px;
-    cursor: pointer;
     user-select: none;
     gap: 4px;
   }
@@ -332,6 +335,18 @@
   .project-item.active {
     background: #eef2ff;
     font-weight: 500;
+  }
+
+  .project-select-btn {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
   }
 
   .project-name {

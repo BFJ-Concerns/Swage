@@ -28,7 +28,8 @@ function mockConversationStore(): ConversationStore {
     selectConversation: async () => {},
     createConversation: async () => {},
     deleteConversation: async () => {},
-    addMessage: () => {},
+    appendOptimisticUserMessage: () => {},
+    appendAssistantMessage: () => {},
     refreshActiveConversation: async () => {},
   };
 }

@@ -6,16 +6,13 @@
 
 use uuid::Uuid;
 
-use swage_storage::{
-    NewThread, ThreadState,
-    NewSession, NewTurn, NewMessage, NewToolCall,
-    TurnState,
-    SqliteStorage,
-};
-use swage_storage::store::{
-    ProjectStore, SessionStore, ThreadStore, TurnStore, MessageStore, ToolCallStore,
-};
 use swage_storage::model::NewProject;
+use swage_storage::store::{
+    MessageStore, ProjectStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
+};
+use swage_storage::{
+    NewMessage, NewSession, NewThread, NewToolCall, NewTurn, SqliteStorage, ThreadState, TurnState,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,11 +24,14 @@ const AGENT_B: &str = "agent_beta";
 /// Create an in-memory SqliteStorage with a project and return (storage, project_id).
 async fn setup() -> (SqliteStorage, Uuid) {
     let storage = SqliteStorage::in_memory().expect("in-memory should succeed");
-    let project = ProjectStore::create(&storage, NewProject {
-        name: "integration-test".into(),
-        slug: "integration-test".into(),
-        workspace_path: None,
-    })
+    let project = ProjectStore::create(
+        &storage,
+        NewProject {
+            name: "integration-test".into(),
+            slug: "integration-test".into(),
+            workspace_path: None,
+        },
+    )
     .await
     .expect("create project");
     (storage, project.id)
@@ -52,10 +52,13 @@ async fn create_full_hierarchy(
         .await
         .expect("create session");
 
-    let thread = ThreadStore::create(storage, NewThread {
-        session_id: session.id,
-        agent_id: agent_id.to_string(),
-    })
+    let thread = ThreadStore::create(
+        storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: agent_id.to_string(),
+        },
+    )
     .await
     .expect("create thread");
 
@@ -64,6 +67,8 @@ async fn create_full_hierarchy(
             thread_id: thread.id,
             agent_id: agent_id.to_string(),
             state: TurnState::Pending,
+            user_input: None,
+            parent_turn_id: None,
         })
         .await
         .expect("create turn");
@@ -71,6 +76,7 @@ async fn create_full_hierarchy(
     let message = storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            turn_id: Some(turn.id),
             agent_id: agent_id.to_string(),
             role: "user".to_string(),
             content: "Hello from integration test".to_string(),
@@ -119,11 +125,14 @@ async fn full_hierarchy_survives_reconnection() {
     // Phase 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
-        let project = ProjectStore::create(&storage, NewProject {
-            name: "roundtrip".into(),
-            slug: "roundtrip".into(),
-            workspace_path: None,
-        })
+        let project = ProjectStore::create(
+            &storage,
+            NewProject {
+                name: "roundtrip".into(),
+                slug: "roundtrip".into(),
+                workspace_path: None,
+            },
+        )
         .await
         .expect("create project");
 
@@ -139,7 +148,9 @@ async fn full_hierarchy_survives_reconnection() {
     assert!(session.is_some(), "session should survive reconnection");
     assert_eq!(session.unwrap().agent_id, AGENT_A);
 
-    let thread = ThreadStore::get(&storage, thread_id).await.expect("get thread");
+    let thread = ThreadStore::get(&storage, thread_id)
+        .await
+        .expect("get thread");
     assert!(thread.is_some(), "thread should survive reconnection");
     let thread = thread.unwrap();
     assert_eq!(thread.session_id, session_id);
@@ -153,7 +164,10 @@ async fn full_hierarchy_survives_reconnection() {
     assert!(message.is_some(), "message should survive reconnection");
     assert_eq!(message.unwrap().thread_id, thread_id);
 
-    let tool_call = storage.get_tool_call(tool_call_id).await.expect("get tool_call");
+    let tool_call = storage
+        .get_tool_call(tool_call_id)
+        .await
+        .expect("get tool_call");
     assert!(tool_call.is_some(), "tool call should survive reconnection");
     assert_eq!(tool_call.unwrap().agent_id, AGENT_A);
 }
@@ -178,21 +192,39 @@ async fn agent_id_isolation_across_entity_types() {
     create_full_hierarchy(&storage, project_id, AGENT_B).await;
 
     // Sessions: each agent should see only their own.
-    let sessions_a = storage.list_sessions_by_agent_id(AGENT_A).await.expect("list sessions A");
-    let sessions_b = storage.list_sessions_by_agent_id(AGENT_B).await.expect("list sessions B");
+    let sessions_a = storage
+        .list_sessions_by_agent_id(AGENT_A)
+        .await
+        .expect("list sessions A");
+    let sessions_b = storage
+        .list_sessions_by_agent_id(AGENT_B)
+        .await
+        .expect("list sessions B");
     assert_eq!(sessions_a.len(), 1, "agent_a should see 1 session");
     assert_eq!(sessions_b.len(), 1, "agent_b should see 1 session");
     assert_ne!(sessions_a[0].id, sessions_b[0].id, "different sessions");
 
     // Threads: each agent should see only their own.
-    let threads_a = storage.list_threads_by_agent_id(AGENT_A).await.expect("list threads A");
-    let threads_b = storage.list_threads_by_agent_id(AGENT_B).await.expect("list threads B");
+    let threads_a = storage
+        .list_threads_by_agent_id(AGENT_A)
+        .await
+        .expect("list threads A");
+    let threads_b = storage
+        .list_threads_by_agent_id(AGENT_B)
+        .await
+        .expect("list threads B");
     assert_eq!(threads_a.len(), 1, "agent_a should see 1 thread");
     assert_eq!(threads_b.len(), 1, "agent_b should see 1 thread");
 
     // Turn recovery: each agent should find only their own non-terminal turns.
-    let orphans_a = storage.find_in_progress_by_agent(AGENT_A).await.expect("find A");
-    let orphans_b = storage.find_in_progress_by_agent(AGENT_B).await.expect("find B");
+    let orphans_a = storage
+        .find_in_progress_by_agent(AGENT_A)
+        .await
+        .expect("find A");
+    let orphans_b = storage
+        .find_in_progress_by_agent(AGENT_B)
+        .await
+        .expect("find B");
     assert_eq!(orphans_a.len(), 1, "agent_a should see 1 pending turn");
     assert_eq!(orphans_b.len(), 1, "agent_b should see 1 pending turn");
     assert_ne!(orphans_a[0].id, orphans_b[0].id, "different turns");
@@ -214,16 +246,25 @@ async fn cascade_deletion_from_project() {
         create_full_hierarchy(&storage, project_id, AGENT_A).await;
 
     // Delete the project — everything underneath should cascade.
-    let deleted = ProjectStore::delete(&storage, project_id).await.expect("delete project");
+    let deleted = ProjectStore::delete(&storage, project_id)
+        .await
+        .expect("delete project");
     assert!(deleted, "project should exist and be deleted");
 
     // Verify all children are gone.
     assert!(
-        storage.get_session(session_id).await.expect("get").is_none(),
+        storage
+            .get_session(session_id)
+            .await
+            .expect("get")
+            .is_none(),
         "session should be cascade-deleted"
     );
     assert!(
-        ThreadStore::get(&storage, thread_id).await.expect("get").is_none(),
+        ThreadStore::get(&storage, thread_id)
+            .await
+            .expect("get")
+            .is_none(),
         "thread should be cascade-deleted"
     );
     assert!(
@@ -231,11 +272,19 @@ async fn cascade_deletion_from_project() {
         "turn should be cascade-deleted"
     );
     assert!(
-        storage.get_message(message_id).await.expect("get").is_none(),
+        storage
+            .get_message(message_id)
+            .await
+            .expect("get")
+            .is_none(),
         "message should be cascade-deleted"
     );
     assert!(
-        storage.get_tool_call(tool_call_id).await.expect("get").is_none(),
+        storage
+            .get_tool_call(tool_call_id)
+            .await
+            .expect("get")
+            .is_none(),
         "tool call should be cascade-deleted"
     );
 }
@@ -261,10 +310,13 @@ async fn thread_state_machine_enforced() {
         .await
         .unwrap();
 
-    let thread = ThreadStore::create(&storage, NewThread {
-        session_id: session.id,
-        agent_id: AGENT_A.to_string(),
-    })
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: AGENT_A.to_string(),
+        },
+    )
     .await
     .unwrap();
 
@@ -272,19 +324,40 @@ async fn thread_state_machine_enforced() {
     assert_eq!(thread.state, ThreadState::Idle);
 
     // Idle → Processing (valid)
-    storage.update_state(thread.id, ThreadState::Processing).await.unwrap();
-    let t = ThreadStore::get(&storage, thread.id).await.unwrap().unwrap();
+    storage
+        .update_state(thread.id, ThreadState::Processing)
+        .await
+        .unwrap();
+    let t = ThreadStore::get(&storage, thread.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(t.state, ThreadState::Processing);
 
     // Processing → Idle (valid — turn completed, thread continues)
-    storage.update_state(thread.id, ThreadState::Idle).await.unwrap();
-    let t = ThreadStore::get(&storage, thread.id).await.unwrap().unwrap();
+    storage
+        .update_state(thread.id, ThreadState::Idle)
+        .await
+        .unwrap();
+    let t = ThreadStore::get(&storage, thread.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(t.state, ThreadState::Idle);
 
     // Idle → Processing → Completed (valid sequence)
-    storage.update_state(thread.id, ThreadState::Processing).await.unwrap();
-    storage.update_state(thread.id, ThreadState::Completed).await.unwrap();
-    let t = ThreadStore::get(&storage, thread.id).await.unwrap().unwrap();
+    storage
+        .update_state(thread.id, ThreadState::Processing)
+        .await
+        .unwrap();
+    storage
+        .update_state(thread.id, ThreadState::Completed)
+        .await
+        .unwrap();
+    let t = ThreadStore::get(&storage, thread.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(t.state, ThreadState::Completed);
 
     // Completed → Processing (INVALID — must be rejected)
@@ -298,8 +371,15 @@ async fn thread_state_machine_enforced() {
     );
 
     // State should still be Completed after rejection.
-    let t = ThreadStore::get(&storage, thread.id).await.unwrap().unwrap();
-    assert_eq!(t.state, ThreadState::Completed, "state should not change on rejection");
+    let t = ThreadStore::get(&storage, thread.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        t.state,
+        ThreadState::Completed,
+        "state should not change on rejection"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -323,10 +403,13 @@ async fn turn_recovery_finds_pending_and_processing() {
         .await
         .unwrap();
 
-    let thread = ThreadStore::create(&storage, NewThread {
-        session_id: session.id,
-        agent_id: AGENT_A.to_string(),
-    })
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: AGENT_A.to_string(),
+        },
+    )
     .await
     .unwrap();
 
@@ -336,6 +419,8 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Pending,
+            user_input: None,
+            parent_turn_id: None,
         })
         .await
         .unwrap();
@@ -345,6 +430,8 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Processing,
+            user_input: None,
+            parent_turn_id: None,
         })
         .await
         .unwrap();
@@ -355,6 +442,8 @@ async fn turn_recovery_finds_pending_and_processing() {
             thread_id: thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Completed,
+            user_input: None,
+            parent_turn_id: None,
         })
         .await
         .unwrap();
@@ -365,12 +454,25 @@ async fn turn_recovery_finds_pending_and_processing() {
         .await
         .expect("find_in_progress should succeed");
 
-    assert_eq!(in_progress.len(), 2, "should find both Pending and Processing turns");
+    assert_eq!(
+        in_progress.len(),
+        2,
+        "should find both Pending and Processing turns"
+    );
 
     let ids: Vec<Uuid> = in_progress.iter().map(|t| t.id).collect();
-    assert!(ids.contains(&pending_turn.id), "should include Pending turn");
-    assert!(ids.contains(&processing_turn.id), "should include Processing turn");
-    assert!(!ids.contains(&completed_turn.id), "should NOT include Completed turn");
+    assert!(
+        ids.contains(&pending_turn.id),
+        "should include Pending turn"
+    );
+    assert!(
+        ids.contains(&processing_turn.id),
+        "should include Processing turn"
+    );
+    assert!(
+        !ids.contains(&completed_turn.id),
+        "should NOT include Completed turn"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +488,9 @@ async fn default_project_cannot_be_deleted() {
     let storage = SqliteStorage::in_memory().expect("in-memory");
     let default = storage.get_or_create_default().await.expect("get default");
 
-    let err = ProjectStore::delete(&storage, default.id).await.unwrap_err();
+    let err = ProjectStore::delete(&storage, default.id)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, swage_core::StorageError::ConstraintViolation(_)),
         "deleting default project should return ConstraintViolation, got: {err:?}"
@@ -413,10 +517,13 @@ async fn messages_ordered_within_thread() {
         .await
         .unwrap();
 
-    let thread = ThreadStore::create(&storage, NewThread {
-        session_id: session.id,
-        agent_id: AGENT_A.to_string(),
-    })
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: AGENT_A.to_string(),
+        },
+    )
     .await
     .unwrap();
 
@@ -424,6 +531,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: "user".into(),
             content: "second".into(),
@@ -435,6 +543,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: "user".into(),
             content: "first".into(),
@@ -446,6 +555,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: "assistant".into(),
             content: "third".into(),
@@ -455,7 +565,10 @@ async fn messages_ordered_within_thread() {
         .unwrap();
 
     // list_messages_by_thread should return messages in position order.
-    let messages = storage.list_messages_by_thread(thread.id).await.expect("list messages");
+    let messages = storage
+        .list_messages_by_thread(thread.id)
+        .await
+        .expect("list messages");
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0].content, "first");
     assert_eq!(messages[0].position, 0);

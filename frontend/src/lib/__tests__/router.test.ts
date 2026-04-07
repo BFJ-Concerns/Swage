@@ -155,7 +155,11 @@ describe("init with conversation store", () => {
 
   it("sets notFound and navigates to '/' when selectConversation rejects", async () => {
     window.history.replaceState(null, "", "/conversations/stale-id");
-    const selectConversation = vi.fn().mockRejectedValue(new Error("not found"));
+    const selectConversation = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("HTTP 404 from GET /api/conversations/stale-id"),
+      );
     const router = createRouter({ conversationStore: { selectConversation } });
 
     await router.init();
@@ -163,5 +167,20 @@ describe("init with conversation store", () => {
     expect(router.currentRoute.notFound).toBe(true);
     expect(router.currentRoute.conversationId).toBeNull();
     expect(window.location.pathname).toBe("/");
+  });
+
+  it("rethrows non-404 failures during route restore", async () => {
+    window.history.replaceState(null, "", "/conversations/outage-id");
+    const selectConversation = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("HTTP 503 from GET /api/conversations/outage-id"),
+      );
+    const router = createRouter({ conversationStore: { selectConversation } });
+
+    await expect(router.init()).rejects.toThrow("HTTP 503");
+    expect(window.location.pathname).toBe("/conversations/outage-id");
+    expect(router.currentRoute.conversationId).toBe("outage-id");
+    expect(router.currentRoute.notFound).toBe(false);
   });
 });

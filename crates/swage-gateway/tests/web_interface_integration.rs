@@ -11,14 +11,14 @@
 use std::sync::Arc;
 
 use axum::{
-    body::{to_bytes, Body},
-    http::{Request, StatusCode},
     Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
 };
 use tower::ServiceExt;
 
 use swage_gateway::{server::build_router, state::AppState};
-use swage_storage::{SqliteStorage, store::ProjectStore};
+use swage_storage::SqliteStorage;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -29,14 +29,14 @@ use swage_storage::{SqliteStorage, store::ProjectStore};
 /// Sufficient for asset serving and HTTP API tests (no streaming needed).
 fn make_router() -> Router {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let provider =
-        Arc::new(NoOpProvider) as Arc<dyn swage_provider::LlmProvider>;
+    let provider = Arc::new(NoOpProvider) as Arc<dyn swage_provider::LlmProvider>;
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
         None,
     );
     build_router(state)
@@ -47,22 +47,27 @@ struct NoOpProvider;
 
 #[async_trait::async_trait]
 impl swage_provider::LlmProvider for NoOpProvider {
-    fn model_id(&self) -> &str { "noop" }
+    fn model_id(&self) -> &str {
+        "noop"
+    }
 
     async fn complete(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in asset serving tests")
     }
 
     async fn complete_with_tools(
-        &self, _request: swage_core::ToolCompletionRequest,
+        &self,
+        _request: swage_core::ToolCompletionRequest,
     ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
         unimplemented!("not used in asset serving tests")
     }
 
     fn stream(
-        &self, _request: swage_core::CompletionRequest,
+        &self,
+        _request: swage_core::CompletionRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
         unimplemented!("not used in asset serving tests")
     }
@@ -126,8 +131,12 @@ async fn root_serves_index_html() {
 #[tokio::test(flavor = "multi_thread")]
 async fn conversation_url_returns_spa_fallback() {
     let router = make_router();
-    let (status, body) =
-        request(&router, "GET", "/conversations/00000000-0000-0000-0000-000000000001").await;
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/conversations/00000000-0000-0000-0000-000000000001",
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -157,8 +166,8 @@ async fn api_routes_coexist_with_asset_serving() {
     let (status, body) = request(&router, "GET", "/api/conversations").await;
     assert_eq!(status, StatusCode::OK);
 
-    let json: serde_json::Value = serde_json::from_slice(&body)
-        .expect("API response should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("API response should be valid JSON");
     assert!(
         json["conversations"].is_array(),
         "API should return conversation list"
