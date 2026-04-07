@@ -12,12 +12,14 @@ Desktop.ini
 *.swo
 *~
 .idea/
+.vscode/
 *.iml
 
 # Environment & secrets
 .env
 .env.*
 !.env.example
+.direnv/
 
 # Logs
 *.log
@@ -33,8 +35,16 @@ dist/
 # Python (for embedded runtime build artifacts)
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage/
+.venv/
+venv/
 
-# Claude
+# Local agent tooling
+AGENTS.md
 .claude/
 .opencode/
 .motes/
