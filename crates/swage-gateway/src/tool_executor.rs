@@ -4,9 +4,8 @@
 //!
 //! - **`SandboxedExecutor`** — routes tool calls through a bubblewrap sandbox.
 //! - **`GatewayExecutionStrategy`** — wraps an optional inner strategy and
-//!   scopes `PYTHON_CONTEXT` around `python_execute` calls so that sub-tool
-//!   dispatch inside Python code has access to the WebSocket sender, turn_id,
-//!   and parent call_id.
+//!   upgrades the tool context for `python_execute` so nested tool execution
+//!   has access to the WebSocket sender without task-local state.
 
 use std::sync::Arc;
 
@@ -16,12 +15,63 @@ use tokio::sync::mpsc;
 
 use swage_core::{SandboxError, ToolError};
 use swage_sandbox::Sandbox;
-use swage_tool::context::ToolContext;
+use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
-use crate::tool::python_execute::{PYTHON_CONTEXT, PythonExecuteContext};
 use crate::websocket::ServerEvent;
+
+pub struct GatewayToolContext {
+    base: SerializableToolContext,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+}
+
+impl GatewayToolContext {
+    pub fn new(ctx: &dyn ToolContext, ws_tx: mpsc::UnboundedSender<ServerEvent>) -> Self {
+        Self {
+            base: SerializableToolContext::from_context(ctx),
+            ws_tx,
+        }
+    }
+
+    pub fn ws_tx(&self) -> &mpsc::UnboundedSender<ServerEvent> {
+        &self.ws_tx
+    }
+}
+
+impl ToolContext for GatewayToolContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn agent_id(&self) -> &str {
+        self.base.agent_id()
+    }
+
+    fn session_id(&self) -> &str {
+        self.base.session_id()
+    }
+
+    fn working_directory(&self) -> &std::path::Path {
+        self.base.working_directory()
+    }
+
+    fn allowed_paths(&self) -> &[std::path::PathBuf] {
+        self.base.allowed_paths()
+    }
+
+    fn user_info(&self) -> Option<&swage_tool::context::UserInfo> {
+        self.base.user_info()
+    }
+
+    fn call_id(&self) -> Option<&str> {
+        self.base.call_id()
+    }
+
+    fn turn_id(&self) -> Option<uuid::Uuid> {
+        self.base.turn_id()
+    }
+}
 
 /// Routes tool execution through a bubblewrap sandbox.
 ///
@@ -71,17 +121,15 @@ impl ToolExecutionStrategy for SandboxedExecutor {
 }
 
 // ---------------------------------------------------------------------------
-// GatewayExecutionStrategy — PYTHON_CONTEXT scoping + optional sandbox
+// GatewayExecutionStrategy — explicit python_execute context + optional sandbox
 // ---------------------------------------------------------------------------
 
 /// Composite execution strategy for the gateway turn loop.
 ///
-/// Intercepts `python_execute` calls to scope the `PYTHON_CONTEXT` task-local,
-/// which gives the `PythonExecuteTool` access to the WebSocket sender, turn_id,
-/// and parent call_id it needs for sub-tool event emission and persistence.
-///
-/// For all other tools, delegates to an optional inner strategy (typically
-/// `SandboxedExecutor`) or falls back to direct `tool.execute()`.
+/// Intercepts `python_execute` calls to provide an explicit context wrapper
+/// carrying the per-turn WebSocket sender. All other tools delegate unchanged
+/// to the optional inner strategy (typically `SandboxedExecutor`) or direct
+/// execution.
 pub struct GatewayExecutionStrategy {
     /// Optional inner strategy — e.g. `SandboxedExecutor` when sandbox is enabled.
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
@@ -108,35 +156,8 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
         if tool_name == "python_execute" {
-            // Extract call_id and turn_id from the ToolContext. The agent
-            // populates these on AgentToolContext before dispatching.
-            let call_id = ctx.call_id().ok_or_else(|| ToolError::ExecutionFailed {
-                name: tool_name.to_owned(),
-                message: "python_execute requires a tool call ID".to_string(),
-            })?;
-            let turn_id = ctx.turn_id().ok_or_else(|| ToolError::ExecutionFailed {
-                name: tool_name.to_owned(),
-                message: "python_execute requires a turn ID".to_string(),
-            })?;
-
-            let py_ctx = PythonExecuteContext {
-                ws_tx: self.ws_tx.clone(),
-                turn_id,
-                call_id: call_id.to_string(),
-            };
-
-            // Scope the task-local around the tool execution so
-            // PythonExecuteTool::execute() can read it.
-            PYTHON_CONTEXT
-                .scope(py_ctx, async {
-                    // Still delegate to inner strategy if present (e.g. sandbox),
-                    // otherwise call the tool directly.
-                    match &self.inner {
-                        Some(strategy) => strategy.execute(tool, tool_name, params, ctx).await,
-                        None => tool.execute(params.clone(), ctx).await,
-                    }
-                })
-                .await
+            let gateway_ctx = GatewayToolContext::new(ctx, self.ws_tx.clone());
+            tool.execute(params.clone(), &gateway_ctx).await
         } else {
             // Non-Python tools: delegate to inner strategy or direct execution.
             match &self.inner {
@@ -158,6 +179,7 @@ mod tests {
     use serde_json::json;
     use swage_sandbox::ToolCallResult;
     use swage_tool::context::MockToolContext;
+    use swage_tool::dispatch::ToolExecutionStrategy;
     use tokio::sync::Mutex;
 
     // -- Mock sandbox ---------------------------------------------------------
@@ -248,6 +270,75 @@ mod tests {
         }
     }
 
+    struct ObservingTool {
+        output: Value,
+        last_execution: Mutex<Option<(bool, Option<String>, Option<uuid::Uuid>)>>,
+    }
+
+    impl ObservingTool {
+        fn new(output: Value) -> Self {
+            Self {
+                output,
+                last_execution: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ObservingTool {
+        fn name(&self) -> &str {
+            "observing"
+        }
+
+        fn description(&self) -> &str {
+            "observes its execution context"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+            *self.last_execution.lock().await = Some((
+                ctx.as_any().is::<GatewayToolContext>(),
+                ctx.call_id().map(ToOwned::to_owned),
+                ctx.turn_id(),
+            ));
+            Ok(self.output.clone())
+        }
+    }
+
+    struct RecordingStrategy {
+        output: Value,
+        last_call: Mutex<Option<(String, bool)>>,
+    }
+
+    impl RecordingStrategy {
+        fn new(output: Value) -> Self {
+            Self {
+                output,
+                last_call: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutionStrategy for RecordingStrategy {
+        async fn execute(
+            &self,
+            _tool: &dyn Tool,
+            tool_name: &str,
+            _params: &Value,
+            ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            *self.last_call.lock().await = Some((
+                tool_name.to_string(),
+                ctx.as_any().is::<GatewayToolContext>(),
+            ));
+            Ok(self.output.clone())
+        }
+    }
+
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
     }
@@ -325,5 +416,78 @@ mod tests {
 
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
         assert!(err.to_string().contains("bwrap not installed"));
+    }
+
+    #[tokio::test]
+    async fn gateway_strategy_executes_python_on_host_with_gateway_context() {
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
+        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx);
+        let tool = ObservingTool::new(json!({"via": "tool"}));
+        let turn_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("valid UUID");
+        let mut tool_ctx = ctx();
+        tool_ctx.call_id = Some("call-123".to_string());
+        tool_ctx.turn_id = Some(turn_id);
+
+        let result = executor
+            .execute(
+                &tool,
+                "python_execute",
+                &json!({"code": "print(1)"}),
+                &tool_ctx,
+            )
+            .await
+            .expect("python_execute should run on the host");
+
+        assert_eq!(result, json!({"via": "tool"}));
+        assert!(
+            inner.last_call.lock().await.is_none(),
+            "python_execute should bypass the inner strategy",
+        );
+
+        let observed = tool
+            .last_execution
+            .lock()
+            .await
+            .clone()
+            .expect("tool should have been executed");
+        assert!(
+            observed.0,
+            "python_execute should receive GatewayToolContext"
+        );
+        assert_eq!(observed.1.as_deref(), Some("call-123"));
+        assert_eq!(observed.2, Some(turn_id));
+    }
+
+    #[tokio::test]
+    async fn gateway_strategy_keeps_non_python_tools_on_inner_strategy() {
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
+        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx);
+        let tool = ObservingTool::new(json!({"via": "tool"}));
+
+        let result = executor
+            .execute(&tool, "shell", &json!({"command": "pwd"}), &ctx())
+            .await
+            .expect("non-python tools should still use the inner strategy");
+
+        assert_eq!(result, json!({"via": "strategy"}));
+        assert!(
+            tool.last_execution.lock().await.is_none(),
+            "tool should not be executed directly when an inner strategy is present",
+        );
+
+        let last_call = inner
+            .last_call
+            .lock()
+            .await
+            .clone()
+            .expect("inner strategy should have been called");
+        assert_eq!(last_call.0, "shell");
+        assert!(
+            !last_call.1,
+            "non-python tools should keep their original tool context",
+        );
     }
 }

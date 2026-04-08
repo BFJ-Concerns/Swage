@@ -746,18 +746,20 @@ pub(crate) async fn process_turn_with_existing_turn(
     );
     let tokeniser = TiktokenTokeniser::new(&config.provider.model);
 
-    // Run the fail-open assembly orchestrator. For "default" (or empty) assembly
-    // names this delegates to default_assembly() synchronously. For any other
-    // name it locates the corresponding .py file and executes it via PyO3.
-    // On timeout or execution failure it falls back to default_assembly() and
-    // records the error in the assembly report.
+    // Run the fail-open assembly orchestrator. For "default" (or empty)
+    // assembly names this delegates to default_assembly() synchronously.
+    // Named Python assemblies now execute in a child worker instead of an
+    // embedded interpreter.
+    let assembly_runner = swage_python::ConfiguredAssemblyRunner::new(
+        config.tools.python_execute.clone(),
+    );
     let output = swage_context::assembly::assemble(
         &elements,
         &config.context,
         &tokeniser,
         &search_level_refs,
         state.provider.as_ref(),
-        Some(&swage_python::ConcreteAssemblyRunner),
+        Some(&assembly_runner),
     )
     .await;
     let (assembled_messages, assembly_report) = (output.messages, output.report);

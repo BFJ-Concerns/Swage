@@ -22,4 +22,7 @@ pub use bubblewrap::BubblewrapSandbox;
 pub use config::SandboxConfig;
 pub use fallback::FallbackSandbox;
 pub use provider::IpcCompletionProvider;
+pub use process::ChildProcessManager;
 pub use sandbox::{Sandbox, ToolCallResult};
+pub use socket::SocketManager;
+pub use bubblewrap::find_bwrap;

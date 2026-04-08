@@ -1,8 +1,9 @@
 use crate::model::{
     ContextConfig, HitlConfig, LifecycleConfig, LogLevel, LoggingConfig, ModelPricing,
     ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderConfig,
-    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
-    ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig,
+    SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig, ToolPermissionConfig,
+    WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,6 +96,7 @@ pub struct PartialObservabilityConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialToolConfig {
     pub shell_timeout_secs: Option<u64>,
+    pub python_execute: Option<PartialPythonExecuteToolConfig>,
     pub max_output_bytes: Option<usize>,
     pub plugin_directory: Option<Option<String>>,
     pub search: Option<Option<SearchProviderConfig>>,
@@ -102,6 +104,20 @@ pub struct PartialToolConfig {
     pub deny: Option<Vec<String>>,
     pub bundles: Option<HashMap<String, Vec<String>>>,
     pub require_approval: Option<Vec<RequireApprovalEntry>>,
+}
+
+/// Partial mirror of `PythonExecuteToolConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialPythonExecuteToolConfig {
+    pub enabled: Option<bool>,
+    pub timeout_secs: Option<u64>,
+    pub startup_timeout_secs: Option<u64>,
+    pub idle_ttl_secs: Option<u64>,
+    pub warm_target: Option<usize>,
+    pub max_workers: Option<usize>,
+    pub runtime_policy: Option<PythonRuntimePolicy>,
+    pub runtime_path: Option<Option<String>>,
+    pub require_sandbox: Option<bool>,
 }
 
 /// Partial mirror of `OutputConfig`. Each field is independently overridable.
@@ -222,6 +238,17 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             tools: Some(PartialToolConfig {
                 shell_timeout_secs: Some(r.tools.shell_timeout_secs),
+                python_execute: Some(PartialPythonExecuteToolConfig {
+                    enabled: Some(r.tools.python_execute.enabled),
+                    timeout_secs: Some(r.tools.python_execute.timeout_secs),
+                    startup_timeout_secs: Some(r.tools.python_execute.startup_timeout_secs),
+                    idle_ttl_secs: Some(r.tools.python_execute.idle_ttl_secs),
+                    warm_target: Some(r.tools.python_execute.warm_target),
+                    max_workers: Some(r.tools.python_execute.max_workers),
+                    runtime_policy: Some(r.tools.python_execute.runtime_policy),
+                    runtime_path: Some(r.tools.python_execute.runtime_path),
+                    require_sandbox: Some(r.tools.python_execute.require_sandbox),
+                }),
                 max_output_bytes: Some(r.tools.max_output_bytes),
                 plugin_directory: Some(r.tools.plugin_directory),
                 search: Some(r.tools.search),
@@ -363,6 +390,21 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             };
             PartialToolConfig {
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
+                python_execute: merge_section(
+                    b.python_execute,
+                    o.python_execute,
+                    |b, o| PartialPythonExecuteToolConfig {
+                        enabled: o.enabled.or(b.enabled),
+                        timeout_secs: o.timeout_secs.or(b.timeout_secs),
+                        startup_timeout_secs: o.startup_timeout_secs.or(b.startup_timeout_secs),
+                        idle_ttl_secs: o.idle_ttl_secs.or(b.idle_ttl_secs),
+                        warm_target: o.warm_target.or(b.warm_target),
+                        max_workers: o.max_workers.or(b.max_workers),
+                        runtime_policy: o.runtime_policy.or(b.runtime_policy),
+                        runtime_path: o.runtime_path.or(b.runtime_path),
+                        require_sandbox: o.require_sandbox.or(b.require_sandbox),
+                    },
+                ),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
                 plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
@@ -473,8 +515,21 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let dt = ToolConfig::default();
             let t = partial.tools.unwrap_or_default();
             let dp = ToolPermissionConfig::default();
+            let dpy = PythonExecuteToolConfig::default();
+            let py = t.python_execute.unwrap_or_default();
             ToolConfig {
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
+                python_execute: PythonExecuteToolConfig {
+                    enabled: py.enabled.unwrap_or(dpy.enabled),
+                    timeout_secs: py.timeout_secs.unwrap_or(dpy.timeout_secs),
+                    startup_timeout_secs: py.startup_timeout_secs.unwrap_or(dpy.startup_timeout_secs),
+                    idle_ttl_secs: py.idle_ttl_secs.unwrap_or(dpy.idle_ttl_secs),
+                    warm_target: py.warm_target.unwrap_or(dpy.warm_target),
+                    max_workers: py.max_workers.unwrap_or(dpy.max_workers),
+                    runtime_policy: py.runtime_policy.unwrap_or(dpy.runtime_policy),
+                    runtime_path: py.runtime_path.unwrap_or(dpy.runtime_path),
+                    require_sandbox: py.require_sandbox.unwrap_or(dpy.require_sandbox),
+                },
                 max_output_bytes: t.max_output_bytes.unwrap_or(dt.max_output_bytes),
                 plugin_directory: t.plugin_directory.unwrap_or(dt.plugin_directory),
                 // Double-option: outer None → default (None), Some(x) → use x.

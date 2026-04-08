@@ -1116,7 +1116,8 @@ impl TopologyRunService {
                 .collect(),
         };
 
-        let graph = swage_python::topology::execute_topology_source(
+        let graph = swage_python::topology::execute_topology_source_with_config(
+            &self.state.config.tools.python_execute,
             &req.topology_source,
             &format!("team-run:{team_id}"),
             std::time::Duration::from_secs(self.state.config.context.timeout),

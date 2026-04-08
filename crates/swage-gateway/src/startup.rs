@@ -384,15 +384,28 @@ fn build_tool_dispatcher(
 
     let mut all_tools = non_python_tools;
 
-    match swage_python::runtime::PythonRuntime::new(None) {
-        Ok(runtime) => {
-            all_tools.push(Arc::new(PythonExecuteTool::new(
-                Arc::new(runtime),
-                Duration::from_secs(config.tools.shell_timeout_secs),
-                sub_dispatcher,
-                storage,
-            )));
-            info!("Python runtime available — python_execute tool registered");
+    match swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()) {
+        Ok(runtime) if runtime.python_execute_available() => {
+            let runtime = Arc::new(runtime);
+            match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
+                Ok(pool) => {
+                    all_tools.push(Arc::new(PythonExecuteTool::new(
+                        runtime,
+                        pool,
+                        sub_dispatcher,
+                        storage,
+                    )));
+                    info!("Python worker runtime available — python_execute tool registered");
+                }
+                Err(error) => {
+                    warn!(
+                        "Python worker pool could not be created ({error}), python_execute tool disabled"
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            warn!("Python worker runtime resolved but sandbox is unavailable; python_execute tool disabled");
         }
         Err(e) => {
             warn!("Python runtime not available ({e}), python_execute tool disabled");

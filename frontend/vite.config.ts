@@ -18,6 +18,16 @@ export default defineConfig({
           "node_modules/svelte/src/index-client.js",
         ),
       },
+      // The app-level tests exercise fromStore() in mounted components.
+      // Point Vitest at the client store entry so those helpers participate
+      // in browser-side reactivity instead of the server fallback module.
+      {
+        find: /^svelte\/store$/,
+        replacement: path.resolve(
+          __dirname,
+          "node_modules/svelte/src/store/index-client.js",
+        ),
+      },
     ],
   },
   server: {

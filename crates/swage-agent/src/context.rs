@@ -76,6 +76,10 @@ impl AgentToolContext {
 }
 
 impl ToolContext for AgentToolContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn agent_id(&self) -> &str {
         &self.agent_id
     }

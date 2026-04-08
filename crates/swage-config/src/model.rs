@@ -163,6 +163,9 @@ impl Default for ToolPermissionConfig {
 pub struct ToolConfig {
     /// Maximum seconds a shell command may run before being killed.
     pub shell_timeout_secs: u64,
+    /// Python execution settings shared by python-backed features.
+    #[serde(default)]
+    pub python_execute: PythonExecuteToolConfig,
     /// Output truncation threshold (bytes) applied to all tool results.
     pub max_output_bytes: usize,
     /// Optional plugin directory scanned at gateway startup.
@@ -179,10 +182,56 @@ impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             shell_timeout_secs: 30,
+            python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
             plugin_directory: None,
             search: None,
             permissions: ToolPermissionConfig::default(),
+        }
+    }
+}
+
+/// Runtime discovery policy for Python-backed features.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PythonRuntimePolicy {
+    #[default]
+    BundledThenSystem,
+}
+
+/// Settings for child-process Python execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PythonExecuteToolConfig {
+    pub enabled: bool,
+    pub timeout_secs: u64,
+    pub startup_timeout_secs: u64,
+    pub idle_ttl_secs: u64,
+    pub warm_target: usize,
+    pub max_workers: usize,
+    pub runtime_policy: PythonRuntimePolicy,
+    pub runtime_path: Option<String>,
+    pub require_sandbox: bool,
+}
+
+fn default_python_max_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().min(8))
+        .unwrap_or(1)
+        .max(1)
+}
+
+impl Default for PythonExecuteToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_secs: 30,
+            startup_timeout_secs: 10,
+            idle_ttl_secs: 60,
+            warm_target: 1,
+            max_workers: default_python_max_workers(),
+            runtime_policy: PythonRuntimePolicy::BundledThenSystem,
+            runtime_path: None,
+            require_sandbox: true,
         }
     }
 }

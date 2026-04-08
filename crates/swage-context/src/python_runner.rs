@@ -6,7 +6,7 @@
 //!
 //! The trait accepts pre-boxed `ContextElement` slices and a `Tokeniser` so
 //! the runner can construct the per-element data structures expected by the
-//! Python runtime (e.g. `AssemblyData` in `swage-python::assembly_bindings`).
+//! Python worker runtime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -81,8 +81,8 @@ impl std::fmt::Display for PythonAssemblyError {
 /// Runs a Python assembly script with pre-computed element data.
 ///
 /// Implementors convert the provided `ContextElement` slices into the element
-/// data format expected by the Python runtime, then delegate to the underlying
-/// Python interpreter (e.g. `execute_assembly` in `swage-python::assembly`).
+/// data format expected by the Python worker runtime, then delegate to the
+/// underlying Python execution backend.
 ///
 /// The trait is `Send + Sync` so a shared reference can be passed across the
 /// async assembly call chain without additional wrapping.

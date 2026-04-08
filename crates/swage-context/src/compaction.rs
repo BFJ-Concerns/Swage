@@ -142,7 +142,7 @@ impl Default for TruncationCompactor {
 ///
 /// Collected during the first pass of assembly, then dispatched concurrently
 /// by [`CompactionExecutor::execute_pending`] in the second pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingCompaction {
     /// Name of the element being compacted (e.g. `"history"`, `"memory"`).
     pub element_name: String,

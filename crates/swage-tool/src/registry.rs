@@ -21,7 +21,6 @@ const PROTECTED_NAMES: &[&str] = &[
     "url_fetch",
     "memory",
     "python_execute",
-    "python_dispatch",
     "workspace",
     "delegate",
 ];

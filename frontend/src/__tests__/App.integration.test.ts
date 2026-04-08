@@ -1,0 +1,284 @@
+// @vitest-environment jsdom
+/**
+ * App-level integration tests.
+ *
+ * These tests mount the real root component and let it wire the actual stores,
+ * router, and child components together. Only the network boundary is mocked:
+ * HTTP API clients and the WebSocket client factory.
+ *
+ * The goal is to prove user journeys rather than isolated implementation details:
+ *   - startup restores a deep-linked conversation
+ *   - creating a conversation updates URL and connection state
+ *   - sending a message flows through optimistic UI, streaming, and completion
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync, mount, unmount } from "svelte";
+
+import App from "../App.svelte";
+import * as conversationsApi from "../lib/api/conversations";
+import * as projectsApi from "../lib/api/projects";
+import type {
+  ClientEvent,
+  ConnectionStatus,
+  ConversationDetail,
+  ConversationResponse,
+  ConversationSummary,
+  Project,
+  ServerEvent,
+} from "../lib/types";
+
+type MountedComponent = ReturnType<typeof mount>;
+
+const websocketHarness = vi.hoisted(() => {
+  let eventHandler: ((event: ServerEvent) => void) | null = null;
+  let statusHandler: ((status: ConnectionStatus) => void) | null = null;
+
+  const client = {
+    connect: vi.fn(),
+    send: vi.fn<(event: ClientEvent) => void>(),
+    disconnect: vi.fn(),
+    onEvent: vi.fn((handler: (event: ServerEvent) => void) => {
+      eventHandler = handler;
+    }),
+    onStatusChange: vi.fn((handler: (status: ConnectionStatus) => void) => {
+      statusHandler = handler;
+    }),
+  };
+
+  return {
+    client,
+    factory: vi.fn(() => client),
+    fireEvent(event: ServerEvent) {
+      eventHandler?.(event);
+    },
+    fireStatus(status: ConnectionStatus) {
+      statusHandler?.(status);
+    },
+    reset() {
+      eventHandler = null;
+      statusHandler = null;
+      client.connect.mockReset();
+      client.send.mockReset();
+      client.disconnect.mockReset();
+      client.onEvent.mockClear();
+      client.onStatusChange.mockClear();
+      this.factory.mockClear();
+    },
+  };
+});
+
+vi.mock("../lib/api/projects", () => ({
+  listProjects: vi.fn(),
+  createProject: vi.fn(),
+  deleteProject: vi.fn(),
+}));
+
+vi.mock("../lib/api/conversations", () => ({
+  listConversations: vi.fn(),
+  createConversation: vi.fn(),
+  getConversation: vi.fn(),
+  deleteConversation: vi.fn(),
+}));
+
+vi.mock("../lib/api/websocket", () => ({
+  createWebSocketClient: websocketHarness.factory,
+}));
+
+function makeProject(overrides: Partial<Project> = {}): Project {
+  return {
+    id: "proj-default",
+    name: "default",
+    slug: "default",
+    is_default: true,
+    workspace_path: "/tmp/default",
+    created_at: "2026-04-07T12:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeConversationSummary(
+  overrides: Partial<ConversationSummary> = {},
+): ConversationSummary {
+  return {
+    id: "conv-1",
+    created_at: "2026-04-07T12:00:00Z",
+    last_activity: "2026-04-07T12:00:00Z",
+    message_preview: "Earlier message",
+    has_interrupted_turn: false,
+    ...overrides,
+  };
+}
+
+function makeConversationDetail(
+  overrides: Partial<ConversationDetail> = {},
+): ConversationDetail {
+  return {
+    id: "conv-1",
+    project_id: "proj-default",
+    created_at: "2026-04-07T12:00:00Z",
+    last_activity: "2026-04-07T12:00:00Z",
+    messages: [],
+    ...overrides,
+  };
+}
+
+async function settleUi(): Promise<void> {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await Promise.resolve();
+}
+
+function setPath(path: string): void {
+  window.history.replaceState(null, "", path);
+}
+
+describe("App", () => {
+  let component: MountedComponent | undefined;
+
+  beforeEach(() => {
+    websocketHarness.reset();
+    vi.clearAllMocks();
+    setPath("/");
+  });
+
+  afterEach(() => {
+    if (component) {
+      unmount(component);
+      component = undefined;
+    }
+
+    while (document.body.firstChild) {
+      document.body.removeChild(document.body.firstChild);
+    }
+
+    setPath("/");
+  });
+
+  it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
+    const defaultProject = makeProject();
+    const linkedConversation = makeConversationSummary({
+      id: "conv-linked",
+      message_preview: "Deep-linked conversation",
+    });
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
+      linkedConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({
+        id: "conv-linked",
+        messages: [
+          {
+            role: "assistant",
+            content: "Restored from URL",
+            timestamp: "2026-04-07T12:01:00Z",
+            turn_state: "completed",
+          },
+        ],
+      }),
+    );
+
+    setPath("/conversations/conv-linked");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(projectsApi.listProjects).toHaveBeenCalledTimes(1);
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultProject.id);
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
+    expect(window.location.pathname).toBe("/conversations/conv-linked");
+
+    const activePreview = document.querySelector(".conversation-item.active .preview");
+    expect(activePreview?.textContent).toContain("Deep-linked conversation");
+    expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
+  });
+
+  it("creates a conversation from the real app wiring and navigates to it", async () => {
+    const defaultProject = makeProject();
+    const created: ConversationResponse = {
+      id: "conv-new",
+      project_id: defaultProject.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
+    expect(newButton).not.toBeNull();
+
+    flushSync(() => newButton!.click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultProject.id);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
+    expect(window.location.pathname).toBe("/conversations/conv-new");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Send a message to start.",
+    );
+  });
+
+  it("sends a message and finalises a streamed reply through the full app stack", async () => {
+    const defaultProject = makeProject();
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({
+        id: "conv-stream",
+        message_preview: "Earlier message",
+      }),
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: "conv-stream" }),
+    );
+
+    setPath("/conversations/conv-stream");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
+    expect(textarea).not.toBeNull();
+
+    flushSync(() => {
+      textarea!.value = "Hello from the app";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector(".send-btn") as HTMLButtonElement | null;
+    expect(sendButton).not.toBeNull();
+
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.send).toHaveBeenCalledWith({
+      type: "send_message",
+      content: "Hello from the app",
+    });
+    expect(document.querySelector(".message-display")?.textContent).toContain("Hello from the app");
+    expect(document.querySelector(".stop-btn")).not.toBeNull();
+
+    websocketHarness.fireEvent({ type: "token", content: "Streamed " });
+    websocketHarness.fireEvent({ type: "token", content: "reply." });
+    await settleUi();
+
+    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+
+    websocketHarness.fireEvent({
+      type: "turn_complete",
+      turn_id: "turn-123",
+    });
+    await settleUi();
+
+    expect(document.querySelector(".stop-btn")).toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+  });
+});

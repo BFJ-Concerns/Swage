@@ -3,6 +3,8 @@
 // Components read from this store and emit events that trigger updates.
 // The store calls the HTTP API client to persist changes and fetch data.
 
+import { fromStore, get, writable } from "svelte/store";
+
 import type { Project } from "../types";
 import * as api from "../api/projects";
 
@@ -17,12 +19,15 @@ export interface ProjectStore {
 }
 
 export function createProjectStore(): ProjectStore {
-  // Per-instance state — each call creates a fresh, isolated store.
-  // Components read these through the getter properties below;
-  // Svelte's fine-grained reactivity tracks property reads automatically.
-  let projects: Project[] = [];
-  let currentProject: Project | null = null;
-  let isLoading = false;
+  // Back the custom API with real Svelte stores so project changes propagate
+  // into mounted components after async actions complete.
+  const projectsStore = writable<Project[]>([]);
+  const currentProjectStore = writable<Project | null>(null);
+  const isLoadingStore = writable(false);
+
+  const projectsState = fromStore(projectsStore);
+  const currentProjectState = fromStore(currentProjectStore);
+  const isLoadingState = fromStore(isLoadingStore);
 
   return {
     // ---------------------------------------------------------------------------
@@ -30,15 +35,15 @@ export function createProjectStore(): ProjectStore {
     // ---------------------------------------------------------------------------
 
     get projects() {
-      return projects;
+      return projectsState.current;
     },
 
     get currentProject() {
-      return currentProject;
+      return currentProjectState.current;
     },
 
     get isLoading() {
-      return isLoading;
+      return isLoadingState.current;
     },
 
     // ---------------------------------------------------------------------------
@@ -46,30 +51,32 @@ export function createProjectStore(): ProjectStore {
     // ---------------------------------------------------------------------------
 
     async loadProjects() {
-      isLoading = true;
+      isLoadingStore.set(true);
       try {
-        projects = await api.listProjects();
+        const projects = await api.listProjects();
+        projectsStore.set(projects);
 
         // Auto-select the default project on load. The default project is
         // identified by name so it works regardless of its generated ID.
         const defaultProject = projects.find((p) => p.is_default);
         if (defaultProject) {
-          currentProject = defaultProject;
+          currentProjectStore.set(defaultProject);
         }
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
-        isLoading = false;
+        isLoadingStore.set(false);
       }
     },
 
     async selectProject(id) {
+      const projects = get(projectsStore);
       const found = projects.find((p) => p.id === id);
       if (!found) {
         throw new Error(`Project not found: ${id}`);
       }
       // Selection is purely local — no extra round-trip needed since we
       // already have the full project data from loadProjects.
-      currentProject = found;
+      currentProjectStore.set(found);
     },
 
     async createProject(name, workspacePath) {
@@ -78,11 +85,12 @@ export function createProjectStore(): ProjectStore {
         workspace_path: workspacePath,
       });
 
-      projects = [...projects, created];
-      currentProject = created;
+      projectsStore.update((projects) => [...projects, created]);
+      currentProjectStore.set(created);
     },
 
     async deleteProject(id) {
+      const projects = get(projectsStore);
       const target = projects.find((p) => p.id === id);
 
       // Guard: the default project is the fallback for all conversations
@@ -95,11 +103,11 @@ export function createProjectStore(): ProjectStore {
       await api.deleteProject(id);
 
       const remaining = projects.filter((p) => p.id !== id);
-      projects = remaining;
+      projectsStore.set(remaining);
 
       // If the deleted project was current, move focus to the next one.
-      if (currentProject?.id === id) {
-        currentProject = remaining.length > 0 ? remaining[0] : null;
+      if (get(currentProjectStore)?.id === id) {
+        currentProjectStore.set(remaining.length > 0 ? remaining[0] : null);
       }
     },
   };

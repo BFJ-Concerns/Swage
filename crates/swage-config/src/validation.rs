@@ -37,6 +37,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         // bundles, require_approval) which live at the [tools] level in TOML.
         "tools" => &[
             "shell_timeout_secs",
+            "python_execute",
             "max_output_bytes",
             "plugin_directory",
             "search",
@@ -124,6 +125,7 @@ fn check_field_type(
         ("lifecycle", "idle_timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
+        ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),
         ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "plugin_directory") => ("string", matches!(value, Value::String(_))),
         ("tools", "search") => ("table", matches!(value, Value::Table(_))),
@@ -340,7 +342,113 @@ fn check_field_semantics(
                 }
             }
         }
+        ("tools", "python_execute") => {
+            if let Value::Table(table) = value {
+                problems.extend(validate_python_execute_table(table, file_path, field_path));
+            }
+        }
         _ => {}
+    }
+
+    problems
+}
+
+fn validate_python_execute_table(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+) -> Vec<ConfigProblem> {
+    const KNOWN_FIELDS: &[&str] = &[
+        "enabled",
+        "timeout_secs",
+        "startup_timeout_secs",
+        "idle_ttl_secs",
+        "warm_target",
+        "max_workers",
+        "runtime_policy",
+        "runtime_path",
+        "require_sandbox",
+    ];
+
+    let mut problems = Vec::new();
+
+    for (name, value) in table {
+        let nested_path = format!("{field_path}.{name}");
+        if !KNOWN_FIELDS.contains(&name.as_str()) {
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::UnknownField {
+                    section: "tools.python_execute".to_string(),
+                    name: name.clone(),
+                },
+            ));
+            continue;
+        }
+
+        let type_ok = match name.as_str() {
+            "enabled" | "require_sandbox" => matches!(value, Value::Boolean(_)),
+            "timeout_secs" | "startup_timeout_secs" | "idle_ttl_secs" => {
+                matches!(value, Value::Integer(_))
+            }
+            "warm_target" | "max_workers" => matches!(value, Value::Integer(_)),
+            "runtime_policy" | "runtime_path" => matches!(value, Value::String(_)),
+            _ => true,
+        };
+
+        if !type_ok {
+            let expected = match name.as_str() {
+                "enabled" | "require_sandbox" => "boolean",
+                "runtime_policy" | "runtime_path" => "string",
+                _ => "integer",
+            };
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::TypeError {
+                    expected: expected.to_string(),
+                    found: toml_type_name(value).to_string(),
+                },
+            ));
+            continue;
+        }
+
+        match (name.as_str(), value) {
+            ("timeout_secs" | "startup_timeout_secs" | "idle_ttl_secs", Value::Integer(raw))
+                if *raw < 1 =>
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("{name} must be at least 1, got {raw}"),
+                    },
+                ));
+            }
+            ("warm_target" | "max_workers", Value::Integer(raw)) if *raw < 1 => {
+                problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("{name} must be at least 1, got {raw}"),
+                    },
+                ));
+            }
+            ("runtime_policy", Value::String(policy))
+                if policy.to_lowercase() != "bundled_then_system" =>
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "unknown runtime_policy '{policy}'; expected bundled_then_system"
+                        ),
+                    },
+                ));
+            }
+            _ => {}
+        }
     }
 
     problems

@@ -35,6 +35,10 @@ struct SandboxToolContext {
 }
 
 impl ToolContext for SandboxToolContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn agent_id(&self) -> &str {
         "sandbox"
     }

@@ -1,18 +1,17 @@
-//! Embedded Python runtime for Programmatic Tool Calling (PTC).
+//! Child-process Python runtime support.
 //!
-//! Provides a bundled Python environment (via PyO3) that executes agent-generated
-//! Python code with access to Swage's built-in tools as callable functions in a
-//! `swage` namespace module. The gateway registers `python_execute` as a tool;
-//! this crate handles the runtime, tool bindings, and execution machinery.
+//! Provides worker-host infrastructure for `python_execute`, programmable
+//! assembly, and topology definition execution.
 
-pub mod assembly;
-pub mod assembly_bindings;
-pub mod bindings;
-pub mod dispatch;
-pub mod execute;
+mod blocking;
+
 pub mod runner;
-pub mod runtime;
+pub mod runtime_resolver;
 pub mod topology;
-pub mod topology_bindings;
+pub mod worker_host;
+pub mod worker_pool;
+pub mod worker_protocol;
 
-pub use runner::ConcreteAssemblyRunner;
+pub use runner::{ConcreteAssemblyRunner, ConfiguredAssemblyRunner};
+pub use worker_host::{NestedToolHost, PythonExecutionResult, PythonWorkerError, PythonWorkerRuntime};
+pub use worker_pool::{WorkerLease, WorkerPool};

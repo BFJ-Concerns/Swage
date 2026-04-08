@@ -62,6 +62,11 @@ impl ChildProcessManager {
         self.pid
     }
 
+    /// Take ownership of the child's stdin pipe, if one was configured.
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
     /// Returns true if the child process is still running.
     ///
     /// Uses a non-blocking `try_wait` — does not block the caller.

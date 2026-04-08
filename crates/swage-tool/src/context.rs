@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::any::Any;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,7 @@ pub struct UserInfo {
 /// constraints, and optional user identity — without exposing agent internals.
 /// Must be object-safe so tools can accept `&dyn ToolContext`.
 pub trait ToolContext: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
     fn agent_id(&self) -> &str;
     fn session_id(&self) -> &str;
     fn working_directory(&self) -> &Path;
@@ -79,6 +81,10 @@ impl SerializableToolContext {
 }
 
 impl ToolContext for SerializableToolContext {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn agent_id(&self) -> &str {
         &self.agent_id
     }
@@ -139,6 +145,10 @@ impl MockToolContext {
 }
 
 impl ToolContext for MockToolContext {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn agent_id(&self) -> &str {
         &self.agent_id
     }

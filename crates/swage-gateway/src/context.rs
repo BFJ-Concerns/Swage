@@ -3,8 +3,6 @@
 //! `ProjectContext` is set as a tokio task-local before each tool execution
 //! during a turn, giving tools (e.g., MemoryTool) access to the current
 //! project without requiring it to be threaded through every function call.
-//!
-//! Uses the same pattern as `PythonExecuteContext` in `tool/python_execute.rs`.
 
 use std::path::PathBuf;
 

@@ -1,12 +1,8 @@
-//! Cross-task integration tests for Phase 05: Programmatic Tool Calling.
+//! Cross-task integration tests for programmatic tool calling.
 //!
-//! These tests verify interactions that emerge only when multiple PTC tasks'
-//! outputs combine. Each test identifies which tasks it spans and why no single
-//! worker could write it.
-//!
-//! All tests currently FAIL because `python_execute` is not yet registered in
-//! the tool registry. Once the implementations are complete and PythonExecuteTool
-//! is registered, they should pass.
+//! These tests exercise the child-worker `python_execute` path end to end:
+//! worker execution, nested tool dispatch, nested-tool event delivery, and
+//! persistence of `parent_call_id` for reloaded conversation detail.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -83,11 +79,12 @@ impl LlmProvider for MultiRoundProvider {
 // Test helpers (mirrors integration.rs patterns)
 // ---------------------------------------------------------------------------
 
-/// Start a test server with PTC tools registered.
+/// Start a test server with programmatic tool-calling tools registered.
 ///
-/// Creates a PythonRuntime (system Python) and registers PythonExecuteTool
-/// alongside the EchoTool. The EchoTool acts as a sub-tool target — Python
-/// code calls `swage.shell("echo hi")` which dispatches to it.
+/// Registers `python_execute` with the real child-worker runtime and a warm
+/// worker pool alongside the EchoTool. The EchoTool acts as a sub-tool target;
+/// Python code calls `swage.shell("echo hi")["output"]` which dispatches to
+/// the mock `shell` tool below.
 async fn start_ptc_test_server(
     provider: impl LlmProvider + 'static,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
@@ -103,11 +100,15 @@ async fn start_ptc_test_server(
     ]));
 
     // Create the PythonExecuteTool with access to sub-tools and storage.
-    let runtime = swage_python::runtime::PythonRuntime::new(None)
-        .expect("system Python must be available for PTC integration tests");
+    let runtime = swage_python::PythonWorkerRuntime::new(
+        swage_config::model::PythonExecuteToolConfig::default(),
+    )
+    .expect("Python worker runtime must be available for PTC integration tests");
+    let pool = swage_python::WorkerPool::new(Arc::new(runtime))
+        .expect("worker pool should initialise for PTC integration tests");
     let ptc_tool = swage_gateway::tool::python_execute::PythonExecuteTool::new(
-        Arc::new(runtime),
-        Duration::from_secs(30),
+        Arc::clone(pool.runtime()),
+        Arc::clone(&pool),
         sub_dispatcher,
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
     );
@@ -169,9 +170,10 @@ impl swage_gateway::tool::Tool for EchoTool {
 
 /// Mock shell tool — simulates the real `shell` tool for PTC tests.
 ///
-/// Python code calls `swage.shell("echo hello")` which dispatches to the tool
-/// named `"shell"` with `{"command": "echo hello"}`. This mock just returns
-/// the command string as output, avoiding real subprocess execution in tests.
+/// Python code calls `swage.shell("echo hello")["output"]`, which dispatches
+/// to the tool named `"shell"` with `{"command": "echo hello"}`. This mock
+/// just returns the command string as output, avoiding real subprocess
+/// execution in tests.
 struct MockShellTool;
 
 #[async_trait]
@@ -284,23 +286,19 @@ async fn collect_events_until_complete(stream: &mut WsStream) -> Vec<Value> {
 /// Python code calling multiple tool functions, chaining results.
 ///
 /// Journey: Core Journey 2 (Task Execution) — PTC proof of delivery
-/// Spans: PythonRuntime [z431], execute_code [vfey], swage bindings [3qt4],
-///   ToolDispatcher [zte4], GatewayToolDispatcher [2p6f],
-///   PythonExecuteTool [k4dh]
+/// Spans: Python worker runtime, nested tool runtime, ToolDispatcher,
+///   PythonExecuteTool
 ///
 /// Proves: the agent writes Python code that calls multiple tool functions,
 /// processes intermediate results with variables and control flow, and returns
 /// a correct answer. This is the canonical proof of delivery from the phase doc.
 ///
-/// Currently fails: python_execute is not registered, so the tool call returns
-/// an error instead of executing Python code. Once PythonExecuteTool is
-/// implemented and registered in start_ptc_test_server, this test should pass.
 #[tokio::test(flavor = "multi_thread")]
 async fn ptc_chained_tool_calls_produce_correct_output() {
     // Python code that the model would submit: call two tools and combine.
     let python_code = r#"
-result1 = swage.shell("echo hello")
-result2 = swage.shell("echo world")
+result1 = swage.shell("echo hello")["output"]
+result2 = swage.shell("echo world")["output"]
 print(f"{result1.strip()} {result2.strip()}")
 "#;
 
@@ -390,20 +388,17 @@ print(f"{result1.strip()} {result2.strip()}")
 /// Sub-tool calls from Python emit events with parent_call_id for nesting.
 ///
 /// Journey: Core Journey 2 (Task Execution) — activity display nesting
-/// Spans: GatewayToolDispatcher [2p6f], sub-tool events [apt7],
-///   PythonExecuteTool [k4dh], frontend nesting [kp7w]
+/// Spans: nested tool runtime, sub-tool events, PythonExecuteTool,
+///   frontend nesting
 ///
 /// Proves: when Python code calls swage.shell(), the WebSocket receives
 /// tool_start/tool_end events with a parent_call_id linking them to the
 /// enclosing python_execute call. The frontend uses this to render nesting.
 ///
-/// Currently fails: python_execute is not registered, so no sub-tool events
-/// are emitted. Even if it were registered, the current ServerEvent lacks
-/// parent_call_id. Both must be implemented for this test to pass.
 #[tokio::test(flavor = "multi_thread")]
 async fn ptc_sub_tool_events_include_parent_call_id() {
     // Simple Python code calling one tool.
-    let python_code = r#"result = swage.shell("echo nested")"#;
+    let python_code = r#"result = swage.shell("echo nested")["output"]"#;
 
     let round_1 = vec![
         StreamChunk::ToolUse {
@@ -498,14 +493,11 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
 /// Python errors surface as tool result with traceback.
 ///
 /// Journey: Core Journey 2 (Task Execution) — error surfacing
-/// Spans: execute_code [vfey], PythonExecuteTool [k4dh],
-///   sub-tool events [apt7]
+/// Spans: Python worker runtime, PythonExecuteTool, sub-tool events
 ///
-/// Proves: when Python code raises an error, the full traceback appears as
-/// the tool result — visible to both the model and the user in the activity
-/// display. The model can read the error and self-correct or explain.
-///
-/// Currently fails: python_execute is not registered.
+/// Proves: when Python code raises an error, the tool call fails and the
+/// traceback appears in the error result visible to both the model and the
+/// user in the activity display.
 #[tokio::test(flavor = "multi_thread")]
 async fn ptc_python_error_surfaces_as_traceback() {
     // Code with a deliberate runtime error.
@@ -561,7 +553,7 @@ x = 1 / 0  # ZeroDivisionError
 
     let events = collect_events_until_complete(&mut ws_read).await;
 
-    // The python_execute tool_end should contain a traceback.
+    // The python_execute tool_end should report failure with a traceback.
     let ptc_tool_end = events
         .iter()
         .find(|e| e["type"] == "tool_end" && e["tool"] == "python_execute");
@@ -575,14 +567,13 @@ x = 1 / 0  # ZeroDivisionError
             .collect::<Vec<_>>()
     );
 
-    // Under agent delegation, the result is a structured object with an
-    // "output" key. For errors, PythonExecuteTool returns the traceback
-    // in the output field. Fall back to checking the result as a flat
-    // string for backwards compatibility.
-    let result_val = &ptc_tool_end.unwrap()["result"];
-    let result_text = result_val["output"]
-        .as_str()
-        .unwrap_or_else(|| result_val.as_str().unwrap_or(""));
+    let ptc_tool_end = ptc_tool_end.unwrap();
+    assert_eq!(
+        ptc_tool_end["status"], "error",
+        "python_execute should fail when Python raises; got: {ptc_tool_end}"
+    );
+
+    let result_text = ptc_tool_end["result"].as_str().unwrap_or("");
     assert!(
         result_text.contains("ZeroDivisionError"),
         "Python runtime errors should produce a traceback containing the \
@@ -593,17 +584,16 @@ x = 1 / 0  # ZeroDivisionError
 /// Sub-tool calls from Python persist in conversation history with nesting.
 ///
 /// Journey: Core Journey 2 (Task Execution) — activity display persistence
-/// Spans: GatewayToolDispatcher [2p6f], sub-tool events [apt7],
-///   PythonExecuteTool [k4dh], tool-call-storage, api-tool-calls
+/// Spans: nested tool runtime, sub-tool events, PythonExecuteTool,
+///   tool-call storage, API tool-call views
 ///
 /// Proves: after a turn with python_execute, the HTTP conversation detail
 /// API returns tool_calls with parent_call_id — so the frontend can render
 /// nested sub-tool calls on page reload, not just from live WebSocket events.
 ///
-/// Currently fails: python_execute is not registered.
 #[tokio::test(flavor = "multi_thread")]
 async fn ptc_sub_tool_calls_persist_with_parent_id() {
-    let python_code = r#"swage.shell("echo persisted")"#;
+    let python_code = r#"swage.shell("echo persisted")["output"]"#;
 
     let round_1 = vec![
         StreamChunk::ToolUse {

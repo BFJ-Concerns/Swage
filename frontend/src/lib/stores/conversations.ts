@@ -3,6 +3,8 @@
 // Components read from this store and emit events that trigger updates.
 // The store calls the HTTP API client to persist changes and fetch data.
 
+import { fromStore, get, writable } from "svelte/store";
+
 import type { ConversationSummary, ConversationDetail, MessageView } from "../types";
 import * as api from "../api/conversations";
 
@@ -38,12 +40,15 @@ function sortByRecency(list: ConversationSummary[]): ConversationSummary[] {
 }
 
 export function createConversationStore(): ConversationStore {
-  // Per-instance state — each call creates a fresh, isolated store.
-  // Components read these through the getter properties below;
-  // Svelte's fine-grained reactivity tracks property reads automatically.
-  let conversations: ConversationSummary[] = [];
-  let activeConversation: ConversationDetail | null = null;
-  let isLoading = false;
+  // Back the custom API with real Svelte stores so async updates re-render
+  // mounted components instead of leaving them stuck on initial state.
+  const conversationsStore = writable<ConversationSummary[]>([]);
+  const activeConversationStore = writable<ConversationDetail | null>(null);
+  const isLoadingStore = writable(false);
+
+  const conversationsState = fromStore(conversationsStore);
+  const activeConversationState = fromStore(activeConversationStore);
+  const isLoadingState = fromStore(isLoadingStore);
 
   function updateConversationSummary(
     conversationId: string,
@@ -53,6 +58,7 @@ export function createConversationStore(): ConversationStore {
       turn_state: MessageView["turn_state"];
     },
   ): void {
+    const conversations = get(conversationsStore);
     const updatedSummary = conversations.find((c) => c.id === conversationId);
     if (!updatedSummary) return;
 
@@ -64,9 +70,11 @@ export function createConversationStore(): ConversationStore {
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
     };
 
-    conversations = sortByRecency(
-      conversations.map((conversation) =>
-        conversation.id === conversationId ? nextSummary : conversation,
+    conversationsStore.set(
+      sortByRecency(
+        conversations.map((conversation) =>
+          conversation.id === conversationId ? nextSummary : conversation,
+        ),
       ),
     );
   }
@@ -79,9 +87,10 @@ export function createConversationStore(): ConversationStore {
       turn_state: MessageView["turn_state"];
     },
   ): void {
+    const activeConversation = get(activeConversationStore);
     if (!activeConversation) return;
 
-    activeConversation = {
+    activeConversationStore.set({
       ...activeConversation,
       last_activity: message.timestamp,
       messages: [
@@ -93,7 +102,7 @@ export function createConversationStore(): ConversationStore {
           turn_state: message.turn_state,
         },
       ],
-    };
+    });
 
     updateConversationSummary(activeConversation.id, message);
   }
@@ -104,15 +113,15 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     get conversations() {
-      return conversations;
+      return conversationsState.current;
     },
 
     get activeConversation() {
-      return activeConversation;
+      return activeConversationState.current;
     },
 
     get isLoading() {
-      return isLoading;
+      return isLoadingState.current;
     },
 
     // ---------------------------------------------------------------------------
@@ -120,22 +129,22 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(projectId) {
-      isLoading = true;
+      isLoadingStore.set(true);
       try {
         const list = await api.listConversations(projectId);
-        conversations = sortByRecency(list);
+        conversationsStore.set(sortByRecency(list));
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
-        isLoading = false;
+        isLoadingStore.set(false);
       }
     },
 
     async selectConversation(id) {
-      isLoading = true;
+      isLoadingStore.set(true);
       try {
-        activeConversation = await api.getConversation(id);
+        activeConversationStore.set(await api.getConversation(id));
       } finally {
-        isLoading = false;
+        isLoadingStore.set(false);
       }
     },
 
@@ -165,22 +174,24 @@ export function createConversationStore(): ConversationStore {
       };
 
       // Prepend: the freshly created conversation is the most recent.
-      conversations = [summary, ...conversations];
-      activeConversation = detail;
+      conversationsStore.update((conversations) => [summary, ...conversations]);
+      activeConversationStore.set(detail);
     },
 
     async deleteConversation(id) {
       await api.deleteConversation(id);
 
-      conversations = conversations.filter((c) => c.id !== id);
+      const remaining = get(conversationsStore).filter((c) => c.id !== id);
+      conversationsStore.set(remaining);
 
       // If the deleted conversation was active, select the next most recent.
       // The list is already sorted by last_activity desc, so index 0 is best.
+      const activeConversation = get(activeConversationStore);
       if (activeConversation?.id === id) {
-        if (conversations.length > 0) {
-          activeConversation = await api.getConversation(conversations[0].id);
+        if (remaining.length > 0) {
+          activeConversationStore.set(await api.getConversation(remaining[0].id));
         } else {
-          activeConversation = null;
+          activeConversationStore.set(null);
         }
       }
     },
@@ -206,8 +217,9 @@ export function createConversationStore(): ConversationStore {
     async refreshActiveConversation() {
       // Called after WebSocket reconnect to reconcile any state changes
       // that happened while the connection was down.
+      const activeConversation = get(activeConversationStore);
       if (!activeConversation) return;
-      activeConversation = await api.getConversation(activeConversation.id);
+      activeConversationStore.set(await api.getConversation(activeConversation.id));
     },
   };
 }

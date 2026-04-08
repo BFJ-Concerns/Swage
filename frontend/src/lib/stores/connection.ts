@@ -4,6 +4,8 @@
 // connection status for the UI indicator and manages connect/disconnect
 // as the active conversation changes.
 
+import { fromStore, get, writable } from "svelte/store";
+
 import type { ConnectionStatus, ServerEvent } from "../types";
 import { createWebSocketClient } from "../api/websocket";
 import type { WebSocketClient } from "../api/websocket";
@@ -32,9 +34,13 @@ export function createConnectionStore(
 ): ConnectionStore {
   const wsClient = (options?.wsClientFactory ?? createWebSocketClient)();
 
-  // Mutable state exposed via getters so reads always reflect current values.
-  let status: ConnectionStatus = "disconnected";
-  let errorMessage: string | null = null;
+  // Back the getter API with Svelte stores so connection state changes re-render
+  // components that read them after mount.
+  const statusStore = writable<ConnectionStatus>("disconnected");
+  const errorMessageStore = writable<string | null>(null);
+
+  const statusState = fromStore(statusStore);
+  const errorMessageState = fromStore(errorMessageStore);
 
   const serverEventHandlers: ((event: ServerEvent) => void)[] = [];
 
@@ -47,9 +53,11 @@ export function createConnectionStore(
   });
 
   wsClient.onStatusChange((newStatus) => {
-    // At this point `status` holds the previous value — check it before
+    const previousStatus = get(statusStore);
+
+    // At this point `previousStatus` holds the previous value — check it before
     // updating so we can detect the reconnecting → connected transition.
-    if (status === "reconnecting" && newStatus === "connected") {
+    if (previousStatus === "reconnecting" && newStatus === "connected") {
       options?.onReconnect?.();
     }
 
@@ -57,29 +65,30 @@ export function createConnectionStore(
       // Surface a human-readable message. The most common cause of "error"
       // before the connection ever opens is an HTTP 409 Conflict rejection
       // (another tab already has this conversation open).
-      errorMessage =
-        "Connection failed. This conversation may already be open in another tab.";
+      errorMessageStore.set(
+        "Connection failed. This conversation may already be open in another tab.",
+      );
     } else {
-      errorMessage = null;
+      errorMessageStore.set(null);
     }
 
-    status = newStatus;
+    statusStore.set(newStatus);
   });
 
   // ---- Public interface --------------------------------------------------------
 
   return {
     get status(): ConnectionStatus {
-      return status;
+      return statusState.current;
     },
 
     get errorMessage(): string | null {
-      return errorMessage;
+      return errorMessageState.current;
     },
 
     connectTo(conversationId: string): void {
       // Clear any stale error from a previous attempt before connecting.
-      errorMessage = null;
+      errorMessageStore.set(null);
       wsClient.connect(conversationId);
     },
 

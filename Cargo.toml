@@ -67,9 +67,6 @@ regex = "1"
 # URL handling
 url = "2"
 
-# Python embedding
-pyo3 = { version = "0.24", features = ["auto-initialize", "abi3-py39"] }
-
 # Frontend embedding
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"

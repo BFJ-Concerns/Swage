@@ -1,20 +1,17 @@
-//! Python topology definition execution.
+//! Python topology definition execution via child workers.
 
-use std::ffi::CString;
 use std::fs;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use swage_config::model::PythonExecuteToolConfig;
 use swage_topology::{
-    TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem, validate_graph,
+    validate_graph, TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem,
 };
-use tracing::debug;
 
-use crate::topology_bindings::{inject_topology_module, py_any_to_json};
+use crate::blocking::run_worker_future;
+use crate::worker_host::PythonWorkerRuntime;
+use crate::worker_protocol::TopologyExecutionPayload;
 
 #[derive(Debug)]
 pub enum TopologyDefinitionError {
@@ -48,40 +45,21 @@ impl std::fmt::Display for TopologyDefinitionError {
 
 impl std::error::Error for TopologyDefinitionError {}
 
-const TOPOLOGY_WRAPPER: &str = concat!(
-    "import traceback as _tb\n",
-    "_topology_err = None\n",
-    "_topology_err_kind = None\n",
-    "_topology_result = None\n",
-    "_topology_ns = {}\n",
-    "try:\n",
-    "    ",
-    "exec",
-    "(compile(_topology_code, _topology_path, '",
-    "exec",
-    "'), _topology_ns)\n",
-    "except SyntaxError:\n",
-    "    _topology_err_kind = 'syntax'\n",
-    "    _topology_err = _tb.format_exc()\n",
-    "except BaseException:\n",
-    "    _topology_err_kind = 'runtime'\n",
-    "    _topology_err = _tb.format_exc()\n",
-    "if _topology_err is None:\n",
-    "    if 'build_topology' not in _topology_ns:\n",
-    "        _topology_err_kind = 'runtime'\n",
-    "        _topology_err = 'topology file does not define a build_topology() function'\n",
-    "    else:\n",
-    "        try:\n",
-    "            _topology_result = _topology_ns['build_topology']()\n",
-    "        except KeyboardInterrupt:\n",
-    "            _topology_err_kind = 'timeout'\n",
-    "            _topology_err = 'topology execution interrupted by timeout'\n",
-    "        except BaseException:\n",
-    "            _topology_err_kind = 'runtime'\n",
-    "            _topology_err = _tb.format_exc()\n",
-);
-
 pub fn execute_topology_definition(
+    path: &Path,
+    timeout: Duration,
+    catalog: TopologyEntityCatalog,
+) -> Result<TopologyGraph, TopologyDefinitionError> {
+    execute_topology_definition_with_config(
+        &PythonExecuteToolConfig::default(),
+        path,
+        timeout,
+        catalog,
+    )
+}
+
+pub fn execute_topology_definition_with_config(
+    python_config: &PythonExecuteToolConfig,
     path: &Path,
     timeout: Duration,
     catalog: TopologyEntityCatalog,
@@ -93,7 +71,13 @@ pub fn execute_topology_definition(
         ))
     })?;
 
-    execute_topology_source(&code, &path.display().to_string(), timeout, catalog)
+    execute_topology_source_with_config(
+        python_config,
+        &code,
+        &path.display().to_string(),
+        timeout,
+        catalog,
+    )
 }
 
 pub fn execute_topology_source(
@@ -102,108 +86,62 @@ pub fn execute_topology_source(
     timeout: Duration,
     catalog: TopologyEntityCatalog,
 ) -> Result<TopologyGraph, TopologyDefinitionError> {
-    let code = code.to_string();
-    let path_str = source_name.to_string();
-    let (result_tx, result_rx) = mpsc::channel();
-
-    let handle = thread::spawn(move || {
-        let result = Python::with_gil(|py| run_topology(py, &code, &path_str, catalog));
-        result_tx.send(result).ok();
-    });
-
-    match result_rx.recv_timeout(timeout) {
-        Ok(result) => {
-            let _ = handle.join();
-            result
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            debug!(
-                timeout_secs = timeout.as_secs(),
-                "topology definition timed out, interrupting"
-            );
-            unsafe { pyo3::ffi::PyErr_SetInterrupt() };
-            let _ = result_rx.recv_timeout(Duration::from_secs(2));
-            Err(TopologyDefinitionError::Timeout(format!(
-                "topology definition exceeded {}s timeout",
-                timeout.as_secs_f64()
-            )))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(TopologyDefinitionError::Runtime(
-            "topology definition terminated: internal error (thread lost)".into(),
-        )),
-    }
+    execute_topology_source_with_config(
+        &PythonExecuteToolConfig::default(),
+        code,
+        source_name,
+        timeout,
+        catalog,
+    )
 }
 
-fn run_topology(
-    py: Python<'_>,
+pub fn execute_topology_source_with_config(
+    python_config: &PythonExecuteToolConfig,
     code: &str,
-    path: &str,
+    source_name: &str,
+    timeout: Duration,
     catalog: TopologyEntityCatalog,
 ) -> Result<TopologyGraph, TopologyDefinitionError> {
-    inject_topology_module(py).map_err(|e| {
-        TopologyDefinitionError::Runtime(format!("failed to inject swage_topology module: {e}"))
-    })?;
+    let runtime = PythonWorkerRuntime::new(python_config.clone())
+        .map_err(|error| TopologyDefinitionError::Runtime(error.to_string()))?;
+    let payload = TopologyExecutionPayload {
+        code: code.to_string(),
+        path: source_name.to_string(),
+        catalog: catalog.clone(),
+    };
+    let execution = run_worker_future(
+        move || async move { runtime.execute_topology(payload, timeout).await },
+        "topology execution",
+    )
+    .map_err(|error| classify_error(error.to_string()))?;
 
-    let locals = PyDict::new(py);
-    locals.set_item("_topology_code", code).unwrap();
-    locals.set_item("_topology_path", path).unwrap();
-
-    let wrapper = CString::new(TOPOLOGY_WRAPPER)
-        .expect("topology wrapper template should not contain NUL bytes");
-    let wrapper_cstr = std::ffi::CStr::from_bytes_with_nul(wrapper.as_bytes_with_nul())
-        .expect("CString should produce valid CStr");
-
-    if let Err(err) = py.run(wrapper_cstr, None, Some(&locals)) {
-        return Err(TopologyDefinitionError::Runtime(format!(
-            "internal topology wrapper error: {err}"
-        )));
-    }
-
-    let error_kind = locals
-        .get_item("_topology_err_kind")
-        .map_err(|err| TopologyDefinitionError::Runtime(err.to_string()))?
-        .and_then(|value| value.extract::<String>().ok());
-    let error_message = locals
-        .get_item("_topology_err")
-        .map_err(|err| TopologyDefinitionError::Runtime(err.to_string()))?
-        .and_then(|value| value.extract::<String>().ok());
-
-    if let Some(kind) = error_kind {
-        let message = error_message.unwrap_or_else(|| "unknown topology error".into());
-        return Err(match kind.as_str() {
-            "syntax" => TopologyDefinitionError::Syntax(message),
-            "timeout" => TopologyDefinitionError::Timeout(message),
-            _ => TopologyDefinitionError::Runtime(message),
+    if let Some(traceback) = execution.traceback {
+        return Err(match execution.exception_type.as_deref() {
+            Some("SyntaxError") => TopologyDefinitionError::Syntax(traceback),
+            Some("TimeoutError") => TopologyDefinitionError::Timeout(traceback),
+            _ => TopologyDefinitionError::Runtime(traceback),
         });
     }
 
-    let topology_value = locals
-        .get_item("_topology_result")
-        .map_err(|err| TopologyDefinitionError::Runtime(err.to_string()))?
-        .ok_or_else(|| {
-            TopologyDefinitionError::Runtime("build_topology() returned no topology result".into())
-        })?;
-
-    let json = py_any_to_json(&topology_value).map_err(|err| {
+    let graph: TopologyGraph = serde_json::from_value(execution.result.ok_or_else(|| {
+        TopologyDefinitionError::Runtime("build_topology() returned no topology result".to_string())
+    })?)
+    .map_err(|error| {
         TopologyDefinitionError::Deserialisation(format!(
-            "failed to convert Python topology to JSON: {err}"
+            "failed to deserialize topology definition: {error}"
         ))
     })?;
-    let graph: TopologyGraph = serde_json::from_value(json).map_err(|err| {
-        TopologyDefinitionError::Deserialisation(format!(
-            "failed to deserialize topology definition: {err}"
-        ))
-    })?;
-
-    let mut catalog = catalog;
-    for node in &graph.nodes {
-        if let Some(task_name) = &node.task_name {
-            catalog.known_tasks.insert(task_name.clone());
-        }
-    }
 
     validate_graph(&graph, &catalog).map_err(TopologyDefinitionError::Validation)?;
     Ok(graph)
+}
+
+fn classify_error(message: String) -> TopologyDefinitionError {
+    if message.contains("timed out") || message.contains("timeout") {
+        TopologyDefinitionError::Timeout(message)
+    } else {
+        TopologyDefinitionError::Runtime(message)
+    }
 }
 
 #[cfg(test)]
@@ -246,42 +184,18 @@ def build_topology():
     return topo.graph(
         "plan",
         [
-            topo.llm_node(
-                "plan",
-                "planner",
-                "draft-plan",
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "decision": {"type": "string"}
-                    }
-                }
-            ),
-            topo.llm_node(
-                "review",
-                "reviewer",
-                "review-plan",
-                output_schema={"type": "object", "properties": {}}
-            ),
+            topo.llm_node("plan", "planner", "draft-plan"),
+            topo.deterministic_node("collect", "collect-results"),
         ],
         [
-            topo.conditional_edge(
-                "plan-to-review",
-                "plan",
-                "review",
-                "decision",
-                "continue",
-            )
+            topo.unconditional_edge("edge_1", "plan", "collect"),
         ],
-        max_fan_out=4,
-        max_concurrency=2,
-        max_total_tokens=1000,
     )
 "#,
         );
 
         let graph = execute_topology_definition(file.path(), Duration::from_secs(5), catalog())
-            .expect("topology should load");
+            .expect("topology definition should succeed");
 
         assert_eq!(graph.entry_node_id, "plan");
         assert_eq!(graph.nodes.len(), 2);
@@ -289,7 +203,34 @@ def build_topology():
     }
 
     #[test]
-    fn execute_topology_definition_surfaces_validation_errors() {
+    fn execute_topology_definition_allows_standard_library_imports() {
+        let file = write_topology_file(
+            r#"
+import json
+import swage_topology as topo
+
+def build_topology():
+    agent_id = json.loads('"planner"')
+    task_name = json.loads('"draft-plan"')
+    return topo.graph(
+        "plan",
+        [
+            topo.llm_node("plan", agent_id, task_name),
+        ],
+        [],
+    )
+"#,
+        );
+
+        let graph = execute_topology_definition(file.path(), Duration::from_secs(5), catalog())
+            .expect("topology definition should allow stdlib imports");
+
+        assert_eq!(graph.entry_node_id, "plan");
+        assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    fn execute_topology_definition_rejects_unknown_agent_ids() {
         let file = write_topology_file(
             r#"
 import swage_topology as topo
@@ -298,30 +239,73 @@ def build_topology():
     return topo.graph(
         "plan",
         [
-            topo.llm_node(
-                "plan",
-                "ghost",
-                "draft-plan",
-                output_schema={"type": "object", "properties": {}}
-            )
+            topo.llm_node("plan", "unknown-agent", "draft-plan"),
         ],
         [],
     )
 "#,
         );
 
-        let err = execute_topology_definition(file.path(), Duration::from_secs(5), catalog())
-            .expect_err("topology should fail validation");
+        let error = execute_topology_definition(file.path(), Duration::from_secs(5), catalog())
+            .expect_err("unknown agent should fail validation");
 
-        match err {
+        match error {
             TopologyDefinitionError::Validation(problems) => {
+                let rendered = problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 assert!(
-                    problems
-                        .iter()
-                        .any(|problem| problem.message.contains("agent_id 'ghost'"))
+                    rendered.contains("agent_id"),
+                    "expected agent validation problem, got: {rendered}"
+                );
+                assert!(
+                    rendered.contains("unknown-agent"),
+                    "expected the unknown agent name in the problem, got: {rendered}"
                 );
             }
-            other => panic!("expected validation error, got {other:?}"),
+            other => panic!("expected validation error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn execute_topology_definition_rejects_unknown_task_names() {
+        let file = write_topology_file(
+            r#"
+import swage_topology as topo
+
+def build_topology():
+    return topo.graph(
+        "plan",
+        [
+            topo.llm_node("plan", "planner", "unknown-task"),
+        ],
+        [],
+    )
+"#,
+        );
+
+        let error = execute_topology_definition(file.path(), Duration::from_secs(5), catalog())
+            .expect_err("unknown task should fail validation");
+
+        match error {
+            TopologyDefinitionError::Validation(problems) => {
+                let rendered = problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                assert!(
+                    rendered.contains("task_name"),
+                    "expected task validation problem, got: {rendered}"
+                );
+                assert!(
+                    rendered.contains("unknown-task"),
+                    "expected the unknown task name in the problem, got: {rendered}"
+                );
+            }
+            other => panic!("expected validation error, got: {other}"),
         }
     }
 }

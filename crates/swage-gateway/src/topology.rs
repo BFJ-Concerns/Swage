@@ -728,13 +728,15 @@ async fn execute_agent_node(
         project.name.clone(),
     );
     let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+    let assembly_runner =
+        swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
     let output = swage_context::assembly::assemble(
         &elements,
         &config.context,
         &tokeniser,
         &search_level_refs,
         state.provider.as_ref(),
-        Some(&swage_python::ConcreteAssemblyRunner),
+        Some(&assembly_runner),
     )
     .await;
 

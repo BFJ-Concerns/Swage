@@ -8,4 +8,5 @@ mod sandbox;
 
 #[cfg(test)]
 pub(crate) use command::find_bwrap;
+pub use command::find_bwrap;
 pub use sandbox::BubblewrapSandbox;

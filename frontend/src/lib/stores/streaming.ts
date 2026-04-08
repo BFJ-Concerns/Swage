@@ -3,6 +3,8 @@
 // Accumulates tokens during an active turn, tracks whether the agent is
 // generating, and controls the send/stop toggle state.
 
+import { fromStore, get, writable } from "svelte/store";
+
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 export interface StreamingStore {
@@ -54,11 +56,16 @@ export interface StreamingStoreOptions {
 export function createStreamingStore(
   options?: StreamingStoreOptions,
 ): StreamingStore {
-  let isStreaming = false;
-  let streamedContent = "";
-  let turnError: { code: string; message: string } | null = null;
+  const isStreamingStore = writable(false);
+  const streamedContentStore = writable("");
+  const turnErrorStore = writable<{ code: string; message: string } | null>(null);
   // Tracks in-flight and completed tool calls for the current turn.
-  let activeToolCalls: ToolCallView[] = [];
+  const activeToolCallsStore = writable<ToolCallView[]>([]);
+
+  const isStreamingState = fromStore(isStreamingStore);
+  const streamedContentState = fromStore(streamedContentStore);
+  const turnErrorState = fromStore(turnErrorStore);
+  const activeToolCallsState = fromStore(activeToolCallsStore);
 
   // ---- Helpers ----------------------------------------------------------------
 
@@ -76,6 +83,7 @@ export function createStreamingStore(
   // Commits any accumulated content to the conversation store. Called when a
   // turn ends before the server explicitly completes it (error or cancellation).
   function preservePartialResponse(): void {
+    const streamedContent = get(streamedContentStore);
     if (streamedContent) {
       pushAssistantMessage(streamedContent, "interrupted");
     }
@@ -85,26 +93,26 @@ export function createStreamingStore(
 
   return {
     get isStreaming(): boolean {
-      return isStreaming;
+      return isStreamingState.current;
     },
 
     get streamedContent(): string {
-      return streamedContent;
+      return streamedContentState.current;
     },
 
     get turnError(): { code: string; message: string } | null {
-      return turnError;
+      return turnErrorState.current;
     },
 
     get activeToolCalls(): ToolCallView[] {
-      return activeToolCalls;
+      return activeToolCallsState.current;
     },
 
     handleServerEvent(event: ServerEvent): void {
       switch (event.type) {
         case "token":
           // Append streaming token — the UI renders this live.
-          streamedContent += event.content;
+          streamedContentStore.update((streamedContent) => streamedContent + event.content);
           break;
 
         case "tool_start": {
@@ -124,14 +132,19 @@ export function createStreamingStore(
           if (event.parent_call_id) {
             // Sub-tool call (e.g. invoked from within python_execute) — nest it
             // under the parent rather than adding to the top-level list.
-            activeToolCalls = activeToolCalls.map((call) =>
-              call.call_id === event.parent_call_id
-                ? { ...call, sub_calls: [...(call.sub_calls ?? []), startEntry] }
-                : call,
+            activeToolCallsStore.update((activeToolCalls) =>
+              activeToolCalls.map((call) =>
+                call.call_id === event.parent_call_id
+                  ? { ...call, sub_calls: [...(call.sub_calls ?? []), startEntry] }
+                  : call,
+              ),
             );
           } else {
             // Top-level call — append to the flat list as before.
-            activeToolCalls = [...activeToolCalls, startEntry];
+            activeToolCallsStore.update((activeToolCalls) => [
+              ...activeToolCalls,
+              startEntry,
+            ]);
           }
           break;
         }
@@ -139,38 +152,42 @@ export function createStreamingStore(
         case "tool_end":
           if (event.parent_call_id) {
             // Sub-tool completion — update within the parent's sub_calls.
-            activeToolCalls = activeToolCalls.map((call) =>
-              call.call_id === event.parent_call_id
-                ? {
-                    ...call,
-                    sub_calls: (call.sub_calls ?? []).map((sub) =>
-                      sub.call_id === event.call_id
-                        ? {
-                            ...sub,
-                            result: event.result,
-                            status: event.status,
-                            duration_ms: event.duration_ms,
-                            truncated: event.truncated,
-                            total_bytes: event.total_bytes,
-                          }
-                        : sub,
-                    ),
-                  }
-                : call,
+            activeToolCallsStore.update((activeToolCalls) =>
+              activeToolCalls.map((call) =>
+                call.call_id === event.parent_call_id
+                  ? {
+                      ...call,
+                      sub_calls: (call.sub_calls ?? []).map((sub) =>
+                        sub.call_id === event.call_id
+                          ? {
+                              ...sub,
+                              result: event.result,
+                              status: event.status,
+                              duration_ms: event.duration_ms,
+                              truncated: event.truncated,
+                              total_bytes: event.total_bytes,
+                            }
+                          : sub,
+                      ),
+                    }
+                  : call,
+              ),
             );
           } else {
             // Top-level tool call finished — update the matching entry.
-            activeToolCalls = activeToolCalls.map((call) =>
-              call.call_id === event.call_id
-                ? {
-                    ...call,
-                    result: event.result,
-                    status: event.status,
-                    duration_ms: event.duration_ms,
-                    truncated: event.truncated,
-                    total_bytes: event.total_bytes,
-                  }
-                : call,
+            activeToolCallsStore.update((activeToolCalls) =>
+              activeToolCalls.map((call) =>
+                call.call_id === event.call_id
+                  ? {
+                      ...call,
+                      result: event.result,
+                      status: event.status,
+                      duration_ms: event.duration_ms,
+                      truncated: event.truncated,
+                      total_bytes: event.total_bytes,
+                    }
+                  : call,
+              ),
             );
           }
           break;
@@ -178,22 +195,25 @@ export function createStreamingStore(
         case "turn_complete":
           // The gateway has committed the full turn. Push the completed
           // assistant message and return to idle state.
+          {
+            const streamedContent = get(streamedContentStore);
           if (streamedContent) {
             pushAssistantMessage(streamedContent, "completed");
           }
-          streamedContent = "";
-          turnError = null;
-          isStreaming = false;
+          }
+          streamedContentStore.set("");
+          turnErrorStore.set(null);
+          isStreamingStore.set(false);
           // Tool calls are now captured in the message history — clear live state.
-          activeToolCalls = [];
+          activeToolCallsStore.set([]);
           break;
 
         case "error":
           // Turn failed mid-stream. Preserve whatever the user saw so the
           // conversation history reflects the partial response.
           preservePartialResponse();
-          turnError = { code: event.code, message: event.message };
-          isStreaming = false;
+          turnErrorStore.set({ code: event.code, message: event.message });
+          isStreamingStore.set(false);
           // streamedContent is intentionally not cleared — it stays visible
           // alongside the error until the next startTurn clears it.
           // activeToolCalls are preserved so the UI can show what was
@@ -209,13 +229,13 @@ export function createStreamingStore(
                 : error.message,
             )
             .join("; ");
-          turnError = {
+          turnErrorStore.set({
             code: "output_schema_failed",
             message: details
               ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
               : `Structured output validation failed after ${event.attempts} attempts.`,
-          };
-          isStreaming = false;
+          });
+          isStreamingStore.set(false);
           break;
         }
 
@@ -223,7 +243,7 @@ export function createStreamingStore(
           // User-initiated cancel. Preserve partial content (they may want
           // to read what was generated before they stopped it).
           preservePartialResponse();
-          isStreaming = false;
+          isStreamingStore.set(false);
           // activeToolCalls preserved — same rationale as the error case.
           break;
 
@@ -232,8 +252,8 @@ export function createStreamingStore(
           // surface the shutdown as a turn error so the UI can notify the user.
           // The WebSocket will close shortly after this event arrives.
           preservePartialResponse();
-          turnError = { code: "gateway_shutdown", message: event.reason };
-          isStreaming = false;
+          turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
+          isStreamingStore.set(false);
           break;
 
         case "context_assembled":
@@ -263,10 +283,10 @@ export function createStreamingStore(
 
     startTurn(content: string): void {
       // Clear state from any previous turn.
-      streamedContent = "";
-      turnError = null;
-      activeToolCalls = [];
-      isStreaming = true;
+      streamedContentStore.set("");
+      turnErrorStore.set(null);
+      activeToolCallsStore.set([]);
+      isStreamingStore.set(true);
 
       // Immediately record the user's message so the conversation history
       // updates before the first token arrives.
