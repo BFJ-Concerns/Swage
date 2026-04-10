@@ -538,6 +538,7 @@ def _execute_python(request_id, connection, reader, payload):
     module = _make_python_execute_module(connection, reader, request_id)
     stdout = io.StringIO()
     previous_stdout = sys.stdout
+    previous_working_directory = os.getcwd()
     sys.stdout = stdout
 
     globals_dict = {
@@ -547,11 +548,15 @@ def _execute_python(request_id, connection, reader, payload):
     }
 
     try:
+        # Run user code relative to the requested tool context directory so
+        # imports and file access behave like the host-side invocation.
+        os.chdir(payload["working_directory"])
         exec(compile(payload["code"], "<python_execute>", "exec"), globals_dict, globals_dict)
         return stdout.getvalue(), None, None, {"output": stdout.getvalue()}
     except BaseException as error:
         return stdout.getvalue(), error.__class__.__name__, traceback.format_exc(), None
     finally:
+        os.chdir(previous_working_directory)
         sys.stdout = previous_stdout
 
 

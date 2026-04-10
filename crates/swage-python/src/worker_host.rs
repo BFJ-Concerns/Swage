@@ -113,9 +113,15 @@ impl PythonWorkerRuntime {
             PythonWorkerError::SpawnFailed(format!("child spawn failed: {error}"))
         })?;
 
-        let stdin = child
-            .take_stdin()
-            .ok_or_else(|| PythonWorkerError::SpawnFailed("worker stdin was not piped".into()))?;
+        let stdin = match child.take_stdin() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = child.graceful_shutdown(Duration::from_secs(2)).await;
+                return Err(PythonWorkerError::SpawnFailed(
+                    "worker stdin was not piped".into(),
+                ));
+            }
+        };
 
         tokio::spawn(async move {
             let mut stdin = stdin;
@@ -123,29 +129,42 @@ impl PythonWorkerRuntime {
             let _ = stdin.shutdown().await;
         });
 
-        let stream = tokio::time::timeout(
-            Duration::from_secs(self.config.startup_timeout_secs),
-            listener.accept(),
-        )
-        .await
-        .map_err(|_| PythonWorkerError::StartupTimeout(self.config.startup_timeout_secs))?
-        .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?
-        .0;
+        let startup_result = async {
+            let stream = tokio::time::timeout(
+                Duration::from_secs(self.config.startup_timeout_secs),
+                listener.accept(),
+            )
+            .await
+            .map_err(|_| PythonWorkerError::StartupTimeout(self.config.startup_timeout_secs))?
+            .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?
+            .0;
 
-        let mut transport = WorkerTransport::new(stream);
-        match transport
-            .receive_timeout(Duration::from_secs(self.config.startup_timeout_secs))
-            .await?
-        {
-            WorkerToHostMessage::Ready => Ok(ReadyWorker {
+            let mut transport = WorkerTransport::new(stream);
+            match transport
+                .receive_timeout(Duration::from_secs(self.config.startup_timeout_secs))
+                .await?
+            {
+                WorkerToHostMessage::Ready => Ok(transport),
+                WorkerToHostMessage::Error { message } => {
+                    Err(PythonWorkerError::Protocol(message))
+                }
+                other => Err(PythonWorkerError::Protocol(format!(
+                    "expected ready message, got {other:?}"
+                ))),
+            }
+        }
+        .await;
+
+        match startup_result {
+            Ok(transport) => Ok(ReadyWorker {
                 child,
                 transport,
                 _worker_dir: worker_dir,
             }),
-            WorkerToHostMessage::Error { message } => Err(PythonWorkerError::Protocol(message)),
-            other => Err(PythonWorkerError::Protocol(format!(
-                "expected ready message, got {other:?}"
-            ))),
+            Err(error) => {
+                let _ = child.graceful_shutdown(Duration::from_secs(2)).await;
+                Err(error)
+            }
         }
     }
 
@@ -535,6 +554,9 @@ fn apply_environment(command: &mut Command, environment: &BTreeMap<String, Strin
 mod tests {
     use super::*;
 
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
     use async_trait::async_trait;
     use tempfile::TempDir;
 
@@ -563,6 +585,39 @@ mod tests {
             ..PythonExecuteToolConfig::default()
         };
         PythonWorkerRuntime::new(config).expect("test runtime should resolve a Python executable")
+    }
+
+    fn custom_test_runtime(
+        executable_path: PathBuf,
+        startup_timeout_secs: u64,
+        environment: BTreeMap<String, String>,
+    ) -> PythonWorkerRuntime {
+        let config = PythonExecuteToolConfig {
+            require_sandbox: false,
+            warm_target: 0,
+            startup_timeout_secs,
+            timeout_secs: startup_timeout_secs,
+            ..PythonExecuteToolConfig::default()
+        };
+
+        PythonWorkerRuntime {
+            config,
+            runtime: Arc::new(ResolvedPythonRuntime {
+                executable_path,
+                runtime_root: None,
+                environment,
+                read_only_mounts: vec![],
+            }),
+        }
+    }
+
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     fn empty_assembly_payload(code: &str) -> AssemblyExecutionPayload {
@@ -685,6 +740,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn python_execute_uses_requested_working_directory() {
+        let runtime = unsandboxed_test_runtime(5);
+        let mut worker = runtime
+            .spawn_ready_worker(false)
+            .await
+            .expect("worker should start");
+        let working_directory = TempDir::new().expect("temp dir");
+
+        let execution = runtime
+            .execute_python(
+                &mut worker,
+                "import os\nprint(os.getcwd())\n",
+                working_directory.path(),
+                &NoopToolHost,
+            )
+            .await
+            .expect("python execution should succeed");
+
+        assert_eq!(execution.exception_type, None);
+        assert_eq!(execution.traceback, None);
+        assert_eq!(
+            execution.stdout,
+            format!("{}\n", working_directory.path().display())
+        );
+
+        if worker.child.is_running() {
+            worker.force_kill().await;
+        }
+    }
+
+    #[tokio::test]
     async fn assembly_execution_allows_standard_library_imports() {
         let runtime = unsandboxed_test_runtime(5);
 
@@ -734,5 +820,46 @@ mod tests {
         })
         .await
         .expect("timed-out worker should be terminated promptly");
+    }
+
+    #[tokio::test]
+    async fn startup_timeout_kills_startup_failed_worker_before_returning() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let pid_file = temp_dir.path().join("worker.pid");
+        let script_path = temp_dir.path().join("hung-worker.sh");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$SWAGE_TEST_PID_FILE\"\nsleep 30\n",
+        )
+        .expect("script should be written");
+        fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("script should be executable");
+
+        let runtime = custom_test_runtime(
+            script_path,
+            1,
+            BTreeMap::from([(
+                "SWAGE_TEST_PID_FILE".to_string(),
+                pid_file.display().to_string(),
+            )]),
+        );
+
+        let result = runtime.spawn_ready_worker(false).await;
+
+        assert!(matches!(result, Err(PythonWorkerError::StartupTimeout(1))));
+
+        let worker_pid: u32 = fs::read_to_string(&pid_file)
+            .expect("worker pid file should exist")
+            .trim()
+            .parse()
+            .expect("worker pid should parse");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(worker_pid) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("startup-failed worker should be terminated promptly");
     }
 }
