@@ -6,11 +6,13 @@
 use std::time::Duration;
 
 use swage_core::SandboxError;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::ipc::message::IpcMessage;
+
+const MAX_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // IpcTransport
@@ -41,6 +43,14 @@ impl IpcTransport {
         let mut line = serde_json::to_string(msg).map_err(|e| SandboxError::IpcError {
             message: format!("serialise failed: {e}"),
         })?;
+        if line.len() > MAX_IPC_MESSAGE_BYTES {
+            return Err(SandboxError::IpcError {
+                message: format!(
+                    "IPC message exceeds {} byte limit",
+                    MAX_IPC_MESSAGE_BYTES
+                ),
+            });
+        }
         // Newline delimiter — NDJSON protocol.
         line.push('\n');
         self.writer
@@ -62,10 +72,10 @@ impl IpcTransport {
     /// Returns `SandboxError::IpcError` if the connection closes before a
     /// complete line is received.
     pub async fn receive(&mut self) -> Result<IpcMessage, SandboxError> {
-        let mut line = String::new();
-        let bytes = self
-            .reader
-            .read_line(&mut line)
+        let mut line = Vec::new();
+        let bytes = (&mut self.reader)
+            .take((MAX_IPC_MESSAGE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
             .await
             .map_err(|e| SandboxError::IpcError {
                 message: format!("read failed: {e}"),
@@ -77,6 +87,20 @@ impl IpcTransport {
                 message: "connection closed".into(),
             });
         }
+
+        let ended_with_newline = line.last() == Some(&b'\n');
+        if line.len() > MAX_IPC_MESSAGE_BYTES || !ended_with_newline {
+            return Err(SandboxError::IpcError {
+                message: format!(
+                    "IPC message exceeds {} byte limit",
+                    MAX_IPC_MESSAGE_BYTES
+                ),
+            });
+        }
+
+        let line = String::from_utf8(line).map_err(|e| SandboxError::IpcError {
+            message: format!("invalid UTF-8 in IPC message: {e}"),
+        })?;
 
         serde_json::from_str(line.trim_end()).map_err(|e| SandboxError::IpcError {
             message: format!("deserialise failed: {e}"),
@@ -103,9 +127,10 @@ mod tests {
     use std::time::Duration;
 
     use swage_core::SandboxError;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
 
-    use super::IpcTransport;
+    use super::{IpcTransport, MAX_IPC_MESSAGE_BYTES};
     use crate::ipc::message::IpcMessage;
 
     // --- Roundtrip: single message across connected socket pair ---
@@ -222,5 +247,48 @@ mod tests {
 
         let result = transport.receive().await;
         assert!(result.is_err(), "closed connection should return an error");
+    }
+
+    #[tokio::test]
+    async fn send_rejects_oversized_message() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut sender = IpcTransport::new(a);
+        let oversized = "x".repeat(MAX_IPC_MESSAGE_BYTES + 1);
+
+        let err = sender
+            .send(&IpcMessage::ErrorMessage {
+                request_id: None,
+                category: crate::ipc::message::ErrorCategory::Protocol,
+                description: oversized,
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            SandboxError::IpcError { message } => {
+                assert!(message.contains("byte limit"), "got: {message}");
+            }
+            other => panic!("expected SandboxError::IpcError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_rejects_oversized_message() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut receiver = IpcTransport::new(a);
+        let mut sender = IpcTransport::new(b);
+        let oversized = "x".repeat(MAX_IPC_MESSAGE_BYTES + 1);
+
+        sender.writer.write_all(oversized.as_bytes()).await.unwrap();
+        sender.writer.write_all(b"\n").await.unwrap();
+        sender.writer.flush().await.unwrap();
+
+        let err = receiver.receive().await.unwrap_err();
+        match err {
+            SandboxError::IpcError { message } => {
+                assert!(message.contains("byte limit"), "got: {message}");
+            }
+            other => panic!("expected SandboxError::IpcError, got {other:?}"),
+        }
     }
 }

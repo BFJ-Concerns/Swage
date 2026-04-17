@@ -37,6 +37,13 @@ pub struct Cli {
     /// clean.
     #[arg(long, hide = true)]
     pub server_mode: bool,
+
+    /// Internal flag: run as the sandbox child-process tool host.
+    ///
+    /// Set only by sandbox process managers when they re-exec the current
+    /// binary for IPC-backed tool execution.
+    #[arg(long, hide = true)]
+    pub sandbox_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +267,8 @@ mod tests {
     fn parse_no_subcommand_returns_none() {
         let cli = Cli::try_parse_from(["swage"]).unwrap();
         assert!(cli.command.is_none());
+        assert!(!cli.server_mode);
+        assert!(!cli.sandbox_mode);
     }
 
     // `--server-mode` flag is accepted and parsed as true.
@@ -267,6 +276,12 @@ mod tests {
     fn parse_server_mode_flag() {
         let cli = Cli::try_parse_from(["swage", "--server-mode"]).unwrap();
         assert!(cli.server_mode);
+    }
+
+    #[test]
+    fn parse_sandbox_mode_flag() {
+        let cli = Cli::try_parse_from(["swage", "--sandbox-mode"]).unwrap();
+        assert!(cli.sandbox_mode);
     }
 
     // `--server-mode` must be hidden so it never appears in help output.

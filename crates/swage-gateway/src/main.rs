@@ -4,12 +4,85 @@
 //! set) or to the appropriate CLI handler for gateway lifecycle management and
 //! shell completions.
 
+use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
+use serde_json::{Value, json};
+use swage_core::ToolError;
 use swage_gateway::cli::{Cli, Command, GatewayCommand};
+use swage_tool::context::ToolContext;
+use swage_tool::tool::Tool;
+
+struct EchoTool;
+
+#[async_trait]
+impl Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    fn description(&self) -> &str {
+        "Returns its input parameters unchanged."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        Ok(params)
+    }
+}
+
+struct EnvReadTool;
+
+#[async_trait]
+impl Tool for EnvReadTool {
+    fn name(&self) -> &str {
+        "env_read"
+    }
+
+    fn description(&self) -> &str {
+        "Reads one environment variable by name for sandbox integration tests."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let name = params["name"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "Missing required argument: name".to_owned(),
+            })?;
+
+        Ok(std::env::var(name)
+            .ok()
+            .map(Value::String)
+            .unwrap_or(Value::Null))
+    }
+}
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if cli.sandbox_mode {
+        if let Err(error) =
+            swage_sandbox::run_agent_loop(vec![Box::new(EchoTool), Box::new(EnvReadTool)]).await
+        {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // --server-mode is set when we re-exec ourselves as a background daemon.
     // Skip all CLI dispatch and run the gateway directly.
@@ -94,6 +167,13 @@ mod tests {
     fn server_mode_flag_is_accepted() {
         let cli = Cli::try_parse_from(["swage", "--server-mode"]).unwrap();
         assert!(cli.server_mode);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn sandbox_mode_flag_is_accepted() {
+        let cli = Cli::try_parse_from(["swage", "--sandbox-mode"]).unwrap();
+        assert!(cli.sandbox_mode);
         assert!(cli.command.is_none());
     }
 

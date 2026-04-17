@@ -15,6 +15,7 @@ use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest
 use crate::ipc::transport::IpcTransport;
 use crate::llm_handler::HostLlmHandler;
 use crate::process::ChildProcessManager;
+use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
 
@@ -103,9 +104,7 @@ impl Sandbox for BubblewrapSandbox {
         let socket_path = socket_manager.path().to_path_buf();
 
         // Determine the agent binary — the host re-execs itself in sandbox mode.
-        let agent_binary = std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
-            message: format!("cannot determine agent binary path: {e}"),
-        })?;
+        let agent_binary = resolve_agent_binary()?;
 
         // Build the bwrap command with namespace isolation and mount config.
         // The socket path is injected via --setenv in the command builder.

@@ -188,6 +188,20 @@ impl GoogleProvider {
         )
     }
 
+    fn redact_api_key_in_text(&self, text: impl AsRef<str>) -> String {
+        Self::redact_api_key(text.as_ref(), self.config.api_key.as_deref())
+    }
+
+    fn redact_api_key(text: &str, api_key: Option<&str>) -> String {
+        let mut redacted = text.to_string();
+        if let Some(api_key) = api_key {
+            if !api_key.is_empty() {
+                redacted = redacted.replace(api_key, "REDACTED");
+            }
+        }
+        redacted
+    }
+
     /// Extract system messages from the conversation and return them as
     /// a single `system_instruction`, plus the remaining non-system messages.
     fn extract_system(messages: &[ChatMessage]) -> (Option<GeminiContent>, Vec<&ChatMessage>) {
@@ -526,11 +540,11 @@ impl LlmProvider for GoogleProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::StreamError(e.to_string()))?;
+            .map_err(|e| ProviderError::StreamError(self.redact_api_key_in_text(e.to_string())))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = self.redact_api_key_in_text(response.text().await.unwrap_or_default());
             return Err(crate::http::map_http_error(status, body_text, None));
         }
 
@@ -566,11 +580,11 @@ impl LlmProvider for GoogleProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::StreamError(e.to_string()))?;
+            .map_err(|e| ProviderError::StreamError(self.redact_api_key_in_text(e.to_string())))?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = self.redact_api_key_in_text(response.text().await.unwrap_or_default());
             return Err(crate::http::map_http_error(status, body_text, None));
         }
 
@@ -604,6 +618,7 @@ impl LlmProvider for GoogleProvider {
         let url = self.build_url(&model, true);
         let body = self.build_request(&request);
         let _sanitised = Self::sanitised_url(&model, &self.config.base_url, true);
+        let api_key = self.config.api_key.clone();
 
         let (tx, rx) = mpsc::unbounded();
 
@@ -619,7 +634,7 @@ impl LlmProvider for GoogleProvider {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx.unbounded_send(StreamChunk::Error {
-                        message: e.to_string(),
+                        message: GoogleProvider::redact_api_key(&e.to_string(), api_key.as_deref()),
                     });
                     return;
                 }
@@ -627,7 +642,10 @@ impl LlmProvider for GoogleProvider {
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();
-                let body_text = response.text().await.unwrap_or_default();
+                let body_text = GoogleProvider::redact_api_key(
+                    &response.text().await.unwrap_or_default(),
+                    api_key.as_deref(),
+                );
                 let err = crate::http::map_http_error(status, body_text, None);
                 let _ = tx.unbounded_send(StreamChunk::Error {
                     message: err.to_string(),
@@ -881,6 +899,20 @@ mod tests {
         );
         assert!(url.contains("REDACTED"));
         assert!(!url.contains("test-key"));
+    }
+
+    #[test]
+    fn redact_api_key_in_text_removes_embedded_key() {
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "test-key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
+        let redacted = provider.redact_api_key_in_text(
+            "request failed for https://x.test?key=test-key with body test-key",
+        );
+        assert!(redacted.contains("REDACTED"));
+        assert!(!redacted.contains("test-key"));
     }
 
     // --- Finish reason parsing ---

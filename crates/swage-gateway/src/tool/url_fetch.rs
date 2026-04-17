@@ -4,6 +4,7 @@
 //! returned as-is. Binary content types are rejected. Output is truncated
 //! to the configured byte limit.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,6 +23,8 @@ pub struct UrlFetchTool {
     pub timeout: Duration,
     pub max_output_bytes: usize,
 }
+
+const BLOCKED_HOSTNAMES: &[&str] = &["localhost", "metadata.google.internal"];
 
 impl Default for UrlFetchTool {
     fn default() -> Self {
@@ -64,6 +67,9 @@ impl Tool for UrlFetchTool {
             })?
             .to_string();
 
+        let parsed_url = parse_fetch_url(&url, self.name())?;
+        ensure_url_target_is_safe(&parsed_url, self.name()).await?;
+
         let client = reqwest::Client::builder()
             .timeout(self.timeout)
             .user_agent(concat!(
@@ -77,13 +83,17 @@ impl Tool for UrlFetchTool {
                 message: format!("Failed to build HTTP client: {e}"),
             })?;
 
-        let mut response = client.get(&url).send().await.map_err(|e| {
+        let mut response = client.get(parsed_url.clone()).send().await.map_err(|e| {
             let message = if e.is_timeout() {
-                format!("Request timed out after {}s: {url}", self.timeout.as_secs())
+                format!(
+                    "Request timed out after {}s: {}",
+                    self.timeout.as_secs(),
+                    parsed_url
+                )
             } else if e.is_connect() || e.is_request() {
-                format!("Failed to reach {url}: {e}")
+                format!("Failed to reach {}: {e}", parsed_url)
             } else {
-                format!("Request failed for {url}: {e}")
+                format!("Request failed for {}: {e}", parsed_url)
             };
             ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
@@ -96,7 +106,7 @@ impl Tool for UrlFetchTool {
             let body = response.text().await.unwrap_or_default();
             return Err(ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: format!("HTTP {status}: {url}\n{body}"),
+                message: format!("HTTP {status}: {parsed_url}\n{body}"),
             });
         }
 
@@ -151,6 +161,122 @@ impl Tool for UrlFetchTool {
     }
 }
 
+fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url, ToolError> {
+    let parsed = reqwest::Url::parse(url).map_err(|error| ToolError::InvalidParameters {
+        name: tool_name.to_owned(),
+        message: format!("Invalid URL: {error}"),
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => Err(ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: format!("Unsupported URL scheme: {scheme}"),
+        }),
+    }
+}
+
+async fn ensure_url_target_is_safe(
+    parsed_url: &reqwest::Url,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    let host = parsed_url
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "URL must include a host".to_owned(),
+        })?;
+
+    let port = parsed_url
+        .port_or_known_default()
+        .ok_or_else(|| ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "URL must include a recognised port".to_owned(),
+        })?;
+
+    if is_blocked_hostname(host) {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!("Blocked private or metadata destination: {host}"),
+        });
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return ensure_public_ip(ip, tool_name);
+    }
+
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!("Failed to resolve {host}: {error}"),
+        })?;
+
+    let mut saw_address = false;
+    for addr in resolved {
+        saw_address = true;
+        ensure_public_ip(addr.ip(), tool_name)?;
+    }
+
+    if !saw_address {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!("Failed to resolve {host}: no addresses returned"),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_blocked_hostname(host: &str) -> bool {
+    BLOCKED_HOSTNAMES
+        .iter()
+        .any(|blocked| host.eq_ignore_ascii_case(blocked))
+}
+
+fn ensure_public_ip(ip: IpAddr, tool_name: &str) -> Result<(), ToolError> {
+    if is_private_or_metadata_ip(ip) {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!("Blocked private or metadata destination: {ip}"),
+        });
+    }
+    Ok(())
+}
+
+fn is_private_or_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_or_metadata_ipv4(ip),
+        IpAddr::V6(ip) => is_private_or_metadata_ipv6(ip),
+    }
+}
+
+fn is_private_or_metadata_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+    {
+        return true;
+    }
+
+    let octets = ip.octets();
+    matches!(octets, [100, second, ..] if (64..=127).contains(&second))
+        || matches!(octets, [198, second, ..] if second == 18 || second == 19)
+        || matches!(octets, [192, 0, 0, ..])
+}
+
+fn is_private_or_metadata_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+}
+
 /// Convert HTML bytes to readable plain text using html2text.
 ///
 /// We use a wide render width to avoid forced line breaks that would fragment
@@ -187,6 +313,32 @@ mod tests {
         let err = tool().execute(json!({}), &ctx()).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
         assert!(err.to_string().contains("url"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_private_ipv4_targets() {
+        let err = tool()
+            .execute(json!({ "url": "http://127.0.0.1/test" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(err.to_string().contains("Blocked private or metadata destination"));
+    }
+
+    #[tokio::test]
+    async fn rejects_metadata_hostname_targets() {
+        let err = tool()
+            .execute(
+                json!({ "url": "http://metadata.google.internal/computeMetadata/v1" }),
+                &ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(
+            err.to_string()
+                .contains("Blocked private or metadata destination")
+        );
     }
 
     #[tokio::test]
@@ -230,6 +382,22 @@ mod tests {
         let text = html_to_text(b"");
         // Should not panic — empty or whitespace output is fine.
         let _ = text;
+    }
+
+    #[test]
+    fn private_or_metadata_ip_detection_covers_reserved_ranges() {
+        assert!(is_private_or_metadata_ip(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 1
+        ))));
+        assert!(is_private_or_metadata_ip(IpAddr::V4(Ipv4Addr::new(
+            169, 254, 169, 254
+        ))));
+        assert!(is_private_or_metadata_ip(IpAddr::V4(Ipv4Addr::new(
+            198, 19, 0, 1
+        ))));
+        assert!(!is_private_or_metadata_ip(IpAddr::V4(Ipv4Addr::new(
+            93, 184, 216, 34
+        ))));
     }
 
     #[tokio::test]

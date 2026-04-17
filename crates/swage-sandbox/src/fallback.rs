@@ -15,6 +15,7 @@ use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest
 use crate::ipc::transport::IpcTransport;
 use crate::llm_handler::HostLlmHandler;
 use crate::process::ChildProcessManager;
+use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
 
@@ -127,9 +128,7 @@ impl Sandbox for FallbackSandbox {
 
         // Re-run the host binary in sandbox mode. In production, the agent
         // entry point is selected by --sandbox-mode and sets up run_agent_loop.
-        let agent_binary = std::env::current_exe().map_err(|e| SandboxError::SpawnFailed {
-            message: format!("cannot determine agent binary path: {e}"),
-        })?;
+        let agent_binary = resolve_agent_binary()?;
 
         let mut cmd = tokio::process::Command::new(&agent_binary);
         cmd.arg("--sandbox-mode");

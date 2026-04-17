@@ -565,6 +565,15 @@ pub fn slugify(name: &str) -> String {
         .collect()
 }
 
+fn validate_project_slug(slug: &str) -> Result<(), GatewayError> {
+    if slug.is_empty() || !slug.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(GatewayError::ValidationError(
+            "name must contain at least one ASCII letter or digit".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns the base directory for all project data: `~/.swage/projects/`.
 fn projects_base_dir() -> Option<PathBuf> {
     std::env::var("HOME")
@@ -617,6 +626,7 @@ impl ProjectService {
         }
 
         let slug = slugify(&req.name);
+        validate_project_slug(&slug)?;
 
         // Create the project directory: ~/.swage/projects/{slug}/memory/
         if let Some(base) = projects_base_dir() {
@@ -689,7 +699,14 @@ impl ProjectService {
         }
 
         // Derive the new slug from the new name, if name is being updated.
-        let new_slug = req.name.as_deref().map(slugify);
+        let new_slug = match req.name.as_deref() {
+            Some(name) => {
+                let slug = slugify(name);
+                validate_project_slug(&slug)?;
+                Some(slug)
+            }
+            None => None,
+        };
 
         let project = self
             .project_store
@@ -734,6 +751,22 @@ fn project_to_response(p: swage_storage::model::Project) -> ProjectResponse {
         slug: p.slug,
         workspace_path: p.workspace_path,
         created_at: p.created_at,
+    }
+}
+
+#[cfg(test)]
+mod project_slug_tests {
+    use super::{GatewayError, slugify, validate_project_slug};
+
+    #[test]
+    fn punctuation_only_name_is_rejected_after_slugify() {
+        let err = validate_project_slug(&slugify("!!! /// ___"))
+            .expect_err("punctuation-only names should be rejected");
+        assert!(matches!(err, GatewayError::ValidationError(_)));
+        assert!(
+            err.to_string()
+                .contains("at least one ASCII letter or digit")
+        );
     }
 }
 
