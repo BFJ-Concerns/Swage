@@ -15,6 +15,7 @@ use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
 use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
+use crate::channel_gateway::{ChannelOrigin, DeliveredChannelMessage};
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -79,6 +80,10 @@ pub struct AppState {
     pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
     /// Optional lifecycle hooks honoured by gateway-owned execution paths.
     pub hook_registry: Option<Arc<HookRegistry>>,
+    /// Session routing map for external channels.
+    pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
+    /// Delivery capture for external channel adapters.
+    pub external_channel_outbox: Arc<AsyncMutex<Vec<DeliveredChannelMessage>>>,
 }
 
 impl AppState {
@@ -106,6 +111,8 @@ impl AppState {
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             hook_registry,
+            channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(AsyncMutex::new(Vec::new())),
         }
     }
 }
@@ -162,11 +169,13 @@ mod tests {
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
             sandbox,
-            hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            hook_registry: None,
+            channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(AsyncMutex::new(Vec::new())),
         }
     }
 

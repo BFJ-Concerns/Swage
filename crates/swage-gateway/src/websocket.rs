@@ -1668,6 +1668,8 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1691,6 +1693,7 @@ mod tests {
                 agent_id: "gateway".to_string(),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                metadata: None,
             },
         );
 
@@ -1714,6 +1717,8 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
         };
 
         (state, session_id)

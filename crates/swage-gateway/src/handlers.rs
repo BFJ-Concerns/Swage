@@ -13,6 +13,10 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 
 use crate::{
+    channel_gateway::{
+        ChannelInboundResponse, DevDmInboundRequest, DevThreadInboundRequest, OutboxQuery,
+        OutboxResponse,
+    },
     error::ApiError,
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
@@ -36,6 +40,38 @@ use crate::{
 /// is up and accepting connections before routing traffic to it.
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// ---------------------------------------------------------------------------
+// External channel gateway
+// ---------------------------------------------------------------------------
+
+/// `POST /api/channels/dev-dm/inbound` — accept a direct-message style inbound event.
+pub async fn channel_dev_dm_inbound(
+    State(state): State<AppState>,
+    Json(req): Json<DevDmInboundRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let response: ChannelInboundResponse =
+        crate::channel_gateway::handle_dev_dm_inbound(&state, req).await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// `POST /api/channels/dev-thread/inbound` — accept a thread/topic style inbound event.
+pub async fn channel_dev_thread_inbound(
+    State(state): State<AppState>,
+    Json(req): Json<DevThreadInboundRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let response: ChannelInboundResponse =
+        crate::channel_gateway::handle_dev_thread_inbound(&state, req).await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// `GET /api/channels/outbox` — inspect delivered messages for test adapters.
+pub async fn channel_outbox(
+    State(state): State<AppState>,
+    Query(query): Query<OutboxQuery>,
+) -> Json<OutboxResponse> {
+    Json(crate::channel_gateway::read_outbox(&state, query).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,6 +1200,8 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
         };
         (build_router(state), storage)
     }
@@ -2661,6 +2699,8 @@ def build_topology():
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

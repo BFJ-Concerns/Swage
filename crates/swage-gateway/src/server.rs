@@ -127,6 +127,16 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Skills listing — resolved hierarchy for a project/agent combination.
         .route("/api/skills", get(handlers::list_skills))
+        // External communication channel gateway.
+        .route(
+            "/api/channels/dev-dm/inbound",
+            post(handlers::channel_dev_dm_inbound),
+        )
+        .route(
+            "/api/channels/dev-thread/inbound",
+            post(handlers::channel_dev_thread_inbound),
+        )
+        .route("/api/channels/outbox", get(handlers::channel_outbox))
         // Turn context snapshots — assembly reports for past turns.
         .route("/api/turns/:id/context", get(handlers::get_turn_context))
         // Programmatic interface — async turn submission and polling.
