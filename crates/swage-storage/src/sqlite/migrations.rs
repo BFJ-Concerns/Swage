@@ -38,6 +38,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
         ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
+        ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
     ]
 }
 
@@ -82,6 +83,228 @@ const CREATE_CHANNEL_LINK_TABLE: &str = "
         ON channel_links(project_id);
     CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
         ON channel_links(session_id);
+";
+
+const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS delivery_records (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        target_json  TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        delivered_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delivery_records_session_id
+        ON delivery_records(session_id, delivered_at);
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        entity_kind  TEXT NOT NULL,
+        entity_id    TEXT NOT NULL,
+        event_kind   TEXT NOT NULL,
+        summary      TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at   TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_session_id
+        ON audit_events(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_entity
+        ON audit_events(entity_kind, entity_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+        ON audit_events(created_at);
+
+    CREATE TRIGGER IF NOT EXISTS trg_turns_state_audit
+    AFTER UPDATE OF state ON turns
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT session_id FROM threads WHERE id = NEW.thread_id),
+            'turn',
+            NEW.id,
+            'state_transition',
+            'turn state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'thread_id', NEW.thread_id,
+                'agent_id', NEW.agent_id
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_approval_state_audit
+    AFTER UPDATE OF state ON approval_requests
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (
+                SELECT th.session_id
+                FROM turns t
+                INNER JOIN threads th ON th.id = t.thread_id
+                WHERE t.id = NEW.turn_id
+            ),
+            'approval',
+            NEW.id,
+            'state_transition',
+            'approval state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'turn_id', NEW.turn_id,
+                'kind', NEW.kind,
+                'decision_reason', COALESCE(NEW.decision_reason, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_scheduled_runs_state_audit
+    AFTER UPDATE OF state ON scheduled_runs
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT session_id FROM scheduled_jobs WHERE id = NEW.job_id),
+            'scheduled_run',
+            NEW.id,
+            'state_transition',
+            'scheduled run state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'job_id', NEW.job_id,
+                'turn_id', COALESCE(NEW.turn_id, ''),
+                'error_message', COALESCE(NEW.error_message, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_heartbeat_runs_state_audit
+    AFTER UPDATE OF state ON heartbeat_runs
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT session_id FROM heartbeats WHERE id = NEW.heartbeat_id),
+            'heartbeat_run',
+            NEW.id,
+            'state_transition',
+            'heartbeat run state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'heartbeat_id', NEW.heartbeat_id,
+                'turn_id', COALESCE(NEW.turn_id, ''),
+                'error_message', COALESCE(NEW.error_message, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_topology_runs_state_audit
+    AFTER UPDATE OF state ON topology_runs
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            NEW.session_id,
+            'topology_run',
+            NEW.id,
+            'state_transition',
+            'topology run state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'team_id', NEW.team_id,
+                'error_message', COALESCE(NEW.error_message, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_node_execution_created_audit
+    AFTER INSERT ON node_executions
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id),
+            'node_execution',
+            NEW.id,
+            'node_activity',
+            'node execution created',
+            json_object(
+                'node_id', NEW.node_id,
+                'node_kind', NEW.node_kind,
+                'state', NEW.state,
+                'topology_run_id', NEW.topology_run_id
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_node_execution_state_audit
+    AFTER UPDATE OF state ON node_executions
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (
+                SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id
+            ),
+            'node_execution',
+            NEW.id,
+            'state_transition',
+            'node execution state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'node_id', NEW.node_id,
+                'topology_run_id', NEW.topology_run_id,
+                'error_message', COALESCE(NEW.error_message, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_delivery_record_audit
+    AFTER INSERT ON delivery_records
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            NEW.session_id,
+            'delivery_record',
+            NEW.id,
+            'delivery_recorded',
+            'delivery recorded',
+            json_object(
+                'target', NEW.target_json,
+                'content', NEW.content
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
 ";
 
 /// Additive migration: cost in microcents derived from provider pricing data.

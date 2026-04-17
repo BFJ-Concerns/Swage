@@ -14,6 +14,9 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 
 use crate::{
+    audit::{
+        OperatorSearchQuery, OperatorSearchResponse, OperatorUsageQuery, OperatorUsageResponse,
+    },
     channel_gateway::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
         DevDmInboundRequest, DevThreadInboundRequest,
@@ -133,6 +136,22 @@ pub async fn operator_overview(
     State(state): State<AppState>,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     Ok(Json(crate::operator::operator_overview(&state).await?))
+}
+
+/// `GET /api/operator/search` — search durable operator-visible history.
+pub async fn operator_search(
+    State(state): State<AppState>,
+    Query(query): Query<OperatorSearchQuery>,
+) -> Result<Json<OperatorSearchResponse>, ApiError> {
+    Ok(Json(crate::audit::operator_search(&state, query).await?))
+}
+
+/// `GET /api/operator/usage` — inspect run and aggregate token/cost usage.
+pub async fn operator_usage(
+    State(state): State<AppState>,
+    Query(query): Query<OperatorUsageQuery>,
+) -> Result<Json<OperatorUsageResponse>, ApiError> {
+    Ok(Json(crate::audit::operator_usage(&state, query).await?))
 }
 
 /// `GET /api/operator/runs` — inspect live and historical run supervision.
@@ -1561,7 +1580,6 @@ mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -3068,7 +3086,6 @@ def build_topology():
             shutdown_signal: shutdown_signal.clone(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),

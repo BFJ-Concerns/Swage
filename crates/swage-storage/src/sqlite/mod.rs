@@ -1,7 +1,9 @@
 pub mod agent_message;
 pub mod approval;
+pub mod audit;
 pub mod channel_link;
 pub mod context_snapshot;
+pub mod delivery;
 pub mod execution_host;
 pub mod heartbeat;
 pub mod message;

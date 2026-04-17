@@ -3111,6 +3111,13 @@ pub(crate) mod tests {
             Ok(result)
         }
 
+        async fn list_approvals(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+            let db = self.db.lock().await;
+            let mut result: Vec<_> = db.approvals.values().cloned().collect();
+            result.sort_by_key(|approval| std::cmp::Reverse(approval.created_at));
+            Ok(result)
+        }
+
         async fn update_approval_state(
             &self,
             id: Uuid,
@@ -3177,6 +3184,49 @@ pub(crate) mod tests {
                 tool_name.to_string(),
                 request_fingerprint.to_string(),
             )))
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::DeliveryStore for MockStorage {
+        async fn create_delivery_record(
+            &self,
+            delivery: swage_storage::NewDeliveryRecord,
+        ) -> Result<swage_storage::DeliveryRecord, StorageError> {
+            Ok(swage_storage::DeliveryRecord {
+                id: Uuid::new_v4(),
+                session_id: delivery.session_id,
+                target: delivery.target,
+                content: delivery.content,
+                delivered_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn list_delivery_records(
+            &self,
+        ) -> Result<Vec<swage_storage::DeliveryRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_delivery_records_by_session(
+            &self,
+            _session_id: Uuid,
+        ) -> Result<Vec<swage_storage::DeliveryRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::AuditStore for MockStorage {
+        async fn list_audit_events(&self) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_audit_events_by_session(
+            &self,
+            _session_id: Uuid,
+        ) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
@@ -3373,7 +3423,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -3439,7 +3488,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -3575,7 +3623,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -3900,7 +3947,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -4164,7 +4210,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -4623,7 +4668,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -4719,7 +4763,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -4899,7 +4942,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),
@@ -5075,7 +5117,6 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
                 crate::execution_host::ExecutionHostRuntime::default(),

@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use swage_core::{GatewayError, Role};
-use swage_storage::model::NewSession;
+use swage_storage::{NewDeliveryRecord, model::NewSession};
 
 use crate::state::AppState;
 use crate::subscription::SubscriptionState;
@@ -201,19 +201,32 @@ pub async fn handle_dev_thread_inbound(
 }
 
 pub async fn read_delivery_log(state: &AppState, query: DeliveryLogQuery) -> DeliveryLogResponse {
-    let deliveries = state.delivery_log.lock().await;
     DeliveryLogResponse {
-        deliveries: deliveries
-            .iter()
-            .filter(|delivery| delivery.session_id == query.session_id)
-            .cloned()
+        deliveries: state
+            .storage
+            .list_delivery_records_by_session(query.session_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| {
+                parse_delivery_target(record.target).map(|target| RecordedDelivery {
+                    session_id: record.session_id,
+                    target,
+                    content: record.content,
+                    delivered_at: record.delivered_at,
+                })
+            })
             .collect(),
     }
 }
 
 pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListResponse {
     let routes = state.channel_routes.lock().await;
-    let deliveries = state.delivery_log.lock().await;
+    let deliveries = state
+        .storage
+        .list_delivery_records()
+        .await
+        .unwrap_or_default();
 
     let channels = [
         ExternalChannelIntegration::DevDm,
@@ -225,15 +238,15 @@ pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListRespons
             .keys()
             .filter(|origin| origin.integration == integration)
             .count();
-        let matching_deliveries: Vec<&RecordedDelivery> = deliveries
+        let matching_deliveries: Vec<&swage_storage::DeliveryRecord> = deliveries
             .iter()
             .filter(|delivery| {
                 matches!(
-                    &delivery.target,
-                    DeliveryTarget::Channel {
+                    parse_delivery_target(delivery.target.clone()),
+                    Some(DeliveryTarget::Channel {
                         integration: target_integration,
                         ..
-                    } if *target_integration == integration
+                    }) if target_integration == integration
                 )
             })
             .collect();
@@ -557,12 +570,18 @@ async fn record_delivery(
     target: DeliveryTarget,
     content: String,
 ) {
-    state.delivery_log.lock().await.push(RecordedDelivery {
-        session_id,
-        target,
-        content,
-        delivered_at: Utc::now(),
-    });
+    let _ = state
+        .storage
+        .create_delivery_record(NewDeliveryRecord {
+            session_id,
+            target: serde_json::to_value(&target).unwrap_or(serde_json::Value::Null),
+            content,
+        })
+        .await;
+}
+
+fn parse_delivery_target(target: serde_json::Value) -> Option<DeliveryTarget> {
+    serde_json::from_value(target).ok()
 }
 
 fn default_true() -> bool {

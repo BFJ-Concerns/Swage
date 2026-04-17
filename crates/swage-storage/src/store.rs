@@ -4,15 +4,15 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, ChannelLink,
-    EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
-    InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewChannelLink, NewEdgeEvaluation,
-    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread,
-    NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project,
-    ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
-    UpdateScheduledJob,
+    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, AuditEvent,
+    ChannelLink, DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat,
+    HeartbeatRun, HeartbeatRunState, InboundAudit, Message, NewAgentMessage, NewApprovalRequest,
+    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
+    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
+    NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+    NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
+    ScheduledRunState, Session, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord,
+    TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,28 @@ pub trait ChannelLinkStore: Send + Sync {
         account: &str,
         conversation: &str,
     ) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait DeliveryStore: Send + Sync {
+    async fn create_delivery_record(
+        &self,
+        delivery: NewDeliveryRecord,
+    ) -> Result<DeliveryRecord, StorageError>;
+    async fn list_delivery_records(&self) -> Result<Vec<DeliveryRecord>, StorageError>;
+    async fn list_delivery_records_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<DeliveryRecord>, StorageError>;
+}
+
+#[async_trait]
+pub trait AuditStore: Send + Sync {
+    async fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StorageError>;
+    async fn list_audit_events_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<AuditEvent>, StorageError>;
 }
 
 #[async_trait]
@@ -424,6 +446,8 @@ pub trait ApprovalStore: Send + Sync {
     /// Used during startup recovery and by the gateway to re-emit pending
     /// approvals to newly connected clients.
     async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError>;
+    /// List all approval requests across all states.
+    async fn list_approvals(&self) -> Result<Vec<ApprovalRequest>, StorageError>;
 
     /// Transition an approval request from Pending to `state`.
     ///
@@ -622,6 +646,8 @@ pub trait Storage:
     + SessionStore
     + ExecutionHostStore
     + ChannelLinkStore
+    + DeliveryStore
+    + AuditStore
     + ThreadStore
     + TurnStore
     + MessageStore
@@ -644,6 +670,8 @@ impl<T> Storage for T where
         + SessionStore
         + ExecutionHostStore
         + ChannelLinkStore
+        + DeliveryStore
+        + AuditStore
         + ThreadStore
         + TurnStore
         + MessageStore
@@ -783,6 +811,38 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl DeliveryStore for StubStorage {
+        async fn create_delivery_record(
+            &self,
+            _: NewDeliveryRecord,
+        ) -> Result<DeliveryRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_delivery_records(&self) -> Result<Vec<DeliveryRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_delivery_records_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<DeliveryRecord>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AuditStore for StubStorage {
+        async fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_audit_events_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<AuditEvent>, StorageError> {
             unimplemented!()
         }
     }
@@ -1083,6 +1143,9 @@ mod tests {
             unimplemented!()
         }
         async fn list_all_pending(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_approvals(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
             unimplemented!()
         }
         async fn update_approval_state(
@@ -1417,6 +1480,7 @@ mod tests {
             let _ = t.get_approval(Uuid::new_v4());
             let _ = t.list_pending_by_agent("agent-1");
             let _ = t.list_all_pending();
+            let _ = t.list_approvals();
             let _ = t.cleanup_orphaned_approvals();
         }
         let stub = StubStorage;
@@ -1431,6 +1495,26 @@ mod tests {
     fn storage_supertrait_includes_approval_store() {
         fn _assert<T: Storage>(t: &T) {
             let _ = t.list_all_pending();
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    #[test]
+    fn delivery_store_compile_check() {
+        fn _assert<T: DeliveryStore>(t: &T) {
+            let _ = t.list_delivery_records();
+            let _ = t.list_delivery_records_by_session(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    #[test]
+    fn audit_store_compile_check() {
+        fn _assert<T: AuditStore>(t: &T) {
+            let _ = t.list_audit_events();
+            let _ = t.list_audit_events_by_session(Uuid::new_v4());
         }
         let stub = StubStorage;
         _assert(&stub);

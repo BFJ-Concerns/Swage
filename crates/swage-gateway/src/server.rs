@@ -159,6 +159,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/deliveries/log", get(handlers::delivery_log))
         .route("/api/operator/overview", get(handlers::operator_overview))
+        .route("/api/operator/search", get(handlers::operator_search))
+        .route("/api/operator/usage", get(handlers::operator_usage))
         .route("/api/operator/runs", get(handlers::list_operator_runs))
         .route(
             "/api/operator/runs/:kind/:id",

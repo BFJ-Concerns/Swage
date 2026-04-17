@@ -16,7 +16,7 @@ use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
-use crate::channel_gateway::{ChannelOrigin, RecordedDelivery};
+use crate::channel_gateway::ChannelOrigin;
 use crate::{
     execution_host::ExecutionHostRuntime, lifecycle::ActivityTracker, presence::PresenceRuntime,
     tool::ToolDispatcher, websocket::ServerEvent,
@@ -89,8 +89,6 @@ pub struct AppState {
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
-    /// Recorded deliveries across all routing targets.
-    pub delivery_log: Arc<AsyncMutex<Vec<RecordedDelivery>>>,
     /// Runtime presence for recent clients and registered machines.
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached execution hosts.
@@ -133,7 +131,6 @@ impl AppState {
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
-            delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -202,7 +199,6 @@ mod tests {
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             hook_registry: None,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
-            delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),

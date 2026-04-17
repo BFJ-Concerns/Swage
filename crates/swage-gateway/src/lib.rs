@@ -51,6 +51,7 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod assets;
+pub mod audit;
 pub mod automated_turn;
 pub mod channel_gateway;
 pub mod cli;

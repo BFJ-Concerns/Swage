@@ -146,6 +146,29 @@ pub struct ChannelLink {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A durable record of a resolved outbound delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryRecord {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub target: serde_json::Value,
+    pub content: String,
+    pub delivered_at: DateTime<Utc>,
+}
+
+/// A durable audit-trail event for operator inspection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: String,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub event_kind: String,
+    pub summary: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A single agent turn within a thread.
 ///
 /// Turns belong to a thread (not directly to a session). Each turn captures
@@ -1177,6 +1200,14 @@ pub struct NewChannelLink {
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
+}
+
+/// Input for recording a durable outbound delivery.
+#[derive(Debug, Clone)]
+pub struct NewDeliveryRecord {
+    pub session_id: Uuid,
+    pub target: serde_json::Value,
+    pub content: String,
 }
 
 /// Input for creating a new thread.

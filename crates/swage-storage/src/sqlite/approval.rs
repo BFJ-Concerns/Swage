@@ -274,6 +274,21 @@ impl ApprovalStore for SqliteStorage {
         .await
     }
 
+    async fn list_approvals(&self) -> Result<Vec<ApprovalRequest>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, turn_id, agent_id, kind, tool_name, tool_arguments, hook_name,
+                        prompt, context, state, timeout_at, timeout_policy,
+                        decision_reason, created_at, decided_at
+                 FROM approval_requests
+                 ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], row_to_approval)?;
+            rows.collect()
+        })
+        .await
+    }
+
     async fn update_approval_state(
         &self,
         id: Uuid,
