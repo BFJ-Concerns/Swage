@@ -1107,6 +1107,9 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
         (state, storage)
     }

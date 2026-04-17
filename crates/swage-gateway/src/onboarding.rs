@@ -65,7 +65,7 @@ pub struct RedeemNodePairingRequest {
     #[serde(default = "default_attached_node_kind")]
     pub kind: String,
     pub base_url: String,
-    pub shared_token: String,
+    pub shared_token_secret_ref: String,
     pub workspace_root: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -76,6 +76,7 @@ pub struct GatewayRecoveryBundle {
     pub version: u32,
     pub projects: Vec<RecoveryProjectRecord>,
     pub sessions: Vec<RecoverySessionRecord>,
+    pub secrets: Vec<RecoverySecretRecord>,
     pub channel_links: Vec<RecoveryChannelLinkRecord>,
     pub execution_hosts: Vec<RecoveryExecutionHostRecord>,
     pub scheduled_jobs: Vec<RecoveryScheduledJobRecord>,
@@ -105,6 +106,21 @@ pub struct RecoverySessionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoverySecretRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub material_kind: String,
+    pub owner_kind: String,
+    pub backend_kind: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub external_reference: Option<String>,
+    pub metadata: serde_json::Value,
+    pub status: String,
+    pub managed_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryChannelLinkRecord {
     pub integration: String,
     pub account: String,
@@ -121,7 +137,7 @@ pub struct RecoveryExecutionHostRecord {
     pub label: Option<String>,
     pub kind: String,
     pub base_url: String,
-    pub shared_token: String,
+    pub shared_token_secret_ref: String,
     pub workspace_root: String,
     pub capabilities: Vec<String>,
 }
@@ -305,7 +321,7 @@ pub async fn redeem_node_pairing_code(
             label: request.label,
             kind: request.kind,
             base_url: request.base_url,
-            shared_token: request.shared_token,
+            shared_token_secret_ref: request.shared_token_secret_ref,
             workspace_root: request.workspace_root,
             capabilities: request.capabilities,
         },
@@ -324,6 +340,7 @@ pub async fn export_gateway_recovery_bundle(
     }
 
     let channel_links = state.storage.list_channel_links().await?;
+    let secrets = state.storage.list_secrets().await?;
     let execution_hosts = state.storage.list_execution_hosts().await?;
     let scheduled_jobs = state.storage.list_scheduled_jobs().await?;
     let heartbeats = state.storage.list_heartbeats().await?;
@@ -349,6 +366,30 @@ pub async fn export_gateway_recovery_bundle(
                 metadata: session.metadata,
             })
             .collect(),
+        secrets: {
+            let mut records = Vec::new();
+            for secret in secrets {
+                let managed_value = if secret.backend_kind == "managed" {
+                    state.storage.get_managed_secret_value(secret.id).await?
+                } else {
+                    None
+                };
+                records.push(RecoverySecretRecord {
+                    id: secret.id,
+                    name: secret.name,
+                    material_kind: secret.material_kind,
+                    owner_kind: secret.owner_kind,
+                    backend_kind: secret.backend_kind,
+                    scope_kind: secret.scope_kind,
+                    scope_id: secret.scope_id,
+                    external_reference: secret.external_reference,
+                    metadata: secret.metadata,
+                    status: secret.status,
+                    managed_value,
+                });
+            }
+            records
+        },
         channel_links: channel_links
             .into_iter()
             .map(|link| RecoveryChannelLinkRecord {
@@ -368,7 +409,7 @@ pub async fn export_gateway_recovery_bundle(
                 label: host.label,
                 kind: host.kind,
                 base_url: host.base_url,
-                shared_token: host.shared_token,
+                shared_token_secret_ref: host.shared_token,
                 workspace_root: host.workspace_root,
                 capabilities: host.capabilities,
             })
@@ -440,6 +481,27 @@ pub async fn import_gateway_recovery_bundle(
         session_map.insert(session.id, imported.id);
     }
 
+    for secret in bundle.secrets {
+        state
+            .storage
+            .create_secret(swage_storage::NewSecretRecord {
+                id: secret.id,
+                name: secret.name,
+                material_kind: secret.material_kind,
+                owner_kind: secret.owner_kind,
+                backend_kind: secret.backend_kind,
+                scope_kind: secret.scope_kind,
+                scope_id: secret.scope_id,
+                external_reference: secret.external_reference,
+                metadata: secret.metadata,
+                value: secret.managed_value,
+            })
+            .await?;
+        if secret.status == "revoked" {
+            state.storage.revoke_secret(secret.id).await?;
+        }
+    }
+
     for link in bundle.channel_links {
         state
             .storage
@@ -470,7 +532,7 @@ pub async fn import_gateway_recovery_bundle(
                 label: host.label,
                 kind: host.kind,
                 base_url: host.base_url,
-                shared_token: host.shared_token,
+                shared_token_secret_ref: host.shared_token_secret_ref,
                 workspace_root: host.workspace_root,
                 capabilities: host.capabilities,
             },

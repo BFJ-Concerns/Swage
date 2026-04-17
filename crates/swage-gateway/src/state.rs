@@ -19,6 +19,7 @@ use swage_storage::store::{ProjectStore, Storage};
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
     execution_host::ExecutionHostRuntime, lifecycle::ActivityTracker, presence::PresenceRuntime,
+    secret::SecretManager,
     tool::ToolDispatcher, websocket::ServerEvent,
 };
 
@@ -95,6 +96,8 @@ pub struct AppState {
     pub execution_hosts: Arc<AsyncMutex<ExecutionHostRuntime>>,
     /// One-time node pairing codes awaiting redemption by a remote host.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
+    /// Canonical secret-management and resolution surface.
+    pub secret_manager: Arc<SecretManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +117,7 @@ impl AppState {
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
         Self {
-            storage,
+            storage: storage.clone(),
             project_store,
             provider,
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
@@ -134,6 +137,7 @@ impl AppState {
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
+            secret_manager: Arc::new(SecretManager::new(storage.clone())),
         }
     }
 }
@@ -183,7 +187,7 @@ mod tests {
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
@@ -202,6 +206,9 @@ mod tests {
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
+            secret_manager: Arc::new(SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         }
     }
 

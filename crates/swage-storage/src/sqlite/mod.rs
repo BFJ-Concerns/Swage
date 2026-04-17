@@ -10,6 +10,7 @@ pub mod message;
 pub mod migrations;
 pub mod project;
 pub mod schedule;
+pub mod secret;
 pub mod session;
 pub mod skill_activation;
 pub mod team;

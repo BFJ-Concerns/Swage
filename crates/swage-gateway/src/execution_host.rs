@@ -21,6 +21,7 @@ use swage_storage::model::NewExecutionHostRegistration;
 use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolDispatcher;
 
+use crate::secret::SecretManager;
 use crate::state::AppState;
 use crate::tool::workspace::resolve_workspace_root;
 
@@ -67,7 +68,7 @@ pub struct RegisteredExecutionHost {
     pub label: Option<String>,
     pub kind: ExecutionHostKind,
     pub base_url: Option<String>,
-    pub shared_token: Option<String>,
+    pub shared_token_secret_ref: Option<String>,
     pub workspace_root: PathBuf,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
@@ -101,7 +102,7 @@ pub struct RegisterExecutionHostRequest {
     #[serde(default = "default_remote_host_kind")]
     pub kind: String,
     pub base_url: String,
-    pub shared_token: String,
+    pub shared_token_secret_ref: String,
     pub workspace_root: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -142,7 +143,7 @@ pub fn make_local_execution_host(
         label: Some("Local machine".to_string()),
         kind: ExecutionHostKind::Local,
         base_url: None,
-        shared_token: None,
+        shared_token_secret_ref: None,
         workspace_root: resolve_workspace_root(config),
         capabilities: dispatcher
             .registry()
@@ -169,7 +170,7 @@ pub async fn register_remote_execution_host(
         label: request.label.clone(),
         kind: ExecutionHostKind::from_str(&request.kind).unwrap_or(ExecutionHostKind::AttachedNode),
         base_url: Some(request.base_url),
-        shared_token: Some(request.shared_token),
+        shared_token_secret_ref: Some(request.shared_token_secret_ref),
         workspace_root: PathBuf::from(request.workspace_root),
         capabilities: request.capabilities,
         registered_at: Utc::now(),
@@ -182,7 +183,10 @@ pub async fn register_remote_execution_host(
             label: host.label.clone(),
             kind: host.kind.to_string(),
             base_url: host.base_url.clone().unwrap_or_default(),
-            shared_token: host.shared_token.clone().unwrap_or_default(),
+            shared_token: host
+                .shared_token_secret_ref
+                .clone()
+                .unwrap_or_default(),
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
             capabilities: host.capabilities.clone(),
         })
@@ -221,7 +225,7 @@ pub async fn restore_registered_execution_hosts(
                 kind: ExecutionHostKind::from_str(&host.kind)
                     .unwrap_or(ExecutionHostKind::AttachedNode),
                 base_url: Some(host.base_url),
-                shared_token: Some(host.shared_token),
+                shared_token_secret_ref: Some(host.shared_token),
                 workspace_root: PathBuf::from(host.workspace_root),
                 capabilities: host.capabilities,
                 registered_at: host.registered_at,
@@ -303,6 +307,7 @@ fn select_execution_host(
 }
 
 pub async fn execute_on_remote_host(
+    secret_manager: &SecretManager,
     host: &RegisteredExecutionHost,
     tool_name: &str,
     params: &Value,
@@ -349,8 +354,27 @@ pub async fn execute_on_remote_host(
             .unwrap_or_default()
             .trim_end_matches('/')
     );
+    let shared_token = match host.shared_token_secret_ref.as_deref() {
+        Some(reference) => secret_manager
+            .resolve(reference)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                message: error.to_string(),
+            })?
+            .value,
+        None => {
+            return Err(ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                message: format!(
+                    "execution host '{}' is missing its shared token secret reference",
+                    host.host_id
+                ),
+            });
+        }
+    };
     let request = RemoteToolExecutionRequest {
-        shared_token: host.shared_token.clone().unwrap_or_default(),
+        shared_token,
         tool_name: tool_name.to_string(),
         params: params.clone(),
         context: SerializableToolContext::from_context(ctx),
@@ -537,18 +561,40 @@ pub async fn register_attached_node_with_gateway(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use swage_storage::SqliteStorage;
     use swage_tool::context::MockToolContext;
+
+    async fn test_secret_manager() -> crate::secret::SecretManager {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = crate::secret::SecretManager::new(storage.clone());
+        manager
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "remote token".into(),
+                material_kind: "node_credential".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("secret".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        manager
+    }
 
     fn registered_host(host_id: &str, kind: ExecutionHostKind) -> RegisteredExecutionHost {
         RegisteredExecutionHost {
             host_id: host_id.to_string(),
             label: None,
             kind,
-            base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token: Some("secret".to_string()),
-            workspace_root: PathBuf::from("/tmp/workspace"),
-            capabilities: vec!["host_identity".to_string()],
-            registered_at: Utc::now(),
+        base_url: Some("http://127.0.0.1:1".to_string()),
+        shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
+        workspace_root: PathBuf::from("/tmp/workspace"),
+        capabilities: vec!["host_identity".to_string()],
+        registered_at: Utc::now(),
         }
     }
 
@@ -628,7 +674,7 @@ mod tests {
             label: None,
             kind: ExecutionHostKind::AttachedNode,
             base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token: Some("secret".to_string()),
+            shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
             workspace_root: PathBuf::from("/tmp/workspace"),
             capabilities: vec!["echo".to_string()],
             registered_at: Utc::now(),
@@ -643,7 +689,8 @@ mod tests {
             turn_id: None,
         };
 
-        let error = execute_on_remote_host(&host, "shell", &serde_json::json!({}), &ctx)
+        let secret_manager = test_secret_manager().await;
+        let error = execute_on_remote_host(&secret_manager, &host, "shell", &serde_json::json!({}), &ctx)
             .await
             .expect_err("unadvertised tool should be rejected");
         assert!(error.to_string().contains("does not expose tool 'shell'"));
@@ -656,7 +703,7 @@ mod tests {
             label: None,
             kind: ExecutionHostKind::AttachedNode,
             base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token: Some("secret".to_string()),
+            shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
             workspace_root: PathBuf::from("/tmp/workspace"),
             capabilities: vec!["shell".to_string()],
             registered_at: Utc::now(),
@@ -671,7 +718,8 @@ mod tests {
             turn_id: None,
         };
 
-        let error = execute_on_remote_host(&host, "shell", &serde_json::json!({}), &ctx)
+        let secret_manager = test_secret_manager().await;
+        let error = execute_on_remote_host(&secret_manager, &host, "shell", &serde_json::json!({}), &ctx)
             .await
             .expect_err("out-of-root context should be rejected");
         assert!(

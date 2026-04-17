@@ -53,6 +53,15 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Parameter keys whose values may be secret references.
+    ///
+    /// The gateway resolves these references at the host boundary before
+    /// execution. Tools that opt in here can receive injected raw secrets
+    /// without exposing them to the model or sandbox IPC by default.
+    fn host_secret_keys(&self) -> &[&str] {
+        &[]
+    }
+
     /// Execute the tool with already-validated parameters.
     ///
     /// Returns the raw output `Value`; the framework wraps it into a

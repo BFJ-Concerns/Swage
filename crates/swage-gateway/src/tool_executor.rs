@@ -20,6 +20,7 @@ use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
 use crate::execution_host::RegisteredExecutionHost;
+use crate::secret::SecretManager;
 use crate::websocket::ServerEvent;
 
 pub struct GatewayToolContext {
@@ -138,6 +139,8 @@ pub struct GatewayExecutionStrategy {
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     /// Resolved execution host for the current turn.
     execution_host: Option<RegisteredExecutionHost>,
+    /// Canonical secret resolution surface.
+    secret_manager: Arc<SecretManager>,
 }
 
 impl GatewayExecutionStrategy {
@@ -145,11 +148,13 @@ impl GatewayExecutionStrategy {
         inner: Option<Arc<dyn ToolExecutionStrategy>>,
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
         execution_host: Option<RegisteredExecutionHost>,
+        secret_manager: Arc<SecretManager>,
     ) -> Self {
         Self {
             inner,
             ws_tx,
             execution_host,
+            secret_manager,
         }
     }
 }
@@ -163,17 +168,22 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
+        let resolved_params = if tool.host_secret_keys().is_empty() {
+            params.clone()
+        } else {
+            resolve_secret_params(params, tool.host_secret_keys(), &self.secret_manager).await?
+        };
+
         if self
             .execution_host
             .as_ref()
             .is_some_and(|host| host.kind != crate::execution_host::ExecutionHostKind::Local)
         {
             return crate::execution_host::execute_on_remote_host(
-                self.execution_host
-                    .as_ref()
-                    .expect("checked execution host"),
+                &self.secret_manager,
+                self.execution_host.as_ref().expect("checked execution host"),
                 tool_name,
-                params,
+                &resolved_params,
                 ctx,
             )
             .await;
@@ -181,15 +191,49 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
 
         if tool_name == "python_execute" {
             let gateway_ctx = GatewayToolContext::new(ctx, self.ws_tx.clone());
-            tool.execute(params.clone(), &gateway_ctx).await
+            tool.execute(resolved_params, &gateway_ctx).await
         } else {
-            // Non-Python tools: delegate to inner strategy or direct execution.
+            // Secret-aware tools run on the host so raw values never enter sandbox IPC.
+            if !tool.host_secret_keys().is_empty() {
+                return tool.execute(resolved_params, ctx).await;
+            }
             match &self.inner {
-                Some(strategy) => strategy.execute(tool, tool_name, params, ctx).await,
-                None => tool.execute(params.clone(), ctx).await,
+                Some(strategy) => strategy.execute(tool, tool_name, &resolved_params, ctx).await,
+                None => tool.execute(resolved_params, ctx).await,
             }
         }
     }
+}
+
+async fn resolve_secret_params(
+    params: &Value,
+    keys: &[&str],
+    secret_manager: &SecretManager,
+) -> Result<Value, ToolError> {
+    let mut resolved = params.clone();
+    let Some(object) = resolved.as_object_mut() else {
+        return Ok(resolved);
+    };
+    for key in keys {
+        let Some(value) = object.get_mut(*key) else {
+            continue;
+        };
+        let Some(reference) = value.as_str() else {
+            continue;
+        };
+        if !reference.starts_with("secret://") {
+            continue;
+        }
+        let secret = secret_manager
+            .resolve(reference)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: "secret_resolution".into(),
+                message: error.to_string(),
+            })?;
+        *value = Value::String(secret.value);
+    }
+    Ok(resolved)
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +246,7 @@ mod tests {
 
     use serde_json::json;
     use swage_sandbox::ToolCallResult;
+    use swage_storage::SqliteStorage;
     use swage_tool::context::MockToolContext;
     use swage_tool::dispatch::ToolExecutionStrategy;
     use tokio::sync::Mutex;
@@ -332,6 +377,45 @@ mod tests {
         }
     }
 
+    struct SecretAwareTool;
+
+    #[async_trait]
+    impl Tool for SecretAwareTool {
+        fn name(&self) -> &str {
+            "secret_aware"
+        }
+
+        fn description(&self) -> &str {
+            "returns a host-injected secret"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "secret": { "type": "string" }
+                },
+                "required": ["secret"]
+            })
+        }
+
+        fn sensitive_keys(&self) -> &[&str] {
+            &["secret"]
+        }
+
+        fn host_secret_keys(&self) -> &[&str] {
+            &["secret"]
+        }
+
+        async fn execute(
+            &self,
+            params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Ok(json!({"secret": params["secret"].as_str().unwrap_or_default()}))
+        }
+    }
+
     struct RecordingStrategy {
         output: Value,
         last_call: Mutex<Option<(String, bool)>>,
@@ -446,7 +530,10 @@ mod tests {
     async fn gateway_strategy_executes_python_on_host_with_gateway_context() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None);
+        let secret_manager =
+            Arc::new(crate::secret::SecretManager::new(Arc::new(SqliteStorage::in_memory().unwrap())));
+        let executor =
+            GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
         let tool = ObservingTool::new(json!({"via": "tool"}));
         let turn_id =
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("valid UUID");
@@ -488,7 +575,10 @@ mod tests {
     async fn gateway_strategy_keeps_non_python_tools_on_inner_strategy() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None);
+        let secret_manager =
+            Arc::new(crate::secret::SecretManager::new(Arc::new(SqliteStorage::in_memory().unwrap())));
+        let executor =
+            GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
         let tool = ObservingTool::new(json!({"via": "tool"}));
 
         let result = executor
@@ -512,6 +602,47 @@ mod tests {
         assert!(
             !last_call.1,
             "non-python tools should keep their original tool context",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gateway_strategy_resolves_secret_refs_on_host_and_bypasses_inner_strategy() {
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let secret_manager = Arc::new(crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        ));
+        let secret = secret_manager
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Tool secret".into(),
+                material_kind: "plugin_secret".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "plugin".into(),
+                scope_id: Some("demo".into()),
+                metadata: None,
+                value: Some("host-only-secret".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
+
+        let result = executor
+            .execute(
+                &SecretAwareTool,
+                "secret_aware",
+                &json!({"secret": secret.reference}),
+                &ctx(),
+            )
+            .await
+            .expect("secret-aware tool should resolve on the host");
+
+        assert_eq!(result["secret"], "host-only-secret");
+        assert!(
+            inner.last_call.lock().await.is_none(),
+            "secret-aware tool should bypass the inner strategy so raw secrets do not enter sandbox IPC"
         );
     }
 }

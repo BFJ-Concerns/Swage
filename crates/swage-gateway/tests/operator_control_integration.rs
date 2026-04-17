@@ -16,16 +16,17 @@ use swage_core::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::{
-    channel_gateway::{ChannelOrigin, DeliveryTarget, RecordedDelivery},
+    channel_gateway::{ChannelOrigin, DeliveryTarget},
     execution_host::{RegisterExecutionHostRequest, register_remote_execution_host},
     heartbeat::{CreateHeartbeatRequest, create_heartbeat},
     schedule::{CreateScheduledJobRequest, ScheduleSpecRequest, create_scheduled_job},
+    secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, NewApprovalRequest, NewTurn, SqliteStorage, TurnState,
+    ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
     store::{ProjectStore, Storage},
 };
 
@@ -199,7 +200,22 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
             label: Some("Docker A".into()),
             kind: "docker".into(),
             base_url: "http://127.0.0.1:4100".into(),
-            shared_token: "secret".into(),
+            shared_token_secret_ref: state
+                .secret_manager
+                .create_secret(CreateSecretRequest {
+                    name: "Operator node token".into(),
+                    material_kind: "node_credential".into(),
+                    owner_kind: "service".into(),
+                    backend_kind: "managed".into(),
+                    scope_kind: "gateway".into(),
+                    scope_id: None,
+                    metadata: None,
+                    value: Some("secret".into()),
+                    external_reference: None,
+                })
+                .await
+                .unwrap()
+                .reference,
             workspace_root: "/srv/docker".into(),
             capabilities: vec!["shell".into()],
         },
@@ -216,16 +232,18 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
         },
         session_id,
     );
-    state.delivery_log.lock().await.push(RecordedDelivery {
+    state.storage.create_delivery_record(NewDeliveryRecord {
         session_id,
-        target: DeliveryTarget::Channel {
+        target: serde_json::to_value(DeliveryTarget::Channel {
             integration: swage_gateway::channel_gateway::ExternalChannelIntegration::DevDm,
             account: "ops".into(),
             conversation: "alice".into(),
-        },
+        })
+        .unwrap(),
         content: "Delivered".into(),
-        delivered_at: chrono::Utc::now(),
-    });
+    })
+    .await
+    .unwrap();
 
     let (status, body) = get_json(&router, "/api/operator/overview").await;
     assert_eq!(status, StatusCode::OK);

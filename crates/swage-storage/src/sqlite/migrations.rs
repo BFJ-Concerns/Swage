@@ -39,6 +39,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
         ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
+        ("022_secrets", CREATE_SECRET_TABLES),
     ]
 }
 
@@ -305,6 +306,38 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
     END;
+";
+
+const CREATE_SECRET_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS secrets (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        name               TEXT NOT NULL,
+        material_kind      TEXT NOT NULL,
+        owner_kind         TEXT NOT NULL,
+        backend_kind       TEXT NOT NULL,
+        scope_kind         TEXT NOT NULL,
+        scope_id           TEXT,
+        reference          TEXT NOT NULL UNIQUE,
+        external_reference TEXT,
+        metadata_json      TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        revoked_at         TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_secrets_scope
+        ON secrets(scope_kind, scope_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_secrets_material_kind
+        ON secrets(material_kind, created_at);
+    CREATE INDEX IF NOT EXISTS idx_secrets_status
+        ON secrets(status, created_at);
+
+    CREATE TABLE IF NOT EXISTS managed_secret_values (
+        secret_id   TEXT NOT NULL PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+        value       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
 ";
 
 /// Additive migration: cost in microcents derived from provider pricing data.

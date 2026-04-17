@@ -15,6 +15,7 @@ use swage_core::{
 };
 use swage_gateway::{
     execution_host::{register_local_execution_host, spawn_attached_node},
+    secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
 };
@@ -136,6 +137,25 @@ async fn start_test_server(
     (addr, state)
 }
 
+async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String {
+    state
+        .secret_manager
+        .create_secret(CreateSecretRequest {
+            name: name.to_string(),
+            material_kind: "node_credential".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some(value.to_string()),
+            external_reference: None,
+        })
+        .await
+        .unwrap()
+        .reference
+}
+
 async fn post_json(addr: SocketAddr, path: &str, body: Value) -> (StatusCode, Value) {
     let response = reqwest::Client::new()
         .post(format!("http://{addr}{path}"))
@@ -168,7 +188,7 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, _state) = start_test_server(
+    let (addr, state) = start_test_server(
         None,
         provider,
         dispatcher,
@@ -176,6 +196,7 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
         false,
     )
     .await;
+    let shared_token_secret_ref = create_secret_ref(&state, "Pair token", "pair-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -201,7 +222,7 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
             "label": "Paired Node A",
             "kind": "attached_node",
             "base_url": node.base_url,
-            "shared_token": "pair-secret",
+            "shared_token_secret_ref": shared_token_secret_ref,
             "workspace_root": workspace.path().to_string_lossy(),
             "capabilities": ["host_identity"]
         }),
@@ -277,7 +298,7 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (origin_addr, _origin_state) = start_test_server(
+    let (origin_addr, origin_state) = start_test_server(
         Some(&origin_db),
         origin_provider,
         origin_dispatcher,
@@ -285,6 +306,8 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         false,
     )
     .await;
+    let recovery_secret_ref =
+        create_secret_ref(&origin_state, "Recovery token", "recovery-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -312,7 +335,7 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
             "label": "Recovery Node A",
             "kind": "attached_node",
             "base_url": node.base_url,
-            "shared_token": "recovery-secret",
+            "shared_token_secret_ref": recovery_secret_ref,
             "workspace_root": node_workspace.path().to_string_lossy(),
             "capabilities": ["host_identity"]
         }),
@@ -424,7 +447,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (origin_addr, _origin_state) = start_test_server(
+    let (origin_addr, origin_state) = start_test_server(
         Some(&origin_db),
         origin_provider,
         origin_dispatcher,
@@ -432,6 +455,8 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         false,
     )
     .await;
+    let moved_secret_ref =
+        create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -459,7 +484,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
             "label": "Moved Node A",
             "kind": "attached_node",
             "base_url": node.base_url,
-            "shared_token": "moved-secret",
+            "shared_token_secret_ref": moved_secret_ref,
             "workspace_root": node_workspace.path().to_string_lossy(),
             "capabilities": ["host_identity"]
         }),
@@ -536,6 +561,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     let mut ctx = MockToolContext::new("gateway", "recovery-session");
     ctx.working_directory = node_workspace.path().to_path_buf();
     let tool_result = swage_gateway::execution_host::execute_on_remote_host(
+        &destination_state.secret_manager,
         &host,
         "host_identity",
         &json!({}),

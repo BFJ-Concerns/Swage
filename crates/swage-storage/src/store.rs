@@ -7,12 +7,13 @@ use crate::model::{
     ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, AuditEvent,
     ChannelLink, DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat,
     HeartbeatRun, HeartbeatRunState, InboundAudit, Message, NewAgentMessage, NewApprovalRequest,
-    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
-    NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-    NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-    ScheduledRunState, Session, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord,
-    TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+    NewAuditEvent, NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation,
+    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
+    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
+    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session,
+    Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,11 +113,29 @@ pub trait DeliveryStore: Send + Sync {
 
 #[async_trait]
 pub trait AuditStore: Send + Sync {
+    async fn create_audit_event(&self, event: NewAuditEvent) -> Result<AuditEvent, StorageError>;
     async fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StorageError>;
     async fn list_audit_events_by_session(
         &self,
         session_id: Uuid,
     ) -> Result<Vec<AuditEvent>, StorageError>;
+}
+
+#[async_trait]
+pub trait SecretStore: Send + Sync {
+    async fn create_secret(&self, secret: NewSecretRecord) -> Result<SecretRecord, StorageError>;
+    async fn list_secrets(&self) -> Result<Vec<SecretRecord>, StorageError>;
+    async fn get_secret(&self, id: Uuid) -> Result<Option<SecretRecord>, StorageError>;
+    async fn update_secret_value(
+        &self,
+        id: Uuid,
+        value: Option<String>,
+        external_reference: Option<String>,
+        metadata: serde_json::Value,
+    ) -> Result<SecretRecord, StorageError>;
+    async fn revoke_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
+    async fn restore_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
+    async fn get_managed_secret_value(&self, id: Uuid) -> Result<Option<String>, StorageError>;
 }
 
 #[async_trait]
@@ -648,6 +667,7 @@ pub trait Storage:
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
+    + SecretStore
     + ThreadStore
     + TurnStore
     + MessageStore
@@ -672,6 +692,7 @@ impl<T> Storage for T where
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
+        + SecretStore
         + ThreadStore
         + TurnStore
         + MessageStore
@@ -836,6 +857,9 @@ mod tests {
 
     #[async_trait]
     impl AuditStore for StubStorage {
+        async fn create_audit_event(&self, _: NewAuditEvent) -> Result<AuditEvent, StorageError> {
+            unimplemented!()
+        }
         async fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StorageError> {
             unimplemented!()
         }
@@ -843,6 +867,37 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<AuditEvent>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for StubStorage {
+        async fn create_secret(&self, _: NewSecretRecord) -> Result<SecretRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_secrets(&self) -> Result<Vec<SecretRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_secret(&self, _: Uuid) -> Result<Option<SecretRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_secret_value(
+            &self,
+            _: Uuid,
+            _: Option<String>,
+            _: Option<String>,
+            _: serde_json::Value,
+        ) -> Result<SecretRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn revoke_secret(&self, _: Uuid) -> Result<SecretRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn restore_secret(&self, _: Uuid) -> Result<SecretRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn get_managed_secret_value(&self, _: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
     }
@@ -1513,8 +1568,44 @@ mod tests {
     #[test]
     fn audit_store_compile_check() {
         fn _assert<T: AuditStore>(t: &T) {
+            let _ = t.create_audit_event(NewAuditEvent {
+                id: "audit".into(),
+                session_id: None,
+                entity_kind: "secret".into(),
+                entity_id: "1".into(),
+                event_kind: "created".into(),
+                summary: "created".into(),
+                metadata: serde_json::json!({}),
+            });
             let _ = t.list_audit_events();
             let _ = t.list_audit_events_by_session(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    #[test]
+    fn secret_store_compile_check() {
+        fn _assert<T: SecretStore>(t: &T) {
+            let id = Uuid::new_v4();
+            let _ = t.create_secret(NewSecretRecord {
+                id,
+                name: "provider".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                external_reference: None,
+                metadata: serde_json::json!({}),
+                value: Some("secret".into()),
+            });
+            let _ = t.list_secrets();
+            let _ = t.get_secret(id);
+            let _ = t.update_secret_value(id, Some("rotated".into()), None, serde_json::json!({}));
+            let _ = t.revoke_secret(id);
+            let _ = t.restore_secret(id);
+            let _ = t.get_managed_secret_value(id);
         }
         let stub = StubStorage;
         _assert(&stub);

@@ -238,6 +238,7 @@ pub(crate) async fn build_gateway_dispatcher(
         inner_strategy,
         ws_tx,
         execution_host,
+        state.secret_manager.clone(),
     )))
 }
 
@@ -1197,7 +1198,7 @@ pub(crate) mod tests {
     use futures::stream;
     use tokio::sync::{Mutex, Notify, mpsc};
 
-    use swage_core::StorageError;
+    use swage_core::{FinishReason, StorageError};
     use swage_core::{
         CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
         ToolCompletionResponse,
@@ -1428,11 +1429,14 @@ pub(crate) mod tests {
         pub(crate) tool_calls: Vec<ToolCallRecord>,
         pub(crate) snapshots: HashMap<Uuid, String>,
         pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
+        pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
         pub(crate) scheduled_jobs: HashMap<Uuid, ScheduledJob>,
         pub(crate) scheduled_runs: HashMap<Uuid, ScheduledRun>,
         pub(crate) heartbeats: HashMap<Uuid, Heartbeat>,
         pub(crate) heartbeat_runs: HashMap<Uuid, HeartbeatRun>,
+        pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
+        pub(crate) managed_secret_values: HashMap<Uuid, String>,
     }
 
     impl MockStorage {
@@ -3218,15 +3222,141 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl swage_storage::store::AuditStore for MockStorage {
+        async fn create_audit_event(
+            &self,
+            event: swage_storage::NewAuditEvent,
+        ) -> Result<swage_storage::AuditEvent, StorageError> {
+            let event = swage_storage::AuditEvent {
+                id: event.id,
+                session_id: event.session_id,
+                entity_kind: event.entity_kind,
+                entity_id: event.entity_id,
+                event_kind: event.event_kind,
+                summary: event.summary,
+                metadata: event.metadata,
+                created_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.audit_events.push(event.clone());
+            Ok(event)
+        }
+
         async fn list_audit_events(&self) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
-            Ok(Vec::new())
+            Ok(self.db.lock().await.audit_events.clone())
         }
 
         async fn list_audit_events_by_session(
             &self,
-            _session_id: Uuid,
+            session_id: Uuid,
         ) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
-            Ok(Vec::new())
+            Ok(self
+                .db
+                .lock()
+                .await
+                .audit_events
+                .iter()
+                .filter(|event| event.session_id == Some(session_id))
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::SecretStore for MockStorage {
+        async fn create_secret(
+            &self,
+            secret: swage_storage::NewSecretRecord,
+        ) -> Result<swage_storage::SecretRecord, StorageError> {
+            let record = swage_storage::SecretRecord {
+                id: secret.id,
+                name: secret.name,
+                material_kind: secret.material_kind,
+                owner_kind: secret.owner_kind,
+                backend_kind: secret.backend_kind.clone(),
+                scope_kind: secret.scope_kind,
+                scope_id: secret.scope_id,
+                reference: format!("secret://{}/{}", secret.backend_kind, secret.id),
+                external_reference: secret.external_reference,
+                metadata: secret.metadata,
+                status: "active".into(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                revoked_at: None,
+            };
+            let mut db = self.db.lock().await;
+            if let Some(value) = secret.value {
+                db.managed_secret_values.insert(record.id, value);
+            }
+            db.secrets.insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn list_secrets(&self) -> Result<Vec<swage_storage::SecretRecord>, StorageError> {
+            Ok(self.db.lock().await.secrets.values().cloned().collect())
+        }
+
+        async fn get_secret(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<swage_storage::SecretRecord>, StorageError> {
+            Ok(self.db.lock().await.secrets.get(&id).cloned())
+        }
+
+        async fn update_secret_value(
+            &self,
+            id: Uuid,
+            value: Option<String>,
+            external_reference: Option<String>,
+            metadata: serde_json::Value,
+        ) -> Result<swage_storage::SecretRecord, StorageError> {
+            let mut db = self.db.lock().await;
+            if let Some(value) = value {
+                db.managed_secret_values.insert(id, value);
+            }
+            let record = db
+                .secrets
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                })?;
+            record.external_reference = external_reference;
+            record.metadata = metadata;
+            record.updated_at = chrono::Utc::now();
+            Ok(record.clone())
+        }
+
+        async fn revoke_secret(&self, id: Uuid) -> Result<swage_storage::SecretRecord, StorageError> {
+            let mut db = self.db.lock().await;
+            let record = db
+                .secrets
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                })?;
+            record.status = "revoked".into();
+            record.updated_at = chrono::Utc::now();
+            record.revoked_at = Some(chrono::Utc::now());
+            Ok(record.clone())
+        }
+
+        async fn restore_secret(&self, id: Uuid) -> Result<swage_storage::SecretRecord, StorageError> {
+            let mut db = self.db.lock().await;
+            let record = db
+                .secrets
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                })?;
+            record.status = "active".into();
+            record.updated_at = chrono::Utc::now();
+            record.revoked_at = None;
+            Ok(record.clone())
+        }
+
+        async fn get_managed_secret_value(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+            Ok(self.db.lock().await.managed_secret_values.get(&id).cloned())
         }
     }
 
@@ -3404,7 +3534,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MockProvider::new(provider_chunks));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -3428,6 +3558,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
         (state, session_id)
     }
@@ -3469,7 +3602,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MockProvider::new(provider_chunks));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -3493,6 +3626,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
         (state, session_id)
     }
@@ -3604,7 +3740,7 @@ pub(crate) mod tests {
 
         let state = Arc::new(AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -3628,6 +3764,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3925,7 +4064,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -3952,6 +4091,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
         (state, session_id)
     }
@@ -4185,7 +4327,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4215,6 +4357,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4647,7 +4792,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4673,6 +4818,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4744,7 +4892,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4768,6 +4916,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4920,7 +5071,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4947,6 +5098,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -5098,7 +5252,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -5122,6 +5276,9 @@ pub(crate) mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
         };
         (state, session_id)
     }
@@ -6038,6 +6195,131 @@ pub(crate) mod tests {
             parsed.get("elements").is_some(),
             "snapshot should contain elements key"
         );
+    }
+
+    #[tokio::test]
+    async fn secret_refs_stay_out_of_snapshots_and_persisted_tool_arguments() {
+        struct SecretEchoTool;
+
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for SecretEchoTool {
+            fn name(&self) -> &str {
+                "secret_echo"
+            }
+
+            fn description(&self) -> &str {
+                "returns a resolved secret"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "secret": { "type": "string" }
+                    },
+                    "required": ["secret"]
+                })
+            }
+
+            fn sensitive_keys(&self) -> &[&str] {
+                &["secret"]
+            }
+
+            fn host_secret_keys(&self) -> &[&str] {
+                &["secret"]
+            }
+
+            async fn execute(
+                &self,
+                arguments: serde_json::Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                Ok(serde_json::json!({
+                    "resolved": arguments["secret"].as_str().unwrap_or_default()
+                }))
+            }
+        }
+
+        let secret_value = "host-only-secret";
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (mut state, session_id) = make_state_with_session(vec![]).await;
+        let secret = state
+            .secret_manager
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Turn secret".into(),
+                material_kind: "plugin_secret".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "plugin".into(),
+                scope_id: Some("turn-test".into()),
+                metadata: None,
+                value: Some(secret_value.into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        state.tool_dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(SecretEchoTool) as Arc<dyn crate::tool::Tool>
+        ]));
+
+        state.provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "secret-call".into(),
+                    name: "secret_echo".into(),
+                    arguments: serde_json::json!({
+                        "secret": secret.reference
+                    }),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::ToolUse),
+                },
+            ],
+            round_2.clone(),
+        ]));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use the governed secret".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turns = state
+            .storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        let tool_calls = state
+            .storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .unwrap();
+        let snapshot = state
+            .storage
+            .get_snapshot(turns[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].arguments.contains("secret://"));
+        assert!(!tool_calls[0].arguments.contains(secret_value));
+        assert!(!snapshot.contains(secret_value));
     }
 
     /// When subscription is off, ContextAssembled is not delivered but

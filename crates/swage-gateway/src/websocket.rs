@@ -1658,7 +1658,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::ProjectStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
-            storage: storage_arc,
+            storage: storage_arc.clone(),
             project_store,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
@@ -1680,6 +1680,9 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage_arc)
+            )),
         }
     }
 
@@ -1714,7 +1717,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::ProjectStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            storage: storage_arc,
+            storage: storage_arc.clone(),
             project_store,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
@@ -1736,6 +1739,9 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage_arc)
+            )),
         };
 
         (state, session_id)

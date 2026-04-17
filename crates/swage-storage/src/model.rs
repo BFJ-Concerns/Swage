@@ -169,6 +169,52 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// A centrally managed secret or credential reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub material_kind: String,
+    pub owner_kind: String,
+    pub backend_kind: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub reference: String,
+    pub external_reference: Option<String>,
+    pub metadata: serde_json::Value,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a new secret record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSecretRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub material_kind: String,
+    pub owner_kind: String,
+    pub backend_kind: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub external_reference: Option<String>,
+    pub metadata: serde_json::Value,
+    pub value: Option<String>,
+}
+
+/// A manually appended audit event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAuditEvent {
+    pub id: String,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub event_kind: String,
+    pub summary: String,
+    pub metadata: serde_json::Value,
+}
+
 /// A single agent turn within a thread.
 ///
 /// Turns belong to a thread (not directly to a session). Each turn captures

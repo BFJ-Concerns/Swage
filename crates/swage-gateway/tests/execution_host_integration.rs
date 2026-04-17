@@ -21,6 +21,7 @@ use swage_gateway::{
         ExecutionHostKind, RegisterExecutionHostRequest, register_attached_node_with_gateway,
         register_local_execution_host, spawn_attached_node, spawn_transport_backed_host,
     },
+    secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
 };
@@ -165,6 +166,25 @@ async fn start_file_backed_test_server(
     (addr, state)
 }
 
+async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String {
+    state
+        .secret_manager
+        .create_secret(CreateSecretRequest {
+            name: name.to_string(),
+            material_kind: "node_credential".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some(value.to_string()),
+            external_reference: None,
+        })
+        .await
+        .unwrap()
+        .reference
+}
+
 type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
@@ -307,13 +327,14 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, _state) = start_test_server(
+    let (addr, state) = start_test_server(
         provider,
         gateway_dispatcher,
         node_workspace.path().to_path_buf(),
         false,
     )
     .await;
+    let shared_token_secret_ref = create_secret_ref(&state, "Remote node token", "node-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -330,7 +351,7 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         label: Some("Remote Node A".to_string()),
         kind: "attached_node".to_string(),
         base_url: node.base_url.clone(),
-        shared_token: "node-secret".to_string(),
+        shared_token_secret_ref,
         workspace_root: node_workspace.path().to_string_lossy().into_owned(),
         capabilities: vec!["host_identity".to_string()],
     };
@@ -360,13 +381,15 @@ async fn run_transport_backend_round_trip(
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, _state) = start_test_server(
+    let (addr, state) = start_test_server(
         provider,
         gateway_dispatcher,
         workspace.path().to_path_buf(),
         false,
     )
     .await;
+    let shared_token_secret_ref =
+        create_secret_ref(&state, &format!("{backend_label} token"), "backend-secret").await;
 
     let backend_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![
@@ -384,7 +407,7 @@ async fn run_transport_backend_round_trip(
         label: Some(format!("{backend_label} Host")),
         kind: backend_kind.to_string(),
         base_url: backend.base_url.clone(),
-        shared_token: "backend-secret".to_string(),
+        shared_token_secret_ref,
         workspace_root: workspace.path().to_string_lossy().into_owned(),
         capabilities: vec!["host_identity".to_string()],
     };
@@ -421,7 +444,7 @@ async fn registered_remote_execution_host_survives_restart() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, _state) = start_file_backed_test_server(
+    let (addr, state) = start_file_backed_test_server(
         &db_path,
         provider,
         gateway_dispatcher,
@@ -429,6 +452,8 @@ async fn registered_remote_execution_host_survives_restart() {
         false,
     )
     .await;
+    let shared_token_secret_ref =
+        create_secret_ref(&state, "Persisted backend token", "backend-secret").await;
 
     let backend_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -448,7 +473,7 @@ async fn registered_remote_execution_host_survives_restart() {
             label: Some("Docker Persisted".to_string()),
             kind: "docker".to_string(),
             base_url: backend.base_url.clone(),
-            shared_token: "backend-secret".to_string(),
+            shared_token_secret_ref,
             workspace_root: workspace.path().to_string_lossy().into_owned(),
             capabilities: vec!["host_identity".to_string()],
         },
@@ -489,6 +514,7 @@ async fn registered_remote_execution_host_survives_restart() {
     let mut ctx = MockToolContext::new("agent-test", "sess-test");
     ctx.working_directory = workspace.path().to_path_buf();
     let result = swage_gateway::execution_host::execute_on_remote_host(
+        &restarted_state.secret_manager,
         &host,
         "host_identity",
         &json!({}),

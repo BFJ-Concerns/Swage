@@ -66,6 +66,7 @@ pub mod operator;
 pub mod presence;
 pub mod schedule;
 pub mod server;
+pub mod secret;
 pub mod service;
 pub mod shutdown;
 pub mod skill;

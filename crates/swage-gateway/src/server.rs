@@ -161,6 +161,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/overview", get(handlers::operator_overview))
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
+        .route("/api/secrets", get(handlers::list_secrets).post(handlers::create_secret))
+        .route("/api/secrets/generate", post(handlers::generate_secret))
+        .route("/api/secrets/:id", get(handlers::get_secret))
+        .route("/api/secrets/:id/rotate", post(handlers::rotate_secret))
+        .route("/api/secrets/:id/revoke", post(handlers::revoke_secret))
+        .route("/api/secrets/:id/restore", post(handlers::restore_secret))
+        .route("/api/secrets/:id/validate", post(handlers::validate_secret))
         .route("/api/operator/runs", get(handlers::list_operator_runs))
         .route(
             "/api/operator/runs/:kind/:id",

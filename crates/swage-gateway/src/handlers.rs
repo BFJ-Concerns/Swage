@@ -40,6 +40,10 @@ use crate::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
         ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
     },
+    secret::{
+        CreateSecretRequest, GenerateSecretRequest, RotateSecretRequest, SecretListResponse,
+        SecretResponse, SecretValidationResponse,
+    },
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
         ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
@@ -152,6 +156,74 @@ pub async fn operator_usage(
     Query(query): Query<OperatorUsageQuery>,
 ) -> Result<Json<OperatorUsageResponse>, ApiError> {
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
+}
+
+/// `GET /api/secrets` — list governed secrets without revealing raw values.
+pub async fn list_secrets(State(state): State<AppState>) -> Result<Json<SecretListResponse>, ApiError> {
+    Ok(Json(state.secret_manager.list_secrets().await?))
+}
+
+/// `POST /api/secrets` — create a governed secret.
+pub async fn create_secret(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(state.secret_manager.create_secret(req).await?),
+    ))
+}
+
+/// `POST /api/secrets/generate` — generate a managed secret material.
+pub async fn generate_secret(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateSecretRequest>,
+) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(state.secret_manager.generate_secret(req).await?),
+    ))
+}
+
+/// `GET /api/secrets/:id` — inspect one governed secret without revealing its value.
+pub async fn get_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.get_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/rotate` — rotate a governed secret.
+pub async fn rotate_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RotateSecretRequest>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.rotate_secret(id, req).await?))
+}
+
+/// `POST /api/secrets/:id/revoke` — revoke a governed secret.
+pub async fn revoke_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.revoke_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/restore` — restore a previously revoked secret.
+pub async fn restore_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.restore_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/validate` — resolve and validate a governed secret.
+pub async fn validate_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretValidationResponse>, ApiError> {
+    Ok(Json(state.secret_manager.validate_secret(id).await?))
 }
 
 /// `GET /api/operator/runs` — inspect live and historical run supervision.
@@ -429,9 +501,9 @@ pub async fn register_execution_host(
             "execution host base_url must not be empty".to_string(),
         ));
     }
-    if request.shared_token.trim().is_empty() {
+    if request.shared_token_secret_ref.trim().is_empty() {
         return Err(ApiError::validation(
-            "execution host shared_token must not be empty".to_string(),
+            "execution host shared_token_secret_ref must not be empty".to_string(),
         ));
     }
 
@@ -1585,6 +1657,9 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn Storage>
+            )),
         };
         (build_router(state), storage)
     }
@@ -3091,6 +3166,9 @@ def build_topology():
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn Storage>
+            )),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }
