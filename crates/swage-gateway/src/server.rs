@@ -136,7 +136,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/channels/dev-thread/inbound",
             post(handlers::channel_dev_thread_inbound),
         )
-        .route("/api/channels/outbox", get(handlers::channel_outbox))
+        .route("/api/deliveries/log", get(handlers::delivery_log))
         // Turn context snapshots — assembly reports for past turns.
         .route("/api/turns/:id/context", get(handlers::get_turn_context))
         // Programmatic interface — async turn submission and polling.

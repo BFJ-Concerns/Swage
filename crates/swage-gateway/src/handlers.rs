@@ -14,8 +14,8 @@ use swage_core::GatewayError;
 
 use crate::{
     channel_gateway::{
-        ChannelInboundResponse, DevDmInboundRequest, DevThreadInboundRequest, OutboxQuery,
-        OutboxResponse,
+        ChannelInboundResponse, DeliveryLogQuery, DeliveryLogResponse, DevDmInboundRequest,
+        DevThreadInboundRequest,
     },
     error::ApiError,
     service::{
@@ -66,12 +66,12 @@ pub async fn channel_dev_thread_inbound(
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
-/// `GET /api/channels/outbox` — inspect delivered messages for test adapters.
-pub async fn channel_outbox(
+/// `GET /api/deliveries/log` — inspect resolved deliveries for a session.
+pub async fn delivery_log(
     State(state): State<AppState>,
-    Query(query): Query<OutboxQuery>,
-) -> Json<OutboxResponse> {
-    Json(crate::channel_gateway::read_outbox(&state, query).await)
+    Query(query): Query<DeliveryLogQuery>,
+) -> Json<DeliveryLogResponse> {
+    Json(crate::channel_gateway::read_delivery_log(&state, query).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1201,7 @@ mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (build_router(state), storage)
     }
@@ -2700,7 +2700,7 @@ def build_topology():
             shutdown_signal: shutdown_signal.clone(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

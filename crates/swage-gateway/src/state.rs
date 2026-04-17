@@ -14,8 +14,8 @@ use swage_provider::LlmProvider;
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
+use crate::channel_gateway::{ChannelOrigin, RecordedDelivery};
 use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
-use crate::channel_gateway::{ChannelOrigin, DeliveredChannelMessage};
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -82,8 +82,8 @@ pub struct AppState {
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
-    /// Delivery capture for external channel adapters.
-    pub external_channel_outbox: Arc<AsyncMutex<Vec<DeliveredChannelMessage>>>,
+    /// Recorded deliveries across all routing targets.
+    pub delivery_log: Arc<AsyncMutex<Vec<RecordedDelivery>>>,
 }
 
 impl AppState {
@@ -112,7 +112,7 @@ impl AppState {
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(AsyncMutex::new(Vec::new())),
+            delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
         }
     }
 }
@@ -175,7 +175,7 @@ mod tests {
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             hook_registry: None,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(AsyncMutex::new(Vec::new())),
+            delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
         }
     }
 

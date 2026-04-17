@@ -2813,7 +2813,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (state, session_id)
     }
@@ -2871,7 +2871,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (state, session_id)
     }
@@ -2999,7 +2999,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3316,7 +3316,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (state, session_id)
     }
@@ -3572,7 +3572,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4023,7 +4023,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4111,7 +4111,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4283,7 +4283,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4451,7 +4451,7 @@ pub(crate) mod tests {
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (state, session_id)
     }

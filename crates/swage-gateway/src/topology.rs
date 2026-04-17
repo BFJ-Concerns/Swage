@@ -1099,7 +1099,7 @@ mod tests {
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            external_channel_outbox: Arc::new(Mutex::new(Vec::new())),
+            delivery_log: Arc::new(Mutex::new(Vec::new())),
         };
         (state, storage)
     }
