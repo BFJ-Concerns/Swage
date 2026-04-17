@@ -119,6 +119,19 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A persisted non-local execution host registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionHostRegistration {
+    pub host_id: String,
+    pub label: Option<String>,
+    pub kind: String,
+    pub base_url: String,
+    pub shared_token: String,
+    pub workspace_root: String,
+    pub capabilities: Vec<String>,
+    pub registered_at: DateTime<Utc>,
+}
+
 /// A single agent turn within a thread.
 ///
 /// Turns belong to a thread (not directly to a session). Each turn captures
@@ -1126,6 +1139,18 @@ pub struct NewSession {
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Input for persisting or replacing an execution host registration.
+#[derive(Debug, Clone)]
+pub struct NewExecutionHostRegistration {
+    pub host_id: String,
+    pub label: Option<String>,
+    pub kind: String,
+    pub base_url: String,
+    pub shared_token: String,
+    pub workspace_root: String,
+    pub capabilities: Vec<String>,
 }
 
 /// Input for creating a new thread.

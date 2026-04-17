@@ -1207,8 +1207,9 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            EdgeEvaluation, Heartbeat, HeartbeatRun, HeartbeatRunState, Message, NewAgentMessage,
-            NewApprovalRequest, NewEdgeEvaluation, NewHeartbeat, NewHeartbeatRun, NewMessage,
+            EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
+            HeartbeatRunState, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
+            NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage,
             NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
             NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution,
             NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState,
@@ -1216,9 +1217,9 @@ pub(crate) mod tests {
             Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
-            ApprovalStore, ContextSnapshotStore, HeartbeatStore, MessageStore, ProjectStore,
-            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
-            ToolCallStore, TopologyTraceStore, TurnStore,
+            ApprovalStore, ContextSnapshotStore, ExecutionHostStore, HeartbeatStore,
+            MessageStore, ProjectStore, ScheduleStore, SessionStore, SkillActivationStore,
+            TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore,
         },
     };
 
@@ -1418,6 +1419,7 @@ pub(crate) mod tests {
         pub(crate) node_retries: Vec<NodeRetry>,
         pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
         pub(crate) sessions: HashMap<Uuid, Session>,
+        pub(crate) execution_hosts: HashMap<String, ExecutionHostRegistration>,
         pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
         pub(crate) messages: Vec<Message>,
@@ -1969,6 +1971,84 @@ pub(crate) mod tests {
                 session.updated_at = chrono::Utc::now();
             }
             Ok(())
+        }
+
+        async fn find_session_by_channel_origin(
+            &self,
+            integration: &str,
+            account: &str,
+            conversation: &str,
+        ) -> Result<Option<Session>, StorageError> {
+            let db = self.db.lock().await;
+            Ok(db
+                .sessions
+                .values()
+                .find(|session| {
+                    let Some(origin) = session
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("channel_origin"))
+                    else {
+                        return false;
+                    };
+                    origin.get("integration").and_then(|value| value.as_str()) == Some(integration)
+                        && origin.get("account").and_then(|value| value.as_str()) == Some(account)
+                        && origin.get("conversation").and_then(|value| value.as_str())
+                            == Some(conversation)
+                })
+                .cloned())
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionHostStore for MockStorage {
+        async fn upsert_execution_host(
+            &self,
+            host: NewExecutionHostRegistration,
+        ) -> Result<ExecutionHostRegistration, StorageError> {
+            let registration = ExecutionHostRegistration {
+                host_id: host.host_id,
+                label: host.label,
+                kind: host.kind,
+                base_url: host.base_url,
+                shared_token: host.shared_token,
+                workspace_root: host.workspace_root,
+                capabilities: host.capabilities,
+                registered_at: chrono::Utc::now(),
+            };
+            self.db
+                .lock()
+                .await
+                .execution_hosts
+                .insert(registration.host_id.clone(), registration.clone());
+            Ok(registration)
+        }
+
+        async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+            let mut hosts: Vec<ExecutionHostRegistration> = self
+                .db
+                .lock()
+                .await
+                .execution_hosts
+                .values()
+                .cloned()
+                .collect();
+            hosts.sort_by(|left, right| {
+                left.registered_at
+                    .cmp(&right.registered_at)
+                    .then_with(|| left.host_id.cmp(&right.host_id))
+            });
+            Ok(hosts)
+        }
+
+        async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .execution_hosts
+                .remove(host_id)
+                .is_some())
         }
     }
 

@@ -21,6 +21,17 @@ use crate::cli::StartArgs;
 /// either runs the gateway in the foreground or spawns it as a detached
 /// background daemon and polls until it is ready.
 pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
+    let installed = super::install::load_install_config()?;
+    let effective_port = args.port.or(installed.as_ref().and_then(|cfg| cfg.port));
+    let effective_host = args
+        .host
+        .clone()
+        .or_else(|| installed.as_ref().and_then(|cfg| cfg.host.clone()));
+    let effective_config = args
+        .config
+        .clone()
+        .or_else(|| installed.as_ref().and_then(|cfg| cfg.config.clone()));
+
     // Step 1: Check runtime metadata to detect an existing gateway.
     match RuntimeMetadata::load() {
         Ok(meta) if meta.is_stale() => {
@@ -45,12 +56,16 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
     // Step 2: Foreground mode — run the gateway inline, blocking until shutdown.
     if args.foreground {
-        crate::startup::run_gateway(args.port, args.host.clone(), args.config.clone()).await;
+        crate::startup::run_gateway(effective_port, effective_host, effective_config).await;
         return Ok(());
     }
 
     // Step 3: Background mode — spawn a detached child process.
-    spawn_background_gateway(args.port, args.host.as_deref(), args.config.as_deref())?;
+    spawn_background_gateway(
+        effective_port,
+        effective_host.as_deref(),
+        effective_config.as_deref(),
+    )?;
 
     // Step 4: Poll until the gateway writes its metadata and passes a health check.
     let address = poll_until_ready(Duration::from_secs(5))

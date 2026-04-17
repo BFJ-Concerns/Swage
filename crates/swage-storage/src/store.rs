@@ -5,13 +5,14 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
-    Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message, NewAgentMessage,
-    NewApprovalRequest, NewEdgeEvaluation, NewHeartbeat, NewHeartbeatRun, NewMessage,
-    NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSession,
-    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
-    UpdateHeartbeat, UpdateScheduledJob,
+    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message,
+    NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewExecutionHostRegistration,
+    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
+    NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall,
+    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
+    ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
+    UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,23 @@ pub trait SessionStore: Send + Sync {
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+    /// Find a session whose metadata records the given external channel origin.
+    async fn find_session_by_channel_origin(
+        &self,
+        integration: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Result<Option<Session>, StorageError>;
+}
+
+#[async_trait]
+pub trait ExecutionHostStore: Send + Sync {
+    async fn upsert_execution_host(
+        &self,
+        host: NewExecutionHostRegistration,
+    ) -> Result<ExecutionHostRegistration, StorageError>;
+    async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError>;
+    async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -584,6 +602,7 @@ pub trait HeartbeatStore: Send + Sync {
 pub trait Storage:
     TeamStore
     + SessionStore
+    + ExecutionHostStore
     + ThreadStore
     + TurnStore
     + MessageStore
@@ -604,6 +623,7 @@ pub trait Storage:
 impl<T> Storage for T where
     T: TeamStore
         + SessionStore
+        + ExecutionHostStore
         + ThreadStore
         + TurnStore
         + MessageStore
@@ -688,6 +708,30 @@ mod tests {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn find_session_by_channel_origin(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<Session>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionHostStore for StubStorage {
+        async fn upsert_execution_host(
+            &self,
+            _: NewExecutionHostRegistration,
+        ) -> Result<ExecutionHostRegistration, StorageError> {
+            unimplemented!()
+        }
+        async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_execution_host(&self, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

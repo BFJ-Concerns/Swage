@@ -85,6 +85,29 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     addr
 }
 
+async fn start_file_backed_test_server(
+    db_path: &std::path::Path,
+    provider: impl LlmProvider + 'static,
+) -> SocketAddr {
+    let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        None,
+    );
+    let router: Router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    addr
+}
+
 async fn start_webhook_server() -> (String, mpsc::UnboundedReceiver<Value>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let app = Router::new().route(
@@ -209,6 +232,75 @@ async fn dev_dm_origin_reuses_session_and_delivers_to_origin_by_default() {
         deliveries[1]["target"],
         channel_target("dev_dm", "workspace-a", "alice")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_channel_origin_reuses_session_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("channels.db");
+
+    let first_addr = start_file_backed_test_server(
+        &db_path,
+        MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "before restart".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+    )
+    .await;
+
+    let (first_status, first_body) = post_json(
+        first_addr,
+        "/api/channels/dev-dm/inbound",
+        json!({
+            "account": "workspace-a",
+            "user_id": "alice",
+            "text": "hello"
+        }),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::ACCEPTED);
+
+    let second_addr = start_file_backed_test_server(
+        &db_path,
+        MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "after restart".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+    )
+    .await;
+
+    let (second_status, second_body) = post_json(
+        second_addr,
+        "/api/channels/dev-dm/inbound",
+        json!({
+            "account": "workspace-a",
+            "user_id": "alice",
+            "text": "again"
+        }),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::ACCEPTED);
+    assert_eq!(first_body["session_id"], second_body["session_id"]);
+
+    let (_, log) = get_json(
+        second_addr,
+        &format!(
+            "/api/deliveries/log?session_id={}",
+            second_body["session_id"].as_str().unwrap()
+        ),
+    )
+    .await;
+    let deliveries = log["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0]["content"], "after restart");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -51,6 +51,7 @@ pub async fn run() -> Result<(), ClientError> {
             println!("  Address: {}", meta.address);
             println!("  Uptime:  {uptime}");
             if let Some(presence) = presence {
+                println!("  Health:  {}", classify_presence(&presence));
                 println!("  Presence: {}", format_presence_summary(&presence));
             }
             Ok(())
@@ -102,6 +103,22 @@ pub(crate) fn format_presence_summary(presence: &PresenceSnapshotResponse) -> St
         presence.machines.len(),
         presence.gateway.active_turn_count
     )
+}
+
+pub(crate) fn classify_presence(presence: &PresenceSnapshotResponse) -> &'static str {
+    if presence.gateway.shutdown_requested {
+        "degraded: shutting down"
+    } else if presence
+        .machines
+        .iter()
+        .any(|machine| machine.state != "connected")
+    {
+        "degraded: disconnected node"
+    } else if presence.gateway.active_turn_count > 0 {
+        "healthy: busy"
+    } else {
+        "healthy: idle"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,5 +211,30 @@ mod tests {
             format_presence_summary(&presence),
             "2 client(s), 1 machine(s), 3 active turn(s)"
         );
+    }
+
+    #[test]
+    fn classify_presence_reports_disconnected_nodes_as_degraded() {
+        let presence = PresenceSnapshotResponse {
+            gateway: PresenceGatewayResponse {
+                status: "running".to_string(),
+                shutdown_requested: false,
+                seconds_since_activity: 4,
+                active_turn_count: 0,
+                active_connection_count: 0,
+            },
+            clients: vec![],
+            machines: vec![MachinePresenceResponse {
+                machine_id: "node-a".to_string(),
+                label: Some("Node A".to_string()),
+                state: "stale".to_string(),
+                registered_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                disconnected_at: None,
+                stale_after_secs: 30,
+            }],
+        };
+
+        assert_eq!(classify_presence(&presence), "degraded: disconnected node");
     }
 }

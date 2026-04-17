@@ -13,7 +13,7 @@ use crate::store::SessionStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
-fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let id: String = row.get(0)?;
     let project_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
@@ -171,6 +171,32 @@ impl SessionStore for SqliteStorage {
                 params![&now_str, id.to_string()],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn find_session_by_channel_origin(
+        &self,
+        integration: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Result<Option<Session>, StorageError> {
+        let integration = integration.to_string();
+        let account = account.to_string();
+        let conversation = conversation.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
+                 FROM sessions
+                 WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
+                   AND json_extract(metadata_json, '$.channel_origin.account') = ?2
+                   AND json_extract(metadata_json, '$.channel_origin.conversation') = ?3
+                 ORDER BY updated_at DESC
+                 LIMIT 1",
+                params![integration, account, conversation],
+                row_to_session,
+            )
+            .optional()
         })
         .await
     }

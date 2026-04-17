@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use swage_core::ToolError;
+use swage_storage::model::NewExecutionHostRegistration;
 use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolDispatcher;
 
@@ -162,7 +163,7 @@ pub async fn register_local_execution_host(state: &AppState) {
 pub async fn register_remote_execution_host(
     state: &AppState,
     request: RegisterExecutionHostRequest,
-) -> RegisteredExecutionHost {
+) -> Result<RegisteredExecutionHost, swage_core::GatewayError> {
     let host = RegisteredExecutionHost {
         host_id: request.host_id,
         label: request.label.clone(),
@@ -173,6 +174,20 @@ pub async fn register_remote_execution_host(
         capabilities: request.capabilities,
         registered_at: Utc::now(),
     };
+
+    state
+        .storage
+        .upsert_execution_host(NewExecutionHostRegistration {
+            host_id: host.host_id.clone(),
+            label: host.label.clone(),
+            kind: host.kind.to_string(),
+            base_url: host.base_url.clone().unwrap_or_default(),
+            shared_token: host.shared_token.clone().unwrap_or_default(),
+            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            capabilities: host.capabilities.clone(),
+        })
+        .await
+        .map_err(swage_core::GatewayError::Storage)?;
 
     let mut runtime = state.execution_hosts.lock().await;
     runtime.hosts.insert(host.host_id.clone(), host.clone());
@@ -188,7 +203,30 @@ pub async fn register_remote_execution_host(
     )
     .await;
 
-    host
+    Ok(host)
+}
+
+pub async fn restore_registered_execution_hosts(state: &AppState) -> Result<(), swage_core::StorageError> {
+    let persisted_hosts = state.storage.list_execution_hosts().await?;
+    let mut runtime = state.execution_hosts.lock().await;
+
+    for host in persisted_hosts {
+        runtime.hosts.insert(
+            host.host_id.clone(),
+            RegisteredExecutionHost {
+                host_id: host.host_id,
+                label: host.label,
+                kind: ExecutionHostKind::from_str(&host.kind).unwrap_or(ExecutionHostKind::AttachedNode),
+                base_url: Some(host.base_url),
+                shared_token: Some(host.shared_token),
+                workspace_root: PathBuf::from(host.workspace_root),
+                capabilities: host.capabilities,
+                registered_at: host.registered_at,
+            },
+        );
+    }
+
+    Ok(())
 }
 
 pub async fn list_execution_hosts(state: &AppState) -> ExecutionHostListResponse {

@@ -317,7 +317,7 @@ pub async fn register_execution_host(
         ));
     }
 
-    let host = crate::execution_host::register_remote_execution_host(&state, request).await;
+    let host = crate::execution_host::register_remote_execution_host(&state, request).await?;
     Ok((
         StatusCode::CREATED,
         Json(ExecutionHostResponse {

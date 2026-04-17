@@ -6,6 +6,8 @@
 //! groups (e.g. `swage project ...`, `swage config ...`).
 
 pub mod completions;
+pub mod install;
+pub mod restart;
 pub mod run;
 pub mod start;
 pub mod status;
@@ -116,8 +118,14 @@ pub struct GatewayArgs {
 /// Gateway lifecycle subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum GatewayCommand {
+    /// Store default lifecycle configuration for this machine.
+    Install(InstallArgs),
+    /// Remove stored lifecycle configuration for this machine.
+    Uninstall(UninstallArgs),
     /// Launch the gateway as a background process.
     Start(StartArgs),
+    /// Restart the gateway, optionally forcing the stop phase.
+    Restart(RestartArgs),
     /// Stop the running gateway.
     Stop(StopArgs),
     /// Check whether the gateway is running.
@@ -148,6 +156,17 @@ pub struct StartArgs {
     pub foreground: bool,
 }
 
+/// Arguments for `swage gateway install`.
+#[derive(Debug, clap::Args)]
+pub struct InstallArgs {
+    #[arg(long)]
+    pub port: Option<u16>,
+    #[arg(long)]
+    pub host: Option<String>,
+    #[arg(long)]
+    pub config: Option<String>,
+}
+
 /// Arguments for `swage gateway stop`.
 #[derive(Debug, clap::Args)]
 pub struct StopArgs {
@@ -157,6 +176,25 @@ pub struct StopArgs {
     #[arg(long)]
     pub force: bool,
 }
+
+/// Arguments for `swage gateway restart`.
+#[derive(Debug, clap::Args)]
+pub struct RestartArgs {
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long)]
+    pub port: Option<u16>,
+    #[arg(long)]
+    pub host: Option<String>,
+    #[arg(long)]
+    pub config: Option<String>,
+    #[arg(long)]
+    pub foreground: bool,
+}
+
+/// Arguments for `swage gateway uninstall`.
+#[derive(Debug, clap::Args, Default)]
+pub struct UninstallArgs {}
 
 // ---------------------------------------------------------------------------
 // TUI argument struct
@@ -292,6 +330,41 @@ mod tests {
             panic!("expected Stop subcommand");
         };
         assert!(!args.force);
+    }
+
+    #[test]
+    fn parse_gateway_install_defaults() {
+        let cli = Cli::try_parse_from(["swage", "gateway", "install"]).unwrap();
+        let Some(Command::Gateway(gw)) = cli.command else {
+            panic!("expected Gateway command");
+        };
+        let GatewayCommand::Install(args) = gw.command else {
+            panic!("expected Install subcommand");
+        };
+        assert!(args.port.is_none());
+        assert!(args.host.is_none());
+        assert!(args.config.is_none());
+    }
+
+    #[test]
+    fn parse_gateway_restart_flags() {
+        let cli = Cli::try_parse_from([
+            "swage",
+            "gateway",
+            "restart",
+            "--force",
+            "--port",
+            "4000",
+        ])
+        .unwrap();
+        let Some(Command::Gateway(gw)) = cli.command else {
+            panic!("expected Gateway command");
+        };
+        let GatewayCommand::Restart(args) = gw.command else {
+            panic!("expected Restart subcommand");
+        };
+        assert!(args.force);
+        assert_eq!(args.port, Some(4000));
     }
 
     // `--force` flag on stop is parsed correctly.

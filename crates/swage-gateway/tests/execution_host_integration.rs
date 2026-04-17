@@ -26,7 +26,7 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
-use swage_tool::context::ToolContext;
+use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
 
 struct ChannelProvider {
@@ -120,6 +120,40 @@ async fn start_test_server(
     );
     if register_local_host {
         register_local_execution_host(&state).await;
+    }
+    let router: Router = build_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (addr, state)
+}
+
+async fn start_file_backed_test_server(
+    db_path: &std::path::Path,
+    provider: impl LlmProvider + 'static,
+    dispatcher: swage_gateway::tool::ToolDispatcher,
+    workspace_root: PathBuf,
+    restore_hosts: bool,
+) -> (SocketAddr, AppState) {
+    let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::new(provider),
+        config,
+        dispatcher,
+        None,
+        None,
+    );
+    register_local_execution_host(&state).await;
+    if restore_hosts {
+        swage_gateway::execution_host::restore_registered_execution_hosts(&state)
+            .await
+            .unwrap();
     }
     let router: Router = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -367,4 +401,97 @@ async fn docker_execution_backend_runs_through_shared_execution_interface() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ssh_execution_backend_runs_through_shared_execution_interface() {
     run_transport_backend_round_trip(ExecutionHostKind::Ssh, "ssh", "ssh-host").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_remote_execution_host_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("execution-hosts.db");
+    let workspace = tempfile::TempDir::new().unwrap();
+
+    let (_tx1, rx1) = tokio::sync::mpsc::channel(10);
+    let (_tx2, rx2) = tokio::sync::mpsc::channel(10);
+    let provider = ChannelProvider::new(vec![rx1, rx2]);
+    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>,
+    ]);
+    let (addr, _state) = start_file_backed_test_server(
+        &db_path,
+        provider,
+        gateway_dispatcher,
+        workspace.path().to_path_buf(),
+        false,
+    )
+    .await;
+
+    let backend_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(HostIdentityTool {
+            marker: "persisted-host",
+        }) as Arc<dyn Tool>,
+    ]);
+    let backend = spawn_transport_backed_host(
+        ExecutionHostKind::Docker,
+        backend_dispatcher,
+        workspace.path().to_path_buf(),
+        "backend-secret".to_string(),
+    )
+    .await;
+    register_attached_node_with_gateway(
+        &format!("http://{addr}"),
+        &RegisterExecutionHostRequest {
+            host_id: "docker-persisted".to_string(),
+            label: Some("Docker Persisted".to_string()),
+            kind: "docker".to_string(),
+            base_url: backend.base_url.clone(),
+            shared_token: "backend-secret".to_string(),
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            capabilities: vec!["host_identity".to_string()],
+        },
+    )
+    .await
+    .unwrap();
+
+    let restarted_provider = ChannelProvider::new(vec![]);
+    let restarted_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>,
+    ]);
+    let (_restarted_addr, restarted_state) = start_file_backed_test_server(
+        &db_path,
+        restarted_provider,
+        restarted_dispatcher,
+        workspace.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let hosts = swage_gateway::execution_host::list_execution_hosts(&restarted_state).await;
+    assert!(
+        hosts.hosts.iter().any(|host| host.host_id == "docker-persisted"),
+        "persisted remote host should be restored: {:?}",
+        hosts.hosts
+    );
+
+    let host = swage_gateway::execution_host::resolve_execution_host(
+        &restarted_state,
+        Some(&json!({"execution_backend": "docker"})),
+    )
+    .await
+    .expect("persisted host should resolve after restart");
+    let mut ctx = MockToolContext::new("agent-test", "sess-test");
+    ctx.working_directory = workspace.path().to_path_buf();
+    let result = swage_gateway::execution_host::execute_on_remote_host(
+        &host,
+        "host_identity",
+        &json!({}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["host"], "persisted-host");
+
+    backend.join_handle.abort();
 }

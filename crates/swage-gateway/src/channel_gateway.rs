@@ -34,6 +34,15 @@ pub enum ExternalChannelIntegration {
     DevThread,
 }
 
+impl ExternalChannelIntegration {
+    fn as_metadata_value(&self) -> &'static str {
+        match self {
+            Self::DevDm => "dev_dm",
+            Self::DevThread => "dev_thread",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryTarget {
@@ -202,6 +211,23 @@ async fn ensure_session_for_origin(
         if state.storage.get_session(existing).await?.is_some() {
             return Ok(existing);
         }
+    }
+
+    if let Some(existing) = state
+        .storage
+        .find_session_by_channel_origin(
+            origin.integration.as_metadata_value(),
+            &origin.account,
+            &origin.conversation,
+        )
+        .await?
+    {
+        state
+            .channel_routes
+            .lock()
+            .await
+            .insert(origin.clone(), existing.id);
+        return Ok(existing.id);
     }
 
     let project = state.project_store.get_or_create_default().await?;

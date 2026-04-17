@@ -36,6 +36,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
         ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
+        ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
     ]
 }
 
@@ -46,6 +47,19 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
         turn_id     TEXT NOT NULL PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
         report_json TEXT NOT NULL,
         created_at  TEXT NOT NULL
+    );
+";
+
+const CREATE_EXECUTION_HOST_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS execution_hosts (
+        host_id           TEXT NOT NULL PRIMARY KEY,
+        label             TEXT,
+        kind              TEXT NOT NULL,
+        base_url          TEXT NOT NULL,
+        shared_token      TEXT NOT NULL,
+        workspace_root    TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL,
+        registered_at     TEXT NOT NULL
     );
 ";
 
