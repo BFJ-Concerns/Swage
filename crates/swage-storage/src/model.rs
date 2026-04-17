@@ -353,6 +353,173 @@ pub struct ActiveSkillRecord {
     pub activated_at: DateTime<Utc>,
 }
 
+/// Lifecycle state of a scheduled job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledJobStatus {
+    Active,
+    Paused,
+    Completed,
+}
+
+impl std::fmt::Display for ScheduledJobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ScheduledJobStatus::Active => "active",
+            ScheduledJobStatus::Paused => "paused",
+            ScheduledJobStatus::Completed => "completed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ScheduledJobStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(ScheduledJobStatus::Active),
+            "paused" => Ok(ScheduledJobStatus::Paused),
+            "completed" => Ok(ScheduledJobStatus::Completed),
+            other => Err(format!("unknown scheduled job status: {other}")),
+        }
+    }
+}
+
+/// Canonical schedule kinds supported by the built-in scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledJobKind {
+    OneShot,
+    Interval,
+    Cron,
+}
+
+impl std::fmt::Display for ScheduledJobKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ScheduledJobKind::OneShot => "one_shot",
+            ScheduledJobKind::Interval => "interval",
+            ScheduledJobKind::Cron => "cron",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ScheduledJobKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "one_shot" => Ok(ScheduledJobKind::OneShot),
+            "interval" => Ok(ScheduledJobKind::Interval),
+            "cron" => Ok(ScheduledJobKind::Cron),
+            other => Err(format!("unknown scheduled job kind: {other}")),
+        }
+    }
+}
+
+/// Execution trigger for a scheduled run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledRunTrigger {
+    Scheduled,
+    Manual,
+}
+
+impl std::fmt::Display for ScheduledRunTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ScheduledRunTrigger::Scheduled => "scheduled",
+            ScheduledRunTrigger::Manual => "manual",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ScheduledRunTrigger {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "scheduled" => Ok(ScheduledRunTrigger::Scheduled),
+            "manual" => Ok(ScheduledRunTrigger::Manual),
+            other => Err(format!("unknown scheduled run trigger: {other}")),
+        }
+    }
+}
+
+/// Lifecycle state of a scheduled run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledRunState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for ScheduledRunState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ScheduledRunState::Pending => "pending",
+            ScheduledRunState::Running => "running",
+            ScheduledRunState::Completed => "completed",
+            ScheduledRunState::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ScheduledRunState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(ScheduledRunState::Pending),
+            "running" => Ok(ScheduledRunState::Running),
+            "completed" => Ok(ScheduledRunState::Completed),
+            "failed" => Ok(ScheduledRunState::Failed),
+            other => Err(format!("unknown scheduled run state: {other}")),
+        }
+    }
+}
+
+/// A durable scheduled job definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJob {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub message: String,
+    pub status: ScheduledJobStatus,
+    pub kind: ScheduledJobKind,
+    /// Original schedule expression as authored.
+    pub schedule_expression: String,
+    /// Delivery routing configuration serialised as JSON.
+    pub delivery_routing: serde_json::Value,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A recorded execution of a scheduled job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledRun {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub trigger: ScheduledRunTrigger,
+    pub state: ScheduledRunState,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub turn_id: Option<Uuid>,
+    pub output_text: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 /// Lifecycle state of an approval request.
 ///
 /// Transitions: Pending → Approved | Rejected (human decision) or Expired
@@ -887,6 +1054,46 @@ pub struct NewTurn {
     /// Optional parent turn for delegation chain tracking. `None` for
     /// user-initiated turns.
     pub parent_turn_id: Option<Uuid>,
+}
+
+/// Input for creating a durable scheduled job.
+#[derive(Debug, Clone)]
+pub struct NewScheduledJob {
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub message: String,
+    pub status: ScheduledJobStatus,
+    pub kind: ScheduledJobKind,
+    pub schedule_expression: String,
+    pub delivery_routing: serde_json::Value,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
+/// Partial update for an existing scheduled job.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateScheduledJob {
+    pub message: Option<String>,
+    pub status: Option<ScheduledJobStatus>,
+    pub kind: Option<ScheduledJobKind>,
+    pub schedule_expression: Option<String>,
+    pub delivery_routing: Option<serde_json::Value>,
+    pub next_run_at: Option<Option<DateTime<Utc>>>,
+    pub last_run_at: Option<Option<DateTime<Utc>>>,
+}
+
+/// Input for recording a scheduled run.
+#[derive(Debug, Clone)]
+pub struct NewScheduledRun {
+    pub job_id: Uuid,
+    pub trigger: ScheduledRunTrigger,
+    pub state: ScheduledRunState,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub turn_id: Option<Uuid>,
+    pub output_text: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Input for creating a new message within a thread.

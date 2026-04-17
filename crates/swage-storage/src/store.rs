@@ -6,10 +6,11 @@ use swage_core::StorageError;
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
     InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
-    NewNodeExecution, NewNodeRetry, NewProject, NewSession, NewTeam, NewThread, NewToolCall,
-    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, Session, Team,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-    TurnState,
+    NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSession,
+    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
+    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+    UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -490,6 +491,53 @@ pub trait AgentMessageStore: Send + Sync {
     ) -> Result<u64, StorageError>;
 }
 
+/// Durable scheduler job and run storage.
+#[async_trait]
+pub trait ScheduleStore: Send + Sync {
+    async fn create_scheduled_job(
+        &self,
+        job: NewScheduledJob,
+    ) -> Result<ScheduledJob, StorageError>;
+
+    async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, StorageError>;
+
+    async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError>;
+
+    async fn list_due_scheduled_jobs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ScheduledJob>, StorageError>;
+
+    async fn update_scheduled_job(
+        &self,
+        id: Uuid,
+        update: UpdateScheduledJob,
+    ) -> Result<ScheduledJob, StorageError>;
+
+    async fn delete_scheduled_job(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    async fn create_scheduled_run(
+        &self,
+        run: NewScheduledRun,
+    ) -> Result<ScheduledRun, StorageError>;
+
+    async fn get_scheduled_run(&self, id: Uuid) -> Result<Option<ScheduledRun>, StorageError>;
+
+    async fn list_scheduled_runs_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ScheduledRun>, StorageError>;
+
+    async fn update_scheduled_run_state(
+        &self,
+        id: Uuid,
+        state: ScheduledRunState,
+        turn_id: Option<Uuid>,
+        output_text: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -509,6 +557,7 @@ pub trait Storage:
     + SkillActivationStore
     + ApprovalStore
     + AgentMessageStore
+    + ScheduleStore
     + TopologyTraceStore
     + Send
     + Sync
@@ -527,6 +576,7 @@ impl<T> Storage for T where
         + SkillActivationStore
         + ApprovalStore
         + AgentMessageStore
+        + ScheduleStore
         + TopologyTraceStore
         + Send
         + Sync
@@ -923,6 +973,63 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleStore for StubStorage {
+        async fn create_scheduled_job(
+            &self,
+            _: NewScheduledJob,
+        ) -> Result<ScheduledJob, StorageError> {
+            unimplemented!()
+        }
+        async fn get_scheduled_job(&self, _: Uuid) -> Result<Option<ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_scheduled_jobs(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_scheduled_job(
+            &self,
+            _: Uuid,
+            _: UpdateScheduledJob,
+        ) -> Result<ScheduledJob, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_scheduled_job(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_scheduled_run(
+            &self,
+            _: NewScheduledRun,
+        ) -> Result<ScheduledRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_scheduled_run(&self, _: Uuid) -> Result<Option<ScheduledRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_scheduled_runs_by_job(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ScheduledRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_scheduled_run_state(
+            &self,
+            _: Uuid,
+            _: ScheduledRunState,
+            _: Option<Uuid>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }

@@ -79,7 +79,7 @@ pub struct ChannelInboundResponse {
     pub response: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryRoutingRequest {
     #[serde(default = "default_true")]
     pub deliver_to_origin: bool,
@@ -184,8 +184,8 @@ async fn handle_inbound(
 ) -> Result<ChannelInboundResponse, GatewayError> {
     let session_id = ensure_session_for_origin(state, &origin).await?;
     let response = run_channel_turn(state, session_id, text).await?;
-    let targets = resolve_delivery_targets(&origin, routing)?;
-    deliver_response(state, session_id, &targets, &response).await?;
+    let targets = resolve_delivery_targets(Some(&origin), routing)?;
+    deliver_to_targets(state, session_id, &targets, &response).await?;
 
     Ok(ChannelInboundResponse {
         session_id,
@@ -272,13 +272,18 @@ async fn run_channel_turn(
         })
 }
 
-fn resolve_delivery_targets(
-    origin: &ChannelOrigin,
+pub fn resolve_delivery_targets(
+    origin: Option<&ChannelOrigin>,
     routing: DeliveryRoutingRequest,
 ) -> Result<Vec<DeliveryTarget>, GatewayError> {
     let mut targets = Vec::new();
 
     if routing.deliver_to_origin {
+        let origin = origin.ok_or_else(|| {
+            GatewayError::ValidationError(
+                "delivery routing requested origin delivery without an origin".into(),
+            )
+        })?;
         push_unique_target(&mut targets, origin.home_target());
     }
 
@@ -309,7 +314,7 @@ fn push_unique_target(targets: &mut Vec<DeliveryTarget>, target: DeliveryTarget)
     }
 }
 
-async fn deliver_response(
+pub async fn deliver_to_targets(
     state: &AppState,
     session_id: Uuid,
     targets: &[DeliveryTarget],
@@ -406,7 +411,7 @@ mod tests {
         };
 
         let targets = resolve_delivery_targets(
-            &origin,
+            Some(&origin),
             DeliveryRoutingRequest {
                 deliver_to_origin: true,
                 home_target: Some(origin.home_target()),
@@ -431,7 +436,7 @@ mod tests {
         };
 
         let error = resolve_delivery_targets(
-            &origin,
+            Some(&origin),
             DeliveryRoutingRequest {
                 deliver_to_origin: false,
                 home_target: None,
@@ -442,5 +447,21 @@ mod tests {
         .expect_err("empty routing should fail");
 
         assert!(error.to_string().contains("resolved no targets"));
+    }
+
+    #[test]
+    fn resolve_delivery_targets_rejects_origin_delivery_without_origin_context() {
+        let error = resolve_delivery_targets(
+            None,
+            DeliveryRoutingRequest {
+                deliver_to_origin: true,
+                home_target: None,
+                explicit_targets: Vec::new(),
+                store_local_output: false,
+            },
+        )
+        .expect_err("missing origin should fail");
+
+        assert!(error.to_string().contains("without an origin"));
     }
 }

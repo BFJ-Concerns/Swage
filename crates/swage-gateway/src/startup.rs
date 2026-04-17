@@ -142,6 +142,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
     );
     let router = crate::server::build_router(state.clone());
+    let scheduler_handle = crate::schedule::spawn_scheduler_loop(state.clone());
 
     // Step 10: Bind the TCP listener.
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -202,6 +203,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
     // Step 12b: Abort the message expiry background task.
     expiry_handle.abort();
+    scheduler_handle.abort();
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {

@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderValue, Request},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
@@ -147,6 +147,31 @@ pub fn build_router(state: AppState) -> Router {
         // Agent messaging — send and query inter-agent messages.
         .route("/api/messages", post(handlers::send_agent_message))
         .route("/api/messages/:id", get(handlers::get_message_status))
+        // Durable scheduled jobs and recorded runs.
+        .route(
+            "/api/scheduled-jobs",
+            get(handlers::list_scheduled_jobs).post(handlers::create_scheduled_job),
+        )
+        .route(
+            "/api/scheduled-jobs/:id",
+            put(handlers::update_scheduled_job).delete(handlers::delete_scheduled_job),
+        )
+        .route(
+            "/api/scheduled-jobs/:id/pause",
+            post(handlers::pause_scheduled_job),
+        )
+        .route(
+            "/api/scheduled-jobs/:id/resume",
+            post(handlers::resume_scheduled_job),
+        )
+        .route(
+            "/api/scheduled-jobs/:id/trigger",
+            post(handlers::trigger_scheduled_job),
+        )
+        .route(
+            "/api/scheduled-jobs/:id/runs",
+            get(handlers::list_scheduled_runs),
+        )
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/:id", post(handlers::decide_approval))

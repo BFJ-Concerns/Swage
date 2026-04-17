@@ -34,6 +34,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
         ("015_project_default_flag", ADD_PROJECT_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
+        ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
     ]
 }
 
@@ -96,6 +97,43 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
+
+    CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        agent_id            TEXT NOT NULL,
+        message             TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        kind                TEXT NOT NULL,
+        schedule_expression TEXT NOT NULL,
+        delivery_json       TEXT NOT NULL,
+        next_run_at         TEXT,
+        last_run_at         TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
+        ON scheduled_jobs(status, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
+        ON scheduled_jobs(session_id);
+
+    CREATE TABLE IF NOT EXISTS scheduled_runs (
+        id            TEXT NOT NULL PRIMARY KEY,
+        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
+        trigger_kind  TEXT NOT NULL,
+        state         TEXT NOT NULL,
+        scheduled_for TEXT,
+        turn_id       TEXT,
+        output_text   TEXT,
+        error_message TEXT,
+        created_at    TEXT NOT NULL,
+        started_at    TEXT,
+        completed_at  TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
+        ON scheduled_runs(job_id, created_at);
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
@@ -183,6 +221,46 @@ const ADD_TURN_STRUCTURED_OUTPUT_COLUMN: &str = "
 /// Additive migration: opaque host-managed session metadata stored as JSON.
 const ADD_SESSION_METADATA_COLUMN: &str = "
     ALTER TABLE sessions ADD COLUMN metadata_json TEXT;
+";
+
+/// Scheduled jobs and their recorded executions.
+const CREATE_SCHEDULED_JOB_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        agent_id            TEXT NOT NULL,
+        message             TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        kind                TEXT NOT NULL,
+        schedule_expression TEXT NOT NULL,
+        delivery_json       TEXT NOT NULL,
+        next_run_at         TEXT,
+        last_run_at         TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
+        ON scheduled_jobs(status, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
+        ON scheduled_jobs(session_id);
+
+    CREATE TABLE IF NOT EXISTS scheduled_runs (
+        id            TEXT NOT NULL PRIMARY KEY,
+        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
+        trigger_kind  TEXT NOT NULL,
+        state         TEXT NOT NULL,
+        scheduled_for TEXT,
+        turn_id       TEXT,
+        output_text   TEXT,
+        error_message TEXT,
+        created_at    TEXT NOT NULL,
+        started_at    TEXT,
+        completed_at  TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
+        ON scheduled_runs(job_id, created_at);
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.

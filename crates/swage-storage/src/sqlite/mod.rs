@@ -4,6 +4,7 @@ pub mod context_snapshot;
 pub mod message;
 pub mod migrations;
 pub mod project;
+pub mod schedule;
 pub mod session;
 pub mod skill_activation;
 pub mod team;
@@ -71,8 +72,7 @@ impl SqliteStorage {
         F: FnOnce(&Connection) -> Result<T, rusqlite::Error>,
     {
         let guard = self.conn.lock().await;
-        tokio::task::block_in_place(|| f(&*guard))
-            .map_err(map_rusqlite_error)
+        tokio::task::block_in_place(|| f(&*guard)).map_err(map_rusqlite_error)
     }
 }
 
@@ -81,9 +81,7 @@ fn map_rusqlite_error(error: rusqlite::Error) -> StorageError {
         rusqlite::Error::SqliteFailure(inner, message)
             if matches!(inner.code, ErrorCode::ConstraintViolation) =>
         {
-            StorageError::ConstraintViolation(
-                message.unwrap_or_else(|| inner.to_string()),
-            )
+            StorageError::ConstraintViolation(message.unwrap_or_else(|| inner.to_string()))
         }
         other => StorageError::QueryFailed(other.to_string()),
     }

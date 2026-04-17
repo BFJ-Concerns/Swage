@@ -613,6 +613,71 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl swage_storage::store::ScheduleStore for StubStorage {
+        async fn create_scheduled_job(
+            &self,
+            _: swage_storage::NewScheduledJob,
+        ) -> Result<swage_storage::ScheduledJob, StorageError> {
+            unimplemented!()
+        }
+        async fn get_scheduled_job(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_scheduled_jobs(
+            &self,
+        ) -> Result<Vec<swage_storage::ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_scheduled_jobs(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<swage_storage::ScheduledJob>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_scheduled_job(
+            &self,
+            _: Uuid,
+            _: swage_storage::UpdateScheduledJob,
+        ) -> Result<swage_storage::ScheduledJob, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_scheduled_job(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_scheduled_run(
+            &self,
+            _: swage_storage::NewScheduledRun,
+        ) -> Result<swage_storage::ScheduledRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_scheduled_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::ScheduledRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_scheduled_runs_by_job(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::ScheduledRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_scheduled_run_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::ScheduledRunState,
+            _: Option<Uuid>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 

@@ -57,6 +57,7 @@ pub mod context;
 pub mod error;
 pub mod handlers;
 pub mod lifecycle;
+pub mod schedule;
 pub mod server;
 pub mod service;
 pub mod shutdown;

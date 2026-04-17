@@ -18,6 +18,10 @@ use crate::{
         DevThreadInboundRequest,
     },
     error::ApiError,
+    schedule::{
+        CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
+        ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
+    },
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
         ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
@@ -72,6 +76,86 @@ pub async fn delivery_log(
     Query(query): Query<DeliveryLogQuery>,
 ) -> Json<DeliveryLogResponse> {
     Json(crate::channel_gateway::read_delivery_log(&state, query).await)
+}
+
+/// `POST /api/scheduled-jobs` — create a durable scheduled job.
+pub async fn create_scheduled_job(
+    State(state): State<AppState>,
+    Json(req): Json<CreateScheduledJobRequest>,
+) -> Result<(StatusCode, Json<ScheduledJobResponse>), ApiError> {
+    let response = crate::schedule::create_scheduled_job(&state, req).await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// `GET /api/scheduled-jobs` — list all configured scheduled jobs.
+pub async fn list_scheduled_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<ScheduledJobListResponse>, ApiError> {
+    Ok(Json(crate::schedule::list_scheduled_jobs(&state).await?))
+}
+
+/// `PUT /api/scheduled-jobs/:id` — edit an existing scheduled job.
+pub async fn update_scheduled_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateScheduledJobRequest>,
+) -> Result<Json<ScheduledJobResponse>, ApiError> {
+    Ok(Json(
+        crate::schedule::update_scheduled_job(&state, id, req).await?,
+    ))
+}
+
+/// `POST /api/scheduled-jobs/:id/pause` — pause a scheduled job.
+pub async fn pause_scheduled_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ScheduledJobResponse>, ApiError> {
+    Ok(Json(
+        crate::schedule::pause_scheduled_job(&state, id).await?,
+    ))
+}
+
+/// `POST /api/scheduled-jobs/:id/resume` — resume a scheduled job.
+pub async fn resume_scheduled_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ScheduledJobResponse>, ApiError> {
+    Ok(Json(
+        crate::schedule::resume_scheduled_job(&state, id).await?,
+    ))
+}
+
+/// `POST /api/scheduled-jobs/:id/trigger` — execute a job immediately.
+pub async fn trigger_scheduled_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<TriggerScheduledJobResponse>), ApiError> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(crate::schedule::trigger_scheduled_job(&state, id).await?),
+    ))
+}
+
+/// `GET /api/scheduled-jobs/:id/runs` — list recorded executions for a job.
+pub async fn list_scheduled_runs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ScheduledRunListResponse>, ApiError> {
+    Ok(Json(
+        crate::schedule::list_scheduled_runs(&state, id).await?,
+    ))
+}
+
+/// `DELETE /api/scheduled-jobs/:id` — delete a job and its recorded runs.
+pub async fn delete_scheduled_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    if crate::schedule::delete_scheduled_job(&state, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("scheduled_job", id))
+    }
 }
 
 // ---------------------------------------------------------------------------
