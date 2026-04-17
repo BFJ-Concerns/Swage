@@ -74,4 +74,5 @@ pub mod tool;
 pub mod tool_executor;
 pub mod topology;
 pub mod turn;
+pub mod voice;
 pub mod websocket;

@@ -78,6 +78,26 @@ pub struct RunArgs {
     #[arg(long)]
     pub url: Option<String>,
 
+    /// Path to an audio file that should be transcribed before sending the turn.
+    #[arg(long)]
+    pub audio_input: Option<String>,
+
+    /// Path where synthesized response audio should be written.
+    #[arg(long)]
+    pub audio_output: Option<String>,
+
+    /// Optional mime type for `--audio-input`.
+    #[arg(long, default_value = "audio/wav")]
+    pub audio_mime_type: String,
+
+    /// Optional voice name for synthesized output.
+    #[arg(long)]
+    pub voice: Option<String>,
+
+    /// Output format for synthesized speech.
+    #[arg(long, default_value = "wav")]
+    pub audio_format: String,
+
     /// Prompt text to send. When omitted, the command reads stdin.
     pub message: Option<String>,
 }
@@ -197,6 +217,7 @@ mod tests {
         };
         assert_eq!(args.message.as_deref(), Some("hello"));
         assert!(args.url.is_none());
+        assert!(args.audio_input.is_none());
     }
 
     #[test]
@@ -207,6 +228,29 @@ mod tests {
         };
         assert_eq!(args.url.as_deref(), Some("http://localhost:9999"));
         assert!(args.message.is_none());
+    }
+
+    #[test]
+    fn parse_run_with_audio_flags() {
+        let cli = Cli::try_parse_from([
+            "swage",
+            "run",
+            "--audio-input",
+            "input.wav",
+            "--audio-output",
+            "reply.wav",
+            "--voice",
+            "nova",
+        ])
+        .unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected Run command");
+        };
+        assert_eq!(args.audio_input.as_deref(), Some("input.wav"));
+        assert_eq!(args.audio_output.as_deref(), Some("reply.wav"));
+        assert_eq!(args.voice.as_deref(), Some("nova"));
+        assert_eq!(args.audio_mime_type, "audio/wav");
+        assert_eq!(args.audio_format, "wav");
     }
 
     // All StartArgs flags round-trip through the parser.

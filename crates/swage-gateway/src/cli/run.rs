@@ -4,6 +4,7 @@
 //! writes the assistant's live response to stdout.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use swage_client::error::ClientError;
 use swage_client::http::GatewayClient;
@@ -23,6 +24,29 @@ pub fn resolve_gateway_url(args: &RunArgs) -> String {
 }
 
 async fn read_message(args: &RunArgs) -> Result<String, ClientError> {
+    if let Some(audio_input) = &args.audio_input {
+        let audio_bytes = tokio::fs::read(audio_input)
+            .await
+            .map_err(|source| ClientError::MetadataIo { source })?;
+        let client = GatewayClient::new(&resolve_gateway_url(args));
+        let capabilities = client.voice_capabilities().await?;
+        if !capabilities.transcription {
+            return Err(ClientError::GatewayNotRunning {
+                reason: "gateway runtime does not support voice transcription".to_string(),
+            });
+        }
+        let response = client
+            .transcribe_audio(audio_bytes, &args.audio_mime_type)
+            .await?;
+        let trimmed = response.text.trim();
+        if trimmed.is_empty() {
+            return Err(ClientError::GatewayNotRunning {
+                reason: "voice transcription returned empty text".to_string(),
+            });
+        }
+        return Ok(trimmed.to_string());
+    }
+
     if let Some(message) = &args.message {
         let trimmed = message.trim();
         if !trimmed.is_empty() {
@@ -67,11 +91,13 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
 
     let mut stdout = io::stdout();
     let mut saw_output = false;
+    let mut full_output = String::new();
 
     loop {
         match ws.next_event().await? {
             Some(ServerEvent::Token { content }) => {
                 saw_output = true;
+                full_output.push_str(&content);
                 print!("{content}");
                 stdout
                     .flush()
@@ -81,6 +107,7 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
                 if saw_output {
                     println!();
                 }
+                write_audio_output(args, &client, &full_output).await?;
                 stdout
                     .flush()
                     .map_err(|source| ClientError::MetadataIo { source })?;
@@ -110,6 +137,49 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
     }
 }
 
+async fn write_audio_output(
+    args: &RunArgs,
+    client: &GatewayClient,
+    assistant_text: &str,
+) -> Result<(), ClientError> {
+    let Some(output_path) = &args.audio_output else {
+        return Ok(());
+    };
+    if assistant_text.trim().is_empty() {
+        return Err(ClientError::GatewayNotRunning {
+            reason: "cannot synthesise empty assistant output".to_string(),
+        });
+    }
+
+    let capabilities = client.voice_capabilities().await?;
+    if !capabilities.synthesis {
+        return Err(ClientError::GatewayNotRunning {
+            reason: "gateway runtime does not support voice synthesis".to_string(),
+        });
+    }
+
+    let response = client
+        .synthesise_speech(
+            assistant_text,
+            args.voice.as_deref(),
+            Some(&args.audio_format),
+        )
+        .await?;
+
+    if let Some(parent) = Path::new(output_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|source| ClientError::MetadataIo { source })?;
+        }
+    }
+
+    tokio::fs::write(output_path, response.audio_bytes)
+        .await
+        .map_err(|source| ClientError::MetadataIo { source })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +188,11 @@ mod tests {
     fn explicit_url_takes_precedence() {
         let args = RunArgs {
             url: Some("http://example.invalid:1234".into()),
+            audio_input: None,
+            audio_output: None,
+            audio_mime_type: "audio/wav".into(),
+            voice: None,
+            audio_format: "wav".into(),
             message: Some("hello".into()),
         };
 

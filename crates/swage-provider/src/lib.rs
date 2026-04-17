@@ -10,6 +10,7 @@ pub mod google;
 pub mod http;
 pub mod openai;
 pub mod provider;
+pub mod voice;
 
 // Reliability decorators
 pub mod builder;
@@ -22,3 +23,7 @@ pub mod registry;
 
 pub use provider::{LlmProvider, ProviderConfig};
 pub use registry::{Registry, RegistryError, ResolvedModel};
+pub use voice::{
+    OpenAiVoiceProvider, SpeechRequest, SpeechResponse, TranscriptionRequest,
+    TranscriptionResponse, UnsupportedVoiceProvider, VoiceCapabilities, VoiceProvider,
+};

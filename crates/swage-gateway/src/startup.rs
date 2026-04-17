@@ -118,6 +118,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
     // Step 6: Create the LLM provider from configuration.
     let provider = create_provider(&config);
+    let voice_provider = create_voice_provider(&config);
 
     // Step 7: Build the tool dispatch pipeline.
     let tool_dispatcher = build_tool_dispatcher(
@@ -132,7 +133,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let project_store: Arc<dyn swage_storage::store::ProjectStore> = raw_storage;
-    let state = crate::state::AppState::new(
+    let mut state = crate::state::AppState::new(
         storage,
         project_store,
         provider,
@@ -141,6 +142,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         sandbox,
         None,
     );
+    state.voice_provider = voice_provider;
     crate::execution_host::register_local_execution_host(&state).await;
     let router = crate::server::build_router(state.clone());
     let scheduler_handle = crate::schedule::spawn_scheduler_loop(state.clone());
@@ -226,6 +228,29 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
                 "Sandbox Arc has unexpected extra references at shutdown \
                  — skipping clean shutdown"
             );
+        }
+    }
+}
+
+fn create_voice_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provider::VoiceProvider> {
+    let provider_config = match swage_provider::ProviderConfig::try_from(&config.provider) {
+        Ok(config) => config,
+        Err(_) => {
+            return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable because the provider configuration is invalid",
+            ));
+        }
+    };
+
+    match config.provider.protocol {
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => {
+            Arc::new(swage_provider::OpenAiVoiceProvider::from_config(provider_config))
+        }
+        swage_config::Protocol::Anthropic | swage_config::Protocol::Google => {
+            Arc::new(swage_provider::UnsupportedVoiceProvider::new(format!(
+                "voice is unavailable for provider protocol {:?}",
+                config.provider.protocol
+            )))
         }
     }
 }

@@ -1661,6 +1661,9 @@ mod tests {
             storage: storage_arc,
             project_store,
             provider,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -1712,6 +1715,9 @@ mod tests {
             storage: storage_arc,
             project_store,
             provider,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),

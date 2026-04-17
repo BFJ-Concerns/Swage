@@ -87,6 +87,41 @@ pub struct PresenceSnapshotResponse {
     pub machines: Vec<MachinePresenceResponse>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceCapabilitiesResponse {
+    pub transcription: bool,
+    pub synthesis: bool,
+    pub default_voice: Option<String>,
+    pub supported_voices: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TranscribeAudioRequest {
+    pub audio_bytes: Vec<u8>,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranscribeAudioResponse {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SynthesiseSpeechRequest {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SynthesiseSpeechResponse {
+    pub audio_bytes: Vec<u8>,
+    pub mime_type: String,
+    pub voice: String,
+}
+
 // ---------------------------------------------------------------------------
 // GatewayClient
 // ---------------------------------------------------------------------------
@@ -212,6 +247,60 @@ impl GatewayClient {
         let response = self
             .client
             .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    /// Fetches voice support for the current runtime.
+    pub async fn voice_capabilities(&self) -> Result<VoiceCapabilitiesResponse, ClientError> {
+        let url = format!("{}/api/voice/capabilities", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    /// Sends audio bytes for transcription.
+    pub async fn transcribe_audio(
+        &self,
+        audio_bytes: Vec<u8>,
+        mime_type: &str,
+    ) -> Result<TranscribeAudioResponse, ClientError> {
+        let url = format!("{}/api/voice/transcriptions", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&TranscribeAudioRequest {
+                audio_bytes,
+                mime_type: mime_type.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    /// Synthesises speech audio from text.
+    pub async fn synthesise_speech(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        format: Option<&str>,
+    ) -> Result<SynthesiseSpeechResponse, ClientError> {
+        let url = format!("{}/api/voice/speech", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&SynthesiseSpeechRequest {
+                text: text.to_string(),
+                voice: voice.map(str::to_string),
+                format: format.map(str::to_string),
+            })
             .send()
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;

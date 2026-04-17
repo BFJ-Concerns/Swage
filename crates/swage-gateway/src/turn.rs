@@ -3181,6 +3181,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -3241,6 +3244,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config,
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -3371,6 +3377,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -3687,6 +3696,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -3942,6 +3954,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -4399,6 +4414,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -4491,6 +4509,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -4662,6 +4683,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -4835,6 +4859,9 @@ pub(crate) mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: provider as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),

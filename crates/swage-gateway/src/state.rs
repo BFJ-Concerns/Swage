@@ -10,7 +10,7 @@ use uuid::Uuid;
 use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
 use swage_hook::HookRegistry;
-use swage_provider::LlmProvider;
+use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
@@ -36,6 +36,8 @@ pub struct AppState {
     pub project_store: Arc<dyn ProjectStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
+    /// Voice provider for speech-to-text and text-to-speech.
+    pub voice_provider: Arc<dyn VoiceProvider>,
     /// Resolved configuration (server, provider, workspace, etc.).
     pub config: ResolvedConfig,
     /// Maps session_id → CancellationToken for turns currently being processed.
@@ -109,6 +111,9 @@ impl AppState {
             storage,
             project_store,
             provider,
+            voice_provider: Arc::new(UnsupportedVoiceProvider::new(
+                "voice is unavailable for the configured runtime",
+            )),
             config,
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
@@ -174,6 +179,9 @@ mod tests {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
             provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
+            voice_provider: Arc::new(UnsupportedVoiceProvider::new(
+                "voice is unavailable for the configured runtime",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),

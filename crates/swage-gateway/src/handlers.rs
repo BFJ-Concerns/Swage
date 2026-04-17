@@ -40,6 +40,10 @@ use crate::{
         UpdateTeamRequest,
     },
     state::AppState,
+    voice::{
+        SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
+        TranscribeAudioResponse, VoiceCapabilitiesResponse,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +57,27 @@ use crate::{
 /// is up and accepting connections before routing traffic to it.
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// `GET /api/voice/capabilities` — inspect voice support for the current runtime.
+pub async fn voice_capabilities(State(state): State<AppState>) -> Json<VoiceCapabilitiesResponse> {
+    Json(crate::voice::voice_capabilities(&state).await)
+}
+
+/// `POST /api/voice/transcriptions` — turn uploaded audio bytes into text.
+pub async fn transcribe_audio(
+    State(state): State<AppState>,
+    Json(request): Json<TranscribeAudioRequest>,
+) -> Result<Json<TranscribeAudioResponse>, ApiError> {
+    Ok(Json(crate::voice::transcribe_audio(&state, request).await?))
+}
+
+/// `POST /api/voice/speech` — synthesise speech audio from assistant text.
+pub async fn synthesise_speech(
+    State(state): State<AppState>,
+    Json(request): Json<SynthesiseSpeechRequest>,
+) -> Result<Json<SynthesiseSpeechResponse>, ApiError> {
+    Ok(Json(crate::voice::synthesise_speech(&state, request).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1423,6 +1448,9 @@ mod tests {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
             project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
             provider,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -2924,6 +2952,9 @@ def build_topology():
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
             project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
             provider: provider as Arc<dyn swage_provider::LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),

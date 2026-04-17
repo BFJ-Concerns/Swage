@@ -209,6 +209,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/execution-hosts/register",
             post(handlers::register_execution_host),
         )
+        .route("/api/voice/capabilities", get(handlers::voice_capabilities))
+        .route("/api/voice/transcriptions", post(handlers::transcribe_audio))
+        .route("/api/voice/speech", post(handlers::synthesise_speech))
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/:id", post(handlers::decide_approval))
