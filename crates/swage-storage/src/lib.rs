@@ -4,6 +4,10 @@ pub mod model;
 pub mod sqlite;
 pub mod store;
 
+pub use crate::sqlite::secret::{
+    MANAGED_SECRET_KEY_ENV, ManagedSecretEncryptionDiagnostics,
+    managed_secret_encryption_diagnostics,
+};
 pub use model::{
     ActiveSkillRecord, AgentMessage, ApprovalKind, ApprovalRequest, ApprovalState, AuditEvent,
     ChannelLink, DeliveryRecord, EdgeEvaluation, Heartbeat, HeartbeatRun, HeartbeatRunState,

@@ -1,10 +1,12 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::Stream;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -26,9 +28,20 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
+    ApprovalKind, MANAGED_SECRET_KEY_ENV, NewApprovalRequest, NewDeliveryRecord, NewTurn,
+    SqliteStorage, TurnState,
     store::{ProjectStore, Storage},
 };
+
+static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_secret_env() -> MutexGuard<'static, ()> {
+    let guard = SECRET_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([17_u8; 32]));
+    }
+    guard
+}
 
 struct MockProvider;
 
@@ -123,6 +136,7 @@ async fn create_conversation(router: &Router) -> Uuid {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
+    let _guard = with_secret_env();
     let state = test_state();
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
@@ -232,18 +246,20 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
         },
         session_id,
     );
-    state.storage.create_delivery_record(NewDeliveryRecord {
-        session_id,
-        target: serde_json::to_value(DeliveryTarget::Channel {
-            integration: swage_gateway::channel_gateway::ExternalChannelIntegration::DevDm,
-            account: "ops".into(),
-            conversation: "alice".into(),
+    state
+        .storage
+        .create_delivery_record(NewDeliveryRecord {
+            session_id,
+            target: serde_json::to_value(DeliveryTarget::Channel {
+                integration: swage_gateway::channel_gateway::ExternalChannelIntegration::DevDm,
+                account: "ops".into(),
+                conversation: "alice".into(),
+            })
+            .unwrap(),
+            content: "Delivered".into(),
         })
-        .unwrap(),
-        content: "Delivered".into(),
-    })
-    .await
-    .unwrap();
+        .await
+        .unwrap();
 
     let (status, body) = get_json(&router, "/api/operator/overview").await;
     assert_eq!(status, StatusCode::OK);

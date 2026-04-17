@@ -11,8 +11,8 @@ use crate::model::{
     NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution,
     NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
     NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session,
-    Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session, Team,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
     TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 

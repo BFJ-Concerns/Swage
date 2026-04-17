@@ -2,10 +2,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -26,7 +28,7 @@ use swage_gateway::{
     state::AppState,
 };
 use swage_provider::LlmProvider;
-use swage_storage::SqliteStorage;
+use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
 use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
 
@@ -100,6 +102,16 @@ impl Tool for HostIdentityTool {
     async fn execute(&self, _params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         Ok(json!({ "host": self.marker }))
     }
+}
+
+static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_secret_env() -> MutexGuard<'static, ()> {
+    let guard = SECRET_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([15_u8; 32]));
+    }
+    guard
 }
 
 async fn start_test_server(
@@ -294,6 +306,7 @@ async fn run_turn_and_collect_tool_result(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn same_machine_gateway_executes_turns_through_local_execution_host() {
+    let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
@@ -319,6 +332,7 @@ async fn same_machine_gateway_executes_turns_through_local_execution_host() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn node_only_execution_host_registers_with_remote_gateway_and_executes_work() {
+    let _guard = with_secret_env();
     let node_workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
@@ -334,7 +348,8 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         false,
     )
     .await;
-    let shared_token_secret_ref = create_secret_ref(&state, "Remote node token", "node-secret").await;
+    let shared_token_secret_ref =
+        create_secret_ref(&state, "Remote node token", "node-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
@@ -373,6 +388,7 @@ async fn run_transport_backend_round_trip(
     backend_label: &str,
     marker: &'static str,
 ) {
+    let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
@@ -433,6 +449,7 @@ async fn ssh_execution_backend_runs_through_shared_execution_interface() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn registered_remote_execution_host_survives_restart() {
+    let _guard = with_secret_env();
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("execution-hosts.db");
     let workspace = tempfile::TempDir::new().unwrap();

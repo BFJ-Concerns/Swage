@@ -1680,9 +1680,7 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage_arc)
-            )),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
         }
     }
 
@@ -1739,9 +1737,7 @@ mod tests {
                 crate::execution_host::ExecutionHostRuntime::default(),
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage_arc)
-            )),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
         };
 
         (state, session_id)

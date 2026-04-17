@@ -1198,11 +1198,11 @@ pub(crate) mod tests {
     use futures::stream;
     use tokio::sync::{Mutex, Notify, mpsc};
 
-    use swage_core::{FinishReason, StorageError};
     use swage_core::{
         CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
         ToolCompletionResponse,
     };
+    use swage_core::{FinishReason, StorageError};
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
     use swage_provider::LlmProvider;
     use swage_storage::{
@@ -3325,7 +3325,10 @@ pub(crate) mod tests {
             Ok(record.clone())
         }
 
-        async fn revoke_secret(&self, id: Uuid) -> Result<swage_storage::SecretRecord, StorageError> {
+        async fn revoke_secret(
+            &self,
+            id: Uuid,
+        ) -> Result<swage_storage::SecretRecord, StorageError> {
             let mut db = self.db.lock().await;
             let record = db
                 .secrets
@@ -3340,7 +3343,10 @@ pub(crate) mod tests {
             Ok(record.clone())
         }
 
-        async fn restore_secret(&self, id: Uuid) -> Result<swage_storage::SecretRecord, StorageError> {
+        async fn restore_secret(
+            &self,
+            id: Uuid,
+        ) -> Result<swage_storage::SecretRecord, StorageError> {
             let mut db = self.db.lock().await;
             let record = db
                 .secrets
@@ -6265,9 +6271,10 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-        state.tool_dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(SecretEchoTool) as Arc<dyn crate::tool::Tool>
-        ]));
+        state.tool_dispatcher =
+            Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(SecretEchoTool) as Arc<dyn crate::tool::Tool>,
+            ]));
 
         state.provider = Arc::new(MultiRoundMockProvider::new(vec![
             vec![

@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
-use swage_storage::{NewAuditEvent, NewSecretRecord, SecretRecord, store::Storage};
+use swage_storage::{
+    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
+    managed_secret_encryption_diagnostics, store::Storage,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateSecretRequest {
@@ -61,6 +64,7 @@ pub struct SecretResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretListResponse {
     pub secrets: Vec<SecretResponse>,
+    pub managed_backend: ManagedSecretEncryptionDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,10 +141,12 @@ impl SecretManager {
             .get_secret(id)
             .await
             .map_err(GatewayError::Storage)?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
-                entity: "secret".into(),
-                id: id.to_string(),
-            }))?;
+            .ok_or_else(|| {
+                GatewayError::Storage(StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                })
+            })?;
         self.audit_secret_event(&record, "generated", "secret generated", json!({}))
             .await?;
         Ok(SecretResponse {
@@ -158,7 +164,10 @@ impl SecretManager {
             .into_iter()
             .map(|record| secret_response(record, None))
             .collect();
-        Ok(SecretListResponse { secrets })
+        Ok(SecretListResponse {
+            secrets,
+            managed_backend: managed_secret_encryption_diagnostics(),
+        })
     }
 
     pub async fn get_secret(&self, id: Uuid) -> Result<SecretResponse, GatewayError> {
@@ -167,10 +176,12 @@ impl SecretManager {
             .get_secret(id)
             .await
             .map_err(GatewayError::Storage)?
-            .ok_or_else(|| GatewayError::Storage(StorageError::NotFound {
-                entity: "secret".into(),
-                id: id.to_string(),
-            }))?;
+            .ok_or_else(|| {
+                GatewayError::Storage(StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                })
+            })?;
         Ok(secret_response(record, None))
     }
 
@@ -440,8 +451,7 @@ fn validate_resolved_material(material_kind: &str, value: &str) -> Result<(), Ga
                     .all(|character| matches!(character, 'A'..='Z' | '2'..='7'))
             {
                 return Err(GatewayError::ValidationError(
-                    "totp_secret must be a base32-style secret with at least 16 characters"
-                        .into(),
+                    "totp_secret must be a base32-style secret with at least 16 characters".into(),
                 ));
             }
         }
@@ -457,7 +467,10 @@ fn validate_resolved_material(material_kind: &str, value: &str) -> Result<(), Ga
     Ok(())
 }
 
-fn generate_material(material_kind: &str, requested_length: Option<usize>) -> Result<String, GatewayError> {
+fn generate_material(
+    material_kind: &str,
+    requested_length: Option<usize>,
+) -> Result<String, GatewayError> {
     let length = requested_length.unwrap_or(32).max(16);
     match material_kind {
         "token" | "provider_key" | "channel_token" | "node_credential" | "plugin_secret" => {
@@ -503,12 +516,26 @@ fn make_base32_secret(minimum_length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use swage_storage::{AuditStore, SqliteStorage};
+    use std::sync::{Mutex, MutexGuard};
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use swage_storage::{AuditStore, MANAGED_SECRET_KEY_ENV, SqliteStorage};
 
     use super::*;
 
+    static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_secret_env() -> MutexGuard<'static, ()> {
+        let guard = SECRET_ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([9_u8; 32]));
+        }
+        guard
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn managed_and_env_backends_resolve_through_same_model() {
+        let _guard = with_secret_env();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = SecretManager::new(storage.clone());
         let managed = manager

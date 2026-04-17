@@ -40,6 +40,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
+        ("023_encrypt_managed_secrets_at_rest", ""),
     ]
 }
 
@@ -334,9 +335,12 @@ const CREATE_SECRET_TABLES: &str = "
         ON secrets(status, created_at);
 
     CREATE TABLE IF NOT EXISTS managed_secret_values (
-        secret_id   TEXT NOT NULL PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
-        value       TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
+        secret_id       TEXT NOT NULL PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+        algorithm       TEXT NOT NULL,
+        key_source      TEXT NOT NULL,
+        nonce_b64       TEXT NOT NULL,
+        ciphertext_b64  TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
     );
 ";
 
@@ -854,11 +858,15 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             continue;
         }
 
-        // Apply migration inside a transaction for atomicity.
-        conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
-            .map_err(|e| {
-                StorageError::MigrationFailed(format!("migration '{name}' failed: {e}"))
-            })?;
+        if name == "023_encrypt_managed_secrets_at_rest" {
+            super::secret::migrate_managed_secret_storage(conn)?;
+        } else {
+            // Apply migration inside a transaction for atomicity.
+            conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
+                .map_err(|e| {
+                    StorageError::MigrationFailed(format!("migration '{name}' failed: {e}"))
+                })?;
+        }
 
         conn.execute(
             "INSERT INTO _swage_migrations (name, applied_at) VALUES (?1, datetime('now'))",

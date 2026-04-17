@@ -2,9 +2,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::Router;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -21,7 +23,7 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    SqliteStorage,
+    MANAGED_SECRET_KEY_ENV, SqliteStorage,
     store::{ProjectStore, Storage},
 };
 use swage_tool::context::MockToolContext;
@@ -103,6 +105,16 @@ impl Tool for HostIdentityTool {
     }
 }
 
+static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_secret_env() -> MutexGuard<'static, ()> {
+    let guard = SECRET_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([13_u8; 32]));
+    }
+    guard
+}
+
 async fn start_test_server(
     db_path: Option<&Path>,
     provider: impl LlmProvider + 'static,
@@ -181,6 +193,7 @@ async fn get_json(addr: SocketAddr, path: &str) -> (StatusCode, Value) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channel_onboarding_pairs_node_and_delivers_first_message() {
+    let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![channel_rx]);
@@ -286,6 +299,7 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance() {
+    let _guard = with_secret_env();
     let gateway_workspace = tempfile::TempDir::new().unwrap();
     let node_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
@@ -435,6 +449,7 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_restores_service_after_installation_move() {
+    let _guard = with_secret_env();
     let gateway_workspace = tempfile::TempDir::new().unwrap();
     let node_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
@@ -455,8 +470,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         false,
     )
     .await;
-    let moved_secret_ref =
-        create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
+    let moved_secret_ref = create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
 
     let node_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {

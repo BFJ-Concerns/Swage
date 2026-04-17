@@ -183,10 +183,7 @@ pub async fn register_remote_execution_host(
             label: host.label.clone(),
             kind: host.kind.to_string(),
             base_url: host.base_url.clone().unwrap_or_default(),
-            shared_token: host
-                .shared_token_secret_ref
-                .clone()
-                .unwrap_or_default(),
+            shared_token: host.shared_token_secret_ref.clone().unwrap_or_default(),
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
             capabilities: host.capabilities.clone(),
         })
@@ -355,14 +352,16 @@ pub async fn execute_on_remote_host(
             .trim_end_matches('/')
     );
     let shared_token = match host.shared_token_secret_ref.as_deref() {
-        Some(reference) => secret_manager
-            .resolve(reference)
-            .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                message: error.to_string(),
-            })?
-            .value,
+        Some(reference) => {
+            secret_manager
+                .resolve(reference)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    message: error.to_string(),
+                })?
+                .value
+        }
         None => {
             return Err(ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
@@ -590,11 +589,13 @@ mod tests {
             host_id: host_id.to_string(),
             label: None,
             kind,
-        base_url: Some("http://127.0.0.1:1".to_string()),
-        shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
-        workspace_root: PathBuf::from("/tmp/workspace"),
-        capabilities: vec!["host_identity".to_string()],
-        registered_at: Utc::now(),
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            shared_token_secret_ref: Some(
+                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
+            ),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            capabilities: vec!["host_identity".to_string()],
+            registered_at: Utc::now(),
         }
     }
 
@@ -674,7 +675,9 @@ mod tests {
             label: None,
             kind: ExecutionHostKind::AttachedNode,
             base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
+            shared_token_secret_ref: Some(
+                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
+            ),
             workspace_root: PathBuf::from("/tmp/workspace"),
             capabilities: vec!["echo".to_string()],
             registered_at: Utc::now(),
@@ -690,9 +693,15 @@ mod tests {
         };
 
         let secret_manager = test_secret_manager().await;
-        let error = execute_on_remote_host(&secret_manager, &host, "shell", &serde_json::json!({}), &ctx)
-            .await
-            .expect_err("unadvertised tool should be rejected");
+        let error = execute_on_remote_host(
+            &secret_manager,
+            &host,
+            "shell",
+            &serde_json::json!({}),
+            &ctx,
+        )
+        .await
+        .expect_err("unadvertised tool should be rejected");
         assert!(error.to_string().contains("does not expose tool 'shell'"));
     }
 
@@ -703,7 +712,9 @@ mod tests {
             label: None,
             kind: ExecutionHostKind::AttachedNode,
             base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token_secret_ref: Some("secret://managed/00000000-0000-0000-0000-000000000001".to_string()),
+            shared_token_secret_ref: Some(
+                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
+            ),
             workspace_root: PathBuf::from("/tmp/workspace"),
             capabilities: vec!["shell".to_string()],
             registered_at: Utc::now(),
@@ -719,9 +730,15 @@ mod tests {
         };
 
         let secret_manager = test_secret_manager().await;
-        let error = execute_on_remote_host(&secret_manager, &host, "shell", &serde_json::json!({}), &ctx)
-            .await
-            .expect_err("out-of-root context should be rejected");
+        let error = execute_on_remote_host(
+            &secret_manager,
+            &host,
+            "shell",
+            &serde_json::json!({}),
+            &ctx,
+        )
+        .await
+        .expect_err("out-of-root context should be rejected");
         assert!(
             error
                 .to_string()

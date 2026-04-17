@@ -159,7 +159,9 @@ pub async fn operator_usage(
 }
 
 /// `GET /api/secrets` — list governed secrets without revealing raw values.
-pub async fn list_secrets(State(state): State<AppState>) -> Result<Json<SecretListResponse>, ApiError> {
+pub async fn list_secrets(
+    State(state): State<AppState>,
+) -> Result<Json<SecretListResponse>, ApiError> {
     Ok(Json(state.secret_manager.list_secrets().await?))
 }
 

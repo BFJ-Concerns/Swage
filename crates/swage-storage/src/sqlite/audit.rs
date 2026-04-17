@@ -216,10 +216,16 @@ mod tests {
             .unwrap();
         assert_eq!(event.entity_kind, "secret");
         let listed = storage.list_audit_events().await.unwrap();
-        assert!(listed.iter().any(|candidate| candidate.id == "secret-audit"));
         assert!(
-            listed.iter().all(|candidate| candidate.metadata.to_string().contains("secret-1")
-                || !candidate.metadata.to_string().contains("sk-live-secret")),
+            listed
+                .iter()
+                .any(|candidate| candidate.id == "secret-audit")
+        );
+        assert!(
+            listed.iter().all(
+                |candidate| candidate.metadata.to_string().contains("secret-1")
+                    || !candidate.metadata.to_string().contains("sk-live-secret")
+            ),
             "audit metadata should not leak raw secret values: {listed:?}"
         );
     }

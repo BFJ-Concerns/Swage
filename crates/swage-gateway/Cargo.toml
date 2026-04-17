@@ -51,3 +51,4 @@ swage-hook = { path = "../swage-hook" }
 tower = { version = "0.4", features = ["util"] }
 tokio-tungstenite = "0.24"
 tempfile = { workspace = true }
+base64 = { workspace = true }

@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::Stream;
 use tower::ServiceExt;
 
@@ -14,7 +16,25 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::store::{ProjectStore, Storage};
-use swage_storage::SqliteStorage;
+use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
+
+static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_secret_env() -> MutexGuard<'static, ()> {
+    let guard = SECRET_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([11_u8; 32]));
+    }
+    guard
+}
+
+fn without_secret_env() -> MutexGuard<'static, ()> {
+    let guard = SECRET_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var(MANAGED_SECRET_KEY_ENV);
+    }
+    guard
+}
 
 struct MockProvider;
 
@@ -64,7 +84,11 @@ async fn json_response(response: axum::response::Response) -> serde_json::Value 
     serde_json::from_slice(&bytes).unwrap()
 }
 
-async fn post_json(router: &Router, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn post_json(
+    router: &Router,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
         .oneshot(
@@ -99,6 +123,7 @@ async fn get_json(router: &Router, path: &str) -> (StatusCode, serde_json::Value
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_management_surface_covers_types_rotation_validation_and_audit() {
+    let _guard = with_secret_env();
     unsafe {
         std::env::set_var("SWAGE_TEST_PROVIDER_KEY", "env-provider-key");
     }
@@ -187,16 +212,22 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
     assert_eq!(ssh_status, StatusCode::CREATED);
     let ssh_id = ssh_body["id"].as_str().unwrap().to_string();
 
-    let (validate_provider_status, validate_provider_body) =
-        post_json(&router, &format!("/api/secrets/{provider_id}/validate"), serde_json::json!({}))
-            .await;
+    let (validate_provider_status, validate_provider_body) = post_json(
+        &router,
+        &format!("/api/secrets/{provider_id}/validate"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(validate_provider_status, StatusCode::OK);
     assert_eq!(validate_provider_body["valid"], true);
 
     for id in [&channel_id, &totp_id, &ssh_id] {
-        let (status, body) =
-            post_json(&router, &format!("/api/secrets/{id}/validate"), serde_json::json!({}))
-                .await;
+        let (status, body) = post_json(
+            &router,
+            &format!("/api/secrets/{id}/validate"),
+            serde_json::json!({}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], true, "validation failed for {id}: {body:?}");
     }
@@ -210,21 +241,30 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
     assert_eq!(rotate_status, StatusCode::OK);
     assert_eq!(rotate_body["revealed_value"], "channel-secret-rotated");
 
-    let (revoke_status, revoke_body) =
-        post_json(&router, &format!("/api/secrets/{channel_id}/revoke"), serde_json::json!({}))
-            .await;
+    let (revoke_status, revoke_body) = post_json(
+        &router,
+        &format!("/api/secrets/{channel_id}/revoke"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(revoke_status, StatusCode::OK);
     assert_eq!(revoke_body["status"], "revoked");
 
-    let (validate_revoked_status, validate_revoked_body) =
-        post_json(&router, &format!("/api/secrets/{channel_id}/validate"), serde_json::json!({}))
-            .await;
+    let (validate_revoked_status, validate_revoked_body) = post_json(
+        &router,
+        &format!("/api/secrets/{channel_id}/validate"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(validate_revoked_status, StatusCode::OK);
     assert_eq!(validate_revoked_body["valid"], false);
 
-    let (restore_status, restore_body) =
-        post_json(&router, &format!("/api/secrets/{channel_id}/restore"), serde_json::json!({}))
-            .await;
+    let (restore_status, restore_body) = post_json(
+        &router,
+        &format!("/api/secrets/{channel_id}/restore"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(restore_status, StatusCode::OK);
     assert_eq!(restore_body["status"], "active");
 
@@ -242,21 +282,34 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
             && !list_body.to_string().contains("channel-secret-rotated"),
         "list response must not reveal raw secret values: {list_body:?}"
     );
+    assert_eq!(list_body["managed_backend"]["status"], "ready");
+    assert!(
+        list_body["managed_backend"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("encrypted at rest")
+    );
 
     let (audit_status, audit_body) =
         get_json(&router, "/api/operator/search?kind=audit_event&q=secret").await;
     assert_eq!(audit_status, StatusCode::OK);
     let results = audit_body["results"].as_array().unwrap();
     assert!(
-        results.iter().any(|result| result["title"].as_str().unwrap().contains("secret created")),
+        results
+            .iter()
+            .any(|result| result["title"].as_str().unwrap().contains("secret created")),
         "expected secret creation audit event: {audit_body:?}"
     );
     assert!(
-        results.iter().any(|result| result["title"].as_str().unwrap().contains("secret rotated")),
+        results
+            .iter()
+            .any(|result| result["title"].as_str().unwrap().contains("secret rotated")),
         "expected secret rotation audit event: {audit_body:?}"
     );
     assert!(
-        results.iter().any(|result| result["title"].as_str().unwrap().contains("secret revoked")),
+        results
+            .iter()
+            .any(|result| result["title"].as_str().unwrap().contains("secret revoked")),
         "expected secret revocation audit event: {audit_body:?}"
     );
     assert!(
@@ -268,4 +321,21 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
     unsafe {
         std::env::remove_var("SWAGE_TEST_PROVIDER_KEY");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secret_list_reports_missing_managed_encryption_key() {
+    let _guard = without_secret_env();
+    let state = test_state();
+    let router = build_router(state);
+
+    let (status, body) = get_json(&router, "/api/secrets").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["managed_backend"]["status"], "missing");
+    assert!(
+        body["managed_backend"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(MANAGED_SECRET_KEY_ENV)
+    );
 }
