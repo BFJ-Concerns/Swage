@@ -36,10 +36,20 @@ pub enum ExternalChannelIntegration {
 }
 
 impl ExternalChannelIntegration {
-    fn as_metadata_value(&self) -> &'static str {
+    pub fn as_metadata_value(&self) -> &'static str {
         match self {
             Self::DevDm => "dev_dm",
             Self::DevThread => "dev_thread",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, GatewayError> {
+        match value {
+            "dev_dm" => Ok(Self::DevDm),
+            "dev_thread" => Ok(Self::DevThread),
+            other => Err(GatewayError::ValidationError(format!(
+                "unknown channel integration: {other}"
+            ))),
         }
     }
 }
@@ -258,8 +268,33 @@ async fn handle_inbound(
     routing: DeliveryRoutingRequest,
 ) -> Result<ChannelInboundResponse, GatewayError> {
     let session_id = ensure_session_for_origin(state, &origin).await?;
+    let configured_home_target = state
+        .storage
+        .get_channel_link(
+            origin.integration.as_metadata_value(),
+            &origin.account,
+            &origin.conversation,
+        )
+        .await?
+        .and_then(|link| link.home_target)
+        .map(serde_json::from_value::<DeliveryTarget>)
+        .transpose()
+        .map_err(|error| {
+            GatewayError::ValidationError(format!(
+                "invalid stored channel home_target for {}:{}:{}: {error}",
+                origin.integration.as_metadata_value(),
+                origin.account,
+                origin.conversation
+            ))
+        })?;
     let response = run_channel_turn(state, session_id, text).await?;
-    let targets = resolve_delivery_targets(Some(&origin), routing)?;
+    let targets = resolve_delivery_targets(
+        Some(&origin),
+        DeliveryRoutingRequest {
+            home_target: routing.home_target.or(configured_home_target),
+            ..routing
+        },
+    )?;
     deliver_to_targets(state, session_id, &targets, &response).await?;
 
     Ok(ChannelInboundResponse {
@@ -294,6 +329,67 @@ async fn ensure_session_for_origin(
             .await
             .insert(origin.clone(), existing.id);
         return Ok(existing.id);
+    }
+
+    if let Some(link) = state
+        .storage
+        .get_channel_link(
+            origin.integration.as_metadata_value(),
+            &origin.account,
+            &origin.conversation,
+        )
+        .await?
+    {
+        if let Some(session_id) = link.session_id {
+            if state.storage.get_session(session_id).await?.is_some() {
+                state
+                    .channel_routes
+                    .lock()
+                    .await
+                    .insert(origin.clone(), session_id);
+                return Ok(session_id);
+            }
+        }
+
+        let session = state
+            .storage
+            .create_session(NewSession {
+                project_id: link.project_id,
+                agent_id: link.agent_id.clone(),
+                metadata: Some(serde_json::json!({
+                    "channel_origin": {
+                        "integration": origin.integration,
+                        "account": origin.account,
+                        "conversation": origin.conversation
+                    }
+                })),
+            })
+            .await?;
+        state
+            .storage
+            .create(swage_storage::model::NewThread {
+                session_id: session.id,
+                agent_id: link.agent_id.clone(),
+            })
+            .await?;
+        state
+            .storage
+            .upsert_channel_link(swage_storage::NewChannelLink {
+                integration: origin.integration.as_metadata_value().to_string(),
+                account: origin.account.clone(),
+                conversation: origin.conversation.clone(),
+                project_id: link.project_id,
+                agent_id: link.agent_id,
+                session_id: Some(session.id),
+                home_target: link.home_target,
+            })
+            .await?;
+        state
+            .channel_routes
+            .lock()
+            .await
+            .insert(origin.clone(), session.id);
+        return Ok(session.id);
     }
 
     let project = state.project_store.get_or_create_default().await?;

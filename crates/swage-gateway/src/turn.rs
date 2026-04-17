@@ -1207,19 +1207,20 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
-            HeartbeatRunState, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
-            NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage,
-            NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
-            NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution,
-            NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState,
-            Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState,
-            Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+            ChannelLink, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
+            HeartbeatRunState, Message, NewAgentMessage, NewApprovalRequest, NewChannelLink,
+            NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
+            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob,
+            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+            NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
+            ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord,
+            TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
-            ApprovalStore, ContextSnapshotStore, ExecutionHostStore, HeartbeatStore,
-            MessageStore, ProjectStore, ScheduleStore, SessionStore, SkillActivationStore,
-            TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore,
+            ApprovalStore, ChannelLinkStore, ContextSnapshotStore, ExecutionHostStore,
+            HeartbeatStore, MessageStore, ProjectStore, ScheduleStore, SessionStore,
+            SkillActivationStore, TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore,
+            TurnStore,
         },
     };
 
@@ -1420,6 +1421,7 @@ pub(crate) mod tests {
         pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
         pub(crate) sessions: HashMap<Uuid, Session>,
         pub(crate) execution_hosts: HashMap<String, ExecutionHostRegistration>,
+        pub(crate) channel_links: HashMap<(String, String, String), ChannelLink>,
         pub(crate) threads: HashMap<Uuid, Thread>,
         pub(crate) turns: HashMap<Uuid, Turn>,
         pub(crate) messages: Vec<Message>,
@@ -2048,6 +2050,90 @@ pub(crate) mod tests {
                 .await
                 .execution_hosts
                 .remove(host_id)
+                .is_some())
+        }
+    }
+
+    #[async_trait]
+    impl ChannelLinkStore for MockStorage {
+        async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
+            let now = chrono::Utc::now();
+            let key = (
+                link.integration.clone(),
+                link.account.clone(),
+                link.conversation.clone(),
+            );
+            let linked_at = self
+                .db
+                .lock()
+                .await
+                .channel_links
+                .get(&key)
+                .map(|existing| existing.linked_at)
+                .unwrap_or(now);
+            let created = ChannelLink {
+                integration: link.integration,
+                account: link.account,
+                conversation: link.conversation,
+                project_id: link.project_id,
+                agent_id: link.agent_id,
+                session_id: link.session_id,
+                home_target: link.home_target,
+                linked_at,
+                updated_at: now,
+            };
+            self.db.lock().await.channel_links.insert(key, created.clone());
+            Ok(created)
+        }
+
+        async fn get_channel_link(
+            &self,
+            integration: &str,
+            account: &str,
+            conversation: &str,
+        ) -> Result<Option<ChannelLink>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .channel_links
+                .get(&(
+                    integration.to_string(),
+                    account.to_string(),
+                    conversation.to_string(),
+                ))
+                .cloned())
+        }
+
+        async fn list_channel_links(&self) -> Result<Vec<ChannelLink>, StorageError> {
+            let mut links: Vec<ChannelLink> = self
+                .db
+                .lock()
+                .await
+                .channel_links
+                .values()
+                .cloned()
+                .collect();
+            links.sort_by_key(|link| link.linked_at);
+            Ok(links)
+        }
+
+        async fn delete_channel_link(
+            &self,
+            integration: &str,
+            account: &str,
+            conversation: &str,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .channel_links
+                .remove(&(
+                    integration.to_string(),
+                    account.to_string(),
+                    conversation.to_string(),
+                ))
                 .is_some())
         }
     }
@@ -3281,6 +3367,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -3344,6 +3431,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -3477,6 +3565,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3799,6 +3888,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }
@@ -4060,6 +4150,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4516,6 +4607,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4609,6 +4701,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4786,6 +4879,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4959,6 +5053,7 @@ pub(crate) mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
     }

@@ -4,14 +4,14 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
-    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message,
-    NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
-    NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall,
-    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
-    ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
+    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, ChannelLink,
+    EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
+    InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewChannelLink, NewEdgeEvaluation,
+    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread,
+    NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project,
+    ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
     UpdateScheduledJob,
 };
 
@@ -77,6 +77,24 @@ pub trait ExecutionHostStore: Send + Sync {
     ) -> Result<ExecutionHostRegistration, StorageError>;
     async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError>;
     async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait ChannelLinkStore: Send + Sync {
+    async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError>;
+    async fn get_channel_link(
+        &self,
+        integration: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Result<Option<ChannelLink>, StorageError>;
+    async fn list_channel_links(&self) -> Result<Vec<ChannelLink>, StorageError>;
+    async fn delete_channel_link(
+        &self,
+        integration: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -603,6 +621,7 @@ pub trait Storage:
     TeamStore
     + SessionStore
     + ExecutionHostStore
+    + ChannelLinkStore
     + ThreadStore
     + TurnStore
     + MessageStore
@@ -624,6 +643,7 @@ impl<T> Storage for T where
     T: TeamStore
         + SessionStore
         + ExecutionHostStore
+        + ChannelLinkStore
         + ThreadStore
         + TurnStore
         + MessageStore
@@ -732,6 +752,32 @@ mod tests {
             unimplemented!()
         }
         async fn delete_execution_host(&self, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelLinkStore for StubStorage {
+        async fn upsert_channel_link(&self, _: NewChannelLink) -> Result<ChannelLink, StorageError> {
+            unimplemented!()
+        }
+        async fn get_channel_link(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ChannelLink>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_channel_links(&self) -> Result<Vec<ChannelLink>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_channel_link(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

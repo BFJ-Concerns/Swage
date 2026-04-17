@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::{DateTime, Utc};
+
 use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -94,6 +96,13 @@ pub struct AppState {
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached execution hosts.
     pub execution_hosts: Arc<AsyncMutex<ExecutionHostRuntime>>,
+    /// One-time node pairing codes awaiting redemption by a remote host.
+    pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairingCodeRecord {
+    pub expires_at: DateTime<Utc>,
 }
 
 impl AppState {
@@ -128,6 +137,7 @@ impl AppState {
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 }
@@ -196,6 +206,7 @@ mod tests {
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 

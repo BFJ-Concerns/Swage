@@ -37,6 +37,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
         ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
+        ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
     ]
 }
 
@@ -61,6 +62,26 @@ const CREATE_EXECUTION_HOST_TABLE: &str = "
         capabilities_json TEXT NOT NULL,
         registered_at     TEXT NOT NULL
     );
+";
+
+const CREATE_CHANNEL_LINK_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS channel_links (
+        integration      TEXT NOT NULL,
+        account          TEXT NOT NULL,
+        conversation     TEXT NOT NULL,
+        project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        agent_id         TEXT NOT NULL,
+        session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        home_target_json TEXT,
+        linked_at        TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        PRIMARY KEY (integration, account, conversation)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_links_project_id
+        ON channel_links(project_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
+        ON channel_links(session_id);
 ";
 
 /// Additive migration: cost in microcents derived from provider pricing data.

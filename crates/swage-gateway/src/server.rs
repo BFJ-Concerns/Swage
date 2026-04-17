@@ -137,6 +137,20 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::channel_dev_thread_inbound),
         )
         .route("/api/channels", get(handlers::list_channel_statuses))
+        .route(
+            "/api/onboarding/channels",
+            get(handlers::list_channel_links).post(handlers::create_channel_link),
+        )
+        .route(
+            "/api/onboarding/nodes/pairing-codes",
+            post(handlers::create_node_pairing_code),
+        )
+        .route(
+            "/api/onboarding/nodes/redeem",
+            post(handlers::redeem_node_pairing_code),
+        )
+        .route("/api/recovery/export", get(handlers::export_gateway_recovery))
+        .route("/api/recovery/import", post(handlers::import_gateway_recovery))
         .route("/api/deliveries/log", get(handlers::delivery_log))
         .route("/api/operator/overview", get(handlers::operator_overview))
         // Turn context snapshots — assembly reports for past turns.

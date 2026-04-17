@@ -19,6 +19,11 @@ use crate::{
         DevDmInboundRequest, DevThreadInboundRequest,
     },
     operator::OperatorOverviewResponse,
+    onboarding::{
+        ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
+        CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
+        RedeemNodePairingRequest,
+    },
     error::ApiError,
     execution_host::{
         ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
@@ -125,6 +130,64 @@ pub async fn operator_overview(
     State(state): State<AppState>,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     Ok(Json(crate::operator::operator_overview(&state).await?))
+}
+
+/// `GET /api/onboarding/channels` — list durable external-channel links.
+pub async fn list_channel_links(
+    State(state): State<AppState>,
+) -> Result<Json<ChannelLinkListResponse>, ApiError> {
+    Ok(Json(crate::onboarding::list_channel_links(&state).await?))
+}
+
+/// `POST /api/onboarding/channels` — link an external channel origin to a session.
+pub async fn create_channel_link(
+    State(state): State<AppState>,
+    Json(req): Json<CreateChannelLinkRequest>,
+) -> Result<(StatusCode, Json<ChannelLinkResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::onboarding::create_channel_link(&state, req).await?),
+    ))
+}
+
+/// `POST /api/onboarding/nodes/pairing-codes` — issue a one-time node pairing code.
+pub async fn create_node_pairing_code(
+    State(state): State<AppState>,
+    Json(req): Json<CreateNodePairingCodeRequest>,
+) -> Result<(StatusCode, Json<NodePairingCodeResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::onboarding::create_node_pairing_code(&state, req).await?),
+    ))
+}
+
+/// `POST /api/onboarding/nodes/redeem` — redeem a pairing code and trust a remote node.
+pub async fn redeem_node_pairing_code(
+    State(state): State<AppState>,
+    Json(req): Json<RedeemNodePairingRequest>,
+) -> Result<(StatusCode, Json<ExecutionHostResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::onboarding::redeem_node_pairing_code(&state, req).await?),
+    ))
+}
+
+/// `GET /api/recovery/export` — export durable operator-managed recovery state.
+pub async fn export_gateway_recovery(
+    State(state): State<AppState>,
+) -> Result<Json<crate::onboarding::GatewayRecoveryBundle>, ApiError> {
+    Ok(Json(
+        crate::onboarding::export_gateway_recovery_bundle(&state).await?,
+    ))
+}
+
+/// `POST /api/recovery/import` — import a recovery bundle into a fresh instance.
+pub async fn import_gateway_recovery(
+    State(state): State<AppState>,
+    Json(req): Json<ImportGatewayRecoveryRequest>,
+) -> Result<StatusCode, ApiError> {
+    crate::onboarding::import_gateway_recovery_bundle(&state, req.bundle).await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// `POST /api/scheduled-jobs` — create a durable scheduled job.
@@ -1480,6 +1543,7 @@ mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage)
     }
@@ -2984,6 +3048,7 @@ def build_topology():
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

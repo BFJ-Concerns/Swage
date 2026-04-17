@@ -1678,6 +1678,7 @@ mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1732,6 +1733,7 @@ mod tests {
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         (state, session_id)

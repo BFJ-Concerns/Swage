@@ -132,6 +132,20 @@ pub struct ExecutionHostRegistration {
     pub registered_at: DateTime<Utc>,
 }
 
+/// A durable onboarding link for an external communication channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelLink {
+    pub integration: String,
+    pub account: String,
+    pub conversation: String,
+    pub project_id: Uuid,
+    pub agent_id: String,
+    pub session_id: Option<Uuid>,
+    pub home_target: Option<serde_json::Value>,
+    pub linked_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A single agent turn within a thread.
 ///
 /// Turns belong to a thread (not directly to a session). Each turn captures
@@ -1151,6 +1165,18 @@ pub struct NewExecutionHostRegistration {
     pub shared_token: String,
     pub workspace_root: String,
     pub capabilities: Vec<String>,
+}
+
+/// Input for creating or replacing a durable channel onboarding link.
+#[derive(Debug, Clone)]
+pub struct NewChannelLink {
+    pub integration: String,
+    pub account: String,
+    pub conversation: String,
+    pub project_id: Uuid,
+    pub agent_id: String,
+    pub session_id: Option<Uuid>,
+    pub home_target: Option<serde_json::Value>,
 }
 
 /// Input for creating a new thread.
