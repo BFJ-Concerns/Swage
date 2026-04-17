@@ -55,12 +55,11 @@ impl LlmProvider for MockProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        let chunks = self
-            .rounds
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| vec![StreamChunk::Done { finish_reason: None }]);
+        let chunks = self.rounds.lock().unwrap().pop_front().unwrap_or_else(|| {
+            vec![StreamChunk::Done {
+                finish_reason: None,
+            }]
+        });
         Box::pin(futures::stream::iter(chunks))
     }
 }
@@ -146,13 +145,17 @@ async fn dev_dm_origin_reuses_session_and_delivers_to_origin_by_default() {
             StreamChunk::Delta {
                 content: "first reply".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
             StreamChunk::Delta {
                 content: "second reply".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
     ]))
     .await;
@@ -197,9 +200,15 @@ async fn dev_dm_origin_reuses_session_and_delivers_to_origin_by_default() {
     let deliveries = log["deliveries"].as_array().unwrap();
     assert_eq!(deliveries.len(), 2);
     assert_eq!(deliveries[0]["content"], "first reply");
-    assert_eq!(deliveries[0]["target"], channel_target("dev_dm", "workspace-a", "alice"));
+    assert_eq!(
+        deliveries[0]["target"],
+        channel_target("dev_dm", "workspace-a", "alice")
+    );
     assert_eq!(deliveries[1]["content"], "second reply");
-    assert_eq!(deliveries[1]["target"], channel_target("dev_dm", "workspace-a", "alice"));
+    assert_eq!(
+        deliveries[1]["target"],
+        channel_target("dev_dm", "workspace-a", "alice")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -209,25 +218,33 @@ async fn routing_keeps_direct_messages_and_threads_isolated() {
             StreamChunk::Delta {
                 content: "alice".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
             StreamChunk::Delta {
                 content: "bob".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
             StreamChunk::Delta {
                 content: "thread one".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
         vec![
             StreamChunk::Delta {
                 content: "thread two".into(),
             },
-            StreamChunk::Done { finish_reason: None },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
         ],
     ]))
     .await;
@@ -322,7 +339,9 @@ async fn configured_home_target_and_local_storage_are_delivered_through_one_rout
         StreamChunk::Delta {
             content: "routed".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]]))
     .await;
 
@@ -365,13 +384,20 @@ async fn configured_home_target_and_local_storage_are_delivered_through_one_rout
     .await;
     let deliveries = log["deliveries"].as_array().unwrap();
     assert_eq!(deliveries.len(), 3);
-    assert_eq!(deliveries[0]["target"], channel_target("dev_dm", "workspace-a", "alice"));
+    assert_eq!(
+        deliveries[0]["target"],
+        channel_target("dev_dm", "workspace-a", "alice")
+    );
     assert_eq!(
         deliveries[1]["target"],
         channel_target("dev_thread", "workspace-b", "room-9/topic-3")
     );
     assert_eq!(deliveries[2]["target"], json!({"kind": "local_storage"}));
-    assert!(deliveries.iter().all(|delivery| delivery["content"] == "routed"));
+    assert!(
+        deliveries
+            .iter()
+            .all(|delivery| delivery["content"] == "routed")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -380,7 +406,9 @@ async fn explicit_webhook_delivery_can_skip_origin() {
         StreamChunk::Delta {
             content: "rerouted".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]]))
     .await;
     let (webhook_url, mut webhook_events) = start_webhook_server().await;
@@ -435,7 +463,9 @@ async fn overlapping_origin_and_explicit_rules_do_not_duplicate_delivery() {
         StreamChunk::Delta {
             content: "once".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]]))
     .await;
 
@@ -488,7 +518,9 @@ async fn invalid_webhook_target_is_rejected() {
         StreamChunk::Delta {
             content: "ignored".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]]))
     .await;
 
@@ -527,7 +559,9 @@ async fn unavailable_webhook_target_fails_explicitly() {
         StreamChunk::Delta {
             content: "ignored".into(),
         },
-        StreamChunk::Done { finish_reason: None },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
     ]]))
     .await;
 

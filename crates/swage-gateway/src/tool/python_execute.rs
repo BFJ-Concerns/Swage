@@ -95,14 +95,23 @@ impl Tool for PythonExecuteTool {
             ctx.working_directory().to_path_buf(),
         );
 
-        let mut lease = self.pool.acquire().await.map_err(|error| ToolError::ExecutionFailed {
-            name: self.name().to_owned(),
-            message: error.to_string(),
-        })?;
+        let mut lease = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: error.to_string(),
+            })?;
 
         let result = self
             .runtime
-            .execute_python(lease.worker_mut(), &code, ctx.working_directory(), &nested_runtime)
+            .execute_python(
+                lease.worker_mut(),
+                &code,
+                ctx.working_directory(),
+                &nested_runtime,
+            )
             .await;
         lease.mark_spent().await;
 

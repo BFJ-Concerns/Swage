@@ -80,8 +80,14 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
         };
         if let Err(error) = self.storage.create_tool_call(new_call).await {
             let failure = error.to_string();
-            self.finish_tool_call(&call_id, tool_name, &Value::String(failure.clone()), "error", 0)
-                .await;
+            self.finish_tool_call(
+                &call_id,
+                tool_name,
+                &Value::String(failure.clone()),
+                "error",
+                0,
+            )
+            .await;
             return Err(WorkerToolError {
                 message: failure,
                 result: None,
@@ -106,14 +112,8 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
 
         match dispatched {
             Ok(output) => {
-                self.finish_tool_call(
-                    &call_id,
-                    tool_name,
-                    &output.result,
-                    "success",
-                    duration_ms,
-                )
-                .await;
+                self.finish_tool_call(&call_id, tool_name, &output.result, "success", duration_ms)
+                    .await;
                 Ok(output.result)
             }
             Err(error) => {

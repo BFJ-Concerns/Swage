@@ -172,6 +172,27 @@ pub fn build_router(state: AppState) -> Router {
             "/api/scheduled-jobs/:id/runs",
             get(handlers::list_scheduled_runs),
         )
+        // Durable heartbeats and recorded runs.
+        .route(
+            "/api/heartbeats",
+            get(handlers::list_heartbeats).post(handlers::create_heartbeat),
+        )
+        .route(
+            "/api/heartbeats/:id",
+            put(handlers::update_heartbeat).delete(handlers::delete_heartbeat),
+        )
+        .route(
+            "/api/heartbeats/:id/enable",
+            post(handlers::enable_heartbeat),
+        )
+        .route(
+            "/api/heartbeats/:id/disable",
+            post(handlers::disable_heartbeat),
+        )
+        .route(
+            "/api/heartbeats/:id/runs",
+            get(handlers::list_heartbeat_runs),
+        )
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/:id", post(handlers::decide_approval))

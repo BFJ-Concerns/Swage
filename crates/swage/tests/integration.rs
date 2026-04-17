@@ -368,7 +368,9 @@ async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
         .config(AgentConfig::new("agent-a"))
         .provider(provider)
         .storage(storage)
-        .tool_dispatcher(ToolDispatcher::allow_all(vec![Arc::new(EchoTool) as Arc<dyn Tool>]))
+        .tool_dispatcher(ToolDispatcher::allow_all(vec![
+            Arc::new(EchoTool) as Arc<dyn Tool>
+        ]))
         .build()
         .expect("agent");
 

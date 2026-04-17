@@ -1199,17 +1199,18 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            EdgeEvaluation, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation,
-            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob,
-            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-            NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-            ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
-            TopologyRunState, Turn, TurnState, UpdateScheduledJob,
+            EdgeEvaluation, Heartbeat, HeartbeatRun, HeartbeatRunState, Message, NewAgentMessage,
+            NewApprovalRequest, NewEdgeEvaluation, NewHeartbeat, NewHeartbeatRun, NewMessage,
+            NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
+            NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution,
+            NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState,
+            Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState,
+            Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
-            ApprovalStore, ContextSnapshotStore, MessageStore, ProjectStore, ScheduleStore,
-            SessionStore, SkillActivationStore, TeamStore, ThreadStore, ToolCallStore,
-            TopologyTraceStore, TurnStore,
+            ApprovalStore, ContextSnapshotStore, HeartbeatStore, MessageStore, ProjectStore,
+            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
+            ToolCallStore, TopologyTraceStore, TurnStore,
         },
     };
 
@@ -1418,6 +1419,8 @@ pub(crate) mod tests {
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
         pub(crate) scheduled_jobs: HashMap<Uuid, ScheduledJob>,
         pub(crate) scheduled_runs: HashMap<Uuid, ScheduledRun>,
+        pub(crate) heartbeats: HashMap<Uuid, Heartbeat>,
+        pub(crate) heartbeat_runs: HashMap<Uuid, HeartbeatRun>,
     }
 
     impl MockStorage {
@@ -2147,6 +2150,181 @@ pub(crate) mod tests {
             if matches!(
                 state,
                 ScheduledRunState::Completed | ScheduledRunState::Failed
+            ) {
+                run.completed_at = Some(chrono::Utc::now());
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl HeartbeatStore for MockStorage {
+        async fn create_heartbeat(
+            &self,
+            heartbeat: NewHeartbeat,
+        ) -> Result<Heartbeat, StorageError> {
+            let now = chrono::Utc::now();
+            let created = Heartbeat {
+                id: Uuid::new_v4(),
+                session_id: heartbeat.session_id,
+                agent_id: heartbeat.agent_id,
+                message: heartbeat.message,
+                interval_seconds: heartbeat.interval_seconds,
+                status: heartbeat.status,
+                last_beat_at: heartbeat.last_beat_at,
+                next_beat_at: heartbeat.next_beat_at,
+                created_at: now,
+                updated_at: now,
+            };
+            self.db
+                .lock()
+                .await
+                .heartbeats
+                .insert(created.id, created.clone());
+            Ok(created)
+        }
+
+        async fn get_heartbeat(&self, id: Uuid) -> Result<Option<Heartbeat>, StorageError> {
+            Ok(self.db.lock().await.heartbeats.get(&id).cloned())
+        }
+
+        async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError> {
+            let mut heartbeats: Vec<Heartbeat> =
+                self.db.lock().await.heartbeats.values().cloned().collect();
+            heartbeats.sort_by_key(|heartbeat| heartbeat.created_at);
+            Ok(heartbeats)
+        }
+
+        async fn list_due_heartbeats(
+            &self,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<Heartbeat>, StorageError> {
+            let mut heartbeats: Vec<Heartbeat> = self
+                .db
+                .lock()
+                .await
+                .heartbeats
+                .values()
+                .filter(|heartbeat| {
+                    heartbeat.status == swage_storage::HeartbeatStatus::Enabled
+                        && heartbeat.next_beat_at.is_some_and(|next| next <= now)
+                })
+                .cloned()
+                .collect();
+            heartbeats.sort_by_key(|heartbeat| heartbeat.next_beat_at);
+            Ok(heartbeats)
+        }
+
+        async fn update_heartbeat(
+            &self,
+            id: Uuid,
+            update: UpdateHeartbeat,
+        ) -> Result<Heartbeat, StorageError> {
+            let mut db = self.db.lock().await;
+            let heartbeat = db.heartbeats.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Heartbeat".into(),
+                id: id.to_string(),
+            })?;
+            if let Some(message) = update.message {
+                heartbeat.message = message;
+            }
+            if let Some(interval_seconds) = update.interval_seconds {
+                heartbeat.interval_seconds = interval_seconds;
+            }
+            if let Some(status) = update.status {
+                heartbeat.status = status;
+            }
+            if let Some(last_beat_at) = update.last_beat_at {
+                heartbeat.last_beat_at = last_beat_at;
+            }
+            if let Some(next_beat_at) = update.next_beat_at {
+                heartbeat.next_beat_at = next_beat_at;
+            }
+            heartbeat.updated_at = chrono::Utc::now();
+            Ok(heartbeat.clone())
+        }
+
+        async fn delete_heartbeat(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self.db.lock().await.heartbeats.remove(&id).is_some())
+        }
+
+        async fn create_heartbeat_run(
+            &self,
+            run: NewHeartbeatRun,
+        ) -> Result<HeartbeatRun, StorageError> {
+            let created = HeartbeatRun {
+                id: Uuid::new_v4(),
+                heartbeat_id: run.heartbeat_id,
+                state: run.state,
+                scheduled_for: run.scheduled_for,
+                turn_id: run.turn_id,
+                output_text: run.output_text,
+                error_message: run.error_message,
+                created_at: chrono::Utc::now(),
+                started_at: run.started_at,
+                completed_at: run.completed_at,
+            };
+            self.db
+                .lock()
+                .await
+                .heartbeat_runs
+                .insert(created.id, created.clone());
+            Ok(created)
+        }
+
+        async fn get_heartbeat_run(&self, id: Uuid) -> Result<Option<HeartbeatRun>, StorageError> {
+            Ok(self.db.lock().await.heartbeat_runs.get(&id).cloned())
+        }
+
+        async fn list_heartbeat_runs_by_heartbeat(
+            &self,
+            heartbeat_id: Uuid,
+        ) -> Result<Vec<HeartbeatRun>, StorageError> {
+            let mut runs: Vec<HeartbeatRun> = self
+                .db
+                .lock()
+                .await
+                .heartbeat_runs
+                .values()
+                .filter(|run| run.heartbeat_id == heartbeat_id)
+                .cloned()
+                .collect();
+            runs.sort_by_key(|run| run.created_at);
+            Ok(runs)
+        }
+
+        async fn update_heartbeat_run_state(
+            &self,
+            id: Uuid,
+            state: HeartbeatRunState,
+            turn_id: Option<Uuid>,
+            output_text: Option<&str>,
+            error_message: Option<&str>,
+        ) -> Result<(), StorageError> {
+            let mut db = self.db.lock().await;
+            let run = db
+                .heartbeat_runs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "HeartbeatRun".into(),
+                    id: id.to_string(),
+                })?;
+            run.state = state.clone();
+            if let Some(turn_id) = turn_id {
+                run.turn_id = Some(turn_id);
+            }
+            if let Some(output_text) = output_text {
+                run.output_text = Some(output_text.to_string());
+            }
+            if let Some(error_message) = error_message {
+                run.error_message = Some(error_message.to_string());
+            }
+            if matches!(state, HeartbeatRunState::Running) && run.started_at.is_none() {
+                run.started_at = Some(chrono::Utc::now());
+            }
+            if matches!(
+                state,
+                HeartbeatRunState::Completed | HeartbeatRunState::Failed
             ) {
                 run.completed_at = Some(chrono::Utc::now());
             }

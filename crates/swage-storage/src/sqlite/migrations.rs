@@ -35,6 +35,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("015_project_default_flag", ADD_PROJECT_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
+        ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
     ]
 }
 
@@ -134,6 +135,40 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
         ON scheduled_runs(job_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS heartbeats (
+        id               TEXT NOT NULL PRIMARY KEY,
+        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        agent_id         TEXT NOT NULL,
+        message          TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL,
+        status           TEXT NOT NULL,
+        last_beat_at     TEXT,
+        next_beat_at     TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
+        ON heartbeats(status, next_beat_at);
+    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
+        ON heartbeats(session_id);
+
+    CREATE TABLE IF NOT EXISTS heartbeat_runs (
+        id            TEXT NOT NULL PRIMARY KEY,
+        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
+        state         TEXT NOT NULL,
+        scheduled_for TEXT,
+        turn_id       TEXT,
+        output_text   TEXT,
+        error_message TEXT,
+        created_at    TEXT NOT NULL,
+        started_at    TEXT,
+        completed_at  TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
+        ON heartbeat_runs(heartbeat_id, created_at);
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
@@ -261,6 +296,43 @@ const CREATE_SCHEDULED_JOB_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
         ON scheduled_runs(job_id, created_at);
+";
+
+/// Additive migration: durable heartbeat configuration and run history.
+const CREATE_HEARTBEAT_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS heartbeats (
+        id               TEXT NOT NULL PRIMARY KEY,
+        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        agent_id         TEXT NOT NULL,
+        message          TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL,
+        status           TEXT NOT NULL,
+        last_beat_at     TEXT,
+        next_beat_at     TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
+        ON heartbeats(status, next_beat_at);
+    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
+        ON heartbeats(session_id);
+
+    CREATE TABLE IF NOT EXISTS heartbeat_runs (
+        id            TEXT NOT NULL PRIMARY KEY,
+        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
+        state         TEXT NOT NULL,
+        scheduled_for TEXT,
+        turn_id       TEXT,
+        output_text   TEXT,
+        error_message TEXT,
+        created_at    TEXT NOT NULL,
+        started_at    TEXT,
+        completed_at  TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
+        ON heartbeat_runs(heartbeat_id, created_at);
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.

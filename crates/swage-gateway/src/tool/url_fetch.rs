@@ -322,7 +322,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
-        assert!(err.to_string().contains("Blocked private or metadata destination"));
+        assert!(
+            err.to_string()
+                .contains("Blocked private or metadata destination")
+        );
     }
 
     #[tokio::test]

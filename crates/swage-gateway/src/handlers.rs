@@ -18,6 +18,10 @@ use crate::{
         DevThreadInboundRequest,
     },
     error::ApiError,
+    heartbeat::{
+        CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
+        UpdateHeartbeatRequest,
+    },
     schedule::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
         ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
@@ -155,6 +159,71 @@ pub async fn delete_scheduled_job(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("scheduled_job", id))
+    }
+}
+
+/// `POST /api/heartbeats` — create a durable heartbeat.
+pub async fn create_heartbeat(
+    State(state): State<AppState>,
+    Json(req): Json<CreateHeartbeatRequest>,
+) -> Result<(StatusCode, Json<HeartbeatResponse>), ApiError> {
+    let response = crate::heartbeat::create_heartbeat(&state, req).await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// `GET /api/heartbeats` — list all configured heartbeats.
+pub async fn list_heartbeats(
+    State(state): State<AppState>,
+) -> Result<Json<HeartbeatListResponse>, ApiError> {
+    Ok(Json(crate::heartbeat::list_heartbeats(&state).await?))
+}
+
+/// `PUT /api/heartbeats/:id` — edit an existing heartbeat.
+pub async fn update_heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateHeartbeatRequest>,
+) -> Result<Json<HeartbeatResponse>, ApiError> {
+    Ok(Json(
+        crate::heartbeat::update_heartbeat(&state, id, req).await?,
+    ))
+}
+
+/// `POST /api/heartbeats/:id/enable` — enable heartbeat execution.
+pub async fn enable_heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<HeartbeatResponse>, ApiError> {
+    Ok(Json(crate::heartbeat::enable_heartbeat(&state, id).await?))
+}
+
+/// `POST /api/heartbeats/:id/disable` — disable heartbeat execution.
+pub async fn disable_heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<HeartbeatResponse>, ApiError> {
+    Ok(Json(crate::heartbeat::disable_heartbeat(&state, id).await?))
+}
+
+/// `GET /api/heartbeats/:id/runs` — list recorded heartbeat runs.
+pub async fn list_heartbeat_runs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<HeartbeatRunListResponse>, ApiError> {
+    Ok(Json(
+        crate::heartbeat::list_heartbeat_runs(&state, id).await?,
+    ))
+}
+
+/// `DELETE /api/heartbeats/:id` — delete a heartbeat and its run history.
+pub async fn delete_heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    if crate::heartbeat::delete_heartbeat(&state, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("heartbeat", id))
     }
 }
 

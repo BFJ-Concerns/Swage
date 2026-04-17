@@ -1,17 +1,14 @@
-use std::str::FromStr;
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
+use std::str::FromStr;
 use tokio::task::JoinHandle;
 use tracing::warn;
 use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_storage::{
-    NewScheduledJob, NewScheduledRun, NewTurn, ScheduledJob, ScheduledJobKind, ScheduledJobStatus,
+    NewScheduledJob, NewScheduledRun, ScheduledJob, ScheduledJobKind, ScheduledJobStatus,
     ScheduledRun, ScheduledRunState, ScheduledRunTrigger, UpdateScheduledJob,
 };
 
@@ -19,8 +16,6 @@ use crate::channel_gateway::{
     DeliveryRoutingRequest, deliver_to_targets, resolve_delivery_targets,
 };
 use crate::state::AppState;
-use crate::subscription::SubscriptionState;
-use crate::thread_selection::resolve_thread_for_session;
 
 const SCHEDULER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -460,7 +455,13 @@ async fn execute_job(
         })
         .await?;
 
-    let turn_id = create_placeholder_turn(state, job).await?;
+    let turn_id = crate::automated_turn::create_placeholder_turn(
+        state,
+        job.session_id,
+        &job.agent_id,
+        &job.message,
+    )
+    .await?;
     state
         .storage
         .update_scheduled_run_state(
@@ -472,7 +473,9 @@ async fn execute_job(
         )
         .await?;
 
-    match run_job_turn(state, job, turn_id).await {
+    match crate::automated_turn::run_placeholder_turn(state, job.session_id, &job.message, turn_id)
+        .await
+    {
         Ok(output_text) => {
             let routing: DeliveryRoutingRequest =
                 serde_json::from_value(job.delivery_routing.clone()).map_err(|error| {
@@ -513,76 +516,6 @@ async fn execute_job(
         .get_scheduled_run(run.id)
         .await?
         .ok_or_else(|| GatewayError::ValidationError("scheduled run disappeared".into()))
-}
-
-async fn create_placeholder_turn(
-    state: &AppState,
-    job: &ScheduledJob,
-) -> Result<Uuid, GatewayError> {
-    let thread = resolve_thread_for_session(state.storage.as_ref(), job.session_id, None).await?;
-    let existing_turns = state.storage.list_turns_by_thread(thread.id).await?;
-    if existing_turns.iter().any(|turn| {
-        matches!(
-            turn.state,
-            swage_storage::TurnState::Pending
-                | swage_storage::TurnState::Processing
-                | swage_storage::TurnState::AwaitingApproval
-                | swage_storage::TurnState::Delegating
-        )
-    }) || state
-        .active_turns
-        .lock()
-        .await
-        .contains_key(&job.session_id)
-    {
-        return Err(GatewayError::TurnInProgress {
-            session_id: job.session_id,
-        });
-    }
-
-    let turn = state
-        .storage
-        .create_turn(NewTurn {
-            thread_id: thread.id,
-            agent_id: job.agent_id.clone(),
-            state: swage_storage::TurnState::Pending,
-            user_input: Some(job.message.clone()),
-            parent_turn_id: None,
-        })
-        .await?;
-    Ok(turn.id)
-}
-
-async fn run_job_turn(
-    state: &AppState,
-    job: &ScheduledJob,
-    turn_id: Uuid,
-) -> Result<String, GatewayError> {
-    let thread = resolve_thread_for_session(state.storage.as_ref(), job.session_id, None).await?;
-    let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
-    let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
-    tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
-
-    crate::turn::process_turn_with_existing_turn(
-        state,
-        job.session_id,
-        Some(thread.id),
-        job.message.clone(),
-        ws_tx,
-        subscription,
-        None,
-        Some(turn_id),
-    )
-    .await?;
-
-    let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
-        GatewayError::ValidationError(format!(
-            "turn {turn_id} not found after scheduled execution"
-        ))
-    })?;
-    turn.assistant_response.ok_or_else(|| {
-        GatewayError::ValidationError("scheduled turn completed without assistant response".into())
-    })
 }
 
 fn map_job_response(job: ScheduledJob) -> Result<ScheduledJobResponse, GatewayError> {

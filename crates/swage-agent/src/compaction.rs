@@ -811,6 +811,69 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl swage_storage::store::HeartbeatStore for StubStorage {
+        async fn create_heartbeat(
+            &self,
+            _: swage_storage::NewHeartbeat,
+        ) -> Result<swage_storage::Heartbeat, StorageError> {
+            unimplemented!()
+        }
+        async fn get_heartbeat(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_heartbeats(&self) -> Result<Vec<swage_storage::Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_heartbeats(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<swage_storage::Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_heartbeat(
+            &self,
+            _: Uuid,
+            _: swage_storage::UpdateHeartbeat,
+        ) -> Result<swage_storage::Heartbeat, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_heartbeat(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_heartbeat_run(
+            &self,
+            _: swage_storage::NewHeartbeatRun,
+        ) -> Result<swage_storage::HeartbeatRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_heartbeat_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<swage_storage::HeartbeatRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_heartbeat_runs_by_heartbeat(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<swage_storage::HeartbeatRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_heartbeat_run_state(
+            &self,
+            _: Uuid,
+            _: swage_storage::HeartbeatRunState,
+            _: Option<Uuid>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 

@@ -51,11 +51,13 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod assets;
+pub mod automated_turn;
 pub mod channel_gateway;
 pub mod cli;
 pub mod context;
 pub mod error;
 pub mod handlers;
+pub mod heartbeat;
 pub mod lifecycle;
 pub mod schedule;
 pub mod server;

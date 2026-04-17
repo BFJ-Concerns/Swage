@@ -1,6 +1,7 @@
 pub mod agent_message;
 pub mod approval;
 pub mod context_snapshot;
+pub mod heartbeat;
 pub mod message;
 pub mod migrations;
 pub mod project;

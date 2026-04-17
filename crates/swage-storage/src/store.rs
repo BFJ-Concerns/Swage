@@ -5,12 +5,13 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, EdgeEvaluation,
-    InboundAudit, Message, NewAgentMessage, NewApprovalRequest, NewEdgeEvaluation, NewMessage,
+    Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message, NewAgentMessage,
+    NewApprovalRequest, NewEdgeEvaluation, NewHeartbeat, NewHeartbeatRun, NewMessage,
     NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSession,
     NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
     NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread,
     ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
-    UpdateScheduledJob,
+    UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -538,6 +539,40 @@ pub trait ScheduleStore: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+#[async_trait]
+pub trait HeartbeatStore: Send + Sync {
+    async fn create_heartbeat(&self, heartbeat: NewHeartbeat) -> Result<Heartbeat, StorageError>;
+    async fn get_heartbeat(&self, id: Uuid) -> Result<Option<Heartbeat>, StorageError>;
+    async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError>;
+    async fn list_due_heartbeats(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Heartbeat>, StorageError>;
+    async fn update_heartbeat(
+        &self,
+        id: Uuid,
+        update: UpdateHeartbeat,
+    ) -> Result<Heartbeat, StorageError>;
+    async fn delete_heartbeat(&self, id: Uuid) -> Result<bool, StorageError>;
+    async fn create_heartbeat_run(
+        &self,
+        run: NewHeartbeatRun,
+    ) -> Result<HeartbeatRun, StorageError>;
+    async fn get_heartbeat_run(&self, id: Uuid) -> Result<Option<HeartbeatRun>, StorageError>;
+    async fn list_heartbeat_runs_by_heartbeat(
+        &self,
+        heartbeat_id: Uuid,
+    ) -> Result<Vec<HeartbeatRun>, StorageError>;
+    async fn update_heartbeat_run_state(
+        &self,
+        id: Uuid,
+        state: HeartbeatRunState,
+        turn_id: Option<Uuid>,
+        output_text: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -558,6 +593,7 @@ pub trait Storage:
     + ApprovalStore
     + AgentMessageStore
     + ScheduleStore
+    + HeartbeatStore
     + TopologyTraceStore
     + Send
     + Sync
@@ -577,6 +613,7 @@ impl<T> Storage for T where
         + ApprovalStore
         + AgentMessageStore
         + ScheduleStore
+        + HeartbeatStore
         + TopologyTraceStore
         + Send
         + Sync
@@ -1026,6 +1063,60 @@ mod tests {
             &self,
             _: Uuid,
             _: ScheduledRunState,
+            _: Option<Uuid>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl HeartbeatStore for StubStorage {
+        async fn create_heartbeat(&self, _: NewHeartbeat) -> Result<Heartbeat, StorageError> {
+            unimplemented!()
+        }
+        async fn get_heartbeat(&self, _: Uuid) -> Result<Option<Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_heartbeats(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<Heartbeat>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_heartbeat(
+            &self,
+            _: Uuid,
+            _: UpdateHeartbeat,
+        ) -> Result<Heartbeat, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_heartbeat(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_heartbeat_run(
+            &self,
+            _: NewHeartbeatRun,
+        ) -> Result<HeartbeatRun, StorageError> {
+            unimplemented!()
+        }
+        async fn get_heartbeat_run(&self, _: Uuid) -> Result<Option<HeartbeatRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_heartbeat_runs_by_heartbeat(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<HeartbeatRun>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_heartbeat_run_state(
+            &self,
+            _: Uuid,
+            _: HeartbeatRunState,
             _: Option<Uuid>,
             _: Option<&str>,
             _: Option<&str>,

@@ -520,6 +520,102 @@ pub struct ScheduledRun {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+/// Lifecycle state of a heartbeat configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatStatus {
+    Enabled,
+    Disabled,
+}
+
+impl std::fmt::Display for HeartbeatStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            HeartbeatStatus::Enabled => "enabled",
+            HeartbeatStatus::Disabled => "disabled",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for HeartbeatStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "enabled" => Ok(HeartbeatStatus::Enabled),
+            "disabled" => Ok(HeartbeatStatus::Disabled),
+            other => Err(format!("unknown heartbeat status: {other}")),
+        }
+    }
+}
+
+/// A durable heartbeat bound to an existing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub message: String,
+    pub interval_seconds: i64,
+    pub status: HeartbeatStatus,
+    pub last_beat_at: Option<DateTime<Utc>>,
+    pub next_beat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Lifecycle state of a heartbeat execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatRunState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for HeartbeatRunState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            HeartbeatRunState::Pending => "pending",
+            HeartbeatRunState::Running => "running",
+            HeartbeatRunState::Completed => "completed",
+            HeartbeatRunState::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for HeartbeatRunState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(HeartbeatRunState::Pending),
+            "running" => Ok(HeartbeatRunState::Running),
+            "completed" => Ok(HeartbeatRunState::Completed),
+            "failed" => Ok(HeartbeatRunState::Failed),
+            other => Err(format!("unknown heartbeat run state: {other}")),
+        }
+    }
+}
+
+/// A recorded execution of a heartbeat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatRun {
+    pub id: Uuid,
+    pub heartbeat_id: Uuid,
+    pub state: HeartbeatRunState,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub turn_id: Option<Uuid>,
+    pub output_text: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 /// Lifecycle state of an approval request.
 ///
 /// Transitions: Pending → Approved | Rejected (human decision) or Expired
@@ -1088,6 +1184,41 @@ pub struct NewScheduledRun {
     pub job_id: Uuid,
     pub trigger: ScheduledRunTrigger,
     pub state: ScheduledRunState,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub turn_id: Option<Uuid>,
+    pub output_text: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a durable heartbeat.
+#[derive(Debug, Clone)]
+pub struct NewHeartbeat {
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub message: String,
+    pub interval_seconds: i64,
+    pub status: HeartbeatStatus,
+    pub last_beat_at: Option<DateTime<Utc>>,
+    pub next_beat_at: Option<DateTime<Utc>>,
+}
+
+/// Partial update for an existing heartbeat.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateHeartbeat {
+    pub message: Option<String>,
+    pub interval_seconds: Option<i64>,
+    pub status: Option<HeartbeatStatus>,
+    pub last_beat_at: Option<Option<DateTime<Utc>>>,
+    pub next_beat_at: Option<Option<DateTime<Utc>>>,
+}
+
+/// Input for recording a heartbeat run.
+#[derive(Debug, Clone)]
+pub struct NewHeartbeatRun {
+    pub heartbeat_id: Uuid,
+    pub state: HeartbeatRunState,
     pub scheduled_for: Option<DateTime<Utc>>,
     pub turn_id: Option<Uuid>,
     pub output_text: Option<String>,
