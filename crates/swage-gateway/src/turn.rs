@@ -1188,7 +1188,7 @@ pub(crate) mod tests {
 
     use async_trait::async_trait;
     use futures::stream;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::{Mutex, Notify, mpsc};
 
     use swage_core::StorageError;
     use swage_core::{
@@ -3225,6 +3225,36 @@ pub(crate) mod tests {
         }
     }
 
+    struct BlockingMockTool {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for BlockingMockTool {
+        fn name(&self) -> &str {
+            "block"
+        }
+        fn description(&self) -> &str {
+            "Block until the test releases execution"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": true
+            })
+        }
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(serde_json::json!({"output": "released"}))
+        }
+    }
+
     /// Build an AppState with a multi-round provider and an EchoMockTool.
     async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
@@ -3463,6 +3493,127 @@ pub(crate) mod tests {
                 .iter()
                 .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_completion() {
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "call_block".into(),
+                name: "block".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+
+        let storage = Arc::new(MockStorage::new());
+        let project = storage
+            .get_or_create_default()
+            .await
+            .expect("create default project");
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create default thread");
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: storage as Arc<dyn swage_storage::store::ProjectStore>,
+            provider: Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                BlockingMockTool {
+                    started: started.clone(),
+                    release: release.clone(),
+                },
+            )
+                as Arc<dyn crate::tool::Tool>])),
+            sandbox: None,
+            hook_registry: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let state = Arc::new(state);
+        let worker_state = state.clone();
+        let handle = tokio::spawn(async move {
+            process_turn(
+                &worker_state,
+                session_id,
+                None,
+                "Run block".to_string(),
+                tx,
+                Arc::new(Mutex::new(SubscriptionState::new(true))),
+                None,
+            )
+            .await
+        });
+
+        started.notified().await;
+        cancel_turn(&state, session_id)
+            .await
+            .expect("cancel should succeed while tool is running");
+
+        handle
+            .await
+            .expect("task should not panic")
+            .expect("process_turn ok");
+
+        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Cancelled {})),
+            "expected Cancelled event, got: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ServerEvent::ToolEnd { tool, call_id, status, .. }
+                if tool == "block" && call_id == "call_block" && status == "cancelled"
+            )),
+            "expected cancelled ToolEnd event, got: {events:?}"
+        );
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let thread_id = threads[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+        assert_eq!(turns[0].state, TurnState::Interrupted);
+
+        let thread = ThreadStore::get(&*state.storage, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        release.notify_waiters();
     }
 
     #[tokio::test]

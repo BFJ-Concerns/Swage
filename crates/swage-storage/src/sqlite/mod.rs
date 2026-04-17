@@ -14,7 +14,7 @@ pub mod turn;
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
 use swage_core::StorageError;
 use tokio::sync::Mutex;
 
@@ -72,7 +72,20 @@ impl SqliteStorage {
     {
         let guard = self.conn.lock().await;
         tokio::task::block_in_place(|| f(&*guard))
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))
+            .map_err(map_rusqlite_error)
+    }
+}
+
+fn map_rusqlite_error(error: rusqlite::Error) -> StorageError {
+    match error {
+        rusqlite::Error::SqliteFailure(inner, message)
+            if matches!(inner.code, ErrorCode::ConstraintViolation) =>
+        {
+            StorageError::ConstraintViolation(
+                message.unwrap_or_else(|| inner.to_string()),
+            )
+        }
+        other => StorageError::QueryFailed(other.to_string()),
     }
 }
 

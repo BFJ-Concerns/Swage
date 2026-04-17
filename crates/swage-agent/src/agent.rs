@@ -773,16 +773,36 @@ impl Agent {
         .with_call_id(call.call_id.clone())
         .with_turn_id(execution.turn_id)
         .with_thread_id(execution.thread_id);
+        let dispatch_started_at = std::time::Instant::now();
+        let dispatch_future = dispatcher.dispatch(
+            &call.name,
+            call.arguments.clone(),
+            &ctx,
+            &self.config.agent_id,
+        );
+        tokio::pin!(dispatch_future);
 
-        match dispatcher
-            .dispatch(
-                &call.name,
-                call.arguments.clone(),
-                &ctx,
-                &self.config.agent_id,
-            )
-            .await
-        {
+        match tokio::select! {
+            result = &mut dispatch_future => result,
+            _ = cancel_token.cancelled() => {
+                let _ = self
+                    .storage
+                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                    .await;
+                let _ = self
+                    .storage
+                    .update_state(execution.thread_id, ThreadState::Idle)
+                    .await;
+                let _ = event_tx.send(AgentEvent::ToolEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    result: Value::Null,
+                    status: "cancelled".to_string(),
+                    duration_ms: Some(dispatch_started_at.elapsed().as_millis() as u64),
+                });
+                return Err(AgentError::Cancelled);
+            }
+        } {
             Ok(output) => {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
                 Ok((result_str, false, "success".to_string()))

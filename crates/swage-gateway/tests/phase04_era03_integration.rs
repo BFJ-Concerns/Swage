@@ -446,7 +446,7 @@ async fn cancel_interrupts_active_delegation() {
     };
 
     // Fallback path — no active delegations registry.
-    swage_agent::cancel::handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+    swage_agent::cancel::handle_cancel(storage.as_ref(), &cancel, None)
         .await
         .unwrap();
 

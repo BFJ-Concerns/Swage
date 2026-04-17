@@ -379,6 +379,57 @@ mod tests {
         assert_eq!(appended.position, 8);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_message_position_in_thread_is_rejected() {
+        let (storage, _, thread_id) = make_thread().await;
+
+        storage
+            .create_message(new_msg(thread_id, Role::User, "first", 0))
+            .await
+            .unwrap();
+
+        let err = storage
+            .create_message(new_msg(thread_id, Role::Assistant, "collision", 0))
+            .await
+            .unwrap_err();
+
+        match err {
+            StorageError::ConstraintViolation(message) => {
+                assert!(
+                    message.contains("UNIQUE") || message.contains("idx_messages_thread_position"),
+                    "unexpected constraint message: {message}"
+                );
+            }
+            other => panic!("expected constraint violation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_append_message_assigns_unique_positions() {
+        let (storage, _, thread_id) = make_thread().await;
+        let storage = std::sync::Arc::new(storage);
+
+        let mut tasks = Vec::new();
+        for i in 0..12 {
+            let storage = storage.clone();
+            tasks.push(tokio::spawn(async move {
+                storage
+                    .append_message(append_msg(thread_id, Role::Assistant, &format!("m{i}")))
+                    .await
+                    .expect("append should succeed")
+                    .position
+            }));
+        }
+
+        let mut positions = Vec::new();
+        for task in tasks {
+            positions.push(task.await.unwrap());
+        }
+        positions.sort_unstable();
+
+        assert_eq!(positions, (0..12).collect::<Vec<_>>());
+    }
+
     // --- get_message ---
 
     #[tokio::test(flavor = "multi_thread")]

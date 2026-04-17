@@ -146,6 +146,8 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
     CREATE INDEX IF NOT EXISTS idx_messages_agent_id  ON messages(agent_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_thread_position
+        ON messages(thread_id, position);
 
     -- Tool calls: execution records for a specific turn.
     -- parent_call_id supports nested / sub-tool invocations (NULL = top-level).

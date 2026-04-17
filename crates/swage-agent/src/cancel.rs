@@ -4,16 +4,28 @@
 //! Shutdown terminates all active work under a target agent.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use swage_core::MessageKind;
 use swage_storage::model::AgentMessage;
-use swage_storage::{Storage, ThreadState, TurnState};
+use swage_storage::store::{AgentMessageStore, ThreadStore, TurnStore};
+use swage_storage::{ThreadState, TurnState};
 
 use crate::delegation::ActiveDelegations;
 use crate::error::AgentError;
+
+/// Narrow storage surface used by cancel and shutdown handling.
+///
+/// These paths only need agent-message lookup plus thread and turn state
+/// updates. Keeping the bound narrow makes the degraded-state behaviour
+/// testable without constructing a full storage implementation.
+#[async_trait]
+pub trait CancellationStorage: AgentMessageStore + ThreadStore + TurnStore + Send + Sync {}
+
+impl<T> CancellationStorage for T where T: AgentMessageStore + ThreadStore + TurnStore + Send + Sync
+{}
 
 /// Handle a Cancel message by interrupting the delegated turn.
 ///
@@ -35,7 +47,7 @@ use crate::error::AgentError;
 /// If the target turn is not found or already in a terminal state, the cancel
 /// is a no-op — "first terminal state wins" (ADR-0002).
 pub async fn handle_cancel(
-    storage: &Arc<dyn Storage>,
+    storage: &dyn CancellationStorage,
     cancel_msg: &AgentMessage,
     active_delegations: Option<&ActiveDelegations>,
 ) -> Result<(), AgentError> {
@@ -122,26 +134,13 @@ pub async fn handle_cancel(
     let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
 
     for turn in active_turns {
-        if let Err(e) = storage
+        storage
             .update_turn_state(turn.id, TurnState::Interrupted)
-            .await
-        {
-            tracing::warn!(
-                turn_id = %turn.id,
-                error = %e,
-                "fallback cancel: failed to interrupt turn — thread may remain stuck"
-            );
-        }
+            .await?;
     }
 
     for thread_id in thread_ids {
-        if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
-            tracing::warn!(
-                thread_id = %thread_id,
-                error = %e,
-                "fallback cancel: failed to reset thread to Idle"
-            );
-        }
+        storage.update_state(thread_id, ThreadState::Idle).await?;
     }
 
     Ok(())
@@ -154,33 +153,19 @@ pub async fn handle_cancel(
 /// interruption is communicated solely via storage writes. Logs warnings on
 /// storage errors so stuck threads are diagnosable.
 async fn interrupt_turns_in_thread(
-    storage: &Arc<dyn Storage>,
+    storage: &dyn CancellationStorage,
     thread_id: Uuid,
     interruptible_states: &[TurnState],
 ) -> Result<(), AgentError> {
     let turns = storage.list_turns_by_thread(thread_id).await?;
     for turn in turns {
         if interruptible_states.contains(&turn.state) {
-            if let Err(e) = storage
+            storage
                 .update_turn_state(turn.id, TurnState::Interrupted)
-                .await
-            {
-                tracing::warn!(
-                    turn_id = %turn.id,
-                    thread_id = %thread_id,
-                    error = %e,
-                    "failed to interrupt turn in fallback cancel — thread may remain stuck"
-                );
-            }
+                .await?;
         }
     }
-    if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
-        tracing::warn!(
-            thread_id = %thread_id,
-            error = %e,
-            "failed to reset thread to Idle after fallback cancel"
-        );
-    }
+    storage.update_state(thread_id, ThreadState::Idle).await?;
     Ok(())
 }
 
@@ -190,7 +175,7 @@ async fn interrupt_turns_in_thread(
 /// interrupts any in-progress turns for the target agent, then resets their
 /// threads to Idle so new turns can be created.
 pub async fn handle_shutdown(
-    storage: &Arc<dyn Storage>,
+    storage: &dyn CancellationStorage,
     shutdown_msg: &AgentMessage,
     active_delegations: Option<&ActiveDelegations>,
 ) -> Result<(), AgentError> {
@@ -219,28 +204,15 @@ pub async fn handle_shutdown(
     let thread_ids: HashSet<Uuid> = active_turns.iter().map(|t| t.thread_id).collect();
 
     for turn in active_turns {
-        if let Err(e) = storage
+        storage
             .update_turn_state(turn.id, TurnState::Interrupted)
-            .await
-        {
-            tracing::warn!(
-                turn_id = %turn.id,
-                error = %e,
-                "shutdown: failed to interrupt turn"
-            );
-        }
+            .await?;
     }
 
     // Reset threads to Idle — mirrors handle_cancel's fallback path. Without
     // this, threads stay in Processing and reject subsequent turn creation.
     for thread_id in thread_ids {
-        if let Err(e) = storage.update_state(thread_id, ThreadState::Idle).await {
-            tracing::warn!(
-                thread_id = %thread_id,
-                error = %e,
-                "shutdown: failed to reset thread to Idle"
-            );
-        }
+        storage.update_state(thread_id, ThreadState::Idle).await?;
     }
 
     Ok(())
@@ -248,7 +220,11 @@ pub async fn handle_shutdown(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use async_trait::async_trait;
+    use swage_core::StorageError;
     use swage_core::{MessageKind, MessageStatus};
     use swage_storage::SqliteStorage;
     use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
@@ -256,6 +232,201 @@ mod tests {
         AgentMessageStore, ProjectStore, SessionStore, ThreadStore, TurnStore,
     };
     use uuid::Uuid;
+
+    #[derive(Clone, Copy)]
+    enum InjectedFailure {
+        UpdateTurnState,
+        UpdateThreadState,
+    }
+
+    struct FailingCancellationStorage {
+        inner: Arc<SqliteStorage>,
+        injected_failure: InjectedFailure,
+    }
+
+    impl FailingCancellationStorage {
+        fn injected_error(&self) -> StorageError {
+            StorageError::QueryFailed("injected cancellation storage failure".into())
+        }
+    }
+
+    #[async_trait]
+    impl AgentMessageStore for FailingCancellationStorage {
+        async fn create_agent_message(
+            &self,
+            _msg: NewAgentMessage,
+        ) -> Result<AgentMessage, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_agent_message(&self, id: Uuid) -> Result<Option<AgentMessage>, StorageError> {
+            self.inner.get_agent_message(id).await
+        }
+
+        async fn list_pending_for_agent(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_agent_message_status(
+            &self,
+            _id: Uuid,
+            _status: MessageStatus,
+            _failure_reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_agent_message_payload(
+            &self,
+            _id: Uuid,
+            _payload: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_by_correlation(
+            &self,
+            _correlation_id: Uuid,
+        ) -> Result<Vec<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn expire_stale_messages(
+            &self,
+            _max_age: std::time::Duration,
+        ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TurnStore for FailingCancellationStorage {
+        async fn create_turn(&self, _turn: NewTurn) -> Result<swage_storage::Turn, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_turn(&self, id: Uuid) -> Result<Option<swage_storage::Turn>, StorageError> {
+            self.inner.get_turn(id).await
+        }
+
+        async fn list_turns_by_thread(
+            &self,
+            thread_id: Uuid,
+        ) -> Result<Vec<swage_storage::Turn>, StorageError> {
+            self.inner.list_turns_by_thread(thread_id).await
+        }
+
+        async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
+            match self.injected_failure {
+                InjectedFailure::UpdateTurnState => Err(self.injected_error()),
+                InjectedFailure::UpdateThreadState => self.inner.update_turn_state(id, state).await,
+            }
+        }
+
+        async fn find_in_progress_by_agent(
+            &self,
+            agent_id: &str,
+        ) -> Result<Vec<swage_storage::Turn>, StorageError> {
+            self.inner.find_in_progress_by_agent(agent_id).await
+        }
+
+        async fn update_response(&self, _id: Uuid, _response: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_inbound_audit(
+            &self,
+            _id: Uuid,
+            _inbound_audit: &swage_storage::InboundAudit,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_tokens(
+            &self,
+            _id: Uuid,
+            _input: i64,
+            _output: i64,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_structured_output(
+            &self,
+            _id: Uuid,
+            _output: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ThreadStore for FailingCancellationStorage {
+        async fn create(
+            &self,
+            _thread: NewThread,
+        ) -> Result<swage_storage::Thread, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get(&self, id: Uuid) -> Result<Option<swage_storage::Thread>, StorageError> {
+            ThreadStore::get(self.inner.as_ref(), id).await
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: Uuid,
+        ) -> Result<Vec<swage_storage::Thread>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_threads_by_agent_id(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Vec<swage_storage::Thread>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError> {
+            match self.injected_failure {
+                InjectedFailure::UpdateThreadState => Err(self.injected_error()),
+                InjectedFailure::UpdateTurnState => self.inner.update_state(id, state).await,
+            }
+        }
+
+        async fn delete(&self, _id: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+
+        async fn create_branch(
+            &self,
+            _parent_thread_id: Uuid,
+            _branched_from_message_id: Uuid,
+        ) -> Result<swage_storage::ThreadBranch, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_branches_by_session(
+            &self,
+            _session_id: Uuid,
+        ) -> Result<Vec<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_branch(
+            &self,
+            _child_thread_id: Uuid,
+        ) -> Result<Option<swage_storage::ThreadBranch>, StorageError> {
+            unimplemented!()
+        }
+    }
 
     async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -328,7 +499,7 @@ mod tests {
             .unwrap();
 
         // Fallback path — no active delegations provided.
-        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+        handle_cancel(storage.as_ref(), &cancel, None)
             .await
             .unwrap();
 
@@ -361,7 +532,7 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        let result = handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None).await;
+        let result = handle_cancel(storage.as_ref(), &cancel, None).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             AgentError::InvalidConfig(msg) => {
@@ -466,7 +637,7 @@ mod tests {
         };
 
         // No active delegations — forces the _thread_id annotation fallback.
-        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+        handle_cancel(storage.as_ref(), &cancel, None)
             .await
             .unwrap();
 
@@ -535,7 +706,7 @@ mod tests {
 
         // Should succeed — malformed UUID is ignored, falls through to
         // the broad agent-level cancel path.
-        handle_cancel(&(storage.clone() as Arc<dyn Storage>), &cancel, None)
+        handle_cancel(storage.as_ref(), &cancel, None)
             .await
             .unwrap();
 
@@ -652,11 +823,7 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_cancel(
-            &(storage.clone() as Arc<dyn Storage>),
-            &cancel,
-            Some(&registry),
-        )
+        handle_cancel(storage.as_ref(), &cancel, Some(&registry))
         .await
         .unwrap();
 
@@ -702,7 +869,7 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_shutdown(&(storage.clone() as Arc<dyn Storage>), &shutdown, None)
+        handle_shutdown(storage.as_ref(), &shutdown, None)
             .await
             .unwrap();
 
@@ -743,11 +910,7 @@ mod tests {
             delivered_at: Some(chrono::Utc::now()),
         };
 
-        handle_shutdown(
-            &(storage.clone() as Arc<dyn Storage>),
-            &shutdown,
-            Some(&registry),
-        )
+        handle_shutdown(storage.as_ref(), &shutdown, Some(&registry))
         .await
         .unwrap();
 
@@ -755,6 +918,91 @@ mod tests {
         assert!(
             cancel_token.is_cancelled(),
             "shutdown must cancel live execution tokens"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_fallback_returns_error_when_turn_interrupt_write_fails() {
+        let (inner, _turn_id) = setup_with_turn("agent-b").await;
+
+        let delegate = inner
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        inner
+            .update_agent_message_status(delegate.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        let failing_storage = Arc::new(FailingCancellationStorage {
+            inner,
+            injected_failure: InjectedFailure::UpdateTurnState,
+        });
+
+        let error = handle_cancel(failing_storage.as_ref(), &cancel, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AgentError::StorageFailed(StorageError::QueryFailed(ref message))
+                if message.contains("injected cancellation storage failure")
+            ),
+            "expected explicit storage failure, got {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_returns_error_when_thread_reset_write_fails() {
+        let (inner, _turn_id) = setup_with_turn("agent-b").await;
+
+        let shutdown = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Shutdown,
+            correlation_id: None,
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+
+        let failing_storage = Arc::new(FailingCancellationStorage {
+            inner,
+            injected_failure: InjectedFailure::UpdateThreadState,
+        });
+
+        let error = handle_shutdown(failing_storage.as_ref(), &shutdown, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AgentError::StorageFailed(StorageError::QueryFailed(ref message))
+                if message.contains("injected cancellation storage failure")
+            ),
+            "expected explicit storage failure, got {error:?}"
         );
     }
 }
