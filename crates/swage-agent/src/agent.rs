@@ -768,11 +768,15 @@ impl Agent {
         let ctx = AgentToolContext::new(
             &self.config.agent_id,
             execution.session_id.to_string(),
-            std::env::current_dir().unwrap_or_default(),
+            self.config.working_directory.clone(),
         )
         .with_call_id(call.call_id.clone())
         .with_turn_id(execution.turn_id)
         .with_thread_id(execution.thread_id);
+        let ctx = AgentToolContext {
+            allowed_paths: self.config.allowed_paths.clone(),
+            ..ctx
+        };
         let dispatch_started_at = std::time::Instant::now();
         let dispatch_future = dispatcher.dispatch(
             &call.name,

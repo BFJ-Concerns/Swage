@@ -726,7 +726,7 @@ async fn execute_agent_node(
     .await;
 
     let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let dispatcher = build_gateway_dispatcher(state, &config, silent_ws_tx);
+    let dispatcher = build_gateway_dispatcher(state, &config, None, silent_ws_tx).await;
     let agent_config =
         build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
     let mut agent_builder = AgentBuilder::new()
@@ -1101,6 +1101,7 @@ mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (state, storage)
     }

@@ -20,6 +20,7 @@ use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
 use crate::websocket::ServerEvent;
+use crate::execution_host::RegisteredExecutionHost;
 
 pub struct GatewayToolContext {
     base: SerializableToolContext,
@@ -135,14 +136,21 @@ pub struct GatewayExecutionStrategy {
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
     /// WebSocket sender for sub-tool lifecycle events inside Python.
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    /// Resolved execution host for the current turn.
+    execution_host: Option<RegisteredExecutionHost>,
 }
 
 impl GatewayExecutionStrategy {
     pub fn new(
         inner: Option<Arc<dyn ToolExecutionStrategy>>,
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
+        execution_host: Option<RegisteredExecutionHost>,
     ) -> Self {
-        Self { inner, ws_tx }
+        Self {
+            inner,
+            ws_tx,
+            execution_host,
+        }
     }
 }
 
@@ -155,6 +163,19 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
+        if matches!(
+            self.execution_host.as_ref().map(|host| &host.kind),
+            Some(crate::execution_host::ExecutionHostKind::AttachedNode)
+        ) {
+            return crate::execution_host::execute_on_remote_host(
+                self.execution_host.as_ref().expect("checked execution host"),
+                tool_name,
+                params,
+                ctx,
+            )
+            .await;
+        }
+
         if tool_name == "python_execute" {
             let gateway_ctx = GatewayToolContext::new(ctx, self.ws_tx.clone());
             tool.execute(params.clone(), &gateway_ctx).await
@@ -422,7 +443,7 @@ mod tests {
     async fn gateway_strategy_executes_python_on_host_with_gateway_context() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx);
+        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None);
         let tool = ObservingTool::new(json!({"via": "tool"}));
         let turn_id =
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("valid UUID");
@@ -464,7 +485,7 @@ mod tests {
     async fn gateway_strategy_keeps_non_python_tools_on_inner_strategy() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx);
+        let executor = GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None);
         let tool = ObservingTool::new(json!({"via": "tool"}));
 
         let result = executor

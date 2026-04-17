@@ -203,6 +203,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/presence/machines/:id",
             axum::routing::delete(handlers::disconnect_machine),
         )
+        // Execution hosts and attached nodes.
+        .route("/api/execution-hosts", get(handlers::list_execution_hosts))
+        .route(
+            "/api/execution-hosts/register",
+            post(handlers::register_execution_host),
+        )
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/:id", post(handlers::decide_approval))

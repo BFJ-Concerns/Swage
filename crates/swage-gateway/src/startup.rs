@@ -141,6 +141,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         sandbox,
         None,
     );
+    crate::execution_host::register_local_execution_host(&state).await;
     let router = crate::server::build_router(state.clone());
     let scheduler_handle = crate::schedule::spawn_scheduler_loop(state.clone());
     let heartbeat_handle = crate::heartbeat::spawn_heartbeat_loop(state.clone());

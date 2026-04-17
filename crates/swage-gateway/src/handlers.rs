@@ -18,6 +18,9 @@ use crate::{
         DevThreadInboundRequest,
     },
     error::ApiError,
+    execution_host::{
+        ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
+    },
     heartbeat::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
@@ -252,6 +255,49 @@ pub async fn disconnect_machine(
     } else {
         Err(ApiError::not_found_str("machine", &id))
     }
+}
+
+/// `GET /api/execution-hosts` — list local and attached execution hosts.
+pub async fn list_execution_hosts(
+    State(state): State<AppState>,
+) -> Json<ExecutionHostListResponse> {
+    Json(crate::execution_host::list_execution_hosts(&state).await)
+}
+
+/// `POST /api/execution-hosts/register` — attach a remote execution host.
+pub async fn register_execution_host(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterExecutionHostRequest>,
+) -> Result<(StatusCode, Json<ExecutionHostResponse>), ApiError> {
+    if request.host_id.trim().is_empty() {
+        return Err(ApiError::validation(
+            "execution host id must not be empty".to_string(),
+        ));
+    }
+    if request.base_url.trim().is_empty() {
+        return Err(ApiError::validation(
+            "execution host base_url must not be empty".to_string(),
+        ));
+    }
+    if request.shared_token.trim().is_empty() {
+        return Err(ApiError::validation(
+            "execution host shared_token must not be empty".to_string(),
+        ));
+    }
+
+    let host = crate::execution_host::register_remote_execution_host(&state, request).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(ExecutionHostResponse {
+            host_id: host.host_id,
+            label: host.label,
+            kind: host.kind.to_string(),
+            base_url: host.base_url,
+            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            capabilities: host.capabilities,
+            registered_at: host.registered_at,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1429,7 @@ mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (build_router(state), storage)
     }
@@ -2883,6 +2930,7 @@ def build_topology():
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

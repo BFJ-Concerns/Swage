@@ -208,9 +208,10 @@ fn build_permission_config(
     }
 }
 
-pub(crate) fn build_gateway_dispatcher(
+pub(crate) async fn build_gateway_dispatcher(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
+    session_metadata: Option<&serde_json::Value>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> ToolDispatcher {
     let permissions = build_permission_config(config, &state.config);
@@ -230,9 +231,13 @@ pub(crate) fn build_gateway_dispatcher(
                 as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
         });
 
+    let execution_host =
+        crate::execution_host::resolve_execution_host(state, session_metadata).await;
+
     dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
         inner_strategy,
         ws_tx,
+        execution_host,
     )))
 }
 
@@ -241,7 +246,9 @@ pub(crate) fn build_agent_config(
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
 ) -> AgentConfig {
-    let mut agent_config = AgentConfig::new(agent_id);
+    let workspace_root = crate::tool::workspace::resolve_workspace_root(config);
+    let mut agent_config =
+        AgentConfig::new(agent_id).with_workspace(&workspace_root, vec![workspace_root.clone()]);
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
@@ -392,7 +399,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         // WebSocket stream.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
         let target_dispatcher =
-            build_gateway_dispatcher(&self.state, &target_resolved, silent_ws_tx);
+            build_gateway_dispatcher(&self.state, &target_resolved, None, silent_ws_tx).await;
 
         let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
         let executor = DelegationExecutor {
@@ -773,7 +780,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     // ToolDispatcher with the resolved permission set. When a sandbox is
     // available, inject SandboxedExecutor as the execution strategy so tool
     // calls are routed through bubblewrap transparently.
-    let dispatcher = build_gateway_dispatcher(state, &config, ws_tx.clone());
+    let dispatcher =
+        build_gateway_dispatcher(state, &config, session.metadata.as_ref(), ws_tx.clone()).await;
 
     // Step 10: Build the Agent that will execute the turn.
     let agent_config =
@@ -3189,6 +3197,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (state, session_id)
     }
@@ -3248,6 +3257,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (state, session_id)
     }
@@ -3377,6 +3387,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3695,6 +3706,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (state, session_id)
     }
@@ -3952,6 +3964,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4404,6 +4417,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4493,6 +4507,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4666,6 +4681,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4835,6 +4851,7 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
         };
         (state, session_id)
     }

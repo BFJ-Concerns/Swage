@@ -1,6 +1,7 @@
 //! Agent configuration types.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +23,10 @@ pub struct AgentConfig {
     /// Maximum number of validation retry attempts when output doesn't match
     /// the schema. 0 means no retries — first failure is final.
     pub max_output_retries: u32,
+    /// Working directory exposed to tools executed within this agent.
+    pub working_directory: PathBuf,
+    /// Gateway-governed allowed path roots for tool execution.
+    pub allowed_paths: Vec<PathBuf>,
 }
 
 impl AgentConfig {
@@ -37,6 +42,8 @@ impl AgentConfig {
             metadata: HashMap::new(),
             output_schema: None,
             max_output_retries: 3,
+            working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            allowed_paths: Vec::new(),
         }
     }
 
@@ -48,6 +55,16 @@ impl AgentConfig {
     pub fn with_output_schema(mut self, schema: Value, max_retries: u32) -> Self {
         self.output_schema = Some(schema);
         self.max_output_retries = max_retries;
+        self
+    }
+
+    pub fn with_workspace(
+        mut self,
+        working_directory: impl Into<PathBuf>,
+        allowed_paths: Vec<PathBuf>,
+    ) -> Self {
+        self.working_directory = working_directory.into();
+        self.allowed_paths = allowed_paths;
         self
     }
 
@@ -93,6 +110,8 @@ mod tests {
             CompactionThreshold::MessageCount(100)
         );
         assert!(config.metadata.is_empty());
+        assert!(config.working_directory.is_absolute());
+        assert!(config.allowed_paths.is_empty());
     }
 
     #[test]

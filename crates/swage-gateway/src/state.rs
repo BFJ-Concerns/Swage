@@ -16,6 +16,7 @@ use swage_storage::store::{ProjectStore, Storage};
 
 use crate::channel_gateway::{ChannelOrigin, RecordedDelivery};
 use crate::{
+    execution_host::ExecutionHostRuntime,
     lifecycle::ActivityTracker, presence::PresenceRuntime, tool::ToolDispatcher,
     websocket::ServerEvent,
 };
@@ -89,6 +90,8 @@ pub struct AppState {
     pub delivery_log: Arc<AsyncMutex<Vec<RecordedDelivery>>>,
     /// Runtime presence for recent clients and registered machines.
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
+    /// Registered local and attached execution hosts.
+    pub execution_hosts: Arc<AsyncMutex<ExecutionHostRuntime>>,
 }
 
 impl AppState {
@@ -119,6 +122,7 @@ impl AppState {
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
+            execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
         }
     }
 }
@@ -183,6 +187,7 @@ mod tests {
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
+            execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
         }
     }
 
