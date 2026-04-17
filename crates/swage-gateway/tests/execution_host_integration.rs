@@ -30,7 +30,8 @@ use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
 
 struct ChannelProvider {
-    receivers: std::sync::Mutex<std::collections::VecDeque<tokio::sync::mpsc::Receiver<StreamChunk>>>,
+    receivers:
+        std::sync::Mutex<std::collections::VecDeque<tokio::sync::mpsc::Receiver<StreamChunk>>>,
 }
 
 impl ChannelProvider {
@@ -277,11 +278,10 @@ async fn same_machine_gateway_executes_turns_through_local_execution_host() {
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "local-host",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let (addr, _state) =
         start_test_server(provider, dispatcher, workspace.path().to_path_buf(), true).await;
 
@@ -303,11 +303,10 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let gateway_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let (addr, _state) = start_test_server(
         provider,
         gateway_dispatcher,
@@ -316,11 +315,10 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
     )
     .await;
 
-    let node_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let node_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "remote-node",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let node = spawn_attached_node(
         node_dispatcher,
         node_workspace.path().to_path_buf(),
@@ -341,7 +339,10 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         .unwrap();
 
     let result = run_turn_and_collect_tool_result(addr, tx1, tx2).await;
-    assert_eq!(result["host"], "remote-node", "remote tool result: {result:?}");
+    assert_eq!(
+        result["host"], "remote-node",
+        "remote tool result: {result:?}"
+    );
 
     node.join_handle.abort();
 }
@@ -355,18 +356,22 @@ async fn run_transport_backend_round_trip(
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let gateway_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
-        }) as Arc<dyn Tool>,
-    ]);
-    let (addr, _state) =
-        start_test_server(provider, gateway_dispatcher, workspace.path().to_path_buf(), false)
-            .await;
+        }) as Arc<dyn Tool>]);
+    let (addr, _state) = start_test_server(
+        provider,
+        gateway_dispatcher,
+        workspace.path().to_path_buf(),
+        false,
+    )
+    .await;
 
-    let backend_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker }) as Arc<dyn Tool>,
-    ]);
+    let backend_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(HostIdentityTool { marker }) as Arc<dyn Tool>
+        ]);
     let backend = spawn_transport_backed_host(
         backend_kind.clone(),
         backend_dispatcher,
@@ -412,11 +417,10 @@ async fn registered_remote_execution_host_survives_restart() {
     let (_tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (_tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let gateway_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let (addr, _state) = start_file_backed_test_server(
         &db_path,
         provider,
@@ -426,11 +430,10 @@ async fn registered_remote_execution_host_survives_restart() {
     )
     .await;
 
-    let backend_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let backend_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "persisted-host",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let backend = spawn_transport_backed_host(
         ExecutionHostKind::Docker,
         backend_dispatcher,
@@ -454,11 +457,10 @@ async fn registered_remote_execution_host_survives_restart() {
     .unwrap();
 
     let restarted_provider = ChannelProvider::new(vec![]);
-    let restarted_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool {
+    let restarted_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
             marker: "gateway-unused",
-        }) as Arc<dyn Tool>,
-    ]);
+        }) as Arc<dyn Tool>]);
     let (_restarted_addr, restarted_state) = start_file_backed_test_server(
         &db_path,
         restarted_provider,
@@ -470,7 +472,10 @@ async fn registered_remote_execution_host_survives_restart() {
 
     let hosts = swage_gateway::execution_host::list_execution_hosts(&restarted_state).await;
     assert!(
-        hosts.hosts.iter().any(|host| host.host_id == "docker-persisted"),
+        hosts
+            .hosts
+            .iter()
+            .any(|host| host.host_id == "docker-persisted"),
         "persisted remote host should be restored: {:?}",
         hosts.hosts
     );

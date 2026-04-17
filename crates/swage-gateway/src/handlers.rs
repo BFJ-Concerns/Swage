@@ -18,12 +18,6 @@ use crate::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
         DevDmInboundRequest, DevThreadInboundRequest,
     },
-    operator::OperatorOverviewResponse,
-    onboarding::{
-        ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
-        CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
-        RedeemNodePairingRequest,
-    },
     error::ApiError,
     execution_host::{
         ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
@@ -32,6 +26,12 @@ use crate::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
     },
+    onboarding::{
+        ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
+        CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
+        RedeemNodePairingRequest,
+    },
+    operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
     schedule::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
@@ -46,6 +46,7 @@ use crate::{
         UpdateTeamRequest,
     },
     state::AppState,
+    supervision::{RunDetailResponse, RunListQuery, RunListResponse},
     voice::{
         SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
         TranscribeAudioResponse, VoiceCapabilitiesResponse,
@@ -83,7 +84,9 @@ pub async fn synthesise_speech(
     State(state): State<AppState>,
     Json(request): Json<SynthesiseSpeechRequest>,
 ) -> Result<Json<SynthesiseSpeechResponse>, ApiError> {
-    Ok(Json(crate::voice::synthesise_speech(&state, request).await?))
+    Ok(Json(
+        crate::voice::synthesise_speech(&state, request).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,24 @@ pub async fn operator_overview(
     State(state): State<AppState>,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     Ok(Json(crate::operator::operator_overview(&state).await?))
+}
+
+/// `GET /api/operator/runs` — inspect live and historical run supervision.
+pub async fn list_operator_runs(
+    State(state): State<AppState>,
+    Query(query): Query<RunListQuery>,
+) -> Result<Json<RunListResponse>, ApiError> {
+    Ok(Json(crate::supervision::list_runs(&state, query).await?))
+}
+
+/// `GET /api/operator/runs/:kind/:id` — inspect one supervised run in detail.
+pub async fn get_operator_run(
+    State(state): State<AppState>,
+    Path((kind, id)): Path<(String, Uuid)>,
+) -> Result<Json<RunDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::supervision::get_run_detail(&state, &kind, id).await?,
+    ))
 }
 
 /// `GET /api/onboarding/channels` — list durable external-channel links.
@@ -1542,7 +1563,9 @@ mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage)
@@ -3047,7 +3070,9 @@ def build_topology():
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)

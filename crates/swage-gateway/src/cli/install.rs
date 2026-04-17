@@ -25,11 +25,13 @@ pub fn install_config_path() -> PathBuf {
 pub fn load_install_config() -> Result<Option<ServiceInstallConfig>, ClientError> {
     let path = install_config_path();
     match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).map(Some).map_err(|source| {
-            ClientError::MetadataIo {
-                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
-            }
-        }),
+        Ok(content) => {
+            serde_json::from_str(&content)
+                .map(Some)
+                .map_err(|source| ClientError::MetadataIo {
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(ClientError::MetadataIo { source }),
     }

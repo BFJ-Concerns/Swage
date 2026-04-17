@@ -10,13 +10,11 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse, ToolError,
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    execution_host::{
-        register_local_execution_host, spawn_attached_node,
-    },
+    execution_host::{register_local_execution_host, spawn_attached_node},
     server::build_router,
     state::AppState,
 };
@@ -25,11 +23,12 @@ use swage_storage::{
     SqliteStorage,
     store::{ProjectStore, Storage},
 };
-use swage_tool::tool::Tool;
 use swage_tool::context::MockToolContext;
+use swage_tool::tool::Tool;
 
 struct ChannelProvider {
-    receivers: std::sync::Mutex<std::collections::VecDeque<tokio::sync::mpsc::Receiver<StreamChunk>>>,
+    receivers:
+        std::sync::Mutex<std::collections::VecDeque<tokio::sync::mpsc::Receiver<StreamChunk>>>,
 }
 
 impl ChannelProvider {
@@ -94,7 +93,11 @@ impl Tool for HostIdentityTool {
         json!({"type": "object", "properties": {}})
     }
 
-    async fn execute(&self, _params: Value, _ctx: &dyn swage_tool::context::ToolContext) -> Result<Value, ToolError> {
+    async fn execute(
+        &self,
+        _params: Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<Value, ToolError> {
         Ok(json!({ "host": self.marker }))
     }
 }
@@ -161,15 +164,23 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
     let workspace = tempfile::TempDir::new().unwrap();
     let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![channel_rx]);
-    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "gateway-unused" }) as Arc<dyn Tool>,
-    ]);
-    let (addr, _state) =
-        start_test_server(None, provider, dispatcher, workspace.path().to_path_buf(), false).await;
+    let dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>]);
+    let (addr, _state) = start_test_server(
+        None,
+        provider,
+        dispatcher,
+        workspace.path().to_path_buf(),
+        false,
+    )
+    .await;
 
-    let node_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "paired-node" }) as Arc<dyn Tool>,
-    ]);
+    let node_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "paired-node",
+        }) as Arc<dyn Tool>]);
     let node = spawn_attached_node(
         node_dispatcher,
         workspace.path().to_path_buf(),
@@ -177,12 +188,8 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
     )
     .await;
 
-    let (pair_status, pair_body) = post_json(
-        addr,
-        "/api/onboarding/nodes/pairing-codes",
-        json!({}),
-    )
-    .await;
+    let (pair_status, pair_body) =
+        post_json(addr, "/api/onboarding/nodes/pairing-codes", json!({})).await;
     assert_eq!(pair_status, StatusCode::CREATED);
 
     let (redeem_status, redeem_body) = post_json(
@@ -266,9 +273,10 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     let destination_db = destination_dir.path().join("destination.db");
 
     let origin_provider = ChannelProvider::new(vec![]);
-    let origin_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "gateway-unused" }) as Arc<dyn Tool>,
-    ]);
+    let origin_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>]);
     let (origin_addr, _origin_state) = start_test_server(
         Some(&origin_db),
         origin_provider,
@@ -278,9 +286,10 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     )
     .await;
 
-    let node_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "recovery-node" }) as Arc<dyn Tool>,
-    ]);
+    let node_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "recovery-node",
+        }) as Arc<dyn Tool>]);
     let node = spawn_attached_node(
         node_dispatcher,
         node_workspace.path().to_path_buf(),
@@ -288,7 +297,12 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     )
     .await;
 
-    let (_, pair_body) = post_json(origin_addr, "/api/onboarding/nodes/pairing-codes", json!({})).await;
+    let (_, pair_body) = post_json(
+        origin_addr,
+        "/api/onboarding/nodes/pairing-codes",
+        json!({}),
+    )
+    .await;
     let (redeem_status, _) = post_json(
         origin_addr,
         "/api/onboarding/nodes/redeem",
@@ -349,9 +363,10 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     assert_eq!(export_status, StatusCode::OK);
 
     let destination_provider = ChannelProvider::new(vec![]);
-    let destination_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "gateway-unused" }) as Arc<dyn Tool>,
-    ]);
+    let destination_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>]);
     let (destination_addr, _destination_state) = start_test_server(
         Some(&destination_db),
         destination_provider,
@@ -387,7 +402,10 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     assert_eq!(jobs_body["jobs"][0]["message"], "Nightly sweep");
 
     let (_, heartbeats_body) = get_json(destination_addr, "/api/heartbeats").await;
-    assert_eq!(heartbeats_body["heartbeats"][0]["message"], "Builder heartbeat");
+    assert_eq!(
+        heartbeats_body["heartbeats"][0]["message"],
+        "Builder heartbeat"
+    );
 
     node.join_handle.abort();
 }
@@ -402,9 +420,10 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     let destination_db = destination_dir.path().join("destination.db");
 
     let origin_provider = ChannelProvider::new(vec![]);
-    let origin_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "gateway-unused" }) as Arc<dyn Tool>,
-    ]);
+    let origin_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>]);
     let (origin_addr, _origin_state) = start_test_server(
         Some(&origin_db),
         origin_provider,
@@ -414,9 +433,10 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     )
     .await;
 
-    let node_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "moved-node" }) as Arc<dyn Tool>,
-    ]);
+    let node_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "moved-node",
+        }) as Arc<dyn Tool>]);
     let node = spawn_attached_node(
         node_dispatcher,
         node_workspace.path().to_path_buf(),
@@ -424,7 +444,12 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     )
     .await;
 
-    let (_, pair_body) = post_json(origin_addr, "/api/onboarding/nodes/pairing-codes", json!({})).await;
+    let (_, pair_body) = post_json(
+        origin_addr,
+        "/api/onboarding/nodes/pairing-codes",
+        json!({}),
+    )
+    .await;
     let _ = post_json(
         origin_addr,
         "/api/onboarding/nodes/redeem",
@@ -455,9 +480,10 @@ async fn recovery_bundle_restores_service_after_installation_move() {
 
     let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(10);
     let destination_provider = ChannelProvider::new(vec![channel_rx]);
-    let destination_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(HostIdentityTool { marker: "gateway-unused" }) as Arc<dyn Tool>,
-    ]);
+    let destination_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>]);
     let (destination_addr, destination_state) = start_test_server(
         Some(&destination_db),
         destination_provider,

@@ -149,10 +149,21 @@ pub fn build_router(state: AppState) -> Router {
             "/api/onboarding/nodes/redeem",
             post(handlers::redeem_node_pairing_code),
         )
-        .route("/api/recovery/export", get(handlers::export_gateway_recovery))
-        .route("/api/recovery/import", post(handlers::import_gateway_recovery))
+        .route(
+            "/api/recovery/export",
+            get(handlers::export_gateway_recovery),
+        )
+        .route(
+            "/api/recovery/import",
+            post(handlers::import_gateway_recovery),
+        )
         .route("/api/deliveries/log", get(handlers::delivery_log))
         .route("/api/operator/overview", get(handlers::operator_overview))
+        .route("/api/operator/runs", get(handlers::list_operator_runs))
+        .route(
+            "/api/operator/runs/:kind/:id",
+            get(handlers::get_operator_run),
+        )
         // Turn context snapshots — assembly reports for past turns.
         .route("/api/turns/:id/context", get(handlers::get_turn_context))
         // Programmatic interface — async turn submission and polling.
@@ -226,7 +237,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::register_execution_host),
         )
         .route("/api/voice/capabilities", get(handlers::voice_capabilities))
-        .route("/api/voice/transcriptions", post(handlers::transcribe_audio))
+        .route(
+            "/api/voice/transcriptions",
+            post(handlers::transcribe_audio),
+        )
         .route("/api/voice/speech", post(handlers::synthesise_speech))
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))

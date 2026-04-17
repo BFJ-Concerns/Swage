@@ -1211,10 +1211,10 @@ pub(crate) mod tests {
             HeartbeatRunState, Message, NewAgentMessage, NewApprovalRequest, NewChannelLink,
             NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
             NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob,
-            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-            NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
-            ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord,
-            TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+            NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
+            ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
+            TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
             ApprovalStore, ChannelLinkStore, ContextSnapshotStore, ExecutionHostStore,
@@ -2026,7 +2026,9 @@ pub(crate) mod tests {
             Ok(registration)
         }
 
-        async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+        async fn list_execution_hosts(
+            &self,
+        ) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
             let mut hosts: Vec<ExecutionHostRegistration> = self
                 .db
                 .lock()
@@ -2056,7 +2058,10 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl ChannelLinkStore for MockStorage {
-        async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
+        async fn upsert_channel_link(
+            &self,
+            link: NewChannelLink,
+        ) -> Result<ChannelLink, StorageError> {
             let now = chrono::Utc::now();
             let key = (
                 link.integration.clone(),
@@ -2082,7 +2087,11 @@ pub(crate) mod tests {
                 linked_at,
                 updated_at: now,
             };
-            self.db.lock().await.channel_links.insert(key, created.clone());
+            self.db
+                .lock()
+                .await
+                .channel_links
+                .insert(key, created.clone());
             Ok(created)
         }
 
@@ -3366,7 +3375,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
@@ -3430,7 +3441,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
@@ -3564,7 +3577,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         });
 
@@ -3887,7 +3902,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)
@@ -4149,7 +4166,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -4606,7 +4625,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -4700,7 +4721,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -4878,7 +4901,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -5052,7 +5077,9 @@ pub(crate) mod tests {
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(crate::execution_host::ExecutionHostRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, session_id)

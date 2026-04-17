@@ -76,7 +76,11 @@ async fn start_test_server() -> (Router, SocketAddr) {
     (router, addr)
 }
 
-async fn post_json(router: &Router, uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn post_json(
+    router: &Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
         .oneshot(
@@ -98,9 +102,7 @@ async fn post_json(router: &Router, uri: &str, body: serde_json::Value) -> (Stat
 async fn connect_ws(
     addr: SocketAddr,
     conversation_id: Uuid,
-) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
     tokio_tungstenite::connect_async(&url)
         .await

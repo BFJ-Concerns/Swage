@@ -748,7 +748,9 @@ mod tests {
         ) -> Result<ExecutionHostRegistration, StorageError> {
             unimplemented!()
         }
-        async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+        async fn list_execution_hosts(
+            &self,
+        ) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
             unimplemented!()
         }
         async fn delete_execution_host(&self, _: &str) -> Result<bool, StorageError> {
@@ -758,7 +760,10 @@ mod tests {
 
     #[async_trait]
     impl ChannelLinkStore for StubStorage {
-        async fn upsert_channel_link(&self, _: NewChannelLink) -> Result<ChannelLink, StorageError> {
+        async fn upsert_channel_link(
+            &self,
+            _: NewChannelLink,
+        ) -> Result<ChannelLink, StorageError> {
             unimplemented!()
         }
         async fn get_channel_link(

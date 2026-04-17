@@ -169,13 +169,16 @@ pub async fn record_client_connected(state: &AppState, session_id: Uuid) {
 pub async fn record_client_seen(state: &AppState, session_id: Uuid) {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
-    let entry = presence.clients.entry(session_id).or_insert(ClientPresenceRecord {
-        session_id,
-        state: PresenceState::Connected,
-        connected_at: Some(now),
-        last_seen_at: Some(now),
-        disconnected_at: None,
-    });
+    let entry = presence
+        .clients
+        .entry(session_id)
+        .or_insert(ClientPresenceRecord {
+            session_id,
+            state: PresenceState::Connected,
+            connected_at: Some(now),
+            last_seen_at: Some(now),
+            disconnected_at: None,
+        });
     entry.state = PresenceState::Connected;
     entry.connected_at.get_or_insert(now);
     entry.last_seen_at = Some(now);
@@ -185,13 +188,16 @@ pub async fn record_client_seen(state: &AppState, session_id: Uuid) {
 pub async fn record_client_disconnected(state: &AppState, session_id: Uuid) {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
-    let entry = presence.clients.entry(session_id).or_insert(ClientPresenceRecord {
-        session_id,
-        state: PresenceState::Disconnected,
-        connected_at: None,
-        last_seen_at: None,
-        disconnected_at: Some(now),
-    });
+    let entry = presence
+        .clients
+        .entry(session_id)
+        .or_insert(ClientPresenceRecord {
+            session_id,
+            state: PresenceState::Disconnected,
+            connected_at: None,
+            last_seen_at: None,
+            disconnected_at: Some(now),
+        });
     entry.state = PresenceState::Disconnected;
     entry.disconnected_at = Some(now);
 }
@@ -202,7 +208,9 @@ pub async fn upsert_machine_heartbeat(state: &AppState, request: MachineHeartbea
     let existing = presence.machines.get(&request.machine_id).cloned();
     let record = MachinePresenceRecord {
         machine_id: request.machine_id.clone(),
-        label: request.label.or_else(|| existing.as_ref().and_then(|value| value.label.clone())),
+        label: request
+            .label
+            .or_else(|| existing.as_ref().and_then(|value| value.label.clone())),
         registered_at: existing.as_ref().map_or(now, |value| value.registered_at),
         last_seen_at: now,
         disconnected_at: None,

@@ -236,7 +236,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     }
 }
 
-fn create_voice_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provider::VoiceProvider> {
+fn create_voice_provider(
+    config: &swage_config::ResolvedConfig,
+) -> Arc<dyn swage_provider::VoiceProvider> {
     let provider_config = match swage_provider::ProviderConfig::try_from(&config.provider) {
         Ok(config) => config,
         Err(_) => {
@@ -247,9 +249,9 @@ fn create_voice_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage
     };
 
     match config.provider.protocol {
-        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => {
-            Arc::new(swage_provider::OpenAiVoiceProvider::from_config(provider_config))
-        }
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Arc::new(
+            swage_provider::OpenAiVoiceProvider::from_config(provider_config),
+        ),
         swage_config::Protocol::Anthropic | swage_config::Protocol::Google => {
             Arc::new(swage_provider::UnsupportedVoiceProvider::new(format!(
                 "voice is unavailable for provider protocol {:?}",

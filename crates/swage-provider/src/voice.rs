@@ -131,8 +131,7 @@ impl OpenAiVoiceProvider {
 
     fn supported_voices() -> Vec<String> {
         [
-            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage",
-            "shimmer",
+            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
         ]
         .into_iter()
         .map(str::to_string)
@@ -197,18 +196,19 @@ impl VoiceProvider for OpenAiVoiceProvider {
             });
         }
 
-        let parsed: OpenAiTranscriptionResponse =
-            response
-                .json()
-                .await
-                .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+        let parsed: OpenAiTranscriptionResponse = response
+            .json()
+            .await
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         Ok(TranscriptionResponse { text: parsed.text })
     }
 
     async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
-        let voice = request
-            .voice
-            .unwrap_or_else(|| self.capabilities().default_voice.unwrap_or_else(|| "alloy".into()));
+        let voice = request.voice.unwrap_or_else(|| {
+            self.capabilities()
+                .default_voice
+                .unwrap_or_else(|| "alloy".into())
+        });
         let format = request.format.unwrap_or_else(|| "wav".to_string());
         let mime_type = match format.as_str() {
             "mp3" => "audio/mpeg",
@@ -290,6 +290,11 @@ mod tests {
         assert!(capabilities.transcription);
         assert!(capabilities.synthesis);
         assert_eq!(capabilities.default_voice.as_deref(), Some("alloy"));
-        assert!(capabilities.supported_voices.iter().any(|voice| voice == "nova"));
+        assert!(
+            capabilities
+                .supported_voices
+                .iter()
+                .any(|voice| voice == "nova")
+        );
     }
 }

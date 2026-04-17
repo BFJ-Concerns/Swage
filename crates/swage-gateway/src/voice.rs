@@ -73,10 +73,14 @@ pub async fn transcribe_audio(
         ));
     }
     if request.audio_bytes.is_empty() {
-        return Err(ApiError::validation("audio_bytes must not be empty".to_string()));
+        return Err(ApiError::validation(
+            "audio_bytes must not be empty".to_string(),
+        ));
     }
     if request.mime_type.trim().is_empty() {
-        return Err(ApiError::validation("mime_type must not be empty".to_string()));
+        return Err(ApiError::validation(
+            "mime_type must not be empty".to_string(),
+        ));
     }
 
     let response: TranscriptionResponse = state

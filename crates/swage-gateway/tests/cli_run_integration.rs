@@ -129,16 +129,16 @@ async fn start_test_server(
 async fn run_command_streams_response_from_argument_prompt() {
     let addr = start_test_server(
         MockProvider::new(vec![
-        StreamChunk::Delta {
-            content: "hello".into(),
-        },
-        StreamChunk::Delta {
-            content: " cli".into(),
-        },
-        StreamChunk::Done {
-            finish_reason: None,
-        },
-    ]),
+            StreamChunk::Delta {
+                content: "hello".into(),
+            },
+            StreamChunk::Delta {
+                content: " cli".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]),
         None,
     )
     .await;
@@ -160,16 +160,16 @@ async fn run_command_streams_response_from_argument_prompt() {
 async fn run_command_reads_prompt_from_stdin() {
     let addr = start_test_server(
         MockProvider::new(vec![
-        StreamChunk::Delta {
-            content: "stdin".into(),
-        },
-        StreamChunk::Delta {
-            content: " path".into(),
-        },
-        StreamChunk::Done {
-            finish_reason: None,
-        },
-    ]),
+            StreamChunk::Delta {
+                content: "stdin".into(),
+            },
+            StreamChunk::Delta {
+                content: " path".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]),
         None,
     )
     .await;

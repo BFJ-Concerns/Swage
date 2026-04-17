@@ -18,9 +18,8 @@ use swage_storage::store::{ProjectStore, Storage};
 
 use crate::channel_gateway::{ChannelOrigin, RecordedDelivery};
 use crate::{
-    execution_host::ExecutionHostRuntime,
-    lifecycle::ActivityTracker, presence::PresenceRuntime, tool::ToolDispatcher,
-    websocket::ServerEvent,
+    execution_host::ExecutionHostRuntime, lifecycle::ActivityTracker, presence::PresenceRuntime,
+    tool::ToolDispatcher, websocket::ServerEvent,
 };
 
 /// Shared application state available to all route handlers via axum's `State` extractor.

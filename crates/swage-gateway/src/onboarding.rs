@@ -12,7 +12,9 @@ use swage_storage::{
 
 use crate::{
     channel_gateway::{DeliveryTarget, ExternalChannelIntegration},
-    execution_host::{ExecutionHostResponse, RegisterExecutionHostRequest, register_remote_execution_host},
+    execution_host::{
+        ExecutionHostResponse, RegisterExecutionHostRequest, register_remote_execution_host,
+    },
     state::{AppState, PairingCodeRecord},
 };
 
@@ -192,11 +194,9 @@ pub async fn create_channel_link(
     }
 
     let project = match request.project_id {
-        Some(project_id) => state
-            .project_store
-            .get(project_id)
-            .await?
-            .ok_or_else(|| GatewayError::ValidationError(format!("project {project_id} not found")))?,
+        Some(project_id) => state.project_store.get(project_id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!("project {project_id} not found"))
+        })?,
         None => state.project_store.get_or_create_default().await?,
     };
     let agent_id = request.agent_id.unwrap_or_else(|| "gateway".to_string());
@@ -272,10 +272,11 @@ pub async fn create_node_pairing_code(
     }
     let expires_at = Utc::now() + Duration::seconds(expires_in_seconds);
     let pairing_code = Uuid::new_v4().to_string();
-    state.pairing_codes.lock().await.insert(
-        pairing_code.clone(),
-        PairingCodeRecord { expires_at },
-    );
+    state
+        .pairing_codes
+        .lock()
+        .await
+        .insert(pairing_code.clone(), PairingCodeRecord { expires_at });
     Ok(NodePairingCodeResponse {
         pairing_code,
         expires_at,
@@ -453,7 +454,9 @@ pub async fn import_gateway_recovery_bundle(
                     ))
                 })?,
                 agent_id: link.agent_id,
-                session_id: link.session_id.and_then(|session_id| session_map.get(&session_id).copied()),
+                session_id: link
+                    .session_id
+                    .and_then(|session_id| session_map.get(&session_id).copied()),
                 home_target: link.home_target,
             })
             .await?;

@@ -126,11 +126,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
 
-    state
-        .active_connections
-        .lock()
-        .await
-        .insert(session_id);
+    state.active_connections.lock().await.insert(session_id);
     state
         .active_turns
         .lock()
@@ -238,14 +234,18 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
     assert_eq!(body["sessions"][0]["has_active_connection"], true);
     assert_eq!(body["sessions"][0]["has_running_turn"], true);
     assert_eq!(body["approvals"][0]["tool_name"], "shell");
-    assert_eq!(body["scheduled_jobs"]["jobs"][0]["message"], "Nightly sweep");
+    assert_eq!(
+        body["scheduled_jobs"]["jobs"][0]["message"],
+        "Nightly sweep"
+    );
     assert_eq!(body["heartbeats"]["heartbeats"][0]["message"], "Heartbeat");
     assert_eq!(body["channels"]["channels"][0]["integration"], "dev_dm");
     assert_eq!(body["channels"]["channels"][0]["status"], "active");
     let docker_node = body["nodes"]
         .as_array()
         .and_then(|nodes| {
-            nodes.iter()
+            nodes
+                .iter()
                 .find(|node| node["host_id"] == json!("docker-a"))
         })
         .expect("expected docker-a node in operator overview");

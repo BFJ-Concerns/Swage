@@ -19,14 +19,22 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
         })
 }
 
 fn parse_json(json: Option<&str>) -> rusqlite::Result<Option<serde_json::Value>> {
     json.map(|value| {
         serde_json::from_str(value).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
         })
     })
     .transpose()

@@ -63,9 +63,7 @@ pub struct OperatorOverviewResponse {
     pub nodes: Vec<OperatorNodeSummary>,
 }
 
-pub async fn operator_overview(
-    state: &AppState,
-) -> Result<OperatorOverviewResponse, GatewayError> {
+pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewResponse, GatewayError> {
     let presence = snapshot_presence(state).await;
     let channels = list_channel_statuses(state).await;
     let approvals = list_pending_approvals(state).await?;
@@ -93,9 +91,9 @@ pub async fn operator_overview(
                 .find(|machine| machine.machine_id == host.host_id);
             OperatorNodeSummary {
                 host_id: host.host_id,
-                label: host.label.or_else(|| {
-                    machine_presence.and_then(|machine| machine.label.clone())
-                }),
+                label: host
+                    .label
+                    .or_else(|| machine_presence.and_then(|machine| machine.label.clone())),
                 kind: host.kind,
                 base_url: host.base_url,
                 workspace_root: host.workspace_root,
@@ -210,5 +208,7 @@ async fn list_pending_approvals(state: &AppState) -> Result<ApprovalListResponse
             timeout_at: Some(approval.timeout_at.to_rfc3339()),
         })
         .collect();
-    Ok(ApprovalListResponse { approvals: summaries })
+    Ok(ApprovalListResponse {
+        approvals: summaries,
+    })
 }

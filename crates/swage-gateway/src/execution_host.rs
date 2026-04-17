@@ -206,7 +206,9 @@ pub async fn register_remote_execution_host(
     Ok(host)
 }
 
-pub async fn restore_registered_execution_hosts(state: &AppState) -> Result<(), swage_core::StorageError> {
+pub async fn restore_registered_execution_hosts(
+    state: &AppState,
+) -> Result<(), swage_core::StorageError> {
     let persisted_hosts = state.storage.list_execution_hosts().await?;
     let mut runtime = state.execution_hosts.lock().await;
 
@@ -216,7 +218,8 @@ pub async fn restore_registered_execution_hosts(state: &AppState) -> Result<(), 
             RegisteredExecutionHost {
                 host_id: host.host_id,
                 label: host.label,
-                kind: ExecutionHostKind::from_str(&host.kind).unwrap_or(ExecutionHostKind::AttachedNode),
+                kind: ExecutionHostKind::from_str(&host.kind)
+                    .unwrap_or(ExecutionHostKind::AttachedNode),
                 base_url: Some(host.base_url),
                 shared_token: Some(host.shared_token),
                 workspace_root: PathBuf::from(host.workspace_root),
@@ -315,7 +318,11 @@ pub async fn execute_on_remote_host(
         });
     }
 
-    if !host.capabilities.iter().any(|capability| capability == tool_name) {
+    if !host
+        .capabilities
+        .iter()
+        .any(|capability| capability == tool_name)
+    {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
@@ -401,9 +408,7 @@ fn context_within_workspace(ctx: &dyn ToolContext, workspace_root: &Path) -> boo
 }
 
 fn path_within_workspace(path: &Path, workspace_root: &Path) -> bool {
-    let candidate = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     candidate.starts_with(workspace_root)
 }
 
@@ -422,7 +427,10 @@ async fn remote_host_execute_tool(
     {
         return Err((
             StatusCode::FORBIDDEN,
-            format!("tool '{}' is not exposed by this execution host", request.tool_name),
+            format!(
+                "tool '{}' is not exposed by this execution host",
+                request.tool_name
+            ),
         ));
     }
 
@@ -478,7 +486,10 @@ pub async fn spawn_transport_backed_host(
     };
     let router = Router::new()
         .route("/api/node/execute-tool", post(remote_host_execute_tool))
-        .route("/api/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route(
+            "/api/health",
+            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+        )
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

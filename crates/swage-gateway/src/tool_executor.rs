@@ -19,8 +19,8 @@ use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
-use crate::websocket::ServerEvent;
 use crate::execution_host::RegisteredExecutionHost;
+use crate::websocket::ServerEvent;
 
 pub struct GatewayToolContext {
     base: SerializableToolContext,
@@ -169,7 +169,9 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             .is_some_and(|host| host.kind != crate::execution_host::ExecutionHostKind::Local)
         {
             return crate::execution_host::execute_on_remote_host(
-                self.execution_host.as_ref().expect("checked execution host"),
+                self.execution_host
+                    .as_ref()
+                    .expect("checked execution host"),
                 tool_name,
                 params,
                 ctx,

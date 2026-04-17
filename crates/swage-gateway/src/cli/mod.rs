@@ -348,15 +348,8 @@ mod tests {
 
     #[test]
     fn parse_gateway_restart_flags() {
-        let cli = Cli::try_parse_from([
-            "swage",
-            "gateway",
-            "restart",
-            "--force",
-            "--port",
-            "4000",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["swage", "gateway", "restart", "--force", "--port", "4000"])
+            .unwrap();
         let Some(Command::Gateway(gw)) = cli.command else {
             panic!("expected Gateway command");
         };
