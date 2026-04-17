@@ -16,6 +16,7 @@ import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
 import * as conversationsApi from "../lib/api/conversations";
+import * as operatorApi from "../lib/api/operator";
 import * as projectsApi from "../lib/api/projects";
 import type {
   ClientEvent,
@@ -23,6 +24,7 @@ import type {
   ConversationDetail,
   ConversationResponse,
   ConversationSummary,
+  OperatorOverview,
   Project,
   ServerEvent,
 } from "../lib/types";
@@ -80,6 +82,16 @@ vi.mock("../lib/api/conversations", () => ({
   deleteConversation: vi.fn(),
 }));
 
+vi.mock("../lib/api/operator", () => ({
+  fetchOperatorOverview: vi.fn(),
+  approvePendingAction: vi.fn(),
+  rejectPendingAction: vi.fn(),
+  pauseScheduledJob: vi.fn(),
+  resumeScheduledJob: vi.fn(),
+  disableHeartbeat: vi.fn(),
+  enableHeartbeat: vi.fn(),
+}));
+
 vi.mock("../lib/api/websocket", () => ({
   createWebSocketClient: websocketHarness.factory,
 }));
@@ -118,6 +130,63 @@ function makeConversationDetail(
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],
+    ...overrides,
+  };
+}
+
+function makeOperatorOverview(
+  overrides: Partial<OperatorOverview> = {},
+): OperatorOverview {
+  return {
+    gateway: {
+      status: "running",
+      health: "healthy",
+      shutdown_requested: false,
+      seconds_since_activity: 3,
+      active_turn_count: 1,
+      active_connection_count: 1,
+    },
+    sessions: [
+      {
+        id: "conv-ops",
+        project_id: "proj-default",
+        project_name: "default",
+        created_at: "2026-04-07T12:00:00Z",
+        last_activity: "2026-04-07T12:04:00Z",
+        message_preview: "Operator view",
+        has_interrupted_turn: false,
+        has_active_connection: true,
+        has_running_turn: true,
+      },
+    ],
+    approvals: [],
+    scheduled_jobs: { jobs: [] },
+    heartbeats: { heartbeats: [] },
+    channels: {
+      channels: [
+        {
+          integration: "dev_dm",
+          status: "active",
+          route_count: 1,
+          delivery_count: 2,
+          last_delivery_at: "2026-04-07T12:04:00Z",
+        },
+      ],
+    },
+    nodes: [
+      {
+        host_id: "local",
+        label: "Local machine",
+        kind: "local",
+        base_url: null,
+        workspace_root: "/tmp/swage",
+        capabilities: [],
+        registered_at: "2026-04-07T12:00:00Z",
+        state: "connected",
+        last_seen_at: null,
+        disconnected_at: null,
+      },
+    ],
     ...overrides,
   };
 }
@@ -280,5 +349,36 @@ describe("App", () => {
 
     expect(document.querySelector(".stop-btn")).toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+  });
+
+  it("switches to the operator deck and renders the overview", async () => {
+    const defaultProject = makeProject();
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
+      makeOperatorOverview(),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const operatorButton = Array.from(
+      document.querySelectorAll(".mode-btn"),
+    ).find((button) => button.textContent?.includes("Operator")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(operatorButton).toBeDefined();
+
+    flushSync(() => operatorButton!.click());
+    await settleUi();
+
+    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain(
+      "Live control surface for the running gateway",
+    );
+    expect(document.body.textContent).toContain("dev_dm");
+    expect(document.body.textContent).toContain("Local machine");
   });
 });

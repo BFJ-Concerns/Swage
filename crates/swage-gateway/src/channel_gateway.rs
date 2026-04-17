@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
@@ -79,6 +80,7 @@ pub struct RecordedDelivery {
     pub session_id: Uuid,
     pub target: DeliveryTarget,
     pub content: String,
+    pub delivered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +142,20 @@ pub struct DeliveryLogResponse {
     pub deliveries: Vec<RecordedDelivery>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelStatusResponse {
+    pub integration: String,
+    pub status: String,
+    pub route_count: usize,
+    pub delivery_count: usize,
+    pub last_delivery_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelStatusListResponse {
+    pub channels: Vec<ChannelStatusResponse>,
+}
+
 pub async fn handle_dev_dm_inbound(
     state: &AppState,
     request: DevDmInboundRequest,
@@ -183,6 +199,56 @@ pub async fn read_delivery_log(state: &AppState, query: DeliveryLogQuery) -> Del
             .cloned()
             .collect(),
     }
+}
+
+pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListResponse {
+    let routes = state.channel_routes.lock().await;
+    let deliveries = state.delivery_log.lock().await;
+
+    let channels = [
+        ExternalChannelIntegration::DevDm,
+        ExternalChannelIntegration::DevThread,
+    ]
+    .into_iter()
+    .map(|integration| {
+        let route_count = routes
+            .keys()
+            .filter(|origin| origin.integration == integration)
+            .count();
+        let matching_deliveries: Vec<&RecordedDelivery> = deliveries
+            .iter()
+            .filter(|delivery| {
+                matches!(
+                    &delivery.target,
+                    DeliveryTarget::Channel {
+                        integration: target_integration,
+                        ..
+                    } if *target_integration == integration
+                )
+            })
+            .collect();
+        let delivery_count = matching_deliveries.len();
+        let last_delivery_at = matching_deliveries
+            .iter()
+            .map(|delivery| delivery.delivered_at)
+            .max();
+        let status = if route_count > 0 || delivery_count > 0 {
+            "active"
+        } else {
+            "idle"
+        };
+
+        ChannelStatusResponse {
+            integration: integration.as_metadata_value().to_string(),
+            status: status.to_string(),
+            route_count,
+            delivery_count,
+            last_delivery_at,
+        }
+    })
+    .collect();
+
+    ChannelStatusListResponse { channels }
 }
 
 async fn handle_inbound(
@@ -399,6 +465,7 @@ async fn record_delivery(
         session_id,
         target,
         content,
+        delivered_at: Utc::now(),
     });
 }
 

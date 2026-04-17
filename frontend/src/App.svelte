@@ -54,6 +54,7 @@
 
   async function selectAndNavigate(id: string): Promise<void> {
     try {
+      isOperatorMode = false;
       await conversationStore.selectConversation(id);
       connectionStore.connectTo(id);
       // router is declared below but will be initialised before this is called.
@@ -65,6 +66,7 @@
 
   async function createAndNavigate(): Promise<void> {
     try {
+      isOperatorMode = false;
       // Use the currently selected project — should always be set after startup.
       const projectId = projectStore.currentProject?.id ?? "";
       await conversationStore.createConversation(projectId);
@@ -122,9 +124,22 @@
   let loadError = $state<string | null>(null);
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
+  let isOperatorMode = $state(false);
 
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
+    const id = conversationStore.activeConversation?.id;
+    if (id) connectionStore.connectTo(id);
+  }
+
+  function handleToggleOperatorMode(next: boolean): void {
+    isOperatorMode = next;
+
+    if (next) {
+      connectionStore.disconnect();
+      return;
+    }
+
     const id = conversationStore.activeConversation?.id;
     if (id) connectionStore.connectTo(id);
   }
@@ -199,6 +214,8 @@
     {projectStore}
     onProjectChange={handleProjectChange}
     onRetry={handleRetry}
+    {isOperatorMode}
+    onToggleOperatorMode={handleToggleOperatorMode}
   />
 
   {#if notFound}

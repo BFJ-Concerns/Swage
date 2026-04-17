@@ -60,6 +60,7 @@ pub mod execution_host;
 pub mod handlers;
 pub mod heartbeat;
 pub mod lifecycle;
+pub mod operator;
 pub mod presence;
 pub mod schedule;
 pub mod server;

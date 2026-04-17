@@ -15,9 +15,10 @@ use swage_core::GatewayError;
 
 use crate::{
     channel_gateway::{
-        ChannelInboundResponse, DeliveryLogQuery, DeliveryLogResponse, DevDmInboundRequest,
-        DevThreadInboundRequest,
+        ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
+        DevDmInboundRequest, DevThreadInboundRequest,
     },
+    operator::OperatorOverviewResponse,
     error::ApiError,
     execution_host::{
         ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
@@ -110,6 +111,20 @@ pub async fn delivery_log(
     Query(query): Query<DeliveryLogQuery>,
 ) -> Json<DeliveryLogResponse> {
     Json(crate::channel_gateway::read_delivery_log(&state, query).await)
+}
+
+/// `GET /api/channels` — inspect channel routing and delivery health.
+pub async fn list_channel_statuses(
+    State(state): State<AppState>,
+) -> Json<ChannelStatusListResponse> {
+    Json(crate::channel_gateway::list_channel_statuses(&state).await)
+}
+
+/// `GET /api/operator/overview` — inspect the canonical operator control surface.
+pub async fn operator_overview(
+    State(state): State<AppState>,
+) -> Result<Json<OperatorOverviewResponse>, ApiError> {
+    Ok(Json(crate::operator::operator_overview(&state).await?))
 }
 
 /// `POST /api/scheduled-jobs` — create a durable scheduled job.
@@ -1099,13 +1114,13 @@ pub async fn get_message_status(
 }
 
 /// Approval listing response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApprovalListResponse {
     pub approvals: Vec<ApprovalSummary>,
 }
 
 /// Summary of a pending approval request.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApprovalSummary {
     pub id: Uuid,
     pub turn_id: Uuid,

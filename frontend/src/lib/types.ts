@@ -99,6 +99,99 @@ export interface ConversationResponse {
 }
 
 // -------------------------------------------------------------------------
+// Operator surface types
+// -------------------------------------------------------------------------
+
+export interface OperatorGatewaySummary {
+  status: string;
+  health: string;
+  shutdown_requested: boolean;
+  seconds_since_activity: number;
+  active_turn_count: number;
+  active_connection_count: number;
+}
+
+export interface OperatorSessionSummary {
+  id: string;
+  project_id: string;
+  project_name: string;
+  created_at: string;
+  last_activity: string;
+  message_preview: string | null;
+  has_interrupted_turn: boolean;
+  has_active_connection: boolean;
+  has_running_turn: boolean;
+}
+
+export interface OperatorApprovalSummary {
+  id: string;
+  turn_id: string;
+  agent_id: string;
+  kind: string;
+  tool_name: string | null;
+  prompt: string;
+  timeout_at: string | null;
+}
+
+export interface ScheduledJobSummary {
+  id: string;
+  session_id: string;
+  message: string;
+  status: string;
+  schedule: Record<string, unknown>;
+  routing: Record<string, unknown>;
+  next_run_at: string | null;
+  last_run_at: string | null;
+}
+
+export interface HeartbeatSummary {
+  id: string;
+  session_id: string;
+  message: string;
+  status: string;
+  interval_seconds: number;
+  next_beat_at: string | null;
+  last_beat_at: string | null;
+}
+
+export interface ChannelStatusSummary {
+  integration: string;
+  status: string;
+  route_count: number;
+  delivery_count: number;
+  last_delivery_at: string | null;
+}
+
+export interface OperatorNodeSummary {
+  host_id: string;
+  label: string | null;
+  kind: string;
+  base_url: string | null;
+  workspace_root: string;
+  capabilities: string[];
+  registered_at: string;
+  state: string;
+  last_seen_at: string | null;
+  disconnected_at: string | null;
+}
+
+export interface OperatorOverview {
+  gateway: OperatorGatewaySummary;
+  sessions: OperatorSessionSummary[];
+  approvals: OperatorApprovalSummary[];
+  scheduled_jobs: {
+    jobs: ScheduledJobSummary[];
+  };
+  heartbeats: {
+    heartbeats: HeartbeatSummary[];
+  };
+  channels: {
+    channels: ChannelStatusSummary[];
+  };
+  nodes: OperatorNodeSummary[];
+}
+
+// -------------------------------------------------------------------------
 // WebSocket event types
 // -------------------------------------------------------------------------
 

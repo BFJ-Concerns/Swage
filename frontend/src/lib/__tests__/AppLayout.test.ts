@@ -66,6 +66,8 @@ function mountLayout(): MountedComponent {
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
       onRetry: () => {},
+      isOperatorMode: false,
+      onToggleOperatorMode: () => {},
     },
   });
 }
