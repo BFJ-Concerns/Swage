@@ -607,8 +607,8 @@ mod tests {
         assert_eq!(select_log_override(None, Some("warn")), Some("warn"));
     }
 
-    #[test]
-    fn build_tool_dispatcher_registers_delegate_tool() {
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_delegate_tool() {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let dispatcher = build_tool_dispatcher(
@@ -625,8 +625,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_tool_dispatcher_registers_plugin_tools_from_configured_directory() {
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_plugin_tools_from_configured_directory() {
         let temp_dir = tempfile::tempdir().unwrap();
         let plugin_dir = temp_dir.path().join("plugins").join("echo-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();

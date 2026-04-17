@@ -529,6 +529,9 @@ pub(crate) async fn process_turn_with_existing_turn(
     // in-progress work; allowing a second turn would interleave history.
     let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
     if existing_turns.iter().any(|t| {
+        if existing_turn_id.is_some_and(|current_turn_id| t.id == current_turn_id) {
+            return false;
+        }
         matches!(
             t.state,
             TurnState::Pending
