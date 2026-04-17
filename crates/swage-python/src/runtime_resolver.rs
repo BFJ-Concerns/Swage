@@ -49,7 +49,8 @@ impl ResolvedPythonRuntime {
                     }
                 }
 
-                let executable = find_system_python().ok_or(PythonRuntimeError::RuntimeUnavailable)?;
+                let executable =
+                    find_system_python().ok_or(PythonRuntimeError::RuntimeUnavailable)?;
                 Self::resolve_system_executable(&executable)
             }
         }
@@ -84,7 +85,10 @@ impl ResolvedPythonRuntime {
 
         let mut environment = BTreeMap::new();
         environment.insert("PYTHONHOME".to_string(), path.display().to_string());
-        environment.insert("PYTHONPATH".to_string(), path.join("lib").display().to_string());
+        environment.insert(
+            "PYTHONPATH".to_string(),
+            path.join("lib").display().to_string(),
+        );
         environment.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
 
         Ok(Self {
@@ -161,9 +165,7 @@ fn bundled_python_executable(path: &Path) -> Option<PathBuf> {
 }
 
 fn find_system_python() -> Option<PathBuf> {
-    ["python3", "python"]
-        .into_iter()
-        .find_map(find_on_path)
+    ["python3", "python"].into_iter().find_map(find_on_path)
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -237,7 +239,10 @@ mod tests {
     #[test]
     fn default_config_resolves_some_runtime() {
         let resolved = ResolvedPythonRuntime::resolve(&PythonExecuteToolConfig::default());
-        assert!(resolved.is_ok(), "expected a Python runtime, got: {resolved:?}");
+        assert!(
+            resolved.is_ok(),
+            "expected a Python runtime, got: {resolved:?}"
+        );
     }
 
     #[test]

@@ -110,6 +110,11 @@ pub struct Session {
     /// The agent that owns this session. Used to scope queries in multi-agent
     /// deployments so each agent sees only its own sessions.
     pub agent_id: String,
+    /// Host-managed opaque metadata associated with the session.
+    ///
+    /// This stays outside prompt and WebSocket transport surfaces unless a
+    /// caller explicitly reads it through storage or a higher-level API.
+    pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -856,6 +861,8 @@ pub struct NewSession {
     pub project_id: Uuid,
     /// The agent that owns this session.
     pub agent_id: String,
+    /// Host-managed opaque metadata to persist with the session.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Input for creating a new thread.
@@ -1547,6 +1554,7 @@ mod tests {
             id,
             project_id,
             agent_id: "my-agent".to_string(),
+            metadata: None,
             created_at: now,
             updated_at: now,
         };
@@ -1563,6 +1571,7 @@ mod tests {
         let ns = NewSession {
             project_id: Uuid::new_v4(),
             agent_id: "builder-agent".to_string(),
+            metadata: None,
         };
         assert_eq!(ns.agent_id, "builder-agent");
     }

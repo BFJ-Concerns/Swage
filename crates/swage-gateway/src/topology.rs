@@ -439,6 +439,7 @@ impl TopologyExecutor {
                 .create_session(NewSession {
                     project_id: team.project_id,
                     agent_id: team.entry_agent_id.clone(),
+                    metadata: None,
                 })
                 .await?
                 .id),

@@ -33,6 +33,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
         ("015_project_default_flag", ADD_PROJECT_DEFAULT_FLAG),
+        ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
     ]
 }
 
@@ -177,6 +178,11 @@ const COMPLETE_SCHEMA: &str = "
 /// JSON text column, nullable — only present when schema validation passed.
 const ADD_TURN_STRUCTURED_OUTPUT_COLUMN: &str = "
     ALTER TABLE turns ADD COLUMN structured_output TEXT;
+";
+
+/// Additive migration: opaque host-managed session metadata stored as JSON.
+const ADD_SESSION_METADATA_COLUMN: &str = "
+    ALTER TABLE sessions ADD COLUMN metadata_json TEXT;
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.

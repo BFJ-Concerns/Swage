@@ -13,5 +13,7 @@ pub mod worker_pool;
 pub mod worker_protocol;
 
 pub use runner::{ConcreteAssemblyRunner, ConfiguredAssemblyRunner};
-pub use worker_host::{NestedToolHost, PythonExecutionResult, PythonWorkerError, PythonWorkerRuntime};
+pub use worker_host::{
+    NestedToolHost, PythonExecutionResult, PythonWorkerError, PythonWorkerRuntime,
+};
 pub use worker_pool::{WorkerLease, WorkerPool};

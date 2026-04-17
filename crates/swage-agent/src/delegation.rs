@@ -102,6 +102,7 @@ impl DelegationExecutor {
             .create_session(NewSession {
                 project_id,
                 agent_id: target_agent_id.clone(),
+                metadata: None,
             })
             .await?;
         let thread = ThreadStore::create(

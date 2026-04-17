@@ -301,7 +301,9 @@ mod tests {
 
     #[test]
     fn role_from_str_rejects_unknown_role() {
-        let error = "moderator".parse::<Role>().expect_err("unknown role should fail");
+        let error = "moderator"
+            .parse::<Role>()
+            .expect_err("unknown role should fail");
         assert_eq!(error.to_string(), "unknown chat role: moderator");
     }
 

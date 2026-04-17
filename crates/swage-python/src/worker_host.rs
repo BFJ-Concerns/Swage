@@ -145,9 +145,7 @@ impl PythonWorkerRuntime {
                 .await?
             {
                 WorkerToHostMessage::Ready => Ok(transport),
-                WorkerToHostMessage::Error { message } => {
-                    Err(PythonWorkerError::Protocol(message))
-                }
+                WorkerToHostMessage::Error { message } => Err(PythonWorkerError::Protocol(message)),
                 other => Err(PythonWorkerError::Protocol(format!(
                     "expected ready message, got {other:?}"
                 ))),

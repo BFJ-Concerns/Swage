@@ -26,7 +26,11 @@ pub struct TransferredContext {
 pub fn resolve_policy<'a>(
     config: &'a ContextTransferConfig,
     target_agent_id: &str,
-) -> (&'a ContextTransferMode, &'a [ContextTransferField], Option<u32>) {
+) -> (
+    &'a ContextTransferMode,
+    &'a [ContextTransferField],
+    Option<u32>,
+) {
     if let Some(target_config) = config.targets.get(target_agent_id) {
         (
             &target_config.mode,

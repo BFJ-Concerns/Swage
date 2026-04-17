@@ -12,8 +12,8 @@ use std::str::FromStr;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
-use swage_agent::approval::ApprovalDecisionValue;
 use crate::{state::AppState, subscription::SubscriptionState, turn};
+use swage_agent::approval::ApprovalDecisionValue;
 
 // ---------------------------------------------------------------------------
 // Client → Server event types

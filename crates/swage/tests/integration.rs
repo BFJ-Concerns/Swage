@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use swage::agent::context::TurnExecutionContext;
 use swage::agent::{AgentBuilder, AgentConfig, AgentEvent, TurnRequest};
+use swage::core::ToolError;
 use swage::core::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role,
     StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
@@ -29,10 +30,44 @@ use swage::storage::{
     MessageStore, NewSession, NewThread, ProjectStore, SessionStore, SqliteStorage, ThreadState,
     ThreadStore, TurnState, TurnStore,
 };
+use swage::tool::context::ToolContext;
+use swage::tool::dispatch::ToolDispatcher;
+use swage::tool::tool::Tool;
 
 struct StreamingProvider {
     rounds: Mutex<Vec<Vec<StreamChunk>>>,
     calls: AtomicUsize,
+}
+
+struct EchoTool;
+
+#[async_trait]
+impl Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    fn description(&self) -> &str {
+        "Echo test tool"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            },
+            "required": ["text"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &dyn ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(json!({ "echoed": params["text"].as_str().unwrap_or_default() }))
+    }
 }
 
 impl StreamingProvider {
@@ -112,6 +147,7 @@ async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
         .create_session(NewSession {
             project_id: project.id,
             agent_id: "agent-a".into(),
+            metadata: None,
         })
         .await
         .expect("session");
@@ -303,4 +339,107 @@ async fn facade_streaming_turn_supports_hooks_redaction_and_schema_retry() {
         event,
         AgentEvent::OutputSchemaRetry { attempt, .. } if *attempt == 1
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
+    let (storage, project_id, session_id, thread_id) = setup().await;
+    let provider = Arc::new(StreamingProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_echo".into(),
+                name: "echo".into(),
+                arguments: json!({ "text": "from tool" }),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "tool complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]));
+    let agent = AgentBuilder::new()
+        .config(AgentConfig::new("agent-a"))
+        .provider(provider)
+        .storage(storage)
+        .tool_dispatcher(ToolDispatcher::allow_all(vec![Arc::new(EchoTool) as Arc<dyn Tool>]))
+        .build()
+        .expect("agent");
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let response = agent
+        .process_turn_streaming(
+            turn_request(project_id, session_id, thread_id, "Use the echo tool"),
+            event_tx,
+        )
+        .await
+        .expect("streaming turn with tool");
+
+    assert_eq!(response.response, "tool complete");
+
+    let events = collect_events(event_rx);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnStarted { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStart {
+            call_id,
+            tool_name,
+            ..
+        }
+        if call_id == "call_echo" && tool_name == "echo"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolEnd {
+            call_id,
+            tool_name,
+            status,
+            ..
+        }
+        if call_id == "call_echo" && tool_name == "echo" && status == "success"
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn facade_storage_round_trips_session_metadata() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
+    let project = ProjectStore::get_or_create_default(storage.as_ref())
+        .await
+        .expect("default project");
+    let metadata = json!({
+        "owner": "host-app",
+        "labels": ["embedder", "demo"]
+    });
+
+    let session = storage
+        .create_session(NewSession {
+            project_id: project.id,
+            agent_id: "agent-a".into(),
+            metadata: Some(metadata.clone()),
+        })
+        .await
+        .expect("session with metadata");
+
+    let fetched = storage
+        .get_session(session.id)
+        .await
+        .expect("session lookup")
+        .expect("session exists");
+
+    assert_eq!(fetched.metadata, Some(metadata));
 }

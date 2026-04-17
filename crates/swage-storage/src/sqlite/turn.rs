@@ -343,6 +343,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();

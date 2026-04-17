@@ -6,6 +6,7 @@
 //! groups (e.g. `swage project ...`, `swage config ...`).
 
 pub mod completions;
+pub mod run;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -53,12 +54,32 @@ pub struct Cli {
 /// Top-level subcommands exposed by `swage`.
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
+    /// Run a single prompt against the gateway and print the streamed reply.
+    Run(RunArgs),
     /// Manage the Swage gateway process.
     Gateway(GatewayArgs),
     /// Launch the terminal user interface.
     Tui(TuiArgs),
     /// Generate shell autocompletion scripts.
     Completions(CompletionsArgs),
+}
+
+// ---------------------------------------------------------------------------
+// Run argument struct
+// ---------------------------------------------------------------------------
+
+/// Arguments for `swage run`.
+#[derive(Debug, clap::Args)]
+pub struct RunArgs {
+    /// Gateway URL to connect to.
+    ///
+    /// Defaults to the running gateway's address found via runtime metadata,
+    /// or `http://127.0.0.1:3000` if no metadata is available.
+    #[arg(long)]
+    pub url: Option<String>,
+
+    /// Prompt text to send. When omitted, the command reads stdin.
+    pub message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +187,26 @@ mod tests {
         assert!(args.host.is_none());
         assert!(args.config.is_none());
         assert!(!args.foreground);
+    }
+
+    #[test]
+    fn parse_run_with_inline_message() {
+        let cli = Cli::try_parse_from(["swage", "run", "hello"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected Run command");
+        };
+        assert_eq!(args.message.as_deref(), Some("hello"));
+        assert!(args.url.is_none());
+    }
+
+    #[test]
+    fn parse_run_with_explicit_url() {
+        let cli = Cli::try_parse_from(["swage", "run", "--url", "http://localhost:9999"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected Run command");
+        };
+        assert_eq!(args.url.as_deref(), Some("http://localhost:9999"));
+        assert!(args.message.is_none());
     }
 
     // All StartArgs flags round-trip through the parser.

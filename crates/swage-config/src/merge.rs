@@ -390,10 +390,8 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             };
             PartialToolConfig {
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
-                python_execute: merge_section(
-                    b.python_execute,
-                    o.python_execute,
-                    |b, o| PartialPythonExecuteToolConfig {
+                python_execute: merge_section(b.python_execute, o.python_execute, |b, o| {
+                    PartialPythonExecuteToolConfig {
                         enabled: o.enabled.or(b.enabled),
                         timeout_secs: o.timeout_secs.or(b.timeout_secs),
                         startup_timeout_secs: o.startup_timeout_secs.or(b.startup_timeout_secs),
@@ -403,8 +401,8 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                         runtime_policy: o.runtime_policy.or(b.runtime_policy),
                         runtime_path: o.runtime_path.or(b.runtime_path),
                         require_sandbox: o.require_sandbox.or(b.require_sandbox),
-                    },
-                ),
+                    }
+                }),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
                 plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
@@ -522,7 +520,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 python_execute: PythonExecuteToolConfig {
                     enabled: py.enabled.unwrap_or(dpy.enabled),
                     timeout_secs: py.timeout_secs.unwrap_or(dpy.timeout_secs),
-                    startup_timeout_secs: py.startup_timeout_secs.unwrap_or(dpy.startup_timeout_secs),
+                    startup_timeout_secs: py
+                        .startup_timeout_secs
+                        .unwrap_or(dpy.startup_timeout_secs),
                     idle_ttl_secs: py.idle_ttl_secs.unwrap_or(dpy.idle_ttl_secs),
                     warm_target: py.warm_target.unwrap_or(dpy.warm_target),
                     max_workers: py.max_workers.unwrap_or(dpy.max_workers),
@@ -1284,9 +1284,9 @@ mod tests {
                         m.insert(
                             "agent-b".into(),
                             PartialContextTransferTargetConfig {
-                                mode: None,                                  // should inherit Summary
+                                mode: None,                                               // should inherit Summary
                                 allowed_fields: Some(vec![ContextTransferField::System]), // overrides
-                                summary_budget: None,                        // should inherit 1024
+                                summary_budget: None, // should inherit 1024
                             },
                         );
                         m

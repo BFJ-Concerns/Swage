@@ -563,6 +563,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -614,6 +615,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -696,6 +698,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -787,6 +790,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -869,6 +873,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -910,6 +915,10 @@ mod tests {
             .list_node_executions_by_run(run.id)
             .await
             .expect_err("invalid stored node kind should fail");
-        assert!(error.to_string().contains("unknown topology node kind: bogus"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown topology node kind: bogus")
+        );
     }
 }

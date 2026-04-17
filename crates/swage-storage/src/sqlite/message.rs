@@ -29,11 +29,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         thread_id: parse_uuid(&thread_id)?,
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
         role: Role::from_str(&role).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(err),
-            )
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
         })?,
         content: row.get(4)?,
         position: row.get(5)?,
@@ -250,6 +246,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -499,6 +496,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "a".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();

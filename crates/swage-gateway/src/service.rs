@@ -152,6 +152,7 @@ impl ConversationService {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await?;
 
@@ -332,6 +333,7 @@ impl ConversationService {
             .create_session(NewSession {
                 project_id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await?;
 

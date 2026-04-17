@@ -405,7 +405,9 @@ fn build_tool_dispatcher(
             }
         }
         Ok(_) => {
-            warn!("Python worker runtime resolved but sandbox is unavailable; python_execute tool disabled");
+            warn!(
+                "Python worker runtime resolved but sandbox is unavailable; python_execute tool disabled"
+            );
         }
         Err(e) => {
             warn!("Python runtime not available ({e}), python_execute tool disabled");

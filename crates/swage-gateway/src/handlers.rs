@@ -1901,6 +1901,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -1908,6 +1909,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -1956,6 +1958,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 project_id: project_a.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -1963,6 +1966,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 project_id: project_b.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -1970,6 +1974,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 project_id: project_b.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();

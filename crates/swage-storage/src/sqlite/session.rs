@@ -17,13 +17,15 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let id: String = row.get(0)?;
     let project_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
-    let created: String = row.get(3)?;
-    let updated: String = row.get(4)?;
+    let metadata_json: Option<String> = row.get(3)?;
+    let created: String = row.get(4)?;
+    let updated: String = row.get(5)?;
 
     Ok(Session {
         id: parse_uuid(&id)?,
         project_id: parse_uuid(&project_id)?,
         agent_id,
+        metadata: parse_metadata(metadata_json.as_deref())?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
@@ -43,6 +45,32 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+fn parse_metadata(metadata_json: Option<&str>) -> rusqlite::Result<Option<serde_json::Value>> {
+    metadata_json
+        .map(|json| {
+            serde_json::from_str(json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn serialise_metadata(
+    metadata: &Option<serde_json::Value>,
+) -> Result<Option<String>, rusqlite::Error> {
+    metadata
+        .as_ref()
+        .map(|value| {
+            serde_json::to_string(value)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })
+        .transpose()
+}
+
 // ---------------------------------------------------------------------------
 // SessionStore
 // ---------------------------------------------------------------------------
@@ -50,18 +78,21 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 #[async_trait]
 impl SessionStore for SqliteStorage {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError> {
+        let metadata_json = serialise_metadata(&session.metadata)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO sessions (id, project_id, agent_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                "INSERT INTO sessions (id, project_id, agent_id, metadata_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
                 params![
                     id.to_string(),
                     session.project_id.to_string(),
                     &session.agent_id,
+                    &metadata_json,
                     &now_str
                 ],
             )?;
@@ -70,6 +101,7 @@ impl SessionStore for SqliteStorage {
                 id,
                 project_id: session.project_id,
                 agent_id: session.agent_id,
+                metadata: session.metadata,
                 created_at: now,
                 updated_at: now,
             })
@@ -80,7 +112,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, project_id, agent_id, created_at, updated_at
+                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 row_to_session,
@@ -93,7 +125,7 @@ impl SessionStore for SqliteStorage {
     async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_id, agent_id, created_at, updated_at
+                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions WHERE project_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -110,7 +142,7 @@ impl SessionStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_id, agent_id, created_at, updated_at
+                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions WHERE agent_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -171,6 +203,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -189,6 +222,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -198,6 +232,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -216,6 +251,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -231,6 +267,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "my-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -242,6 +279,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn create_session_round_trips_metadata() {
+        let (storage, project_id) = make_storage_with_project().await;
+        let metadata = serde_json::json!({
+            "host": "embedder",
+            "labels": ["demo", "cli"]
+        });
+
+        let session = storage
+            .create_session(NewSession {
+                project_id,
+                agent_id: "my-agent".to_string(),
+                metadata: Some(metadata.clone()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(session.metadata, Some(metadata.clone()));
+
+        let fetched = storage.get_session(session.id).await.unwrap().unwrap();
+        assert_eq!(fetched.metadata, Some(metadata));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_by_agent_id_filters_and_orders() {
         let (storage, project_id) = make_storage_with_project().await;
 
@@ -250,6 +310,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "alpha".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -257,6 +318,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "beta".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -264,6 +326,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "alpha".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -296,6 +359,7 @@ mod tests {
             .create_session(NewSession {
                 project_id,
                 agent_id: "test-agent".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();

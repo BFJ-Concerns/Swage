@@ -378,6 +378,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "agent-1".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -527,6 +528,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "a".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -534,6 +536,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "a".into(),
+                metadata: None,
             })
             .await
             .unwrap();

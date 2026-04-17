@@ -49,6 +49,7 @@ async fn create_full_hierarchy(
         .create_session(NewSession {
             project_id,
             agent_id: agent_id.to_string(),
+            metadata: None,
         })
         .await
         .expect("create session");
@@ -307,6 +308,7 @@ async fn thread_state_machine_enforced() {
         .create_session(NewSession {
             project_id,
             agent_id: AGENT_A.to_string(),
+            metadata: None,
         })
         .await
         .unwrap();
@@ -400,6 +402,7 @@ async fn turn_recovery_finds_pending_and_processing() {
         .create_session(NewSession {
             project_id,
             agent_id: AGENT_A.to_string(),
+            metadata: None,
         })
         .await
         .unwrap();
@@ -514,6 +517,7 @@ async fn messages_ordered_within_thread() {
         .create_session(NewSession {
             project_id,
             agent_id: AGENT_A.to_string(),
+            metadata: None,
         })
         .await
         .unwrap();

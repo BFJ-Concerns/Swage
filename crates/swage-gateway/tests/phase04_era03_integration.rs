@@ -33,6 +33,7 @@ async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uu
         .create_session(NewSession {
             project_id: project.id,
             agent_id: agent_id.to_string(),
+            metadata: None,
         })
         .await
         .unwrap();
@@ -139,6 +140,7 @@ async fn delegation_creates_child_turn_with_parent() {
         .create_session(NewSession {
             project_id: project.id,
             agent_id: "agent-b".into(),
+            metadata: None,
         })
         .await
         .unwrap();

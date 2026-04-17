@@ -103,6 +103,7 @@ async fn main() {
     }
 
     let result = match cli.command {
+        Some(Command::Run(run_args)) => swage_gateway::cli::run::run(&run_args).await,
         Some(Command::Gateway(args)) => match args.command {
             GatewayCommand::Start(start_args) => swage_gateway::cli::start::run(&start_args).await,
             GatewayCommand::Stop(stop_args) => swage_gateway::cli::stop::run(&stop_args).await,

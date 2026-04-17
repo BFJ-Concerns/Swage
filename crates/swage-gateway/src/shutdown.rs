@@ -369,6 +369,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -515,6 +516,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "reviewer".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -566,6 +568,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .unwrap();

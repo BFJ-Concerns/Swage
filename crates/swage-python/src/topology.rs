@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use swage_config::model::PythonExecuteToolConfig;
 use swage_topology::{
-    validate_graph, TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem,
+    TopologyEntityCatalog, TopologyGraph, TopologyValidationProblem, validate_graph,
 };
 
 use crate::blocking::run_worker_future;
@@ -139,11 +139,16 @@ pub fn execute_topology_source_with_config(
         // separate registry that does not exist yet. Seed the validation set
         // from the decoded graph so execution still rejects malformed nodes
         // without spuriously rejecting valid authored task names.
-        known_tasks: catalog.known_tasks.into_iter().chain(
-            graph.nodes
-                .iter()
-                .filter_map(|node| node.task_name.as_ref().cloned()),
-        ).collect(),
+        known_tasks: catalog
+            .known_tasks
+            .into_iter()
+            .chain(
+                graph
+                    .nodes
+                    .iter()
+                    .filter_map(|node| node.task_name.as_ref().cloned()),
+            )
+            .collect(),
         known_handlers: catalog.known_handlers,
     };
     validate_graph(&graph, &effective_catalog).map_err(TopologyDefinitionError::Validation)?;

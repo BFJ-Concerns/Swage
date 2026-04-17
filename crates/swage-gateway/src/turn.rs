@@ -741,9 +741,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     // assembly names this delegates to default_assembly() synchronously.
     // Named Python assemblies now execute in a child worker instead of an
     // embedded interpreter.
-    let assembly_runner = swage_python::ConfiguredAssemblyRunner::new(
-        config.tools.python_execute.clone(),
-    );
+    let assembly_runner =
+        swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
     let output = swage_context::assembly::assemble(
         &elements,
         &config.context,
@@ -2777,6 +2776,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -2833,6 +2833,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -2959,6 +2960,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -3268,6 +3270,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -3517,6 +3520,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -3709,6 +3713,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -3940,6 +3945,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("session");
@@ -4059,6 +4065,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("session");
@@ -4203,6 +4210,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("create session");
@@ -4391,6 +4399,7 @@ pub(crate) mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "gateway".to_string(),
+                metadata: None,
             })
             .await
             .expect("session");

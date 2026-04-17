@@ -35,10 +35,10 @@ pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
 
 pub use agent_loop::run_agent_loop;
 pub use bubblewrap::BubblewrapSandbox;
+pub use bubblewrap::find_bwrap;
 pub use config::SandboxConfig;
 pub use fallback::FallbackSandbox;
-pub use provider::IpcCompletionProvider;
 pub use process::ChildProcessManager;
+pub use provider::IpcCompletionProvider;
 pub use sandbox::{Sandbox, ToolCallResult};
 pub use socket::SocketManager;
-pub use bubblewrap::find_bwrap;

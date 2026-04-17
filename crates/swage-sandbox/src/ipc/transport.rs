@@ -45,10 +45,7 @@ impl IpcTransport {
         })?;
         if line.len() > MAX_IPC_MESSAGE_BYTES {
             return Err(SandboxError::IpcError {
-                message: format!(
-                    "IPC message exceeds {} byte limit",
-                    MAX_IPC_MESSAGE_BYTES
-                ),
+                message: format!("IPC message exceeds {} byte limit", MAX_IPC_MESSAGE_BYTES),
             });
         }
         // Newline delimiter — NDJSON protocol.
@@ -91,10 +88,7 @@ impl IpcTransport {
         let ended_with_newline = line.last() == Some(&b'\n');
         if line.len() > MAX_IPC_MESSAGE_BYTES || !ended_with_newline {
             return Err(SandboxError::IpcError {
-                message: format!(
-                    "IPC message exceeds {} byte limit",
-                    MAX_IPC_MESSAGE_BYTES
-                ),
+                message: format!("IPC message exceeds {} byte limit", MAX_IPC_MESSAGE_BYTES),
             });
         }
 

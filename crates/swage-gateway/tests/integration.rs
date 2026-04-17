@@ -496,6 +496,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .create_session(NewSession {
             project_id: project.id,
             agent_id: "gateway".to_string(),
+            metadata: None,
         })
         .await
         .unwrap();
@@ -524,6 +525,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .create_session(NewSession {
             project_id: project.id,
             agent_id: "gateway".to_string(),
+            metadata: None,
         })
         .await
         .unwrap();

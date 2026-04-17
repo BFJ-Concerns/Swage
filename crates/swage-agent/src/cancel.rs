@@ -24,8 +24,7 @@ use crate::error::AgentError;
 #[async_trait]
 pub trait CancellationStorage: AgentMessageStore + ThreadStore + TurnStore + Send + Sync {}
 
-impl<T> CancellationStorage for T where T: AgentMessageStore + ThreadStore + TurnStore + Send + Sync
-{}
+impl<T> CancellationStorage for T where T: AgentMessageStore + ThreadStore + TurnStore + Send + Sync {}
 
 /// Handle a Cancel message by interrupting the delegated turn.
 ///
@@ -369,10 +368,7 @@ mod tests {
 
     #[async_trait]
     impl ThreadStore for FailingCancellationStorage {
-        async fn create(
-            &self,
-            _thread: NewThread,
-        ) -> Result<swage_storage::Thread, StorageError> {
+        async fn create(&self, _thread: NewThread) -> Result<swage_storage::Thread, StorageError> {
             unimplemented!()
         }
 
@@ -437,6 +433,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: agent_id.to_string(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -558,6 +555,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "agent-b".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -732,6 +730,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "agent-b".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -760,6 +759,7 @@ mod tests {
             .create_session(NewSession {
                 project_id: project.id,
                 agent_id: "agent-b".into(),
+                metadata: None,
             })
             .await
             .unwrap();
@@ -824,8 +824,8 @@ mod tests {
         };
 
         handle_cancel(storage.as_ref(), &cancel, Some(&registry))
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
         // First delegation's turn interrupted.
         let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
@@ -911,8 +911,8 @@ mod tests {
         };
 
         handle_shutdown(storage.as_ref(), &shutdown, Some(&registry))
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
         // Token should have been cancelled — live execution would stop.
         assert!(

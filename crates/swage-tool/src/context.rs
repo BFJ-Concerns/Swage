@@ -1,8 +1,8 @@
 //! Tool execution context — the opaque boundary between tools and agent internals.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::any::Any;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

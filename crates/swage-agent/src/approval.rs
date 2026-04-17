@@ -5,9 +5,9 @@
 //! human decision. These types bridge the agent runtime with the gateway's
 //! WebSocket-based approval UI.
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 

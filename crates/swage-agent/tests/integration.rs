@@ -108,6 +108,7 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Project, Ses
         .create_session(NewSession {
             project_id: project.id,
             agent_id: agent_id.to_string(),
+            metadata: None,
         })
         .await
         .expect("session");

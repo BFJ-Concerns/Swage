@@ -82,6 +82,34 @@ impl App {
         self.pending_reconnect = Some(PendingReconnect::immediate());
     }
 
+    async fn handle_gateway_result(
+        &mut self,
+        gateway_result: Result<Option<ServerEvent>, ClientError>,
+    ) {
+        match gateway_result {
+            Ok(Some(event)) => {
+                let outcome = handle_server_event(&mut self.state, event);
+                if outcome == EventOutcome::Shutdown {
+                    self.connection.disconnect().await;
+                    self.queue_reconnect();
+                }
+            }
+            Ok(None) => {
+                self.connection.disconnect().await;
+                self.state
+                    .push_local_message("system", "Connection lost — retrying…");
+                self.queue_reconnect();
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "WebSocket error");
+                self.state
+                    .push_local_message("error", format!("Connection error: {error}"));
+                self.connection.disconnect().await;
+                self.queue_reconnect();
+            }
+        }
+    }
+
     fn conversation_viewport(
         &self,
         terminal_area: ratatui::layout::Rect,
@@ -373,34 +401,7 @@ impl App {
                             .await
                     }
                 } => {
-                    match gateway_result {
-                        Ok(Some(event)) => {
-                            let outcome = handle_server_event(&mut self.state, event);
-                            if outcome == EventOutcome::Shutdown {
-                                // TODO Reconnect after shutdown event
-                                // A graceful Shutdown bypasses the Ok(None)/Err reconnect paths and only disconnects here,
-                                // so the TUI stays permanently offline after the gateway restarts.
-                                // ---
-                                self.connection.disconnect().await;
-                            }
-                        }
-                        Ok(None) => {
-                            // Clean WebSocket close — gateway disconnected.
-                            self.connection.disconnect().await;
-                            self.state
-                                .push_local_message("system", "Connection lost — retrying…");
-                            self.queue_reconnect();
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "WebSocket error");
-                            self.state.push_local_message(
-                                "error",
-                                format!("Connection error: {e}"),
-                            );
-                            self.connection.disconnect().await;
-                            self.queue_reconnect();
-                        }
-                    }
+                    self.handle_gateway_result(gateway_result).await;
                 }
             }
         }
@@ -1154,6 +1155,47 @@ mod tests {
         assert!(!app.state.messages().is_empty());
         app.dispatch_action(AppAction::NewConversation);
         assert!(!app.state.messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_event_disconnects_and_queues_reconnect() {
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
+        let mut app = App::new("http://127.0.0.1:3000", project);
+
+        app.handle_gateway_result(Ok(Some(ServerEvent::Shutdown {
+            reason: "restart".to_string(),
+        })))
+        .await;
+
+        assert_eq!(
+            app.connection.connection_state(),
+            ConnectionState::Reconnecting
+        );
+        assert!(app.pending_reconnect.is_some());
+        let last_message = app.state.messages().last().expect("shutdown message");
+        assert!(last_message.content.contains("Gateway shutting down"));
+    }
+
+    #[tokio::test]
+    async fn clean_close_disconnects_and_queues_reconnect() {
+        let project = ProjectInfo {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+        };
+        let mut app = App::new("http://127.0.0.1:3000", project);
+
+        app.handle_gateway_result(Ok(None)).await;
+
+        assert_eq!(
+            app.connection.connection_state(),
+            ConnectionState::Reconnecting
+        );
+        assert!(app.pending_reconnect.is_some());
+        let last_message = app.state.messages().last().expect("disconnect message");
+        assert!(last_message.content.contains("retrying"));
     }
 
     // --- SkillAlreadyActive ---
