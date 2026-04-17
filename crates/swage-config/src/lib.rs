@@ -19,7 +19,8 @@ pub mod validation;
 // Resolved config types
 pub use model::{
     CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferMode,
-    ContextTransferTargetConfig, HierarchyLevel, HitlConfig, LifecycleConfig, LogLevel,
+    ContextTransferField, ContextTransferTargetConfig, HierarchyLevel, HitlConfig,
+    LifecycleConfig, LogLevel,
     LoggingConfig, ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderConfig,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
     ToolConfig, ToolPermissionConfig, WorkspaceConfig,

@@ -14,7 +14,7 @@ use swage_core::{ChatMessage, Role, StorageError};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
     NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewSession, NewThread, NewTopologyRun,
-    NodeExecutionState, Team, TopologyRunState,
+    NodeExecutionState, Team, TopologyNodeRecordKind, TopologyRunState,
 };
 use swage_storage::store::ThreadStore;
 use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind};
@@ -478,9 +478,9 @@ async fn execute_node(
             topology_run_id,
             node_id: node.id.clone(),
             node_kind: match node.kind {
-                TopologyNodeKind::Llm => "llm".into(),
-                TopologyNodeKind::Deterministic => "deterministic".into(),
-                TopologyNodeKind::Continuation => "continuation".into(),
+                TopologyNodeKind::Llm => TopologyNodeRecordKind::Llm,
+                TopologyNodeKind::Deterministic => TopologyNodeRecordKind::Deterministic,
+                TopologyNodeKind::Continuation => TopologyNodeRecordKind::Continuation,
             },
             agent_id: node.agent_id.clone(),
             task_name: node.task_name.clone(),
@@ -667,7 +667,7 @@ async fn execute_agent_node(
         .append_message(swage_storage::model::AppendMessage {
             thread_id: thread.id,
             turn_id: None,
-            role: Role::User.to_string(),
+            role: Role::User,
             content: rendered_input.clone(),
             agent_id: agent_id.to_string(),
         })
@@ -675,23 +675,7 @@ async fn execute_agent_node(
     let stored_history = state.storage.list_messages_by_thread(thread.id).await?;
     let history_messages: Vec<ChatMessage> = stored_history
         .into_iter()
-        .map(|message| {
-            let role = match message.role.as_str() {
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "tool" => Role::Tool,
-                "user" => Role::User,
-                other => {
-                    tracing::warn!(
-                        role = other,
-                        thread_id = %thread.id,
-                        "unexpected stored message role in topology history; defaulting to user"
-                    );
-                    Role::User
-                }
-            };
-            ChatMessage::new(role, message.content)
-        })
+        .map(|message| ChatMessage::new(message.role, message.content))
         .collect();
 
     let swage_root_opt: Option<PathBuf> = swage_config::discovery::resolve_root().ok();

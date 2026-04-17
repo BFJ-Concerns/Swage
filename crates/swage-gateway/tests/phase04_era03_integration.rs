@@ -177,12 +177,12 @@ async fn delegation_creates_child_turn_with_parent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn context_transfer_explicit_restricts_fields() {
     use swage_agent::context_transfer::transfer_context;
-    use swage_config::{ContextTransferConfig, ContextTransferMode};
+    use swage_config::{ContextTransferConfig, ContextTransferField, ContextTransferMode};
     use swage_core::{ChatMessage, Role};
 
     let config = ContextTransferConfig {
         mode: ContextTransferMode::Explicit,
-        allowed_fields: vec!["system".to_string()],
+        allowed_fields: vec![ContextTransferField::System],
         summary_budget: None,
         targets: std::collections::HashMap::new(),
     };

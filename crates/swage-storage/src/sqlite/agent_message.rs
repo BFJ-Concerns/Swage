@@ -92,8 +92,12 @@ fn row_to_agent_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessag
     let id = parse_uuid(&id)?;
     let correlation_id = correlation_id_str.as_deref().map(parse_uuid).transpose()?;
     let payload = parse_json(&payload_str, 5)?;
-    let kind = kind_str.parse().map_err(|e: String| parse_error(3, e))?;
-    let status = status_str.parse().map_err(|e: String| parse_error(6, e))?;
+    let kind = kind_str
+        .parse::<swage_core::MessageKind>()
+        .map_err(|e| parse_error(3, e.to_string()))?;
+    let status = status_str
+        .parse::<swage_core::MessageStatus>()
+        .map_err(|e| parse_error(6, e.to_string()))?;
     let created_at = parse_dt(&created_at_str)?;
     let delivered_at = delivered_at_str.as_deref().map(parse_dt).transpose()?;
 

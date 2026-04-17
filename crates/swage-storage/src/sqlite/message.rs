@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
+use std::str::FromStr;
 use uuid::Uuid;
 
-use swage_core::StorageError;
+use swage_core::{Role, StorageError};
 
 use crate::model::{AppendMessage, Message, NewMessage};
 use crate::sqlite::SqliteStorage;
@@ -21,11 +22,19 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let turn_id: Option<String> = row.get(2)?;
     let created: String = row.get(9)?;
 
+    let role: String = row.get(3)?;
+
     Ok(Message {
         id: parse_uuid(&id)?,
         thread_id: parse_uuid(&thread_id)?,
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
-        role: row.get(3)?,
+        role: Role::from_str(&role).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })?,
         content: row.get(4)?,
         position: row.get(5)?,
         agent_id: row.get(6)?,
@@ -69,7 +78,7 @@ impl MessageStore for SqliteStorage {
                     id.to_string(),
                     message.thread_id.to_string(),
                     message.turn_id.map(|turn_id| turn_id.to_string()),
-                    &message.role,
+                    message.role.to_string(),
                     &message.content,
                     message.position,
                     &message.agent_id,
@@ -116,7 +125,7 @@ impl MessageStore for SqliteStorage {
                     id.to_string(),
                     message.thread_id.to_string(),
                     message.turn_id.map(|turn_id| turn_id.to_string()),
-                    &message.role,
+                    message.role.to_string(),
                     &message.content,
                     position,
                     &message.agent_id,
@@ -215,6 +224,7 @@ impl MessageStore for SqliteStorage {
 mod tests {
     use chrono::Utc;
     use rusqlite::params;
+    use swage_core::Role;
     use uuid::Uuid;
 
     use crate::model::{NewMessage, NewProject, NewSession};
@@ -261,7 +271,7 @@ mod tests {
         (storage, session.id, thread_id)
     }
 
-    fn new_msg(thread_id: Uuid, role: &str, content: &str, position: i32) -> NewMessage {
+    fn new_msg(thread_id: Uuid, role: Role, content: &str, position: i32) -> NewMessage {
         NewMessage {
             thread_id,
             turn_id: None,
@@ -272,7 +282,7 @@ mod tests {
         }
     }
 
-    fn append_msg(thread_id: Uuid, role: &str, content: &str) -> AppendMessage {
+    fn append_msg(thread_id: Uuid, role: Role, content: &str) -> AppendMessage {
         AppendMessage {
             thread_id,
             turn_id: None,
@@ -289,11 +299,11 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         storage
-            .create_message(new_msg(thread_id, "user", "hello", 0))
+            .create_message(new_msg(thread_id, Role::User, "hello", 0))
             .await
             .unwrap();
         storage
-            .create_message(new_msg(thread_id, "assistant", "hi", 1))
+            .create_message(new_msg(thread_id, Role::Assistant, "hi", 1))
             .await
             .unwrap();
 
@@ -301,8 +311,8 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].position, 0);
         assert_eq!(msgs[1].position, 1);
-        assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -321,11 +331,11 @@ mod tests {
 
         // Insert out of position order to verify the ORDER BY clause works.
         storage
-            .create_message(new_msg(thread_id, "assistant", "second", 1))
+            .create_message(new_msg(thread_id, Role::Assistant, "second", 1))
             .await
             .unwrap();
         storage
-            .create_message(new_msg(thread_id, "user", "first", 0))
+            .create_message(new_msg(thread_id, Role::User, "first", 0))
             .await
             .unwrap();
 
@@ -340,11 +350,11 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         let first = storage
-            .append_message(append_msg(thread_id, "user", "first"))
+            .append_message(append_msg(thread_id, Role::User, "first"))
             .await
             .unwrap();
         let second = storage
-            .append_message(append_msg(thread_id, "assistant", "second"))
+            .append_message(append_msg(thread_id, Role::Assistant, "second"))
             .await
             .unwrap();
 
@@ -357,12 +367,12 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         storage
-            .create_message(new_msg(thread_id, "user", "seed", 7))
+            .create_message(new_msg(thread_id, Role::User, "seed", 7))
             .await
             .unwrap();
 
         let appended = storage
-            .append_message(append_msg(thread_id, "assistant", "next"))
+            .append_message(append_msg(thread_id, Role::Assistant, "next"))
             .await
             .unwrap();
 
@@ -376,7 +386,7 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         let created = storage
-            .create_message(new_msg(thread_id, "user", "hi", 0))
+            .create_message(new_msg(thread_id, Role::User, "hi", 0))
             .await
             .unwrap();
         let fetched = storage
@@ -387,7 +397,7 @@ mod tests {
 
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.thread_id, thread_id);
-        assert_eq!(fetched.role, "user");
+        assert_eq!(fetched.role, Role::User);
         assert_eq!(fetched.content, "hi");
         assert_eq!(fetched.agent_id, "test-agent");
     }
@@ -406,11 +416,11 @@ mod tests {
         let (storage, _, thread_id) = make_thread().await;
 
         storage
-            .create_message(new_msg(thread_id, "user", "a", 0))
+            .create_message(new_msg(thread_id, Role::User, "a", 0))
             .await
             .unwrap();
         storage
-            .create_message(new_msg(thread_id, "assistant", "b", 1))
+            .create_message(new_msg(thread_id, Role::Assistant, "b", 1))
             .await
             .unwrap();
 
@@ -459,11 +469,11 @@ mod tests {
             .unwrap();
 
         storage
-            .create_message(new_msg(t1, "user", "in t1", 0))
+            .create_message(new_msg(t1, Role::User, "in t1", 0))
             .await
             .unwrap();
         storage
-            .create_message(new_msg(t2, "user", "in t2", 0))
+            .create_message(new_msg(t2, Role::User, "in t2", 0))
             .await
             .unwrap();
 
@@ -486,11 +496,11 @@ mod tests {
         let (storage, session_id, thread_id) = make_thread().await;
 
         storage
-            .create_message(new_msg(thread_id, "user", "first", 0))
+            .create_message(new_msg(thread_id, Role::User, "first", 0))
             .await
             .unwrap();
         storage
-            .create_message(new_msg(thread_id, "assistant", "last", 1))
+            .create_message(new_msg(thread_id, Role::Assistant, "last", 1))
             .await
             .unwrap();
 
@@ -517,7 +527,7 @@ mod tests {
         // NewMessage has no tool fields; they default to NULL.
         let (storage, _, thread_id) = make_thread().await;
         let msg = storage
-            .create_message(new_msg(thread_id, "user", "plain", 0))
+            .create_message(new_msg(thread_id, Role::User, "plain", 0))
             .await
             .unwrap();
 
@@ -527,5 +537,28 @@ mod tests {
         let fetched = storage.get_message(msg.id).await.unwrap().unwrap();
         assert!(fetched.tool_call_id.is_none());
         assert!(fetched.tool_name.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_stored_role_returns_explicit_error() {
+        let (storage, _, thread_id) = make_thread().await;
+        let now = Utc::now().to_rfc3339();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
+                     VALUES (?1, ?2, NULL, 'bogus', 'oops', 0, 'test-agent', NULL, NULL, ?3)",
+                    params![Uuid::new_v4().to_string(), thread_id.to_string(), now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let error = storage
+            .list_messages_by_thread(thread_id)
+            .await
+            .expect_err("invalid stored role should fail");
+        assert!(error.to_string().contains("unknown chat role: bogus"));
     }
 }

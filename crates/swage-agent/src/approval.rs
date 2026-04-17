@@ -6,21 +6,65 @@
 //! WebSocket-based approval UI.
 
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use thiserror::Error;
 use uuid::Uuid;
 
 /// The outcome of a human approval decision, sent back to the agent through
 /// a oneshot channel.
 #[derive(Debug, Clone)]
 pub struct ApprovalDecision {
-    /// "approved" or "rejected" — matches the wire protocol.
-    pub decision: String,
+    pub decision: ApprovalDecisionValue,
     /// Optional human-readable rationale from the reviewer.
     pub reason: Option<String>,
 }
 
 impl ApprovalDecision {
     pub fn is_approved(&self) -> bool {
-        self.decision == "approved"
+        self.decision == ApprovalDecisionValue::Approved
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionValue {
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown approval decision: {value}")]
+pub struct ApprovalDecisionParseError {
+    value: String,
+}
+
+impl ApprovalDecisionValue {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+impl std::fmt::Display for ApprovalDecisionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ApprovalDecisionValue {
+    type Err = ApprovalDecisionParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(ApprovalDecisionParseError {
+                value: other.to_string(),
+            }),
+        }
     }
 }
 
@@ -94,7 +138,7 @@ mod tests {
     #[test]
     fn approval_decision_approved() {
         let d = ApprovalDecision {
-            decision: "approved".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: None,
         };
         assert!(d.is_approved());
@@ -103,7 +147,7 @@ mod tests {
     #[test]
     fn approval_decision_rejected() {
         let d = ApprovalDecision {
-            decision: "rejected".to_string(),
+            decision: ApprovalDecisionValue::Rejected,
             reason: Some("too dangerous".to_string()),
         };
         assert!(!d.is_approved());
@@ -112,19 +156,19 @@ mod tests {
     #[test]
     fn approval_decision_debug_and_clone() {
         let d = ApprovalDecision {
-            decision: "approved".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: Some("looks good".to_string()),
         };
         let cloned = d.clone();
         let debug = format!("{:?}", cloned);
-        assert!(debug.contains("approved"));
+        assert!(debug.contains("Approved"));
     }
 
     #[tokio::test]
     async fn approval_decision_traverses_oneshot_channel() {
         let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
         tx.send(ApprovalDecision {
-            decision: "approved".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: None,
         })
         .unwrap();

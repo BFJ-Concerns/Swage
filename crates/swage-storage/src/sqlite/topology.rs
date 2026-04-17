@@ -9,7 +9,8 @@ use swage_core::StorageError;
 
 use crate::model::{
     EdgeEvaluation, NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewTopologyRun,
-    NodeExecution, NodeExecutionState, NodeRetry, TopologyRun, TopologyRunState,
+    NodeExecution, NodeExecutionState, NodeRetry, TopologyNodeRecordKind, TopologyRun,
+    TopologyRunState,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::TopologyTraceStore;
@@ -79,7 +80,13 @@ fn row_to_node_execution(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeExecut
         id: parse_uuid(&id)?,
         topology_run_id: parse_uuid(&topology_run_id)?,
         node_id: row.get(2)?,
-        node_kind: row.get(3)?,
+        node_kind: TopologyNodeRecordKind::from_str(&row.get::<_, String>(3)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            )
+        })?,
         agent_id: row.get(4)?,
         task_name: row.get(5)?,
         state: NodeExecutionState::from_str(&state).map_err(|e| {
@@ -322,7 +329,7 @@ impl TopologyTraceStore for SqliteStorage {
                     id.to_string(),
                     execution.topology_run_id.to_string(),
                     &execution.node_id,
-                    &execution.node_kind,
+                    execution.node_kind.to_string(),
                     &execution.agent_id,
                     &execution.task_name,
                     state.to_string(),
@@ -636,7 +643,7 @@ mod tests {
             .create_node_execution(NewNodeExecution {
                 topology_run_id: run.id,
                 node_id: "plan".into(),
-                node_kind: "llm".into(),
+                node_kind: TopologyNodeRecordKind::Llm,
                 agent_id: Some("planner".into()),
                 task_name: Some("draft-plan".into()),
                 state: NodeExecutionState::Running,
@@ -717,7 +724,7 @@ mod tests {
             .create_node_execution(NewNodeExecution {
                 topology_run_id: run.id,
                 node_id: "finalise".into(),
-                node_kind: "deterministic".into(),
+                node_kind: TopologyNodeRecordKind::Deterministic,
                 agent_id: None,
                 task_name: Some("package-results".into()),
                 state: NodeExecutionState::Running,
@@ -808,7 +815,7 @@ mod tests {
             .create_node_execution(NewNodeExecution {
                 topology_run_id: run.id,
                 node_id: "plan".into(),
-                node_kind: "llm".into(),
+                node_kind: TopologyNodeRecordKind::Llm,
                 agent_id: Some("planner".into()),
                 task_name: None,
                 state: NodeExecutionState::Running,
@@ -852,5 +859,57 @@ mod tests {
                 .is_empty()
         );
         assert!(storage.list_node_retries(node.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_stored_node_kind_returns_explicit_error() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let project = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                project_id: project.id,
+                name: "invalid-kind".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                members: vec!["planner".into()],
+            })
+            .await
+            .unwrap();
+        let run = storage
+            .create_topology_run(NewTopologyRun {
+                team_id: team.id,
+                session_id: session.id,
+                source_turn_id: None,
+                state: TopologyRunState::Running,
+                final_output: None,
+                error_message: None,
+            })
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, agent_id, task_name, state, input_json, output_json, error_message, created_at, completed_at)
+                     VALUES (?1, ?2, 'plan', 'bogus', NULL, NULL, 'running', NULL, NULL, NULL, ?3, NULL)",
+                    params![Uuid::new_v4().to_string(), run.id.to_string(), now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let error = storage
+            .list_node_executions_by_run(run.id)
+            .await
+            .expect_err("invalid stored node kind should fail");
+        assert!(error.to_string().contains("unknown topology node kind: bogus"));
     }
 }

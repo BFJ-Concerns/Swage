@@ -7,6 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use thiserror::Error;
 use uuid::Uuid;
 
 /// Role of a participant in a conversation.
@@ -20,6 +22,20 @@ pub enum Role {
     Tool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown chat role: {value}")]
+pub struct RoleParseError {
+    value: String,
+}
+
+impl RoleParseError {
+    fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+}
+
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -29,6 +45,20 @@ impl std::fmt::Display for Role {
             Role::Tool => "tool",
         };
         write!(f, "{s}")
+    }
+}
+
+impl FromStr for Role {
+    type Err = RoleParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "system" => Ok(Role::System),
+            "user" => Ok(Role::User),
+            "assistant" => Ok(Role::Assistant),
+            "tool" => Ok(Role::Tool),
+            other => Err(RoleParseError::new(other)),
+        }
     }
 }
 
@@ -267,6 +297,12 @@ mod tests {
         assert_eq!(Role::Assistant.to_string(), "assistant");
         assert_eq!(Role::System.to_string(), "system");
         assert_eq!(Role::Tool.to_string(), "tool");
+    }
+
+    #[test]
+    fn role_from_str_rejects_unknown_role() {
+        let error = "moderator".parse::<Role>().expect_err("unknown role should fail");
+        assert_eq!(error.to_string(), "unknown chat role: moderator");
     }
 
     #[test]

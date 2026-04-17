@@ -5,9 +5,7 @@
 //! The policy is resolved from CommunicationConfig: per-target overrides take
 //! precedence, falling back to the default mode.
 
-use std::collections::HashSet;
-
-use swage_config::{ContextTransferConfig, ContextTransferMode};
+use swage_config::{ContextTransferConfig, ContextTransferField, ContextTransferMode};
 use swage_core::{ChatMessage, CompletionRequest, ContentPart, Role};
 use swage_provider::LlmProvider;
 
@@ -28,7 +26,7 @@ pub struct TransferredContext {
 pub fn resolve_policy<'a>(
     config: &'a ContextTransferConfig,
     target_agent_id: &str,
-) -> (&'a ContextTransferMode, &'a [String], Option<u32>) {
+) -> (&'a ContextTransferMode, &'a [ContextTransferField], Option<u32>) {
     if let Some(target_config) = config.targets.get(target_agent_id) {
         (
             &target_config.mode,
@@ -51,7 +49,7 @@ pub fn resolve_policy<'a>(
 ///   for cross-agent use. This is fail-open by design.
 pub fn evaluate_transfer(
     mode: &ContextTransferMode,
-    allowed_fields: &[String],
+    allowed_fields: &[ContextTransferField],
     _summary_budget: Option<u32>,
     sender_context: &[ChatMessage],
 ) -> TransferredContext {
@@ -59,16 +57,17 @@ pub fn evaluate_transfer(
         ContextTransferMode::None => TransferredContext::default(),
 
         ContextTransferMode::Explicit => {
-            // Filter context messages by allowed field names.
-            // Fields map to ChatMessage roles for now. Silently omit unknown fields.
-            // Pre-compute lowercased field set once: O(M) instead of O(N×M) allocations.
-            let allowed_lower: HashSet<String> =
-                allowed_fields.iter().map(|f| f.to_lowercase()).collect();
             let messages = sender_context
                 .iter()
                 .filter(|msg| {
-                    let role_str = msg.role.to_string().to_lowercase();
-                    allowed_lower.contains(&role_str)
+                    allowed_fields.iter().any(|field| {
+                        matches!(
+                            (field, &msg.role),
+                            (ContextTransferField::System, Role::System)
+                                | (ContextTransferField::User, Role::User)
+                                | (ContextTransferField::Assistant, Role::Assistant)
+                        )
+                    })
                 })
                 .cloned()
                 .collect();
@@ -95,7 +94,7 @@ pub fn evaluate_transfer(
 /// to `None` gracefully if the provider call fails.
 pub async fn evaluate_transfer_async(
     mode: &ContextTransferMode,
-    allowed_fields: &[String],
+    allowed_fields: &[ContextTransferField],
     summary_budget: Option<u32>,
     sender_context: &[ChatMessage],
     provider: Option<&dyn LlmProvider>,
@@ -228,7 +227,7 @@ mod tests {
     fn mode_explicit_filters_by_role() {
         let result = evaluate_transfer(
             &ContextTransferMode::Explicit,
-            &["system".to_string(), "user".to_string()],
+            &[ContextTransferField::System, ContextTransferField::User],
             None,
             &sample_context(),
         );
@@ -245,14 +244,12 @@ mod tests {
     }
 
     #[test]
-    fn mode_explicit_unknown_fields_silently_ignored() {
-        let result = evaluate_transfer(
-            &ContextTransferMode::Explicit,
-            &["nonexistent".to_string()],
-            None,
-            &sample_context(),
-        );
-        assert!(result.messages.is_empty());
+    fn context_transfer_config_rejects_unknown_allowed_field() {
+        let error = serde_json::from_str::<ContextTransferConfig>(
+            r#"{"mode":"explicit","allowed_fields":["nonexistent"],"summary_budget":null,"targets":{}}"#,
+        )
+        .expect_err("unknown field should be rejected");
+        assert!(error.to_string().contains("nonexistent"));
     }
 
     #[test]
@@ -272,7 +269,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::Stream;
     use std::pin::Pin;
-    use swage_config::ContextTransferTargetConfig;
+    use swage_config::{ContextTransferField, ContextTransferTargetConfig};
     use swage_core::{
         CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
         StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
@@ -433,7 +430,7 @@ mod tests {
     async fn mode_explicit_async_delegates_to_sync() {
         let result = evaluate_transfer_async(
             &ContextTransferMode::Explicit,
-            &["user".to_string()],
+            &[ContextTransferField::User],
             None,
             &sample_context(),
             None,
@@ -455,7 +452,7 @@ mod tests {
                     "agent-b".to_string(),
                     ContextTransferTargetConfig {
                         mode: ContextTransferMode::Explicit,
-                        allowed_fields: vec!["system".to_string()],
+                        allowed_fields: vec![ContextTransferField::System],
                         summary_budget: None,
                     },
                 );
@@ -465,7 +462,7 @@ mod tests {
 
         let (mode, fields, _) = resolve_policy(&config, "agent-b");
         assert_eq!(*mode, ContextTransferMode::Explicit);
-        assert_eq!(fields, &["system".to_string()]);
+        assert_eq!(fields, &[ContextTransferField::System]);
 
         // Unspecified target falls back to default.
         let (mode, _, _) = resolve_policy(&config, "agent-c");
@@ -476,7 +473,7 @@ mod tests {
     fn transfer_context_convenience() {
         let config = ContextTransferConfig {
             mode: ContextTransferMode::Explicit,
-            allowed_fields: vec!["system".to_string()],
+            allowed_fields: vec![ContextTransferField::System],
             summary_budget: None,
             targets: std::collections::HashMap::new(),
         };

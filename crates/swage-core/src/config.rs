@@ -20,7 +20,7 @@ pub enum Protocol {
 }
 
 /// Configuration for connecting to an LLM provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderConfig {
     /// Unique identifier for this provider instance.
     pub id: String,
@@ -40,6 +40,20 @@ pub struct ProviderConfig {
     pub tokens_per_minute: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProviderConfigDef {
+    id: String,
+    protocol: Protocol,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    requests_per_minute: Option<u32>,
+    #[serde(default)]
+    tokens_per_minute: Option<u32>,
+}
+
 impl ProviderConfig {
     /// Creates a new provider configuration, validating the base URL if provided.
     ///
@@ -53,6 +67,18 @@ impl ProviderConfig {
         requests_per_minute: Option<u32>,
         tokens_per_minute: Option<u32>,
     ) -> Result<Self, ProviderError> {
+        if id.trim().is_empty() {
+            return Err(ProviderError::InvalidConfig {
+                message: "provider id must not be empty".to_string(),
+            });
+        }
+        if let Some(env) = api_key_env.as_deref()
+            && env.trim().is_empty()
+        {
+            return Err(ProviderError::InvalidConfig {
+                message: "api_key_env must not be empty when set".to_string(),
+            });
+        }
         // Validate the URL scheme if one is provided.
         if let Some(ref raw_url) = base_url {
             let parsed = Url::parse(raw_url).map_err(|err| ProviderError::InvalidConfig {
@@ -75,6 +101,31 @@ impl ProviderConfig {
             requests_per_minute,
             tokens_per_minute,
         })
+    }
+}
+
+impl TryFrom<ProviderConfigDef> for ProviderConfig {
+    type Error = ProviderError;
+
+    fn try_from(value: ProviderConfigDef) -> Result<Self, Self::Error> {
+        Self::new(
+            value.id,
+            value.protocol,
+            value.api_key_env,
+            value.base_url,
+            value.requests_per_minute,
+            value.tokens_per_minute,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = ProviderConfigDef::deserialize(deserializer)?;
+        ProviderConfig::try_from(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -250,6 +301,29 @@ mod tests {
         assert!(!json.contains("base_url"));
         assert!(!json.contains("requests_per_minute"));
         assert!(!json.contains("tokens_per_minute"));
+    }
+
+    #[test]
+    fn provider_config_deserialisation_rejects_blank_id() {
+        let json = serde_json::json!({
+            "id": " ",
+            "protocol": Protocol::Google,
+        });
+        let error = serde_json::from_value::<ProviderConfig>(json)
+            .expect_err("blank provider id should be rejected");
+        assert!(error.to_string().contains("provider id must not be empty"));
+    }
+
+    #[test]
+    fn provider_config_deserialisation_rejects_blank_api_key_env() {
+        let json = serde_json::json!({
+            "id": "openai",
+            "protocol": Protocol::OpenAiCompatible,
+            "api_key_env": " ",
+        });
+        let error = serde_json::from_value::<ProviderConfig>(json)
+            .expect_err("blank api_key_env should be rejected");
+        assert!(error.to_string().contains("api_key_env must not be empty"));
     }
 
     // -- ModelConfig ----------------------------------------------------------

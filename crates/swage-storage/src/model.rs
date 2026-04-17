@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use swage_core::StorageError;
+use swage_core::{Role, StorageError};
 use uuid::Uuid;
 
 /// Turn lifecycle state.
@@ -177,7 +177,7 @@ pub struct Message {
     ///
     /// Older rows and synthetic thread bootstrap messages may not have a turn.
     pub turn_id: Option<Uuid>,
-    pub role: String,
+    pub role: Role,
     pub content: String,
     /// Monotonically increasing position within the thread.
     pub position: i32,
@@ -727,6 +727,39 @@ impl FromStr for NodeExecutionState {
     }
 }
 
+/// Stable persisted node kind for topology execution traces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyNodeRecordKind {
+    Llm,
+    Deterministic,
+    Continuation,
+}
+
+impl std::fmt::Display for TopologyNodeRecordKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TopologyNodeRecordKind::Llm => "llm",
+            TopologyNodeRecordKind::Deterministic => "deterministic",
+            TopologyNodeRecordKind::Continuation => "continuation",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for TopologyNodeRecordKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "llm" => Ok(TopologyNodeRecordKind::Llm),
+            "deterministic" => Ok(TopologyNodeRecordKind::Deterministic),
+            "continuation" => Ok(TopologyNodeRecordKind::Continuation),
+            other => Err(format!("unknown topology node kind: {other}")),
+        }
+    }
+}
+
 /// A single node execution within a topology run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeExecution {
@@ -735,7 +768,7 @@ pub struct NodeExecution {
     /// Stable identifier from the topology definition.
     pub node_id: String,
     /// Semantic node kind such as `llm`, `deterministic`, or `continuation`.
-    pub node_kind: String,
+    pub node_kind: TopologyNodeRecordKind,
     pub agent_id: Option<String>,
     pub task_name: Option<String>,
     pub state: NodeExecutionState,
@@ -751,7 +784,7 @@ pub struct NodeExecution {
 pub struct NewNodeExecution {
     pub topology_run_id: Uuid,
     pub node_id: String,
-    pub node_kind: String,
+    pub node_kind: TopologyNodeRecordKind,
     pub agent_id: Option<String>,
     pub task_name: Option<String>,
     pub state: NodeExecutionState,
@@ -857,7 +890,7 @@ pub struct NewMessage {
     pub thread_id: Uuid,
     /// The turn that produced this message, when known.
     pub turn_id: Option<Uuid>,
-    pub role: String,
+    pub role: Role,
     pub content: String,
     /// Monotonically increasing position within the thread.
     pub position: i32,
@@ -873,7 +906,7 @@ pub struct AppendMessage {
     pub thread_id: Uuid,
     /// The turn that produced this message, when known.
     pub turn_id: Option<Uuid>,
-    pub role: String,
+    pub role: Role,
     pub content: String,
     /// The agent that produced or received this message.
     pub agent_id: String,
@@ -1132,7 +1165,7 @@ mod tests {
             id: Uuid::new_v4(),
             topology_run_id: Uuid::new_v4(),
             node_id: "plan".into(),
-            node_kind: "llm".into(),
+            node_kind: TopologyNodeRecordKind::Llm,
             agent_id: Some("planner".into()),
             task_name: Some("draft-plan".into()),
             state: NodeExecutionState::Completed,
@@ -1412,7 +1445,7 @@ mod tests {
             id,
             thread_id,
             turn_id: Some(Uuid::new_v4()),
-            role: "user".to_string(),
+            role: Role::User,
             content: "hello".to_string(),
             position: 0,
             agent_id: "agent-1".to_string(),
@@ -1426,7 +1459,7 @@ mod tests {
 
         assert_eq!(back.id, id);
         assert_eq!(back.thread_id, thread_id);
-        assert_eq!(back.role, "user");
+        assert_eq!(back.role, Role::User);
         assert_eq!(back.agent_id, "agent-1");
         assert_eq!(back.tool_call_id, Some("call_abc123".to_string()));
         assert_eq!(back.tool_name, Some("shell".to_string()));
@@ -1443,7 +1476,7 @@ mod tests {
             id,
             thread_id,
             turn_id: None,
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: "sure".to_string(),
             position: 1,
             agent_id: "agent-1".to_string(),
@@ -1465,7 +1498,7 @@ mod tests {
         let nm = NewMessage {
             thread_id,
             turn_id: None,
-            role: "user".to_string(),
+            role: Role::User,
             content: "test".to_string(),
             position: 0,
             agent_id: "agent-x".to_string(),
@@ -1479,7 +1512,7 @@ mod tests {
         let original = NewMessage {
             thread_id: Uuid::new_v4(),
             turn_id: Some(Uuid::new_v4()),
-            role: "user".to_string(),
+            role: Role::User,
             content: "hi".to_string(),
             position: 0,
             agent_id: "agent-y".to_string(),

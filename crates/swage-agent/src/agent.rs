@@ -413,7 +413,7 @@ impl Agent {
                         .append_message(swage_storage::model::AppendMessage {
                             thread_id,
                             turn_id: Some(turn.id),
-                            role: "assistant".into(),
+                            role: Role::Assistant,
                             content: accumulated.clone(),
                             agent_id: self.config.agent_id.clone(),
                         })
@@ -507,7 +507,7 @@ impl Agent {
             .append_message(swage_storage::model::AppendMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "assistant".into(),
+                role: Role::Assistant,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })

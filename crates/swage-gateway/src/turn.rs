@@ -677,7 +677,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         .append_message(AppendMessage {
             thread_id,
             turn_id: Some(prepared_turn_id),
-            role: Role::User.to_string(),
+            role: Role::User,
             content: before_inbound.canonical_content.clone(),
             agent_id: session.agent_id.clone(),
         })
@@ -690,19 +690,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     let stored_history = state.storage.list_messages_by_thread(thread_id).await?;
     let history_messages: Vec<ChatMessage> = stored_history
         .into_iter()
-        .map(|m| {
-            let role = match m.role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "tool" => Role::Tool,
-                unexpected_role => {
-                    tracing::warn!(role = %unexpected_role, "unexpected history role in gateway assembly; treating as user");
-                    Role::User
-                }
-            };
-            ChatMessage::new(role, m.content)
-        })
+        .map(|m| ChatMessage::new(m.role, m.content))
         .collect();
 
     // Load project memory from the filesystem. Returns an empty string when
@@ -2944,9 +2932,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(messages.len(), 2, "user message + assistant message");
-        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[0].content, "Hi");
-        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].role, Role::Assistant);
         assert_eq!(messages[1].content, "Hello, world!");
 
         // Verify the turn was marked Completed.

@@ -8,9 +8,11 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
+use swage_agent::approval::ApprovalDecisionValue;
 use crate::{state::AppState, subscription::SubscriptionState, turn};
 
 // ---------------------------------------------------------------------------
@@ -1023,8 +1025,16 @@ async fn dispatch_client_message(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = channels.remove(&approval_uuid) {
+                    let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
+                        tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
+                        let _ = tx.send(ServerEvent::Error {
+                            code: error_codes::INTERNAL_ERROR.to_string(),
+                            message: "Failed to record approval decision.".to_string(),
+                        });
+                        return;
+                    };
                     let _ = sender.send(swage_agent::ApprovalDecision {
-                        decision: decision.clone(),
+                        decision: decision_value,
                         reason: reason.clone(),
                     });
                 }
@@ -2255,7 +2265,10 @@ mod tests {
 
         // The oneshot should have fired with the rejection.
         let decision = oneshot_rx.await.expect("oneshot should have fired");
-        assert_eq!(decision.decision, "rejected");
+        assert_eq!(
+            decision.decision,
+            swage_agent::approval::ApprovalDecisionValue::Rejected
+        );
         assert_eq!(decision.reason, Some("Too risky".to_string()));
     }
 }

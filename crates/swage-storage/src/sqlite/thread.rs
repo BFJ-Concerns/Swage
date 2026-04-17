@@ -356,6 +356,7 @@ mod tests {
     use crate::model::NewMessage;
     use crate::model::{NewProject, NewSession};
     use crate::store::{MessageStore, ProjectStore, SessionStore};
+    use swage_core::Role;
 
     use super::*;
 
@@ -680,7 +681,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id: parent.id,
                 turn_id: None,
-                role: "user".into(),
+                role: Role::User,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -691,7 +692,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id: parent.id,
                 turn_id: None,
-                role: "assistant".into(),
+                role: Role::Assistant,
                 content: "world".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -730,7 +731,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id: parent_a.id,
                 turn_id: None,
-                role: "user".into(),
+                role: Role::User,
                 content: "a".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -741,7 +742,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id: parent_b.id,
                 turn_id: None,
-                role: "user".into(),
+                role: Role::User,
                 content: "b".into(),
                 position: 0,
                 agent_id: "agent-1".into(),

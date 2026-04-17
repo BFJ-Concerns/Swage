@@ -149,7 +149,7 @@ pub struct PartialHitlConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialContextTransferTargetConfig {
     pub mode: Option<crate::model::ContextTransferMode>,
-    pub allowed_fields: Option<Vec<String>>,
+    pub allowed_fields: Option<Vec<crate::model::ContextTransferField>>,
     pub summary_budget: Option<u32>,
 }
 
@@ -161,7 +161,7 @@ pub struct PartialContextTransferTargetConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialContextTransferConfig {
     pub mode: Option<crate::model::ContextTransferMode>,
-    pub allowed_fields: Option<Vec<String>>,
+    pub allowed_fields: Option<Vec<crate::model::ContextTransferField>>,
     pub summary_budget: Option<u32>,
     pub targets: Option<HashMap<String, PartialContextTransferTargetConfig>>,
 }
@@ -628,6 +628,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ContextTransferField;
 
     fn partial_with_server_host(host: &str) -> PartialConfig {
         PartialConfig {
@@ -1273,7 +1274,10 @@ mod tests {
                 expiry_interval_secs: None,
                 context_transfer: Some(PartialContextTransferConfig {
                     mode: Some(crate::model::ContextTransferMode::Summary),
-                    allowed_fields: Some(vec!["system".into(), "tools".into()]),
+                    allowed_fields: Some(vec![
+                        ContextTransferField::System,
+                        ContextTransferField::Assistant,
+                    ]),
                     summary_budget: Some(1024),
                     targets: Some({
                         let mut m = std::collections::HashMap::new();
@@ -1281,7 +1285,7 @@ mod tests {
                             "agent-b".into(),
                             PartialContextTransferTargetConfig {
                                 mode: None,                                  // should inherit Summary
-                                allowed_fields: Some(vec!["system".into()]), // overrides
+                                allowed_fields: Some(vec![ContextTransferField::System]), // overrides
                                 summary_budget: None,                        // should inherit 1024
                             },
                         );
@@ -1307,7 +1311,7 @@ mod tests {
         );
         assert_eq!(
             target.allowed_fields,
-            vec!["system".to_string()],
+            vec![ContextTransferField::System],
             "per-target allowed_fields should be the override value"
         );
         assert_eq!(

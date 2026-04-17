@@ -12,7 +12,7 @@ use swage_core::ChatMessage;
 
 /// The complete output of a context assembly run: a non-empty message list
 /// paired with a structured report describing how the context was built.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AssemblyOutput {
     /// The assembled context messages. Always non-empty — construction is
     /// guarded by [`AssemblyOutput::new`].
@@ -21,6 +21,12 @@ pub struct AssemblyOutput {
     /// A full account of every element processed, any compaction applied,
     /// and any errors or warnings encountered.
     pub report: AssemblyReport,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssemblyOutputDef {
+    messages: Vec<ChatMessage>,
+    report: AssemblyReport,
 }
 
 impl AssemblyOutput {
@@ -45,6 +51,24 @@ impl AssemblyOutput {
             "AssemblyOutput requires at least one message"
         );
         Self { messages, report }
+    }
+}
+
+impl TryFrom<AssemblyOutputDef> for AssemblyOutput {
+    type Error = String;
+
+    fn try_from(value: AssemblyOutputDef) -> Result<Self, Self::Error> {
+        Self::new(value.messages, value.report)
+    }
+}
+
+impl<'de> Deserialize<'de> for AssemblyOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = AssemblyOutputDef::deserialize(deserializer)?;
+        AssemblyOutput::try_from(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -247,6 +271,15 @@ mod tests {
         let report = AssemblyReport::default();
         let output = AssemblyOutput::new(vec![make_message()], report).unwrap();
         assert_eq!(output.messages.len(), 1);
+    }
+
+    #[test]
+    fn assembly_output_deserialisation_rejects_empty_messages() {
+        let error = serde_json::from_str::<AssemblyOutput>(
+            r#"{"messages":[],"report":{"assembly_name":"default","elements":[],"total_tokens":0,"budget":null,"budget_remaining":null,"compaction_applied":[],"warnings":[],"errors":[],"duration":{"secs":0,"nanos":0}}}"#,
+        )
+        .expect_err("empty messages should be rejected");
+        assert!(error.to_string().contains("at least one message"));
     }
 
     #[test]

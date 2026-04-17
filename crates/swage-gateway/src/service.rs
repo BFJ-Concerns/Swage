@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use serde_json::Value as JsonValue;
-use swage_core::{GatewayError, StorageError};
+use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
     model::{
         EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry, Team,
@@ -245,7 +245,7 @@ impl ConversationService {
                 let turn_id = message.turn_id;
                 let turn_state = turn_id
                     .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id).cloned());
-                let tool_calls = if message.role == "assistant" {
+                let tool_calls = if message.role == Role::Assistant {
                     turn_id
                         .and_then(|message_turn_id| {
                             tool_calls_by_turn.get(&message_turn_id).cloned()
@@ -258,7 +258,7 @@ impl ConversationService {
                 MessageView {
                     thread_id: message.thread_id,
                     turn_id,
-                    role: message.role,
+                    role: message.role.to_string(),
                     content: message.content,
                     timestamp: message.created_at,
                     turn_state,
@@ -451,11 +451,11 @@ impl ConversationService {
             messages: messages
                 .into_iter()
                 .map(|message| {
-                    let is_assistant = message.role == "assistant";
+                    let is_assistant = message.role == Role::Assistant;
                     MessageView {
                         thread_id: message.thread_id,
                         turn_id: message.turn_id,
-                        role: message.role,
+                        role: message.role.to_string(),
                         content: message.content,
                         timestamp: message.created_at,
                         turn_state: message
@@ -1216,7 +1216,7 @@ fn node_execution_to_response(node: NodeExecution) -> NodeExecutionResponse {
         id: node.id,
         topology_run_id: node.topology_run_id,
         node_id: node.node_id,
-        node_kind: node.node_kind,
+        node_kind: node.node_kind.to_string(),
         agent_id: node.agent_id,
         task_name: node.task_name,
         state: node.state.to_string(),
@@ -1359,7 +1359,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "user".to_string(),
+                role: Role::User,
                 content: "Hello!".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1440,7 +1440,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "user".to_string(),
+                role: Role::User,
                 content: "Hi".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1451,7 +1451,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: "Hello!".to_string(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1544,7 +1544,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "user".into(),
+                role: Role::User,
                 content: "list files".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1556,7 +1556,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "assistant".into(),
+                role: Role::Assistant,
                 content: "I'll run ls for you.".into(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1634,7 +1634,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "assistant".into(),
+                role: Role::Assistant,
                 content: "Ran python".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1725,7 +1725,7 @@ mod tests {
             .create_message(NewMessage {
                 thread_id,
                 turn_id: Some(turn.id),
-                role: "assistant".into(),
+                role: Role::Assistant,
                 content: "Hello".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),

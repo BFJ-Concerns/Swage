@@ -211,7 +211,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
         .await
         .expect("thread messages");
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].role, "assistant");
+    assert_eq!(messages[0].role, swage_core::Role::Assistant);
     assert_eq!(messages[0].content, "hello world");
 
     let events = drain_events(event_rx);

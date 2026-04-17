@@ -121,6 +121,7 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::Value;
+    use swage_agent::approval::ApprovalDecisionValue;
     use swage_core::SandboxError;
     use swage_sandbox::{Sandbox, ToolCallResult};
 
@@ -223,12 +224,12 @@ mod tests {
             .expect("sender should be present");
         sender
             .send(ApprovalDecision {
-                decision: "approved".to_string(),
+                decision: ApprovalDecisionValue::Approved,
                 reason: None,
             })
             .unwrap();
         let decision = rx.await.expect("receiver should get decision");
-        assert_eq!(decision.decision, "approved");
+        assert_eq!(decision.decision, ApprovalDecisionValue::Approved);
         assert_eq!(decision.reason, None);
     }
 

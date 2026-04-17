@@ -398,6 +398,14 @@ impl RequireApprovalEntry {
 // `lowercase` for all current single-word variants (None, Explicit, Summary).
 pub use swage_core::ContextTransferMode;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTransferField {
+    System,
+    User,
+    Assistant,
+}
+
 /// Context transfer policy for a single target agent.
 ///
 /// Overrides the defaults in [`ContextTransferConfig`] for a specific
@@ -407,9 +415,8 @@ pub struct ContextTransferTargetConfig {
     /// Transfer mode for this specific target.
     pub mode: ContextTransferMode,
     /// For `Explicit` mode: which context element types to include.
-    /// Silently omits fields that don't exist in the sender's context.
     #[serde(default)]
-    pub allowed_fields: Vec<String>,
+    pub allowed_fields: Vec<ContextTransferField>,
     /// For `Summary` mode: maximum token budget for the compacted summary.
     pub summary_budget: Option<u32>,
 }
@@ -431,7 +438,7 @@ pub struct ContextTransferConfig {
     pub mode: ContextTransferMode,
     /// For `Explicit` mode: default allowed fields.
     #[serde(default)]
-    pub allowed_fields: Vec<String>,
+    pub allowed_fields: Vec<ContextTransferField>,
     /// For `Summary` mode: default token budget.
     pub summary_budget: Option<u32>,
     /// Per-target overrides keyed by recipient agent_id.
@@ -975,6 +982,7 @@ timeout_policy = "reject"
 
         let original = ToolConfig {
             shell_timeout_secs: 60,
+            python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,
             plugin_directory: Some("plugins".into()),
             search: None,

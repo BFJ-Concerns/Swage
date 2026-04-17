@@ -6,6 +6,7 @@
 
 use uuid::Uuid;
 
+use swage_core::Role;
 use swage_storage::model::NewProject;
 use swage_storage::store::{
     MessageStore, ProjectStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
@@ -78,7 +79,7 @@ async fn create_full_hierarchy(
             thread_id: thread.id,
             turn_id: Some(turn.id),
             agent_id: agent_id.to_string(),
-            role: "user".to_string(),
+            role: Role::User,
             content: "Hello from integration test".to_string(),
             position: 0,
         })
@@ -533,7 +534,7 @@ async fn messages_ordered_within_thread() {
             thread_id: thread.id,
             turn_id: None,
             agent_id: AGENT_A.to_string(),
-            role: "user".into(),
+            role: Role::User,
             content: "second".into(),
             position: 1,
         })
@@ -545,7 +546,7 @@ async fn messages_ordered_within_thread() {
             thread_id: thread.id,
             turn_id: None,
             agent_id: AGENT_A.to_string(),
-            role: "user".into(),
+            role: Role::User,
             content: "first".into(),
             position: 0,
         })
@@ -557,7 +558,7 @@ async fn messages_ordered_within_thread() {
             thread_id: thread.id,
             turn_id: None,
             agent_id: AGENT_A.to_string(),
-            role: "assistant".into(),
+            role: Role::Assistant,
             content: "third".into(),
             position: 2,
         })

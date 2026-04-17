@@ -6,6 +6,23 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown {type_name}: {value}")]
+pub struct MessagingParseError {
+    type_name: &'static str,
+    value: String,
+}
+
+impl MessagingParseError {
+    fn new(type_name: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            type_name,
+            value: value.into(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MessageKind
@@ -45,7 +62,7 @@ impl std::fmt::Display for MessageKind {
 }
 
 impl FromStr for MessageKind {
-    type Err = String;
+    type Err = MessagingParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -54,7 +71,7 @@ impl FromStr for MessageKind {
             "notify" => Ok(MessageKind::Notify),
             "cancel" => Ok(MessageKind::Cancel),
             "shutdown" => Ok(MessageKind::Shutdown),
-            other => Err(format!("unknown message kind: {other}")),
+            other => Err(MessagingParseError::new("message kind", other)),
         }
     }
 }
@@ -90,14 +107,14 @@ impl std::fmt::Display for MessageStatus {
 }
 
 impl FromStr for MessageStatus {
-    type Err = String;
+    type Err = MessagingParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "pending" => Ok(MessageStatus::Pending),
             "delivered" => Ok(MessageStatus::Delivered),
             "failed" => Ok(MessageStatus::Failed),
-            other => Err(format!("unknown message status: {other}")),
+            other => Err(MessagingParseError::new("message status", other)),
         }
     }
 }
@@ -138,14 +155,14 @@ impl std::fmt::Display for ContextTransferMode {
 }
 
 impl FromStr for ContextTransferMode {
-    type Err = String;
+    type Err = MessagingParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(ContextTransferMode::None),
             "explicit" => Ok(ContextTransferMode::Explicit),
             "summary" => Ok(ContextTransferMode::Summary),
-            other => Err(format!("unknown context transfer mode: {other}")),
+            other => Err(MessagingParseError::new("context transfer mode", other)),
         }
     }
 }

@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 
 use crate::{
@@ -760,8 +761,8 @@ pub async fn send_agent_message(
 
     let kind: MessageKind = req
         .kind
-        .parse()
-        .map_err(|e: String| ApiError::validation(e))?;
+        .parse::<MessageKind>()
+        .map_err(|e| ApiError::validation(e.to_string()))?;
 
     // Store-only path — live dispatch deferred. See BACKLOG.md [fvxd].
     let router = MessageRouter::new(state.storage.clone(), None);
@@ -891,8 +892,7 @@ impl ApprovalOutcome {
 /// Request body for an approval decision.
 #[derive(Debug, Deserialize)]
 pub struct ApprovalDecisionRequest {
-    /// "approved" or "rejected"
-    pub decision: String,
+    pub decision: ApprovalDecisionValue,
     pub reason: Option<String>,
 }
 
@@ -908,12 +908,10 @@ pub async fn decide_approval(
     use swage_agent::ApprovalDecision;
 
     // Validate the decision string early — before any side effects.
-    let outcome = ApprovalOutcome::parse(&req.decision).ok_or_else(|| {
-        ApiError::validation(format!(
-            "invalid decision '{}': expected 'approved' or 'rejected'",
-            req.decision,
-        ))
-    })?;
+    let outcome = match req.decision {
+        ApprovalDecisionValue::Approved => ApprovalOutcome::Approved,
+        ApprovalDecisionValue::Rejected => ApprovalOutcome::Rejected,
+    };
 
     // Try to fire the oneshot channel for this approval.
     let sender = state
@@ -931,7 +929,7 @@ pub async fn decide_approval(
     match sender {
         Some(tx) => {
             let decision = ApprovalDecision {
-                decision: outcome.as_str().to_string(),
+                decision: req.decision,
                 reason: req.reason.clone(),
             };
 
@@ -2492,7 +2490,7 @@ def build_topology():
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
                 turn_id: None,
-                role: "user".into(),
+                role: swage_core::Role::User,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "gateway".into(),
@@ -2503,7 +2501,7 @@ def build_topology():
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
                 turn_id: None,
-                role: "assistant".into(),
+                role: swage_core::Role::Assistant,
                 content: "draft".into(),
                 position: 1,
                 agent_id: "gateway".into(),
@@ -2542,7 +2540,7 @@ def build_topology():
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
                 turn_id: None,
-                role: "user".into(),
+                role: swage_core::Role::User,
                 content: "parent continues".into(),
                 position: 2,
                 agent_id: "gateway".into(),
