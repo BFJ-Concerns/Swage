@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::str::FromStr;
 
 use axum::{
     Json,
@@ -273,6 +274,12 @@ pub async fn register_execution_host(
         return Err(ApiError::validation(
             "execution host id must not be empty".to_string(),
         ));
+    }
+    if crate::execution_host::ExecutionHostKind::from_str(request.kind.trim()).is_err() {
+        return Err(ApiError::validation(format!(
+            "unknown execution host kind '{}'",
+            request.kind
+        )));
     }
     if request.base_url.trim().is_empty() {
         return Err(ApiError::validation(

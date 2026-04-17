@@ -163,10 +163,11 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
-        if matches!(
-            self.execution_host.as_ref().map(|host| &host.kind),
-            Some(crate::execution_host::ExecutionHostKind::AttachedNode)
-        ) {
+        if self
+            .execution_host
+            .as_ref()
+            .is_some_and(|host| host.kind != crate::execution_host::ExecutionHostKind::Local)
+        {
             return crate::execution_host::execute_on_remote_host(
                 self.execution_host.as_ref().expect("checked execution host"),
                 tool_name,

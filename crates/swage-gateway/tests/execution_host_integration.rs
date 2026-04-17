@@ -18,8 +18,8 @@ use swage_core::{
 };
 use swage_gateway::{
     execution_host::{
-        RegisterExecutionHostRequest, register_attached_node_with_gateway,
-        register_local_execution_host, spawn_attached_node,
+        ExecutionHostKind, RegisterExecutionHostRequest, register_attached_node_with_gateway,
+        register_local_execution_host, spawn_attached_node, spawn_transport_backed_host,
     },
     server::build_router,
     state::AppState,
@@ -296,6 +296,7 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
     let registration = RegisterExecutionHostRequest {
         host_id: "remote-node-a".to_string(),
         label: Some("Remote Node A".to_string()),
+        kind: "attached_node".to_string(),
         base_url: node.base_url.clone(),
         shared_token: "node-secret".to_string(),
         workspace_root: node_workspace.path().to_string_lossy().into_owned(),
@@ -309,4 +310,61 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
     assert_eq!(result["host"], "remote-node", "remote tool result: {result:?}");
 
     node.join_handle.abort();
+}
+
+async fn run_transport_backend_round_trip(
+    backend_kind: ExecutionHostKind,
+    backend_label: &str,
+    marker: &'static str,
+) {
+    let workspace = tempfile::TempDir::new().unwrap();
+    let (tx1, rx1) = tokio::sync::mpsc::channel(10);
+    let (tx2, rx2) = tokio::sync::mpsc::channel(10);
+    let provider = ChannelProvider::new(vec![rx1, rx2]);
+    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(HostIdentityTool {
+            marker: "gateway-unused",
+        }) as Arc<dyn Tool>,
+    ]);
+    let (addr, _state) =
+        start_test_server(provider, gateway_dispatcher, workspace.path().to_path_buf(), false)
+            .await;
+
+    let backend_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(HostIdentityTool { marker }) as Arc<dyn Tool>,
+    ]);
+    let backend = spawn_transport_backed_host(
+        backend_kind.clone(),
+        backend_dispatcher,
+        workspace.path().to_path_buf(),
+        "backend-secret".to_string(),
+    )
+    .await;
+    let registration = RegisterExecutionHostRequest {
+        host_id: format!("{backend_label}-host"),
+        label: Some(format!("{backend_label} Host")),
+        kind: backend_kind.to_string(),
+        base_url: backend.base_url.clone(),
+        shared_token: "backend-secret".to_string(),
+        workspace_root: workspace.path().to_string_lossy().into_owned(),
+        capabilities: vec!["host_identity".to_string()],
+    };
+    register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
+        .await
+        .unwrap();
+
+    let result = run_turn_and_collect_tool_result(addr, tx1, tx2).await;
+    assert_eq!(result["host"], marker, "{backend_label} result: {result:?}");
+
+    backend.join_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_execution_backend_runs_through_shared_execution_interface() {
+    run_transport_backend_round_trip(ExecutionHostKind::Docker, "docker", "docker-host").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ssh_execution_backend_runs_through_shared_execution_interface() {
+    run_transport_backend_round_trip(ExecutionHostKind::Ssh, "ssh", "ssh-host").await;
 }
