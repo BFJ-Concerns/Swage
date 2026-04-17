@@ -59,6 +59,7 @@ pub mod error;
 pub mod handlers;
 pub mod heartbeat;
 pub mod lifecycle;
+pub mod presence;
 pub mod schedule;
 pub mod server;
 pub mod service;

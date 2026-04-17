@@ -193,6 +193,16 @@ pub fn build_router(state: AppState) -> Router {
             "/api/heartbeats/:id/runs",
             get(handlers::list_heartbeat_runs),
         )
+        // Runtime presence and liveness.
+        .route("/api/presence", get(handlers::presence_snapshot))
+        .route(
+            "/api/presence/machines/heartbeat",
+            post(handlers::machine_heartbeat),
+        )
+        .route(
+            "/api/presence/machines/:id",
+            axum::routing::delete(handlers::disconnect_machine),
+        )
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/:id", post(handlers::decide_approval))

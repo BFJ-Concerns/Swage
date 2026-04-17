@@ -21,9 +21,18 @@ impl From<GatewayError> for ApiError {
 impl ApiError {
     /// 404 Not Found for a named entity.
     pub fn not_found(entity: &str, id: uuid::Uuid) -> Self {
+        Self::not_found_string(entity, id.to_string())
+    }
+
+    /// 404 Not Found for a named entity with a non-UUID identifier.
+    pub fn not_found_str(entity: &str, id: &str) -> Self {
+        Self::not_found_string(entity, id.to_string())
+    }
+
+    fn not_found_string(entity: &str, id: String) -> Self {
         ApiError(GatewayError::Storage(swage_core::StorageError::NotFound {
             entity: entity.to_string(),
-            id: id.to_string(),
+            id,
         }))
     }
 

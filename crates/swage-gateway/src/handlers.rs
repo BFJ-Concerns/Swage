@@ -22,6 +22,7 @@ use crate::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
     },
+    presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
     schedule::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
         ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
@@ -224,6 +225,32 @@ pub async fn delete_heartbeat(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("heartbeat", id))
+    }
+}
+
+/// `GET /api/presence` — inspect gateway, client, and machine presence.
+pub async fn presence_snapshot(State(state): State<AppState>) -> Json<PresenceSnapshotResponse> {
+    Json(crate::presence::snapshot_presence(&state).await)
+}
+
+/// `POST /api/presence/machines/heartbeat` — register or refresh a machine heartbeat.
+pub async fn machine_heartbeat(
+    State(state): State<AppState>,
+    Json(req): Json<MachineHeartbeatRequest>,
+) -> StatusCode {
+    crate::presence::upsert_machine_heartbeat(&state, req).await;
+    StatusCode::ACCEPTED
+}
+
+/// `DELETE /api/presence/machines/:id` — mark a machine disconnected.
+pub async fn disconnect_machine(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if crate::presence::disconnect_machine(&state, &id).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found_str("machine", &id))
     }
 }
 
@@ -1355,6 +1382,7 @@ mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (build_router(state), storage)
     }
@@ -2854,6 +2882,7 @@ def build_topology():
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

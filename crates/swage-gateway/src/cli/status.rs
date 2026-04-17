@@ -4,7 +4,11 @@
 //! the full gateway state: PID, address, uptime, and health status.
 
 use chrono::Utc;
-use swage_client::{error::ClientError, http::GatewayClient, runtime::RuntimeMetadata};
+use swage_client::{
+    error::ClientError,
+    http::{GatewayClient, PresenceSnapshotResponse},
+    runtime::RuntimeMetadata,
+};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -42,9 +46,13 @@ pub async fn run() -> Result<(), ClientError> {
     match client.health().await {
         Ok(()) => {
             let uptime = format_uptime(Utc::now() - meta.started_at);
+            let presence = client.presence().await.ok();
             println!("Gateway is running (PID {})", meta.pid);
             println!("  Address: {}", meta.address);
             println!("  Uptime:  {uptime}");
+            if let Some(presence) = presence {
+                println!("  Presence: {}", format_presence_summary(&presence));
+            }
             Ok(())
         }
         Err(_) => {
@@ -87,6 +95,15 @@ pub(crate) fn format_uptime(duration: chrono::Duration) -> String {
     }
 }
 
+pub(crate) fn format_presence_summary(presence: &PresenceSnapshotResponse) -> String {
+    format!(
+        "{} client(s), {} machine(s), {} active turn(s)",
+        presence.gateway.active_connection_count,
+        presence.machines.len(),
+        presence.gateway.active_turn_count
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests — written first; they fail until format_uptime and run() are defined
 // ---------------------------------------------------------------------------
@@ -94,7 +111,12 @@ pub(crate) fn format_uptime(duration: chrono::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
+    use swage_client::http::{
+        ClientPresenceResponse, MachinePresenceResponse, PresenceGatewayResponse,
+        PresenceSnapshotResponse,
+    };
+    use uuid::Uuid;
 
     // Sub-minute durations render as seconds only.
     #[test]
@@ -137,6 +159,40 @@ mod tests {
         assert!(
             result.is_ok(),
             "format_uptime should not panic on negative input"
+        );
+    }
+
+    #[test]
+    fn format_presence_summary_reports_operator_counts() {
+        let presence = PresenceSnapshotResponse {
+            gateway: PresenceGatewayResponse {
+                status: "running".to_string(),
+                shutdown_requested: false,
+                seconds_since_activity: 4,
+                active_turn_count: 3,
+                active_connection_count: 2,
+            },
+            clients: vec![ClientPresenceResponse {
+                session_id: Uuid::new_v4(),
+                state: "connected".to_string(),
+                connected_at: None,
+                last_seen_at: None,
+                disconnected_at: None,
+            }],
+            machines: vec![MachinePresenceResponse {
+                machine_id: "node-a".to_string(),
+                label: Some("Node A".to_string()),
+                state: "connected".to_string(),
+                registered_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                disconnected_at: None,
+                stale_after_secs: 30,
+            }],
+        };
+
+        assert_eq!(
+            format_presence_summary(&presence),
+            "2 client(s), 1 machine(s), 3 active turn(s)"
         );
     }
 }

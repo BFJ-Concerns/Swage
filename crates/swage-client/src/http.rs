@@ -51,6 +51,42 @@ pub struct UpdateProjectRequest {
     pub workspace_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PresenceGatewayResponse {
+    pub status: String,
+    pub shutdown_requested: bool,
+    pub seconds_since_activity: u64,
+    pub active_turn_count: usize,
+    pub active_connection_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClientPresenceResponse {
+    pub session_id: Uuid,
+    pub state: String,
+    pub connected_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub disconnected_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MachinePresenceResponse {
+    pub machine_id: String,
+    pub label: Option<String>,
+    pub state: String,
+    pub registered_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub disconnected_at: Option<DateTime<Utc>>,
+    pub stale_after_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PresenceSnapshotResponse {
+    pub gateway: PresenceGatewayResponse,
+    pub clients: Vec<ClientPresenceResponse>,
+    pub machines: Vec<MachinePresenceResponse>,
+}
+
 // ---------------------------------------------------------------------------
 // GatewayClient
 // ---------------------------------------------------------------------------
@@ -168,6 +204,18 @@ impl GatewayClient {
 
         self.check_success(response, &url).await?;
         Ok(())
+    }
+
+    /// Fetches the runtime presence and liveness snapshot.
+    pub async fn presence(&self) -> Result<PresenceSnapshotResponse, ClientError> {
+        let url = format!("{}/api/presence", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
     }
 
     // --- Project CRUD ---

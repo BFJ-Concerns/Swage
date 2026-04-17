@@ -15,7 +15,10 @@ use swage_sandbox::Sandbox;
 use swage_storage::store::{ProjectStore, Storage};
 
 use crate::channel_gateway::{ChannelOrigin, RecordedDelivery};
-use crate::{lifecycle::ActivityTracker, tool::ToolDispatcher, websocket::ServerEvent};
+use crate::{
+    lifecycle::ActivityTracker, presence::PresenceRuntime, tool::ToolDispatcher,
+    websocket::ServerEvent,
+};
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
@@ -84,6 +87,8 @@ pub struct AppState {
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
     /// Recorded deliveries across all routing targets.
     pub delivery_log: Arc<AsyncMutex<Vec<RecordedDelivery>>>,
+    /// Runtime presence for recent clients and registered machines.
+    pub presence: Arc<AsyncMutex<PresenceRuntime>>,
 }
 
 impl AppState {
@@ -113,6 +118,7 @@ impl AppState {
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
+            presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
         }
     }
 }
@@ -176,6 +182,7 @@ mod tests {
             hook_registry: None,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             delivery_log: Arc::new(AsyncMutex::new(Vec::new())),
+            presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
         }
     }
 

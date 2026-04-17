@@ -3188,6 +3188,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (state, session_id)
     }
@@ -3246,6 +3247,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (state, session_id)
     }
@@ -3374,6 +3376,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3691,6 +3694,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (state, session_id)
     }
@@ -3947,6 +3951,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4398,6 +4403,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4486,6 +4492,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4658,6 +4665,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4826,6 +4834,7 @@ pub(crate) mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
         (state, session_id)
     }

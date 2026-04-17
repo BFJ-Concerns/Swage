@@ -396,6 +396,7 @@ pub async fn ws_handler(
 
     // Mark connection as active now that preconditions passed.
     state.active_connections.lock().await.insert(session_id);
+    crate::presence::record_client_connected(&state, session_id).await;
 
     ws.on_upgrade(move |socket| handle_connection(socket, state, session_id))
 }
@@ -555,6 +556,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                         // Only actual messages reset the idle timer —
                         // an open but silent connection does not count.
                         state.activity_tracker.record_activity();
+                        crate::presence::record_client_seen(&state, session_id).await;
                         dispatch_client_message(
                             text.as_str(),
                             &state,
@@ -577,6 +579,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
         let mut connections = state.active_connections.lock().await;
         connections.remove(&session_id);
     }
+    crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
 fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
@@ -1670,6 +1673,7 @@ mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         }
     }
 
@@ -1719,6 +1723,7 @@ mod tests {
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             delivery_log: Arc::new(Mutex::new(Vec::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
         };
 
         (state, session_id)
