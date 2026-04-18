@@ -15,6 +15,7 @@ pub mod project;
 pub mod schedule;
 pub mod secret;
 pub mod session;
+pub mod shared_reference;
 pub mod skill_activation;
 pub mod team;
 pub mod thread;

@@ -47,6 +47,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
         ("026_lens_preferences", CREATE_LENS_PREFERENCES_TABLE),
+        (
+            "027_shared_reference_events",
+            CREATE_SHARED_REFERENCE_EVENT_TABLE,
+        ),
     ]
 }
 
@@ -102,6 +106,20 @@ const CREATE_LENS_PREFERENCES_TABLE: &str = "
 
     INSERT OR IGNORE INTO lens_preferences (singleton_key, active_lens, updated_at)
     VALUES (1, 'assistant', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+";
+
+const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS shared_reference_events (
+        id           TEXT NOT NULL PRIMARY KEY,
+        object_kind  TEXT NOT NULL,
+        object_id    TEXT NOT NULL,
+        event_kind   TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at   TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shared_reference_events_object
+        ON shared_reference_events(object_kind, object_id, created_at);
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "

@@ -1429,9 +1429,10 @@ pub(crate) mod tests {
         pub(crate) turns: HashMap<Uuid, Turn>,
         pub(crate) messages: Vec<Message>,
         pub(crate) tool_calls: Vec<ToolCallRecord>,
-        pub(crate) snapshots: HashMap<Uuid, String>,
+        pub(crate) snapshots: HashMap<Uuid, (String, chrono::DateTime<chrono::Utc>)>,
         pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
         pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
+        pub(crate) shared_reference_events: Vec<swage_storage::SharedReferenceEvent>,
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
         pub(crate) scheduled_jobs: HashMap<Uuid, ScheduledJob>,
         pub(crate) scheduled_runs: HashMap<Uuid, ScheduledRun>,
@@ -3246,12 +3247,90 @@ pub(crate) mod tests {
                 .lock()
                 .await
                 .snapshots
-                .insert(turn_id, report_json.to_string());
+                .insert(turn_id, (report_json.to_string(), chrono::Utc::now()));
             Ok(())
         }
 
         async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError> {
-            Ok(self.db.lock().await.snapshots.get(&turn_id).cloned())
+            Ok(self
+                .db
+                .lock()
+                .await
+                .snapshots
+                .get(&turn_id)
+                .map(|(report_json, _)| report_json.clone()))
+        }
+
+        async fn list_snapshots_by_project(
+            &self,
+            project_id: Uuid,
+            limit: usize,
+        ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
+            let db = self.db.lock().await;
+            let mut records = Vec::new();
+            for (turn_id, (report_json, created_at)) in &db.snapshots {
+                let Some(turn) = db.turns.get(turn_id) else {
+                    continue;
+                };
+                let Some(thread) = db.threads.get(&turn.thread_id) else {
+                    continue;
+                };
+                let Some(session) = db.sessions.get(&thread.session_id) else {
+                    continue;
+                };
+                if session.project_id != project_id {
+                    continue;
+                }
+                records.push(swage_storage::ContextSnapshotRecord {
+                    turn_id: *turn_id,
+                    session_id: session.id,
+                    project_id,
+                    created_at: *created_at,
+                    report_json: report_json.clone(),
+                });
+            }
+            records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            records.truncate(limit);
+            Ok(records)
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::SharedReferenceStore for MockStorage {
+        async fn create_shared_reference_event(
+            &self,
+            event: swage_storage::NewSharedReferenceEvent,
+        ) -> Result<swage_storage::SharedReferenceEvent, StorageError> {
+            let created = swage_storage::SharedReferenceEvent {
+                id: event.id,
+                object_kind: event.object_kind,
+                object_id: event.object_id,
+                event_kind: event.event_kind,
+                payload: event.payload,
+                created_at: chrono::Utc::now(),
+            };
+            self.db
+                .lock()
+                .await
+                .shared_reference_events
+                .push(created.clone());
+            Ok(created)
+        }
+
+        async fn list_shared_reference_events(
+            &self,
+            object_kind: swage_storage::SharedReferenceKind,
+            object_id: &str,
+        ) -> Result<Vec<swage_storage::SharedReferenceEvent>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .shared_reference_events
+                .iter()
+                .filter(|event| event.object_kind == object_kind && event.object_id == object_id)
+                .cloned()
+                .collect())
         }
     }
 

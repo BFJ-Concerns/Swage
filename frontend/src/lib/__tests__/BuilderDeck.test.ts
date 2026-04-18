@@ -15,6 +15,12 @@ vi.mock("../api/builder", () => ({
   createProjectExtension: vi.fn(),
   updateProjectExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
+  listSharedReferences: vi.fn(),
+  getSharedReference: vi.fn(),
+  createSharedReferenceEvent: vi.fn(),
+  updateTeamTopologyReference: vi.fn(),
+  isTeamTopologyPayload: (payload: Record<string, unknown>) => "nodes" in payload,
+  isContextSnapshotPayload: (payload: Record<string, unknown>) => "elements" in payload,
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -115,6 +121,7 @@ describe("BuilderDeck", () => {
       status: "active",
       source_kind: "managed",
     });
+    vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
   });
 
   afterEach(() => {

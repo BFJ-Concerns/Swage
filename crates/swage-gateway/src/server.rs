@@ -194,6 +194,19 @@ pub fn build_router(state: AppState) -> Router {
             "/api/lens-runtime",
             get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
         )
+        .route("/api/shared-objects", get(handlers::list_shared_objects))
+        .route(
+            "/api/shared-objects/:kind/:id",
+            get(handlers::get_shared_object),
+        )
+        .route(
+            "/api/shared-objects/:kind/:id/events",
+            post(handlers::create_shared_object_event),
+        )
+        .route(
+            "/api/shared-objects/team_topology/:id",
+            put(handlers::update_team_topology_reference),
+        )
         .route(
             "/api/secrets",
             get(handlers::list_secrets).post(handlers::create_secret),

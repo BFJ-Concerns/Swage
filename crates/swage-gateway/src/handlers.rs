@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
+use swage_storage::SharedReferenceKind;
 
 use crate::{
     attachment::{
@@ -64,6 +65,11 @@ use crate::{
         ProjectResponse, ProjectService, TeamListResponse, TeamResponse, TeamService,
         TopologyRunDetailResponse, TopologyRunResponse, TopologyRunService, UpdateProjectRequest,
         UpdateTeamRequest,
+    },
+    shared_reference::{
+        CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
+        SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
+        UpdateTeamTopologyReferenceRequest,
     },
     state::AppState,
     supervision::{RunDetailResponse, RunListQuery, RunListResponse},
@@ -195,6 +201,62 @@ pub async fn update_lens_runtime(
     ))
 }
 
+/// `GET /api/shared-objects` — list shared reference objects for a project.
+pub async fn list_shared_objects(
+    State(state): State<AppState>,
+    Query(query): Query<SharedReferenceListQuery>,
+) -> Result<Json<SharedReferenceListResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::list_shared_objects(&state, query).await?,
+    ))
+}
+
+/// `GET /api/shared-objects/:kind/:id` — inspect one shared reference object.
+pub async fn get_shared_object(
+    State(state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::get_shared_object(
+            &state,
+            parse_shared_reference_kind(&kind)?,
+            &id,
+        )
+        .await?,
+    ))
+}
+
+/// `POST /api/shared-objects/:kind/:id/events` — persist a replayable interaction event.
+pub async fn create_shared_object_event(
+    State(state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+    Json(request): Json<CreateSharedReferenceEventRequest>,
+) -> Result<(StatusCode, Json<SharedReferenceInteractionResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            crate::shared_reference::create_shared_object_event(
+                &state,
+                parse_shared_reference_kind(&kind)?,
+                &id,
+                request,
+            )
+            .await?,
+        ),
+    ))
+}
+
+/// `PUT /api/shared-objects/team_topology/:id` — update the editable team-topology shared object.
+pub async fn update_team_topology_reference(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateTeamTopologyReferenceRequest>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::update_team_topology_reference(&state, id, request).await?,
+    ))
+}
+
 /// `GET /api/secrets` — list governed secrets without revealing raw values.
 pub async fn list_secrets(
     State(state): State<AppState>,
@@ -263,6 +325,11 @@ pub async fn validate_secret(
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecretValidationResponse>, ApiError> {
     Ok(Json(state.secret_manager.validate_secret(id).await?))
+}
+
+fn parse_shared_reference_kind(kind: &str) -> Result<SharedReferenceKind, ApiError> {
+    kind.parse()
+        .map_err(|error: String| ApiError::from(GatewayError::ValidationError(error)))
 }
 
 /// `GET /api/operator/runs` — inspect live and historical run supervision.

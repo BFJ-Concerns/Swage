@@ -9,6 +9,7 @@
     updateTeam,
   } from "../api/builder";
   import OperatorDashboard from "./OperatorDashboard.svelte";
+  import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { ProjectStore } from "../stores/projects";
   import type { AppLens, ProjectExtensionSummary, TeamSummary } from "../types";
@@ -197,6 +198,11 @@
       extensionError =
         error instanceof Error ? error.message : "Failed to approve extension.";
     }
+  }
+
+  async function handleTeamTopologyUpdate(): Promise<void> {
+    if (!currentProject) return;
+    await refreshBuilderData(currentProject.id);
   }
 </script>
 
@@ -409,6 +415,11 @@
           </div>
         </div>
       </article>
+
+      <SharedReferenceStudio
+        projectId={currentProject.id}
+        onTeamTopologyUpdated={handleTeamTopologyUpdate}
+      />
     </section>
 
     <div class="operator-shell">

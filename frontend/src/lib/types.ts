@@ -176,6 +176,83 @@ export interface UpdateProjectExtensionRequest {
 }
 
 // -------------------------------------------------------------------------
+// Shared reference object types
+// -------------------------------------------------------------------------
+
+export type SharedReferenceKind = "team_topology" | "context_snapshot";
+
+export interface SharedReferenceSummary {
+  kind: SharedReferenceKind;
+  id: string;
+  title: string;
+  subtitle: string;
+  updated_at: string;
+}
+
+export interface SharedReferenceInteraction {
+  id: string;
+  event_kind: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SharedReferenceNode {
+  agent_id: string;
+  label: string;
+  column: number;
+  is_entry: boolean;
+}
+
+export interface SharedReferenceEdge {
+  from: string;
+  to: string;
+  kind: string;
+}
+
+export interface TeamTopologySharedReferencePayload {
+  team_id: string;
+  project_id: string;
+  entry_agent_id: string;
+  members: string[];
+  nodes: SharedReferenceNode[];
+  edges: SharedReferenceEdge[];
+}
+
+export interface ContextSnapshotElementReference {
+  element_id: string;
+  name: string;
+  source: string;
+  token_count: number;
+  priority: number;
+  preview: string | null;
+  child_count: number;
+}
+
+export interface ContextSnapshotSharedReferencePayload {
+  turn_id: string;
+  assembly_name: string;
+  total_tokens: number;
+  budget: number | null;
+  warnings: string[];
+  elements: ContextSnapshotElementReference[];
+}
+
+export interface SharedReferenceObject {
+  kind: SharedReferenceKind;
+  id: string;
+  title: string;
+  subtitle: string;
+  payload:
+    | TeamTopologySharedReferencePayload
+    | ContextSnapshotSharedReferencePayload;
+}
+
+export interface SharedReferenceDetailResponse {
+  object: SharedReferenceObject;
+  interactions: SharedReferenceInteraction[];
+}
+
+// -------------------------------------------------------------------------
 // Operator surface types
 // -------------------------------------------------------------------------
 

@@ -1,5 +1,10 @@
 import type {
+  ContextSnapshotSharedReferencePayload,
   CreateProjectExtensionRequest,
+  SharedReferenceDetailResponse,
+  SharedReferenceKind,
+  SharedReferenceSummary,
+  TeamTopologySharedReferencePayload,
   CreateTeamRequest,
   ProjectExtensionSummary,
   TeamSummary,
@@ -98,4 +103,55 @@ export async function approveWorkspaceExtension(
     "POST",
   );
   return response.json() as Promise<ProjectExtensionSummary>;
+}
+
+export async function listSharedReferences(
+  projectId: string,
+): Promise<SharedReferenceSummary[]> {
+  const response = await request(`/api/shared-objects?project_id=${projectId}`, "GET");
+  const body = (await response.json()) as { objects: SharedReferenceSummary[] };
+  return body.objects;
+}
+
+export async function getSharedReference(
+  kind: SharedReferenceKind,
+  id: string,
+): Promise<SharedReferenceDetailResponse> {
+  const response = await request(`/api/shared-objects/${kind}/${id}`, "GET");
+  return response.json() as Promise<SharedReferenceDetailResponse>;
+}
+
+export async function createSharedReferenceEvent(
+  kind: SharedReferenceKind,
+  id: string,
+  eventKind: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await request(`/api/shared-objects/${kind}/${id}/events`, "POST", {
+    event_kind: eventKind,
+    payload,
+  });
+}
+
+export async function updateTeamTopologyReference(
+  teamId: string,
+  payload: Pick<TeamTopologySharedReferencePayload, "entry_agent_id" | "members">,
+): Promise<SharedReferenceDetailResponse> {
+  const response = await request(`/api/shared-objects/team_topology/${teamId}`, "PUT", {
+    entry_agent_id: payload.entry_agent_id,
+    members: payload.members,
+  });
+  return response.json() as Promise<SharedReferenceDetailResponse>;
+}
+
+export function isTeamTopologyPayload(
+  payload: SharedReferenceDetailResponse["object"]["payload"],
+): payload is TeamTopologySharedReferencePayload {
+  return "nodes" in payload;
+}
+
+export function isContextSnapshotPayload(
+  payload: SharedReferenceDetailResponse["object"]["payload"],
+): payload is ContextSnapshotSharedReferencePayload {
+  return "elements" in payload;
 }

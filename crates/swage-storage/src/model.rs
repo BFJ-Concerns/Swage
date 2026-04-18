@@ -48,6 +48,67 @@ pub struct LensPreference {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Canonical kind of shared reference object exposed to users and the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedReferenceKind {
+    TeamTopology,
+    ContextSnapshot,
+}
+
+impl std::fmt::Display for SharedReferenceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            SharedReferenceKind::TeamTopology => "team_topology",
+            SharedReferenceKind::ContextSnapshot => "context_snapshot",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for SharedReferenceKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "team_topology" => Ok(Self::TeamTopology),
+            "context_snapshot" => Ok(Self::ContextSnapshot),
+            other => Err(format!("unknown shared reference kind: {other}")),
+        }
+    }
+}
+
+/// Persisted interaction against a shared reference object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedReferenceEvent {
+    pub id: Uuid,
+    pub object_kind: SharedReferenceKind,
+    pub object_id: String,
+    pub event_kind: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for creating a shared reference event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewSharedReferenceEvent {
+    pub id: Uuid,
+    pub object_kind: SharedReferenceKind,
+    pub object_id: String,
+    pub event_kind: String,
+    pub payload: serde_json::Value,
+}
+
+/// Persisted context snapshot metadata for project-scoped listing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextSnapshotRecord {
+    pub turn_id: Uuid,
+    pub session_id: Uuid,
+    pub project_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub report_json: String,
+}
+
 /// Turn lifecycle state.
 ///
 /// State transitions are consumer-driven — the storage layer records whatever

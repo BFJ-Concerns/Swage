@@ -1,12 +1,21 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
 
+use crate::model::ContextSnapshotRecord;
 use crate::sqlite::SqliteStorage;
 use crate::store::ContextSnapshotStore;
+
+fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+}
 
 // ---------------------------------------------------------------------------
 // ContextSnapshotStore
@@ -38,6 +47,54 @@ impl ContextSnapshotStore for SqliteStorage {
                 |row| row.get::<_, String>(0),
             )
             .optional()
+        })
+        .await
+    }
+
+    async fn list_snapshots_by_project(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT cs.turn_id, th.session_id, s.project_id, cs.created_at, cs.report_json
+                 FROM context_snapshots cs
+                 INNER JOIN turns t ON t.id = cs.turn_id
+                 INNER JOIN threads th ON th.id = t.thread_id
+                 INNER JOIN sessions s ON s.id = th.session_id
+                 WHERE s.project_id = ?1
+                 ORDER BY cs.created_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![project_id.to_string(), limit as i64], |row| {
+                Ok(ContextSnapshotRecord {
+                    turn_id: row.get::<_, String>(0)?.parse().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    session_id: row.get::<_, String>(1)?.parse().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    project_id: row.get::<_, String>(2)?.parse().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    created_at: parse_dt(&row.get::<_, String>(3)?)?,
+                    report_json: row.get(4)?,
+                })
+            })?;
+            rows.collect()
         })
         .await
     }

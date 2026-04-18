@@ -5,15 +5,16 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest, ApprovalState,
-    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, DeliveryRecord,
-    EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
-    InboundAudit, LensPreference, Material, Message, NewAgentMessage, NewApprovalRequest,
-    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeliveryRecord,
-    NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMaterial,
-    NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
-    NewSecretRecord, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-    ScheduledRunState, SecretRecord, Session, Team, Thread, ThreadBranch, ThreadState,
+    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, ContextSnapshotRecord,
+    DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
+    HeartbeatRunState, InboundAudit, LensPreference, Material, Message, NewAgentMessage,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink,
+    NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat,
+    NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
+    NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewSharedReferenceEvent,
+    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
+    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session,
+    SharedReferenceEvent, SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState,
     ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
     UpdateScheduledJob,
 };
@@ -428,6 +429,25 @@ pub trait ContextSnapshotStore: Send + Sync {
     /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
     /// was stored for that turn.
     async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
+    /// List recent context snapshots for a project, newest first.
+    async fn list_snapshots_by_project(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
+}
+
+#[async_trait]
+pub trait SharedReferenceStore: Send + Sync {
+    async fn create_shared_reference_event(
+        &self,
+        event: NewSharedReferenceEvent,
+    ) -> Result<SharedReferenceEvent, StorageError>;
+    async fn list_shared_reference_events(
+        &self,
+        object_kind: SharedReferenceKind,
+        object_id: &str,
+    ) -> Result<Vec<SharedReferenceEvent>, StorageError>;
 }
 
 /// Store for thread CRUD operations.
@@ -765,6 +785,7 @@ pub trait Storage:
     + MessageStore
     + ToolCallStore
     + ContextSnapshotStore
+    + SharedReferenceStore
     + SkillActivationStore
     + ApprovalStore
     + AgentMessageStore
@@ -794,6 +815,7 @@ impl<T> Storage for T where
         + MessageStore
         + ToolCallStore
         + ContextSnapshotStore
+        + SharedReferenceStore
         + SkillActivationStore
         + ApprovalStore
         + AgentMessageStore
@@ -1311,6 +1333,31 @@ mod tests {
             unimplemented!()
         }
         async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_snapshots_by_project(
+            &self,
+            _project_id: Uuid,
+            _limit: usize,
+        ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl SharedReferenceStore for StubStorage {
+        async fn create_shared_reference_event(
+            &self,
+            _: NewSharedReferenceEvent,
+        ) -> Result<SharedReferenceEvent, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_shared_reference_events(
+            &self,
+            _: SharedReferenceKind,
+            _: &str,
+        ) -> Result<Vec<SharedReferenceEvent>, StorageError> {
             unimplemented!()
         }
     }
