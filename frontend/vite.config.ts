@@ -44,5 +44,22 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("/node_modules/highlight.js/")) {
+            return "code-highlighting";
+          }
+          if (
+            id.includes("/node_modules/marked/") ||
+            id.includes("/node_modules/marked-highlight/") ||
+            id.includes("/node_modules/dompurify/")
+          ) {
+            return "markdown-rendering";
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

@@ -5,17 +5,18 @@
 <script lang="ts">
   import ConversationList from "./ConversationList.svelte";
   import ProjectSelector from "./ProjectSelector.svelte";
-  import BuilderDeck from "./BuilderDeck.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
-  import OperatorDashboard from "./OperatorDashboard.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { AppLens, LensSurface } from "../types";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
   import type { ProjectStore } from "../stores/projects";
+
+  type BuilderDeckModule = typeof import("./BuilderDeck.svelte");
+  type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
 
   interface Props {
     conversationStore: ConversationStore;
@@ -44,6 +45,19 @@
     onSelectSurface,
     desktopRuntime,
   }: Props = $props();
+
+  let builderDeckModule = $state<Promise<BuilderDeckModule> | null>(null);
+  let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
+
+  $effect(() => {
+    if (activeSurface === "builder" && !builderDeckModule) {
+      builderDeckModule = import("./BuilderDeck.svelte");
+    }
+
+    if (activeSurface === "operator" && !operatorDashboardModule) {
+      operatorDashboardModule = import("./OperatorDashboard.svelte");
+    }
+  });
 </script>
 
 <div class="layout">
@@ -115,9 +129,40 @@
       visible as a banner when the WebSocket is down or reconnecting.
     -->
     {#if activeSurface === "operator"}
-      <OperatorDashboard />
+      {#if operatorDashboardModule}
+        {#await operatorDashboardModule then module}
+          {@const OperatorDashboard = module.default}
+          <OperatorDashboard />
+        {:catch error}
+          <div class="surface-state" role="alert">
+            {error instanceof Error
+              ? error.message
+              : "Failed to load the operator surface."}
+          </div>
+        {/await}
+      {:else}
+        <div class="surface-state">Loading operator surface…</div>
+      {/if}
     {:else if activeSurface === "builder"}
-      <BuilderDeck {projectStore} {desktopRuntime} {activeLens} {onSelectLens} />
+      {#if builderDeckModule}
+        {#await builderDeckModule then module}
+          {@const BuilderDeck = module.default}
+          <BuilderDeck
+            {projectStore}
+            {desktopRuntime}
+            {activeLens}
+            {onSelectLens}
+          />
+        {:catch error}
+          <div class="surface-state" role="alert">
+            {error instanceof Error
+              ? error.message
+              : "Failed to load the builder surface."}
+          </div>
+        {/await}
+      {:else}
+        <div class="surface-state">Loading builder surface…</div>
+      {/if}
     {:else}
       <ConnectionIndicator store={connectionStore} {onRetry} />
       <!-- Messages fill the available space and scroll independently. -->
@@ -213,6 +258,16 @@
     flex-direction: column;
     /* min-width: 0 prevents flex children from overflowing at narrow widths. */
     min-width: 0;
+  }
+
+  .surface-state {
+    margin: auto;
+    padding: 18px 22px;
+    border-radius: 18px;
+    border: 1px solid rgba(154, 52, 18, 0.18);
+    background: rgba(255, 251, 235, 0.82);
+    color: #7c2d12;
+    font-weight: 600;
   }
 
   @media (max-width: 820px) {

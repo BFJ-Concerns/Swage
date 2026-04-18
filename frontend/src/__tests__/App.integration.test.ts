@@ -234,9 +234,10 @@ function makeLensRuntime(
 }
 
 async function settleUi(): Promise<void> {
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await Promise.resolve();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 function setPath(path: string): void {

@@ -6,14 +6,41 @@
  * correct panels. AppLayout threads store props to children but owns no
  * state itself — it is a pure layout shell.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import AppLayout from "../components/AppLayout.svelte";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
 import type { StreamingStore } from "../stores/streaming";
 
+import * as operatorApi from "../api/operator";
+
+vi.mock("../api/operator", () => ({
+  fetchOperatorOverview: vi.fn(),
+  approvePendingAction: vi.fn(),
+  rejectPendingAction: vi.fn(),
+  pauseScheduledJob: vi.fn(),
+  resumeScheduledJob: vi.fn(),
+  disableHeartbeat: vi.fn(),
+  enableHeartbeat: vi.fn(),
+}));
+
 type MountedComponent = ReturnType<typeof mount>;
+
+async function flushUi(): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+async function waitForText(text: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await flushUi();
+    if (document.body.textContent?.includes(text)) {
+      return;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Minimal mock stores — satisfy the interface so AppLayout can thread them.
@@ -97,6 +124,25 @@ function mountBuilderLayout(): MountedComponent {
 describe("AppLayout: three-panel structure", () => {
   let component: MountedComponent | undefined;
 
+  beforeEach(() => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
+      gateway: {
+        status: "running",
+        health: "healthy",
+        shutdown_requested: false,
+        seconds_since_activity: 0,
+        active_turn_count: 0,
+        active_connection_count: 0,
+      },
+      sessions: [],
+      approvals: [],
+      scheduled_jobs: { jobs: [] },
+      heartbeats: { heartbeats: [] },
+      channels: { channels: [] },
+      nodes: [],
+    });
+  });
+
   afterEach(() => {
     if (component) {
       unmount(component);
@@ -161,8 +207,9 @@ describe("AppLayout: three-panel structure", () => {
     expect(main!.children.length).toBeGreaterThan(0);
   });
 
-  it("renders the builder deck when the builder lens is active", () => {
+  it("renders the builder deck when the builder lens is active", async () => {
     component = mountBuilderLayout();
+    await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",

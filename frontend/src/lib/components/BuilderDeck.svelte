@@ -8,11 +8,12 @@
     updateProjectExtension,
     updateTeam,
   } from "../api/builder";
-  import OperatorDashboard from "./OperatorDashboard.svelte";
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { ProjectStore } from "../stores/projects";
   import type { AppLens, ProjectExtensionSummary, TeamSummary } from "../types";
+
+  type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
 
   interface Props {
     projectStore?: ProjectStore;
@@ -48,6 +49,7 @@
   );
 
   let lastLoadedProjectId = "";
+  let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
 
   const currentProject = $derived(projectStore?.currentProject ?? null);
   const managedExtensions = $derived(
@@ -56,6 +58,12 @@
   const workspaceCandidates = $derived(
     extensions.filter((extension) => extension.status === "approval_required"),
   );
+
+  $effect(() => {
+    if (!operatorDashboardModule) {
+      operatorDashboardModule = import("./OperatorDashboard.svelte");
+    }
+  });
 
   $effect(() => {
     const projectId = currentProject?.id ?? "";
@@ -423,7 +431,20 @@
     </section>
 
     <div class="operator-shell">
-      <OperatorDashboard />
+      {#if operatorDashboardModule}
+        {#await operatorDashboardModule then module}
+          {@const OperatorDashboard = module.default}
+          <OperatorDashboard />
+        {:catch error}
+          <div class="operator-shell-state" role="alert">
+            {error instanceof Error
+              ? error.message
+              : "Failed to load the operator deck."}
+          </div>
+        {/await}
+      {:else}
+        <div class="operator-shell-state">Loading operator deck…</div>
+      {/if}
     </div>
   {/if}
 </section>
@@ -683,6 +704,12 @@
 
   .operator-shell {
     min-height: 0;
+  }
+
+  .operator-shell-state {
+    padding: 18px;
+    color: #7c2d12;
+    font-weight: 600;
   }
 
   @media (max-width: 1100px) {

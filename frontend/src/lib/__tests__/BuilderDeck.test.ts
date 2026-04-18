@@ -6,6 +6,7 @@ import BuilderDeck from "../components/BuilderDeck.svelte";
 import type { ProjectStore } from "../stores/projects";
 
 import * as builderApi from "../api/builder";
+import * as operatorApi from "../api/operator";
 
 vi.mock("../api/builder", () => ({
   listTeams: vi.fn(),
@@ -21,6 +22,16 @@ vi.mock("../api/builder", () => ({
   updateTeamTopologyReference: vi.fn(),
   isTeamTopologyPayload: (payload: Record<string, unknown>) => "nodes" in payload,
   isContextSnapshotPayload: (payload: Record<string, unknown>) => "elements" in payload,
+}));
+
+vi.mock("../api/operator", () => ({
+  fetchOperatorOverview: vi.fn(),
+  approvePendingAction: vi.fn(),
+  rejectPendingAction: vi.fn(),
+  pauseScheduledJob: vi.fn(),
+  resumeScheduledJob: vi.fn(),
+  disableHeartbeat: vi.fn(),
+  enableHeartbeat: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -122,6 +133,22 @@ describe("BuilderDeck", () => {
       source_kind: "managed",
     });
     vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
+      gateway: {
+        status: "running",
+        health: "healthy",
+        shutdown_requested: false,
+        seconds_since_activity: 0,
+        active_turn_count: 0,
+        active_connection_count: 0,
+      },
+      sessions: [],
+      approvals: [],
+      scheduled_jobs: { jobs: [] },
+      heartbeats: { heartbeats: [] },
+      channels: { channels: [] },
+      nodes: [],
+    });
   });
 
   afterEach(() => {
