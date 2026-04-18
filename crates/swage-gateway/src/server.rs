@@ -119,14 +119,23 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::get_conversation).delete(handlers::delete_conversation),
         )
         .route("/api/conversations/:id/ws", get(websocket::ws_handler))
+        .route(
+            "/api/sessions/:id/attachments",
+            get(handlers::list_session_attachments),
+        )
         // Project-scoped session routes. These supplement /api/conversations
         // and allow the frontend to fetch/create sessions per project.
         .route(
             "/api/projects/:project_id/sessions",
             get(handlers::list_project_sessions).post(handlers::create_project_session),
         )
+        .route(
+            "/api/projects/:id/attachments",
+            get(handlers::list_project_attachments),
+        )
         // Skills listing — resolved hierarchy for a project/agent combination.
         .route("/api/skills", get(handlers::list_skills))
+        .route("/api/capabilities", get(handlers::workflow_capabilities))
         // External communication channel gateway.
         .route(
             "/api/channels/dev-dm/inbound",
@@ -186,6 +195,15 @@ pub fn build_router(state: AppState) -> Router {
         // Agent messaging — send and query inter-agent messages.
         .route("/api/messages", post(handlers::send_agent_message))
         .route("/api/messages/:id", get(handlers::get_message_status))
+        .route("/api/attachments", post(handlers::create_attachment))
+        .route(
+            "/api/background-jobs/:id",
+            get(handlers::get_background_job),
+        )
+        .route(
+            "/api/background-jobs/:id/retry",
+            post(handlers::retry_background_job),
+        )
         // Durable scheduled jobs and recorded runs.
         .route(
             "/api/scheduled-jobs",

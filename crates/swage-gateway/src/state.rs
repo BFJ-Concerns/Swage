@@ -18,8 +18,9 @@ use swage_storage::store::{ProjectStore, Storage};
 
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
-    execution_host::ExecutionHostRuntime, lifecycle::ActivityTracker, presence::PresenceRuntime,
-    secret::SecretManager, tool::ToolDispatcher, websocket::ServerEvent,
+    capabilities::WorkflowCapabilities, execution_host::ExecutionHostRuntime,
+    lifecycle::ActivityTracker, presence::PresenceRuntime, secret::SecretManager,
+    tool::ToolDispatcher, websocket::ServerEvent,
 };
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
@@ -97,6 +98,8 @@ pub struct AppState {
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
+    /// Capability surface used to gate attachment and media workflows.
+    pub workflow_capabilities: WorkflowCapabilities,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +118,8 @@ impl AppState {
         hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
+        let workflow_capabilities =
+            WorkflowCapabilities::for_protocol(config.provider.protocol.clone());
         Self {
             storage: storage.clone(),
             project_store,
@@ -137,6 +142,7 @@ impl AppState {
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
+            workflow_capabilities,
         }
     }
 }
@@ -208,6 +214,7 @@ mod tests {
             secret_manager: Arc::new(SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: WorkflowCapabilities::default(),
         }
     }
 

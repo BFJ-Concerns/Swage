@@ -1208,8 +1208,9 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            ChannelLink, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
-            HeartbeatRunState, Message, NewAgentMessage, NewApprovalRequest, NewChannelLink,
+            Attachment, AttachmentStatus, BackgroundJob, ChannelLink, EdgeEvaluation,
+            ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, Message,
+            NewAgentMessage, NewApprovalRequest, NewAttachment, NewBackgroundJob, NewChannelLink,
             NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
             NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob,
             NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
@@ -1218,10 +1219,10 @@ pub(crate) mod tests {
             TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
-            ApprovalStore, ChannelLinkStore, ContextSnapshotStore, ExecutionHostStore,
-            HeartbeatStore, MessageStore, ProjectStore, ScheduleStore, SessionStore,
-            SkillActivationStore, TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore,
-            TurnStore,
+            ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
+            ContextSnapshotStore, ExecutionHostStore, HeartbeatStore, MessageStore, ProjectStore,
+            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
+            ToolCallStore, TopologyTraceStore, TurnStore,
         },
     };
 
@@ -1435,6 +1436,8 @@ pub(crate) mod tests {
         pub(crate) scheduled_runs: HashMap<Uuid, ScheduledRun>,
         pub(crate) heartbeats: HashMap<Uuid, Heartbeat>,
         pub(crate) heartbeat_runs: HashMap<Uuid, HeartbeatRun>,
+        pub(crate) attachments: HashMap<Uuid, Attachment>,
+        pub(crate) background_jobs: HashMap<Uuid, BackgroundJob>,
         pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
         pub(crate) managed_secret_values: HashMap<Uuid, String>,
     }
@@ -2520,6 +2523,236 @@ pub(crate) mod tests {
     }
 
     #[async_trait]
+    impl AttachmentStore for MockStorage {
+        async fn queue_attachment_ingestion(
+            &self,
+            attachment: NewAttachment,
+            job: NewBackgroundJob,
+        ) -> Result<(Attachment, BackgroundJob), StorageError> {
+            let mut db = self.db.lock().await;
+            let now = chrono::Utc::now();
+            let byte_count = i64::try_from(attachment.bytes.len()).unwrap_or(i64::MAX);
+            let attachment_record = Attachment {
+                id: attachment.id,
+                scope_kind: attachment.scope_kind,
+                session_id: attachment.session_id,
+                project_id: attachment.project_id,
+                kind: attachment.kind,
+                status: AttachmentStatus::Pending,
+                filename: attachment.filename,
+                mime_type: attachment.mime_type,
+                bytes: attachment.bytes,
+                byte_count,
+                ingested_markdown: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let job_record = BackgroundJob {
+                id: job.id,
+                kind: job.kind,
+                state: swage_storage::BackgroundJobState::Queued,
+                attachment_id: job.attachment_id,
+                payload: job.payload,
+                result: None,
+                error_message: None,
+                attempt_count: 0,
+                created_at: now,
+                updated_at: now,
+                started_at: None,
+                completed_at: None,
+            };
+            db.attachments
+                .insert(attachment_record.id, attachment_record.clone());
+            db.background_jobs.insert(job_record.id, job_record.clone());
+            Ok((attachment_record, job_record))
+        }
+
+        async fn get_attachment(&self, id: Uuid) -> Result<Option<Attachment>, StorageError> {
+            Ok(self.db.lock().await.attachments.get(&id).cloned())
+        }
+
+        async fn list_attachments_by_session(
+            &self,
+            session_id: Uuid,
+        ) -> Result<Vec<Attachment>, StorageError> {
+            let mut attachments: Vec<Attachment> = self
+                .db
+                .lock()
+                .await
+                .attachments
+                .values()
+                .filter(|attachment| attachment.session_id == Some(session_id))
+                .cloned()
+                .collect();
+            attachments.sort_by_key(|attachment| attachment.created_at);
+            Ok(attachments)
+        }
+
+        async fn list_attachments_by_project(
+            &self,
+            project_id: Uuid,
+        ) -> Result<Vec<Attachment>, StorageError> {
+            let mut attachments: Vec<Attachment> = self
+                .db
+                .lock()
+                .await
+                .attachments
+                .values()
+                .filter(|attachment| attachment.project_id == Some(project_id))
+                .cloned()
+                .collect();
+            attachments.sort_by_key(|attachment| attachment.created_at);
+            Ok(attachments)
+        }
+
+        async fn update_attachment_ingestion(
+            &self,
+            id: Uuid,
+            status: AttachmentStatus,
+            ingested_markdown: Option<&str>,
+        ) -> Result<Attachment, StorageError> {
+            let mut db = self.db.lock().await;
+            let attachment = db.attachments.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Attachment".into(),
+                id: id.to_string(),
+            })?;
+            attachment.status = status;
+            attachment.ingested_markdown = ingested_markdown.map(str::to_string);
+            attachment.updated_at = chrono::Utc::now();
+            Ok(attachment.clone())
+        }
+    }
+
+    #[async_trait]
+    impl BackgroundJobStore for MockStorage {
+        async fn get_background_job(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<BackgroundJob>, StorageError> {
+            Ok(self.db.lock().await.background_jobs.get(&id).cloned())
+        }
+
+        async fn list_runnable_background_jobs(&self) -> Result<Vec<BackgroundJob>, StorageError> {
+            let mut jobs: Vec<BackgroundJob> = self
+                .db
+                .lock()
+                .await
+                .background_jobs
+                .values()
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        swage_storage::BackgroundJobState::Queued
+                            | swage_storage::BackgroundJobState::Retried
+                    )
+                })
+                .cloned()
+                .collect();
+            jobs.sort_by_key(|job| job.created_at);
+            Ok(jobs)
+        }
+
+        async fn mark_background_job_running(
+            &self,
+            id: Uuid,
+        ) -> Result<BackgroundJob, StorageError> {
+            let mut db = self.db.lock().await;
+            let job = db
+                .background_jobs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "BackgroundJob".into(),
+                    id: id.to_string(),
+                })?;
+            let now = chrono::Utc::now();
+            job.state = swage_storage::BackgroundJobState::Running;
+            job.attempt_count += 1;
+            job.started_at = Some(now);
+            job.completed_at = None;
+            job.updated_at = now;
+            Ok(job.clone())
+        }
+
+        async fn complete_background_job(
+            &self,
+            id: Uuid,
+            result: Option<&serde_json::Value>,
+        ) -> Result<BackgroundJob, StorageError> {
+            let mut db = self.db.lock().await;
+            let job = db
+                .background_jobs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "BackgroundJob".into(),
+                    id: id.to_string(),
+                })?;
+            let now = chrono::Utc::now();
+            job.state = swage_storage::BackgroundJobState::Completed;
+            job.result = result.cloned();
+            job.error_message = None;
+            job.completed_at = Some(now);
+            job.updated_at = now;
+            Ok(job.clone())
+        }
+
+        async fn fail_background_job(
+            &self,
+            id: Uuid,
+            error_message: &str,
+        ) -> Result<BackgroundJob, StorageError> {
+            let mut db = self.db.lock().await;
+            let job = db
+                .background_jobs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "BackgroundJob".into(),
+                    id: id.to_string(),
+                })?;
+            let now = chrono::Utc::now();
+            job.state = swage_storage::BackgroundJobState::Failed;
+            job.error_message = Some(error_message.to_string());
+            job.completed_at = Some(now);
+            job.updated_at = now;
+            Ok(job.clone())
+        }
+
+        async fn retry_background_job(&self, id: Uuid) -> Result<BackgroundJob, StorageError> {
+            let mut db = self.db.lock().await;
+            let job = db
+                .background_jobs
+                .get_mut(&id)
+                .ok_or(StorageError::NotFound {
+                    entity: "BackgroundJob".into(),
+                    id: id.to_string(),
+                })?;
+            job.state = swage_storage::BackgroundJobState::Retried;
+            job.result = None;
+            job.error_message = None;
+            job.started_at = None;
+            job.completed_at = None;
+            job.updated_at = chrono::Utc::now();
+            Ok(job.clone())
+        }
+
+        async fn list_background_jobs_by_attachment(
+            &self,
+            attachment_id: Uuid,
+        ) -> Result<Vec<BackgroundJob>, StorageError> {
+            let mut jobs: Vec<BackgroundJob> = self
+                .db
+                .lock()
+                .await
+                .background_jobs
+                .values()
+                .filter(|job| job.attachment_id == Some(attachment_id))
+                .cloned()
+                .collect();
+            jobs.sort_by_key(|job| job.created_at);
+            Ok(jobs)
+        }
+    }
+
+    #[async_trait]
     impl ThreadStore for MockStorage {
         async fn create(&self, thread: NewThread) -> Result<Thread, StorageError> {
             let t = Thread {
@@ -3567,6 +3800,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (state, session_id)
     }
@@ -3635,6 +3869,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (state, session_id)
     }
@@ -3773,6 +4008,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4100,6 +4336,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (state, session_id)
     }
@@ -4366,6 +4603,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4827,6 +5065,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4925,6 +5164,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -5107,6 +5347,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -5285,6 +5526,7 @@ pub(crate) mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (state, session_id)
     }

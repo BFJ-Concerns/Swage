@@ -41,6 +41,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
+        (
+            "024_attachments_and_background_jobs",
+            CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
+        ),
     ]
 }
 
@@ -342,6 +346,49 @@ const CREATE_SECRET_TABLES: &str = "
         ciphertext_b64  TEXT NOT NULL,
         updated_at      TEXT NOT NULL
     );
+";
+
+const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS attachments (
+        id                TEXT NOT NULL PRIMARY KEY,
+        scope_kind        TEXT NOT NULL,
+        session_id        TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        project_id        TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        kind              TEXT NOT NULL,
+        status            TEXT NOT NULL,
+        filename          TEXT NOT NULL,
+        mime_type         TEXT NOT NULL,
+        content_bytes     BLOB NOT NULL,
+        byte_count        INTEGER NOT NULL,
+        ingested_markdown TEXT,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_attachments_session_id
+        ON attachments(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_attachments_project_id
+        ON attachments(project_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS background_jobs (
+        id             TEXT NOT NULL PRIMARY KEY,
+        kind           TEXT NOT NULL,
+        state          TEXT NOT NULL,
+        attachment_id  TEXT REFERENCES attachments(id) ON DELETE CASCADE,
+        payload_json   TEXT NOT NULL,
+        result_json    TEXT,
+        error_message  TEXT,
+        attempt_count  INTEGER NOT NULL,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        started_at     TEXT,
+        completed_at   TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_background_jobs_state
+        ON background_jobs(state, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_background_jobs_attachment_id
+        ON background_jobs(attachment_id, created_at);
 ";
 
 /// Additive migration: cost in microcents derived from provider pricing data.

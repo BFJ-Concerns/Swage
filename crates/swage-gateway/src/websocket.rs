@@ -1681,6 +1681,7 @@ mod tests {
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         }
     }
 
@@ -1738,6 +1739,7 @@ mod tests {
             )),
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
 
         (state, session_id)

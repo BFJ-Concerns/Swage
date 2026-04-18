@@ -1110,6 +1110,7 @@ mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (state, storage)
     }

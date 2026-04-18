@@ -14,9 +14,14 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 
 use crate::{
+    attachment::{
+        AttachmentListResponse, BackgroundJobResponse, CreateAttachmentRequest,
+        QueuedAttachmentResponse,
+    },
     audit::{
         OperatorSearchQuery, OperatorSearchResponse, OperatorUsageQuery, OperatorUsageResponse,
     },
+    capabilities::WorkflowCapabilitiesResponse,
     channel_gateway::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
         DevDmInboundRequest, DevThreadInboundRequest,
@@ -71,6 +76,13 @@ use crate::{
 /// is up and accepting connections before routing traffic to it.
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// `GET /api/capabilities` — inspect gateway workflow capability gating.
+pub async fn workflow_capabilities(
+    State(state): State<AppState>,
+) -> Json<WorkflowCapabilitiesResponse> {
+    Json(crate::capabilities::workflow_capabilities(&state).await)
 }
 
 /// `GET /api/voice/capabilities` — inspect voice support for the current runtime.
@@ -243,6 +255,57 @@ pub async fn get_operator_run(
 ) -> Result<Json<RunDetailResponse>, ApiError> {
     Ok(Json(
         crate::supervision::get_run_detail(&state, &kind, id).await?,
+    ))
+}
+
+/// `POST /api/attachments` — enqueue durable attachment ingestion.
+pub async fn create_attachment(
+    State(state): State<AppState>,
+    Json(req): Json<CreateAttachmentRequest>,
+) -> Result<(StatusCode, Json<QueuedAttachmentResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::attachment::create_attachment(&state, req).await?),
+    ))
+}
+
+/// `GET /api/sessions/:id/attachments` — list session-scoped attachments.
+pub async fn list_session_attachments(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AttachmentListResponse>, ApiError> {
+    Ok(Json(
+        crate::attachment::list_session_attachments(&state, id).await?,
+    ))
+}
+
+/// `GET /api/projects/:id/attachments` — list project-scoped attachments.
+pub async fn list_project_attachments(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AttachmentListResponse>, ApiError> {
+    Ok(Json(
+        crate::attachment::list_project_attachments(&state, id).await?,
+    ))
+}
+
+/// `GET /api/background-jobs/:id` — inspect one background job.
+pub async fn get_background_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<BackgroundJobResponse>, ApiError> {
+    Ok(Json(
+        crate::attachment::get_background_job(&state, id).await?,
+    ))
+}
+
+/// `POST /api/background-jobs/:id/retry` — re-queue a failed background job.
+pub async fn retry_background_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<BackgroundJobResponse>, ApiError> {
+    Ok(Json(
+        crate::attachment::retry_background_job(&state, id).await?,
     ))
 }
 
@@ -1662,6 +1725,7 @@ mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (build_router(state), storage)
     }
@@ -3171,6 +3235,7 @@ def build_topology():
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

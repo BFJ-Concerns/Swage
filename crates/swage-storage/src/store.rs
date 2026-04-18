@@ -4,16 +4,17 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, AuditEvent,
-    ChannelLink, DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat,
-    HeartbeatRun, HeartbeatRunState, InboundAudit, Message, NewAgentMessage, NewApprovalRequest,
-    NewAuditEvent, NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation,
-    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
-    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session, Team,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-    TurnState, UpdateHeartbeat, UpdateScheduledJob,
+    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
+    AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, DeliveryRecord, EdgeEvaluation,
+    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message,
+    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
+    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
+    NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewTeam, NewThread, NewToolCall,
+    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
+    ScheduledRun, ScheduledRunState, SecretRecord, Session, Team, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
+    UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -136,6 +137,52 @@ pub trait SecretStore: Send + Sync {
     async fn revoke_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
     async fn restore_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
     async fn get_managed_secret_value(&self, id: Uuid) -> Result<Option<String>, StorageError>;
+}
+
+#[async_trait]
+pub trait AttachmentStore: Send + Sync {
+    async fn queue_attachment_ingestion(
+        &self,
+        attachment: NewAttachment,
+        job: NewBackgroundJob,
+    ) -> Result<(Attachment, BackgroundJob), StorageError>;
+    async fn get_attachment(&self, id: Uuid) -> Result<Option<Attachment>, StorageError>;
+    async fn list_attachments_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<Attachment>, StorageError>;
+    async fn list_attachments_by_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<Attachment>, StorageError>;
+    async fn update_attachment_ingestion(
+        &self,
+        id: Uuid,
+        status: AttachmentStatus,
+        ingested_markdown: Option<&str>,
+    ) -> Result<Attachment, StorageError>;
+}
+
+#[async_trait]
+pub trait BackgroundJobStore: Send + Sync {
+    async fn get_background_job(&self, id: Uuid) -> Result<Option<BackgroundJob>, StorageError>;
+    async fn list_runnable_background_jobs(&self) -> Result<Vec<BackgroundJob>, StorageError>;
+    async fn mark_background_job_running(&self, id: Uuid) -> Result<BackgroundJob, StorageError>;
+    async fn complete_background_job(
+        &self,
+        id: Uuid,
+        result: Option<&serde_json::Value>,
+    ) -> Result<BackgroundJob, StorageError>;
+    async fn fail_background_job(
+        &self,
+        id: Uuid,
+        error_message: &str,
+    ) -> Result<BackgroundJob, StorageError>;
+    async fn retry_background_job(&self, id: Uuid) -> Result<BackgroundJob, StorageError>;
+    async fn list_background_jobs_by_attachment(
+        &self,
+        attachment_id: Uuid,
+    ) -> Result<Vec<BackgroundJob>, StorageError>;
 }
 
 #[async_trait]
@@ -663,6 +710,8 @@ pub trait HeartbeatStore: Send + Sync {
 pub trait Storage:
     TeamStore
     + SessionStore
+    + AttachmentStore
+    + BackgroundJobStore
     + ExecutionHostStore
     + ChannelLinkStore
     + DeliveryStore
@@ -688,6 +737,8 @@ pub trait Storage:
 impl<T> Storage for T where
     T: TeamStore
         + SessionStore
+        + AttachmentStore
+        + BackgroundJobStore
         + ExecutionHostStore
         + ChannelLinkStore
         + DeliveryStore
@@ -898,6 +949,89 @@ mod tests {
             unimplemented!()
         }
         async fn get_managed_secret_value(&self, _: Uuid) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AttachmentStore for StubStorage {
+        async fn queue_attachment_ingestion(
+            &self,
+            _: NewAttachment,
+            _: NewBackgroundJob,
+        ) -> Result<(Attachment, BackgroundJob), StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_attachment(&self, _: Uuid) -> Result<Option<Attachment>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_attachments_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<Attachment>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_attachments_by_project(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<Attachment>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_attachment_ingestion(
+            &self,
+            _: Uuid,
+            _: AttachmentStatus,
+            _: Option<&str>,
+        ) -> Result<Attachment, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl BackgroundJobStore for StubStorage {
+        async fn get_background_job(&self, _: Uuid) -> Result<Option<BackgroundJob>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_runnable_background_jobs(&self) -> Result<Vec<BackgroundJob>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn mark_background_job_running(
+            &self,
+            _: Uuid,
+        ) -> Result<BackgroundJob, StorageError> {
+            unimplemented!()
+        }
+
+        async fn complete_background_job(
+            &self,
+            _: Uuid,
+            _: Option<&serde_json::Value>,
+        ) -> Result<BackgroundJob, StorageError> {
+            unimplemented!()
+        }
+
+        async fn fail_background_job(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<BackgroundJob, StorageError> {
+            unimplemented!()
+        }
+
+        async fn retry_background_job(&self, _: Uuid) -> Result<BackgroundJob, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_background_jobs_by_attachment(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<BackgroundJob>, StorageError> {
             unimplemented!()
         }
     }

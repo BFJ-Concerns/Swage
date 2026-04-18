@@ -1,5 +1,6 @@
 pub mod agent_message;
 pub mod approval;
+pub mod attachment;
 pub mod audit;
 pub mod channel_link;
 pub mod context_snapshot;

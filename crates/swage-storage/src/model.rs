@@ -203,6 +203,220 @@ pub struct NewSecretRecord {
     pub value: Option<String>,
 }
 
+/// Attachment scope for user-supplied material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentScopeKind {
+    Session,
+    Project,
+}
+
+impl std::fmt::Display for AttachmentScopeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AttachmentScopeKind::Session => "session",
+            AttachmentScopeKind::Project => "project",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for AttachmentScopeKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "session" => Ok(AttachmentScopeKind::Session),
+            "project" => Ok(AttachmentScopeKind::Project),
+            other => Err(format!("unknown attachment scope: {other}")),
+        }
+    }
+}
+
+/// Stable attachment kind used by ingestion and capability gating.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Document,
+    Image,
+}
+
+impl std::fmt::Display for AttachmentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AttachmentKind::Document => "document",
+            AttachmentKind::Image => "image",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for AttachmentKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "document" => Ok(AttachmentKind::Document),
+            "image" => Ok(AttachmentKind::Image),
+            other => Err(format!("unknown attachment kind: {other}")),
+        }
+    }
+}
+
+/// Attachment ingestion lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentStatus {
+    Pending,
+    Ready,
+    Failed,
+}
+
+impl std::fmt::Display for AttachmentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AttachmentStatus::Pending => "pending",
+            AttachmentStatus::Ready => "ready",
+            AttachmentStatus::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for AttachmentStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(AttachmentStatus::Pending),
+            "ready" => Ok(AttachmentStatus::Ready),
+            "failed" => Ok(AttachmentStatus::Failed),
+            other => Err(format!("unknown attachment status: {other}")),
+        }
+    }
+}
+
+/// A durable attachment for session or project context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Uuid,
+    pub scope_kind: AttachmentScopeKind,
+    pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub kind: AttachmentKind,
+    pub status: AttachmentStatus,
+    pub filename: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub byte_count: i64,
+    pub ingested_markdown: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewAttachment {
+    pub id: Uuid,
+    pub scope_kind: AttachmentScopeKind,
+    pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub kind: AttachmentKind,
+    pub filename: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Background-job kind. Currently used for attachment ingestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobKind {
+    AttachmentIngestion,
+}
+
+impl std::fmt::Display for BackgroundJobKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BackgroundJobKind::AttachmentIngestion => "attachment_ingestion",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for BackgroundJobKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "attachment_ingestion" => Ok(BackgroundJobKind::AttachmentIngestion),
+            other => Err(format!("unknown background job kind: {other}")),
+        }
+    }
+}
+
+/// Durable background-job lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobState {
+    Queued,
+    Running,
+    Retried,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for BackgroundJobState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BackgroundJobState::Queued => "queued",
+            BackgroundJobState::Running => "running",
+            BackgroundJobState::Retried => "retried",
+            BackgroundJobState::Completed => "completed",
+            BackgroundJobState::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for BackgroundJobState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "queued" => Ok(BackgroundJobState::Queued),
+            "running" => Ok(BackgroundJobState::Running),
+            "retried" => Ok(BackgroundJobState::Retried),
+            "completed" => Ok(BackgroundJobState::Completed),
+            "failed" => Ok(BackgroundJobState::Failed),
+            other => Err(format!("unknown background job state: {other}")),
+        }
+    }
+}
+
+/// A durable background job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundJob {
+    pub id: Uuid,
+    pub kind: BackgroundJobKind,
+    pub state: BackgroundJobState,
+    pub attachment_id: Option<Uuid>,
+    pub payload: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub attempt_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBackgroundJob {
+    pub id: Uuid,
+    pub kind: BackgroundJobKind,
+    pub attachment_id: Option<Uuid>,
+    pub payload: serde_json::Value,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {
