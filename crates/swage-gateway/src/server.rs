@@ -96,6 +96,18 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_teams).post(handlers::create_team),
         )
         .route(
+            "/api/projects/:id/extensions",
+            get(handlers::list_project_extensions).post(handlers::create_project_extension),
+        )
+        .route(
+            "/api/projects/:id/extensions/:name",
+            put(handlers::update_project_extension),
+        )
+        .route(
+            "/api/projects/:id/extensions/:name/approve-workspace",
+            post(handlers::approve_workspace_extension),
+        )
+        .route(
             "/api/teams/:id",
             get(handlers::get_team)
                 .put(handlers::update_team)

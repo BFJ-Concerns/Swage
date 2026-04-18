@@ -45,6 +45,10 @@ use crate::{
     },
     operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
+    project_extension::{
+        CreateProjectExtensionRequest, ProjectExtensionListResponse, ProjectExtensionResponse,
+        UpdateProjectExtensionRequest,
+    },
     schedule::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
         ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
@@ -186,7 +190,9 @@ pub async fn update_lens_runtime(
     State(state): State<AppState>,
     Json(request): Json<UpdateLensRuntimeRequest>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(crate::lens::update_lens_runtime(&state, request).await?))
+    Ok(Json(
+        crate::lens::update_lens_runtime(&state, request).await?,
+    ))
 }
 
 /// `GET /api/secrets` — list governed secrets without revealing raw values.
@@ -844,6 +850,52 @@ pub async fn list_teams(
     let svc = TeamService::new(state.storage, state.project_store);
     let resp = svc.list_teams(project_id).await?;
     Ok(Json(resp))
+}
+
+/// `GET /api/projects/:id/extensions` — list managed and workspace extension candidates.
+pub async fn list_project_extensions(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<ProjectExtensionListResponse>, ApiError> {
+    Ok(Json(
+        crate::project_extension::list_project_extensions(&state, project_id).await?,
+    ))
+}
+
+/// `POST /api/projects/:id/extensions` — create a managed project extension.
+pub async fn create_project_extension(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(request): Json<CreateProjectExtensionRequest>,
+) -> Result<(StatusCode, Json<ProjectExtensionResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            crate::project_extension::create_project_extension(&state, project_id, request).await?,
+        ),
+    ))
+}
+
+/// `PUT /api/projects/:id/extensions/:name` — update a managed project extension.
+pub async fn update_project_extension(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<UpdateProjectExtensionRequest>,
+) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    Ok(Json(
+        crate::project_extension::update_project_extension(&state, project_id, &name, request)
+            .await?,
+    ))
+}
+
+/// `POST /api/projects/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
+pub async fn approve_workspace_extension(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    Ok(Json(
+        crate::project_extension::approve_workspace_extension(&state, project_id, &name).await?,
+    ))
 }
 
 /// `GET /api/teams/:id` — fetch a team by ID.

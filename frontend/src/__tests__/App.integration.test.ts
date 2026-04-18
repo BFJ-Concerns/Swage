@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
+import * as builderApi from "../lib/api/builder";
 import * as conversationsApi from "../lib/api/conversations";
 import * as lensApi from "../lib/api/lens";
 import * as operatorApi from "../lib/api/operator";
@@ -88,6 +89,16 @@ vi.mock("../lib/api/conversations", () => ({
 vi.mock("../lib/api/lens", () => ({
   fetchLensRuntime: vi.fn(),
   updateLensRuntime: vi.fn(),
+}));
+
+vi.mock("../lib/api/builder", () => ({
+  listTeams: vi.fn(),
+  createTeam: vi.fn(),
+  updateTeam: vi.fn(),
+  listProjectExtensions: vi.fn(),
+  createProjectExtension: vi.fn(),
+  updateProjectExtension: vi.fn(),
+  approveWorkspaceExtension: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -242,6 +253,8 @@ describe("App", () => {
     delete window.swageDesktop;
     vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
     vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
+    vi.mocked(builderApi.listTeams).mockResolvedValue([]);
+    vi.mocked(builderApi.listProjectExtensions).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -456,7 +469,7 @@ describe("App", () => {
     await settleUi();
 
     expect(document.body.textContent).toContain(
-      "Shape the workspace, not just the next reply.",
+      "Author the workspace, then let the agent live in it.",
     );
     expect(document.body.textContent).toContain("Workbench");
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
@@ -485,7 +498,7 @@ describe("App", () => {
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("builder");
     expect(document.body.textContent).toContain("Builder deck");
     expect(document.body.textContent).toContain(
-      "Shape the workspace, not just the next reply.",
+      "Author the workspace, then let the agent live in it.",
     );
   });
 });

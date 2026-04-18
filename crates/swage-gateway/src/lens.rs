@@ -1,7 +1,7 @@
+use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use swage_core::GatewayError;
 use swage_storage::model::{AppLens, LensPreference};
-use crate::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LensDescriptor {
@@ -28,8 +28,7 @@ fn available_lenses() -> Vec<LensDescriptor> {
         LensDescriptor {
             id: AppLens::Assistant,
             title: "Assistant lens".to_string(),
-            summary: "Conversation-first view for direct work with the active agent."
-                .to_string(),
+            summary: "Conversation-first view for direct work with the active agent.".to_string(),
             default_surface: "conversation".to_string(),
         },
         LensDescriptor {

@@ -26,7 +26,7 @@
     onRetry: () => void;
     activeLens: AppLens;
     activeSurface: LensSurface;
-    onSelectLens: (next: AppLens) => void;
+    onSelectLens: (next: AppLens) => void | Promise<void>;
     onSelectSurface: (next: LensSurface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
   }
@@ -117,7 +117,7 @@
     {#if activeSurface === "operator"}
       <OperatorDashboard />
     {:else if activeSurface === "builder"}
-      <BuilderDeck {projectStore} {desktopRuntime} />
+      <BuilderDeck {projectStore} {desktopRuntime} {activeLens} {onSelectLens} />
     {:else}
       <ConnectionIndicator store={connectionStore} {onRetry} />
       <!-- Messages fill the available space and scroll independently. -->

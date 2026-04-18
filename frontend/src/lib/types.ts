@@ -119,6 +119,63 @@ export interface LensRuntimeResponse {
 }
 
 // -------------------------------------------------------------------------
+// Builder authoring types
+// -------------------------------------------------------------------------
+
+export interface TeamSummary {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  entry_agent_id: string;
+  members: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTeamRequest {
+  name: string;
+  description: string;
+  entry_agent_id: string;
+  members: string[];
+}
+
+export interface UpdateTeamRequest {
+  name?: string;
+  description?: string;
+  entry_agent_id?: string;
+  members?: string[];
+}
+
+export type ProjectExtensionStatus = "active" | "approval_required";
+export type ProjectExtensionSourceKind = "managed" | "workspace_candidate";
+
+export interface ProjectExtensionSummary {
+  name: string;
+  display_name: string | null;
+  description: string;
+  requested_tools: string[];
+  instructions: string;
+  status: ProjectExtensionStatus;
+  source_kind: ProjectExtensionSourceKind;
+}
+
+export interface CreateProjectExtensionRequest {
+  name: string;
+  display_name?: string | null;
+  description: string;
+  requested_tools: string[];
+  instructions: string;
+}
+
+export interface UpdateProjectExtensionRequest {
+  display_name?: string | null;
+  description: string;
+  requested_tools: string[];
+  instructions: string;
+}
+
+// -------------------------------------------------------------------------
 // Operator surface types
 // -------------------------------------------------------------------------
 

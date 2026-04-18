@@ -165,7 +165,7 @@ describe("AppLayout: three-panel structure", () => {
     component = mountBuilderLayout();
 
     expect(document.body.textContent).toContain(
-      "Shape the workspace, not just the next reply.",
+      "Author the workspace, then let the agent live in it.",
     );
   });
 });
