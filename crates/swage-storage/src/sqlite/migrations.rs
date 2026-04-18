@@ -45,6 +45,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "024_attachments_and_background_jobs",
             CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
         ),
+        ("025_materials", CREATE_MATERIAL_TABLES),
     ]
 }
 
@@ -389,6 +390,33 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
         ON background_jobs(state, updated_at);
     CREATE INDEX IF NOT EXISTS idx_background_jobs_attachment_id
         ON background_jobs(attachment_id, created_at);
+";
+
+const CREATE_MATERIAL_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS materials (
+        id                   TEXT NOT NULL PRIMARY KEY,
+        scope_kind           TEXT NOT NULL,
+        session_id           TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        project_id           TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        source_kind          TEXT NOT NULL,
+        source_attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
+        status               TEXT NOT NULL,
+        title                TEXT NOT NULL,
+        relative_path        TEXT NOT NULL,
+        mime_type            TEXT NOT NULL,
+        content_text         TEXT NOT NULL,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        archived_at          TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_materials_session_id
+        ON materials(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_materials_project_id
+        ON materials(project_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_source_attachment_id
+        ON materials(source_attachment_id)
+        WHERE source_attachment_id IS NOT NULL;
 ";
 
 /// Additive migration: cost in microcents derived from provider pricing data.

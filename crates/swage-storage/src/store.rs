@@ -6,15 +6,15 @@ use swage_core::StorageError;
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
     AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, DeliveryRecord, EdgeEvaluation,
-    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Message,
-    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Material,
+    Message, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
     NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
-    NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewTeam, NewThread, NewToolCall,
-    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
-    ScheduledRun, ScheduledRunState, SecretRecord, Session, Team, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
-    UpdateScheduledJob,
+    NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry,
+    NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewTeam, NewThread,
+    NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project,
+    ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session, Team, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+    UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,6 +183,40 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         attachment_id: Uuid,
     ) -> Result<Vec<BackgroundJob>, StorageError>;
+}
+
+#[async_trait]
+pub trait MaterialStore: Send + Sync {
+    async fn create_material(&self, material: NewMaterial) -> Result<Material, StorageError>;
+    async fn get_material(&self, id: Uuid) -> Result<Option<Material>, StorageError>;
+    async fn get_material_by_source_attachment(
+        &self,
+        attachment_id: Uuid,
+    ) -> Result<Option<Material>, StorageError>;
+    async fn list_materials_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<Material>, StorageError>;
+    async fn list_materials_by_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<Material>, StorageError>;
+    async fn update_material_content(
+        &self,
+        id: Uuid,
+        content_text: &str,
+        mime_type: &str,
+    ) -> Result<Material, StorageError>;
+    async fn archive_material(&self, id: Uuid) -> Result<Material, StorageError>;
+    async fn restore_material(&self, id: Uuid) -> Result<Material, StorageError>;
+    async fn promote_material(
+        &self,
+        id: Uuid,
+        scope_kind: crate::model::AttachmentScopeKind,
+        session_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        relative_path: &str,
+    ) -> Result<Material, StorageError>;
 }
 
 #[async_trait]
@@ -712,6 +746,7 @@ pub trait Storage:
     + SessionStore
     + AttachmentStore
     + BackgroundJobStore
+    + MaterialStore
     + ExecutionHostStore
     + ChannelLinkStore
     + DeliveryStore
@@ -739,6 +774,7 @@ impl<T> Storage for T where
         + SessionStore
         + AttachmentStore
         + BackgroundJobStore
+        + MaterialStore
         + ExecutionHostStore
         + ChannelLinkStore
         + DeliveryStore
@@ -1032,6 +1068,60 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<BackgroundJob>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl MaterialStore for StubStorage {
+        async fn create_material(&self, _: NewMaterial) -> Result<Material, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_material(&self, _: Uuid) -> Result<Option<Material>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_material_by_source_attachment(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<Material>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_materials_by_session(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_materials_by_project(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_material_content(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<Material, StorageError> {
+            unimplemented!()
+        }
+
+        async fn archive_material(&self, _: Uuid) -> Result<Material, StorageError> {
+            unimplemented!()
+        }
+
+        async fn restore_material(&self, _: Uuid) -> Result<Material, StorageError> {
+            unimplemented!()
+        }
+
+        async fn promote_material(
+            &self,
+            _: Uuid,
+            _: crate::model::AttachmentScopeKind,
+            _: Option<Uuid>,
+            _: Option<Uuid>,
+            _: &str,
+        ) -> Result<Material, StorageError> {
             unimplemented!()
         }
     }

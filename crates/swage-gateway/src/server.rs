@@ -123,6 +123,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sessions/:id/attachments",
             get(handlers::list_session_attachments),
         )
+        .route(
+            "/api/sessions/:id/materials",
+            get(handlers::list_session_materials),
+        )
         // Project-scoped session routes. These supplement /api/conversations
         // and allow the frontend to fetch/create sessions per project.
         .route(
@@ -132,6 +136,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/attachments",
             get(handlers::list_project_attachments),
+        )
+        .route(
+            "/api/projects/:id/materials",
+            get(handlers::list_project_materials),
         )
         // Skills listing — resolved hierarchy for a project/agent combination.
         .route("/api/skills", get(handlers::list_skills))
@@ -196,6 +204,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/messages", post(handlers::send_agent_message))
         .route("/api/messages/:id", get(handlers::get_message_status))
         .route("/api/attachments", post(handlers::create_attachment))
+        .route("/api/materials", post(handlers::create_material))
+        .route("/api/materials/:id", get(handlers::get_material))
+        .route(
+            "/api/materials/:id/archive",
+            post(handlers::archive_material),
+        )
+        .route(
+            "/api/materials/:id/restore",
+            post(handlers::restore_material),
+        )
+        .route(
+            "/api/materials/:id/promote",
+            post(handlers::promote_material),
+        )
         .route(
             "/api/background-jobs/:id",
             get(handlers::get_background_job),

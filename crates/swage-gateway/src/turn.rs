@@ -1208,21 +1208,22 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            Attachment, AttachmentStatus, BackgroundJob, ChannelLink, EdgeEvaluation,
-            ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, Message,
-            NewAgentMessage, NewApprovalRequest, NewAttachment, NewBackgroundJob, NewChannelLink,
-            NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
-            NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob,
-            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-            NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-            ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
-            TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+            Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink,
+            EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
+            Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
+            NewBackgroundJob, NewChannelLink, NewEdgeEvaluation, NewExecutionHostRegistration,
+            NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry,
+            NewProject, NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread,
+            NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
+            Project, ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread,
+            ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
+            UpdateHeartbeat, UpdateScheduledJob,
         },
         store::{
             ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
-            ContextSnapshotStore, ExecutionHostStore, HeartbeatStore, MessageStore, ProjectStore,
-            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
-            ToolCallStore, TopologyTraceStore, TurnStore,
+            ContextSnapshotStore, ExecutionHostStore, HeartbeatStore, MaterialStore, MessageStore,
+            ProjectStore, ScheduleStore, SessionStore, SkillActivationStore, TeamStore,
+            ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore,
         },
     };
 
@@ -1438,6 +1439,7 @@ pub(crate) mod tests {
         pub(crate) heartbeat_runs: HashMap<Uuid, HeartbeatRun>,
         pub(crate) attachments: HashMap<Uuid, Attachment>,
         pub(crate) background_jobs: HashMap<Uuid, BackgroundJob>,
+        pub(crate) materials: HashMap<Uuid, Material>,
         pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
         pub(crate) managed_secret_values: HashMap<Uuid, String>,
     }
@@ -2749,6 +2751,156 @@ pub(crate) mod tests {
                 .collect();
             jobs.sort_by_key(|job| job.created_at);
             Ok(jobs)
+        }
+    }
+
+    #[async_trait]
+    impl MaterialStore for MockStorage {
+        async fn create_material(&self, material: NewMaterial) -> Result<Material, StorageError> {
+            let now = chrono::Utc::now();
+            let record = Material {
+                id: material.id,
+                scope_kind: material.scope_kind,
+                session_id: material.session_id,
+                project_id: material.project_id,
+                source_kind: material.source_kind,
+                source_attachment_id: material.source_attachment_id,
+                status: MaterialStatus::Active,
+                title: material.title,
+                relative_path: material.relative_path,
+                mime_type: material.mime_type,
+                content_text: material.content_text,
+                created_at: now,
+                updated_at: now,
+                archived_at: None,
+            };
+            self.db
+                .lock()
+                .await
+                .materials
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn get_material(&self, id: Uuid) -> Result<Option<Material>, StorageError> {
+            Ok(self.db.lock().await.materials.get(&id).cloned())
+        }
+
+        async fn get_material_by_source_attachment(
+            &self,
+            attachment_id: Uuid,
+        ) -> Result<Option<Material>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .materials
+                .values()
+                .find(|material| material.source_attachment_id == Some(attachment_id))
+                .cloned())
+        }
+
+        async fn list_materials_by_session(
+            &self,
+            session_id: Uuid,
+        ) -> Result<Vec<Material>, StorageError> {
+            let mut materials: Vec<Material> = self
+                .db
+                .lock()
+                .await
+                .materials
+                .values()
+                .filter(|material| material.session_id == Some(session_id))
+                .cloned()
+                .collect();
+            materials.sort_by_key(|material| material.created_at);
+            Ok(materials)
+        }
+
+        async fn list_materials_by_project(
+            &self,
+            project_id: Uuid,
+        ) -> Result<Vec<Material>, StorageError> {
+            let mut materials: Vec<Material> = self
+                .db
+                .lock()
+                .await
+                .materials
+                .values()
+                .filter(|material| {
+                    material.project_id == Some(project_id)
+                        && material.scope_kind == AttachmentScopeKind::Project
+                })
+                .cloned()
+                .collect();
+            materials.sort_by_key(|material| material.created_at);
+            Ok(materials)
+        }
+
+        async fn update_material_content(
+            &self,
+            id: Uuid,
+            content_text: &str,
+            mime_type: &str,
+        ) -> Result<Material, StorageError> {
+            let mut db = self.db.lock().await;
+            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Material".into(),
+                id: id.to_string(),
+            })?;
+            material.content_text = content_text.to_string();
+            material.mime_type = mime_type.to_string();
+            material.status = MaterialStatus::Active;
+            material.archived_at = None;
+            material.updated_at = chrono::Utc::now();
+            Ok(material.clone())
+        }
+
+        async fn archive_material(&self, id: Uuid) -> Result<Material, StorageError> {
+            let mut db = self.db.lock().await;
+            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Material".into(),
+                id: id.to_string(),
+            })?;
+            material.status = MaterialStatus::Archived;
+            material.archived_at = Some(chrono::Utc::now());
+            material.updated_at = chrono::Utc::now();
+            Ok(material.clone())
+        }
+
+        async fn restore_material(&self, id: Uuid) -> Result<Material, StorageError> {
+            let mut db = self.db.lock().await;
+            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Material".into(),
+                id: id.to_string(),
+            })?;
+            material.status = MaterialStatus::Active;
+            material.archived_at = None;
+            material.updated_at = chrono::Utc::now();
+            Ok(material.clone())
+        }
+
+        async fn promote_material(
+            &self,
+            id: Uuid,
+            scope_kind: AttachmentScopeKind,
+            session_id: Option<Uuid>,
+            project_id: Option<Uuid>,
+            relative_path: &str,
+        ) -> Result<Material, StorageError> {
+            let mut db = self.db.lock().await;
+            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
+                entity: "Material".into(),
+                id: id.to_string(),
+            })?;
+            material.scope_kind = scope_kind;
+            material.session_id = session_id;
+            material.project_id = project_id;
+            material.relative_path = relative_path.to_string();
+            material.status = MaterialStatus::Active;
+            material.archived_at = None;
+            material.updated_at = chrono::Utc::now();
+            Ok(material.clone())
         }
     }
 

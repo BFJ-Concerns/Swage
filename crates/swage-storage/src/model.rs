@@ -417,6 +417,99 @@ pub struct NewBackgroundJob {
     pub payload: serde_json::Value,
 }
 
+/// Stable source for a managed material record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialSourceKind {
+    Manual,
+    AttachmentIngestion,
+}
+
+impl std::fmt::Display for MaterialSourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MaterialSourceKind::Manual => "manual",
+            MaterialSourceKind::AttachmentIngestion => "attachment_ingestion",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for MaterialSourceKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "manual" => Ok(MaterialSourceKind::Manual),
+            "attachment_ingestion" => Ok(MaterialSourceKind::AttachmentIngestion),
+            other => Err(format!("unknown material source kind: {other}")),
+        }
+    }
+}
+
+/// Durable lifecycle for managed materials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialStatus {
+    Active,
+    Archived,
+}
+
+impl std::fmt::Display for MaterialStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MaterialStatus::Active => "active",
+            MaterialStatus::Archived => "archived",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for MaterialStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(MaterialStatus::Active),
+            "archived" => Ok(MaterialStatus::Archived),
+            other => Err(format!("unknown material status: {other}")),
+        }
+    }
+}
+
+/// Canonical managed material derived from manual authoring or attachment ingestion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Material {
+    pub id: Uuid,
+    pub scope_kind: AttachmentScopeKind,
+    pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub source_kind: MaterialSourceKind,
+    pub source_attachment_id: Option<Uuid>,
+    pub status: MaterialStatus,
+    pub title: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub content_text: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMaterial {
+    pub id: Uuid,
+    pub scope_kind: AttachmentScopeKind,
+    pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub source_kind: MaterialSourceKind,
+    pub source_attachment_id: Option<Uuid>,
+    pub title: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub content_text: String,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {

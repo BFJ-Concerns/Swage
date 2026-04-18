@@ -293,6 +293,10 @@ async fn process_attachment_job(state: &AppState, job: &BackgroundJob) -> Result
                     markdown.as_deref(),
                 )
                 .await?;
+            if let Some(markdown) = markdown.as_deref() {
+                let _ = crate::material::ensure_attachment_material(state, &attachment, markdown)
+                    .await?;
+            }
             let result = serde_json::json!({
                 "attachment_id": attachment.id,
                 "status": "ready",

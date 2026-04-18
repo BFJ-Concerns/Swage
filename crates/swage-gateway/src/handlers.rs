@@ -34,6 +34,9 @@ use crate::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
     },
+    material::{
+        CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
+    },
     onboarding::{
         ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
         CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
@@ -306,6 +309,72 @@ pub async fn retry_background_job(
 ) -> Result<Json<BackgroundJobResponse>, ApiError> {
     Ok(Json(
         crate::attachment::retry_background_job(&state, id).await?,
+    ))
+}
+
+/// `POST /api/materials` — create a managed material.
+pub async fn create_material(
+    State(state): State<AppState>,
+    Json(req): Json<CreateMaterialRequest>,
+) -> Result<(StatusCode, Json<MaterialResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::material::create_material(&state, req).await?),
+    ))
+}
+
+/// `GET /api/materials/:id` — inspect one managed material.
+pub async fn get_material(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MaterialResponse>, ApiError> {
+    Ok(Json(crate::material::get_material(&state, id).await?))
+}
+
+/// `GET /api/sessions/:id/materials` — list session-scoped managed materials.
+pub async fn list_session_materials(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MaterialListResponse>, ApiError> {
+    Ok(Json(
+        crate::material::list_session_materials(&state, id).await?,
+    ))
+}
+
+/// `GET /api/projects/:id/materials` — list project-scoped managed materials.
+pub async fn list_project_materials(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MaterialListResponse>, ApiError> {
+    Ok(Json(
+        crate::material::list_project_materials(&state, id).await?,
+    ))
+}
+
+/// `POST /api/materials/:id/archive` — archive a managed material.
+pub async fn archive_material(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MaterialResponse>, ApiError> {
+    Ok(Json(crate::material::archive_material(&state, id).await?))
+}
+
+/// `POST /api/materials/:id/restore` — restore an archived managed material.
+pub async fn restore_material(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MaterialResponse>, ApiError> {
+    Ok(Json(crate::material::restore_material(&state, id).await?))
+}
+
+/// `POST /api/materials/:id/promote` — promote a material to a broader scope.
+pub async fn promote_material(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PromoteMaterialRequest>,
+) -> Result<Json<MaterialResponse>, ApiError> {
+    Ok(Json(
+        crate::material::promote_material(&state, id, req).await?,
     ))
 }
 
