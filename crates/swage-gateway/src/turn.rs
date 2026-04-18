@@ -1442,12 +1442,16 @@ pub(crate) mod tests {
         pub(crate) materials: HashMap<Uuid, Material>,
         pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
         pub(crate) managed_secret_values: HashMap<Uuid, String>,
+        pub(crate) active_lens: swage_storage::AppLens,
     }
 
     impl MockStorage {
         pub(crate) fn new() -> Self {
             Self {
-                db: Mutex::new(InMemoryDb::default()),
+                db: Mutex::new(InMemoryDb {
+                    active_lens: swage_storage::AppLens::Assistant,
+                    ..Default::default()
+                }),
             }
         }
     }
@@ -2008,6 +2012,29 @@ pub(crate) mod tests {
                             == Some(conversation)
                 })
                 .cloned())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::LensStore for MockStorage {
+        async fn get_active_lens(
+            &self,
+        ) -> Result<swage_storage::LensPreference, StorageError> {
+            Ok(swage_storage::LensPreference {
+                active_lens: self.db.lock().await.active_lens,
+                updated_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn set_active_lens(
+            &self,
+            lens: swage_storage::AppLens,
+        ) -> Result<swage_storage::LensPreference, StorageError> {
+            self.db.lock().await.active_lens = lens;
+            Ok(swage_storage::LensPreference {
+                active_lens: lens,
+                updated_at: chrono::Utc::now(),
+            })
         }
     }
 

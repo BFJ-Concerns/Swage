@@ -12,6 +12,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
+  import { fetchLensRuntime, updateLensRuntime } from "./lib/api/lens";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
@@ -19,6 +20,7 @@
   import { createProjectStore } from "./lib/stores/projects";
   import { createRouter } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
+  import type { AppLens, LensSurface } from "./lib/types";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -55,7 +57,7 @@
 
   async function selectAndNavigate(id: string): Promise<void> {
     try {
-      isOperatorMode = false;
+      activeSurface = "conversation";
       await conversationStore.selectConversation(id);
       connectionStore.connectTo(id);
       // router is declared below but will be initialised before this is called.
@@ -67,7 +69,7 @@
 
   async function createAndNavigate(): Promise<void> {
     try {
-      isOperatorMode = false;
+      activeSurface = "conversation";
       // Use the currently selected project — should always be set after startup.
       const projectId = projectStore.currentProject?.id ?? "";
       await conversationStore.createConversation(projectId);
@@ -125,8 +127,13 @@
   let loadError = $state<string | null>(null);
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
-  let isOperatorMode = $state(false);
+  let activeLens = $state<AppLens>("assistant");
+  let activeSurface = $state<LensSurface>("conversation");
   const desktopRuntime = getDesktopRuntime();
+
+  function defaultSurfaceForLens(lens: AppLens): LensSurface {
+    return lens === "builder" ? "builder" : "conversation";
+  }
 
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
@@ -134,16 +141,22 @@
     if (id) connectionStore.connectTo(id);
   }
 
-  function handleToggleOperatorMode(next: boolean): void {
-    isOperatorMode = next;
+  function handleSelectSurface(next: LensSurface): void {
+    activeSurface = next;
 
-    if (next) {
+    if (next !== "conversation") {
       connectionStore.disconnect();
       return;
     }
 
     const id = conversationStore.activeConversation?.id;
     if (id) connectionStore.connectTo(id);
+  }
+
+  async function handleSelectLens(next: AppLens): Promise<void> {
+    const runtime = await updateLensRuntime(next);
+    activeLens = runtime.active_lens;
+    handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
   }
 
   // ---------------------------------------------------------------------------
@@ -181,6 +194,10 @@
         await conversationStore.loadConversations(projectId);
       }
 
+      const lensRuntime = await fetchLensRuntime();
+      activeLens = lensRuntime.active_lens;
+      activeSurface = defaultSurfaceForLens(lensRuntime.active_lens);
+
       await router.init();
 
       // Snapshot the not-found flag — set by the router if the URL pointed
@@ -216,8 +233,10 @@
     {projectStore}
     onProjectChange={handleProjectChange}
     onRetry={handleRetry}
-    {isOperatorMode}
-    onToggleOperatorMode={handleToggleOperatorMode}
+    {activeLens}
+    {activeSurface}
+    onSelectLens={handleSelectLens}
+    onSelectSurface={handleSelectSurface}
     {desktopRuntime}
   />
 

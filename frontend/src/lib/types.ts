@@ -99,6 +99,26 @@ export interface ConversationResponse {
 }
 
 // -------------------------------------------------------------------------
+// Lens runtime types
+// -------------------------------------------------------------------------
+
+export type AppLens = "assistant" | "builder";
+export type LensSurface = "conversation" | "operator" | "builder";
+
+export interface LensDescriptor {
+  id: AppLens;
+  title: string;
+  summary: string;
+  default_surface: LensSurface;
+}
+
+export interface LensRuntimeResponse {
+  active_lens: AppLens;
+  updated_at: string;
+  available_lenses: LensDescriptor[];
+}
+
+// -------------------------------------------------------------------------
 // Operator surface types
 // -------------------------------------------------------------------------
 

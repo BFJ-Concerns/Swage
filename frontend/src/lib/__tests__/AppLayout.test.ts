@@ -66,8 +66,26 @@ function mountLayout(): MountedComponent {
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
       onRetry: () => {},
-      isOperatorMode: false,
-      onToggleOperatorMode: () => {},
+      activeLens: "assistant",
+      activeSurface: "conversation",
+      onSelectLens: () => {},
+      onSelectSurface: () => {},
+    },
+  });
+}
+
+function mountBuilderLayout(): MountedComponent {
+  return mount(AppLayout, {
+    target: document.body,
+    props: {
+      conversationStore: mockConversationStore(),
+      connectionStore: mockConnectionStore(),
+      streamingStore: mockStreamingStore(),
+      onRetry: () => {},
+      activeLens: "builder",
+      activeSurface: "builder",
+      onSelectLens: () => {},
+      onSelectSurface: () => {},
     },
   });
 }
@@ -141,5 +159,13 @@ describe("AppLayout: three-panel structure", () => {
     // ConnectionIndicator is hidden when status is "disconnected" (no active
     // connection attempt), so we verify the other children are present.
     expect(main!.children.length).toBeGreaterThan(0);
+  });
+
+  it("renders the builder deck when the builder lens is active", () => {
+    component = mountBuilderLayout();
+
+    expect(document.body.textContent).toContain(
+      "Shape the workspace, not just the next reply.",
+    );
   });
 });

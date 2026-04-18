@@ -63,6 +63,7 @@ pub mod execution_host;
 pub mod handlers;
 pub mod heartbeat;
 pub mod lifecycle;
+pub mod lens;
 pub mod material;
 pub mod onboarding;
 pub mod operator;

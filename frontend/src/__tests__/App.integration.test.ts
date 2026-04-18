@@ -16,14 +16,17 @@ import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
 import * as conversationsApi from "../lib/api/conversations";
+import * as lensApi from "../lib/api/lens";
 import * as operatorApi from "../lib/api/operator";
 import * as projectsApi from "../lib/api/projects";
 import type {
+  AppLens,
   ClientEvent,
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
   ConversationSummary,
+  LensRuntimeResponse,
   OperatorOverview,
   Project,
   ServerEvent,
@@ -80,6 +83,11 @@ vi.mock("../lib/api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
+}));
+
+vi.mock("../lib/api/lens", () => ({
+  fetchLensRuntime: vi.fn(),
+  updateLensRuntime: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -191,6 +199,29 @@ function makeOperatorOverview(
   };
 }
 
+function makeLensRuntime(
+  activeLens: AppLens = "assistant",
+): LensRuntimeResponse {
+  return {
+    active_lens: activeLens,
+    updated_at: "2026-04-07T12:00:00Z",
+    available_lenses: [
+      {
+        id: "assistant",
+        title: "Assistant lens",
+        summary: "Conversation-first view",
+        default_surface: "conversation",
+      },
+      {
+        id: "builder",
+        title: "Builder lens",
+        summary: "Workspace-first view",
+        default_surface: "builder",
+      },
+    ],
+  };
+}
+
 async function settleUi(): Promise<void> {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -209,6 +240,8 @@ describe("App", () => {
     vi.clearAllMocks();
     setPath("/");
     delete window.swageDesktop;
+    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
+    vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
   });
 
   afterEach(() => {
@@ -255,6 +288,7 @@ describe("App", () => {
     await settleUi();
 
     expect(projectsApi.listProjects).toHaveBeenCalledTimes(1);
+    expect(lensApi.fetchLensRuntime).toHaveBeenCalledTimes(1);
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultProject.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
@@ -388,7 +422,7 @@ describe("App", () => {
     await settleUi();
 
     const operatorButton = Array.from(
-      document.querySelectorAll(".mode-btn"),
+      document.querySelectorAll(".toggle-btn"),
     ).find((button) => button.textContent?.includes("Operator")) as
       | HTMLButtonElement
       | undefined;
@@ -404,5 +438,54 @@ describe("App", () => {
     );
     expect(document.body.textContent).toContain("dev_dm");
     expect(document.body.textContent).toContain("Local machine");
+  });
+
+  it("loads the builder lens and renders the builder deck by default", async () => {
+    const defaultProject = makeProject({ name: "Workbench" });
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
+      makeOperatorOverview(),
+    );
+    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValueOnce(
+      makeLensRuntime("builder"),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(document.body.textContent).toContain(
+      "Shape the workspace, not just the next reply.",
+    );
+    expect(document.body.textContent).toContain("Workbench");
+    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a lens switch and changes the available primary surface", async () => {
+    const defaultProject = makeProject();
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const builderButton = Array.from(
+      document.querySelectorAll(".toggle-btn"),
+    ).find((button) => button.textContent?.includes("Builder")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(builderButton).toBeDefined();
+
+    flushSync(() => builderButton!.click());
+    await settleUi();
+
+    expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("builder");
+    expect(document.body.textContent).toContain("Builder deck");
+    expect(document.body.textContent).toContain(
+      "Shape the workspace, not just the next reply.",
+    );
   });
 });

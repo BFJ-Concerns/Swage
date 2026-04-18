@@ -4,17 +4,18 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
-    AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, DeliveryRecord, EdgeEvaluation,
-    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit, Material,
-    Message, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
-    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry,
-    NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewTeam, NewThread,
-    NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project,
-    ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session, Team, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
-    UpdateHeartbeat, UpdateScheduledJob,
+    ActiveSkillRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest, ApprovalState,
+    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, DeliveryRecord,
+    EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
+    InboundAudit, LensPreference, Material, Message, NewAgentMessage, NewApprovalRequest,
+    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeliveryRecord,
+    NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMaterial,
+    NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
+    NewSecretRecord, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
+    ScheduledRunState, SecretRecord, Session, Team, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
+    UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +70,12 @@ pub trait SessionStore: Send + Sync {
         account: &str,
         conversation: &str,
     ) -> Result<Option<Session>, StorageError>;
+}
+
+#[async_trait]
+pub trait LensStore: Send + Sync {
+    async fn get_active_lens(&self) -> Result<LensPreference, StorageError>;
+    async fn set_active_lens(&self, lens: AppLens) -> Result<LensPreference, StorageError>;
 }
 
 #[async_trait]
@@ -744,6 +751,7 @@ pub trait HeartbeatStore: Send + Sync {
 pub trait Storage:
     TeamStore
     + SessionStore
+    + LensStore
     + AttachmentStore
     + BackgroundJobStore
     + MaterialStore
@@ -772,6 +780,7 @@ pub trait Storage:
 impl<T> Storage for T where
     T: TeamStore
         + SessionStore
+        + LensStore
         + AttachmentStore
         + BackgroundJobStore
         + MaterialStore
@@ -872,6 +881,17 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<Session>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl LensStore for StubStorage {
+        async fn get_active_lens(&self) -> Result<LensPreference, StorageError> {
+            unimplemented!()
+        }
+
+        async fn set_active_lens(&self, _: AppLens) -> Result<LensPreference, StorageError> {
             unimplemented!()
         }
     }

@@ -5,11 +5,13 @@
 <script lang="ts">
   import ConversationList from "./ConversationList.svelte";
   import ProjectSelector from "./ProjectSelector.svelte";
+  import BuilderDeck from "./BuilderDeck.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
+  import type { AppLens, LensSurface } from "../types";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
@@ -22,8 +24,10 @@
     projectStore?: ProjectStore;
     onProjectChange?: () => void;
     onRetry: () => void;
-    isOperatorMode: boolean;
-    onToggleOperatorMode: (next: boolean) => void;
+    activeLens: AppLens;
+    activeSurface: LensSurface;
+    onSelectLens: (next: AppLens) => void;
+    onSelectSurface: (next: LensSurface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
   }
 
@@ -34,8 +38,10 @@
     projectStore,
     onProjectChange,
     onRetry,
-    isOperatorMode,
-    onToggleOperatorMode,
+    activeLens,
+    activeSurface,
+    onSelectLens,
+    onSelectSurface,
     desktopRuntime,
   }: Props = $props();
 </script>
@@ -44,21 +50,54 @@
   <aside class="sidebar">
     <!-- Project context at the top, conversation list fills the rest. -->
     <ProjectSelector {projectStore} {onProjectChange} />
+    <div class="lens-switch" role="tablist" aria-label="Product lenses">
+      <button
+        class="toggle-btn"
+        class:active={activeLens === "assistant"}
+        onclick={() => onSelectLens("assistant")}
+      >
+        Assistant
+      </button>
+      <button
+        class="toggle-btn"
+        class:active={activeLens === "builder"}
+        onclick={() => onSelectLens("builder")}
+      >
+        Builder
+      </button>
+    </div>
     <div class="mode-switch" role="tablist" aria-label="Primary views">
-      <button
-        class="mode-btn"
-        class:active={!isOperatorMode}
-        onclick={() => onToggleOperatorMode(false)}
-      >
-        Conversations
-      </button>
-      <button
-        class="mode-btn"
-        class:active={isOperatorMode}
-        onclick={() => onToggleOperatorMode(true)}
-      >
-        Operator
-      </button>
+      {#if activeLens === "assistant"}
+        <button
+          class="toggle-btn"
+          class:active={activeSurface === "conversation"}
+          onclick={() => onSelectSurface("conversation")}
+        >
+          Conversations
+        </button>
+        <button
+          class="toggle-btn"
+          class:active={activeSurface === "operator"}
+          onclick={() => onSelectSurface("operator")}
+        >
+          Operator
+        </button>
+      {:else}
+        <button
+          class="toggle-btn"
+          class:active={activeSurface === "builder"}
+          onclick={() => onSelectSurface("builder")}
+        >
+          Builder deck
+        </button>
+        <button
+          class="toggle-btn"
+          class:active={activeSurface === "conversation"}
+          onclick={() => onSelectSurface("conversation")}
+        >
+          Conversations
+        </button>
+      {/if}
     </div>
     {#if desktopRuntime}
       <div class="runtime-chip" title={desktopRuntime.gatewayUrl}>
@@ -75,8 +114,10 @@
       ConnectionIndicator is non-intrusive — hidden when connected,
       visible as a banner when the WebSocket is down or reconnecting.
     -->
-    {#if isOperatorMode}
+    {#if activeSurface === "operator"}
       <OperatorDashboard />
+    {:else if activeSurface === "builder"}
+      <BuilderDeck {projectStore} {desktopRuntime} />
     {:else}
       <ConnectionIndicator store={connectionStore} {onRetry} />
       <!-- Messages fill the available space and scroll independently. -->
@@ -111,6 +152,14 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.58);
+  }
+
+  .lens-switch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 10px 12px;
     border-bottom: 1px solid #e7ddd0;
     background: rgba(255, 255, 255, 0.68);
   }
@@ -141,7 +190,7 @@
     color: #6b7280;
   }
 
-  .mode-btn {
+  .toggle-btn {
     border: 1px solid rgba(154, 52, 18, 0.14);
     border-radius: 999px;
     padding: 8px 10px;
@@ -152,7 +201,7 @@
     font-weight: 600;
   }
 
-  .mode-btn.active {
+  .toggle-btn.active {
     background: #1f2937;
     color: #fffaf0;
     border-color: #1f2937;

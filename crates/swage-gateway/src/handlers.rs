@@ -34,6 +34,7 @@ use crate::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
     },
+    lens::{LensRuntimeResponse, UpdateLensRuntimeRequest},
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
@@ -171,6 +172,21 @@ pub async fn operator_usage(
     Query(query): Query<OperatorUsageQuery>,
 ) -> Result<Json<OperatorUsageResponse>, ApiError> {
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
+}
+
+/// `GET /api/lens-runtime` — inspect the active assistant or builder lens.
+pub async fn get_lens_runtime(
+    State(state): State<AppState>,
+) -> Result<Json<LensRuntimeResponse>, ApiError> {
+    Ok(Json(crate::lens::get_lens_runtime(&state).await?))
+}
+
+/// `PUT /api/lens-runtime` — persist the active assistant or builder lens.
+pub async fn update_lens_runtime(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateLensRuntimeRequest>,
+) -> Result<Json<LensRuntimeResponse>, ApiError> {
+    Ok(Json(crate::lens::update_lens_runtime(&state, request).await?))
 }
 
 /// `GET /api/secrets` — list governed secrets without revealing raw values.
@@ -1740,7 +1756,10 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::store::{MessageStore, ProjectStore, SessionStore, Storage, TeamStore};
+    use swage_storage::{
+        AppLens,
+        store::{MessageStore, ProjectStore, SessionStore, Storage, TeamStore},
+    };
 
     use super::*;
     use crate::{
@@ -2008,6 +2027,99 @@ mod tests {
         assert!(body["project_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
+    }
+
+    #[tokio::test]
+    async fn get_lens_runtime_defaults_to_assistant() {
+        let (router, _storage) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/lens-runtime")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["active_lens"], "assistant");
+        assert_eq!(body["available_lenses"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn put_lens_runtime_persists_builder_lens() {
+        let (router, storage) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/lens-runtime")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["active_lens"], "builder");
+
+        let stored = swage_storage::store::LensStore::get_active_lens(&*storage)
+            .await
+            .expect("stored lens");
+        assert_eq!(stored.active_lens, AppLens::Builder);
+    }
+
+    #[tokio::test]
+    async fn switching_lenses_does_not_change_workflow_capabilities() {
+        let (router, _storage) = make_router();
+
+        let before = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/capabilities")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let before_body = body_json(before).await;
+
+        let update = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/lens-runtime")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update.status(), StatusCode::OK);
+
+        let after = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/capabilities")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after_body = body_json(after).await;
+
+        assert_eq!(before_body, after_body);
     }
 
     #[tokio::test]

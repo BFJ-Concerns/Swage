@@ -46,6 +46,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
+        ("026_lens_preferences", CREATE_LENS_PREFERENCES_TABLE),
     ]
 }
 
@@ -90,6 +91,17 @@ const CREATE_CHANNEL_LINK_TABLE: &str = "
         ON channel_links(project_id);
     CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
         ON channel_links(session_id);
+";
+
+const CREATE_LENS_PREFERENCES_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS lens_preferences (
+        singleton_key INTEGER NOT NULL PRIMARY KEY CHECK (singleton_key = 1),
+        active_lens   TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO lens_preferences (singleton_key, active_lens, updated_at)
+    VALUES (1, 'assistant', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "

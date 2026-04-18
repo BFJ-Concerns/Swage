@@ -179,6 +179,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
         .route(
+            "/api/lens-runtime",
+            get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
+        )
+        .route(
             "/api/secrets",
             get(handlers::list_secrets).post(handlers::create_secret),
         )
