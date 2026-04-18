@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use rusqlite::params;
 use uuid::Uuid;
 
@@ -74,7 +75,6 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
         mime_type: row.get(7)?,
         bytes: row.get(8)?,
         byte_count: row.get(9)?,
-        ingested_markdown: row.get(12)?,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -139,6 +139,93 @@ fn row_to_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Background
     })
 }
 
+pub fn migrate_attachment_ingested_markdown_dedup(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+    let result = (|| -> Result<(), StorageError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    a.id,
+                    a.scope_kind,
+                    a.session_id,
+                    a.project_id,
+                    a.filename,
+                    a.ingested_markdown,
+                    a.created_at,
+                    a.updated_at
+                 FROM attachments a
+                 LEFT JOIN materials m ON m.source_attachment_id = a.id
+                 WHERE a.ingested_markdown IS NOT NULL
+                   AND m.id IS NULL",
+            )
+            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+
+        for row in rows {
+            let (
+                attachment_id,
+                scope_kind,
+                session_id,
+                project_id,
+                filename,
+                content_text,
+                created_at,
+                updated_at,
+            ) = row.map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+            conn.execute(
+                "INSERT INTO materials (
+                    id, scope_kind, session_id, project_id, source_kind, source_attachment_id,
+                    status, title, relative_path, mime_type, content_text, created_at, updated_at, archived_at
+                ) VALUES (?1, ?2, ?3, ?4, 'attachment_ingestion', ?5, 'active', ?6, ?7, 'text/markdown', ?8, ?9, ?10, NULL)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    scope_kind,
+                    session_id,
+                    project_id,
+                    attachment_id,
+                    filename,
+                    format!("attachments/{attachment_id}-attachment.md"),
+                    content_text,
+                    created_at,
+                    updated_at,
+                ],
+            )
+            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+        }
+
+        conn.execute(
+            "UPDATE attachments SET ingested_markdown = NULL WHERE ingested_markdown IS NOT NULL",
+            [],
+        )
+        .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|error| StorageError::MigrationFailed(error.to_string())),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 #[async_trait]
 impl AttachmentStore for SqliteStorage {
     async fn queue_attachment_ingestion(
@@ -188,7 +275,7 @@ impl AttachmentStore for SqliteStorage {
                 )?;
                 let attachment_record = conn.query_row(
                     "SELECT id, scope_kind, session_id, project_id, kind, status, filename,
-                            mime_type, content_bytes, byte_count, created_at, updated_at, ingested_markdown
+                            mime_type, content_bytes, byte_count, created_at, updated_at
                      FROM attachments WHERE id = ?1",
                     params![attachment.id.to_string()],
                     row_to_attachment,
@@ -220,7 +307,7 @@ impl AttachmentStore for SqliteStorage {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, scope_kind, session_id, project_id, kind, status, filename,
-                        mime_type, content_bytes, byte_count, created_at, updated_at, ingested_markdown
+                        mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id.to_string()])?;
@@ -239,7 +326,7 @@ impl AttachmentStore for SqliteStorage {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, scope_kind, session_id, project_id, kind, status, filename,
-                        mime_type, content_bytes, byte_count, created_at, updated_at, ingested_markdown
+                        mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE session_id = ?1 ORDER BY created_at ASC, id ASC",
             )?;
             stmt.query_map(params![session_id.to_string()], row_to_attachment)?
@@ -255,7 +342,7 @@ impl AttachmentStore for SqliteStorage {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, scope_kind, session_id, project_id, kind, status, filename,
-                        mime_type, content_bytes, byte_count, created_at, updated_at, ingested_markdown
+                        mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE project_id = ?1 ORDER BY created_at ASC, id ASC",
             )?;
             stmt.query_map(params![project_id.to_string()], row_to_attachment)?
@@ -268,19 +355,18 @@ impl AttachmentStore for SqliteStorage {
         &self,
         id: Uuid,
         status: AttachmentStatus,
-        ingested_markdown: Option<&str>,
     ) -> Result<Attachment, StorageError> {
         self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
             conn.execute(
                 "UPDATE attachments
-                 SET status = ?2, ingested_markdown = ?3, updated_at = ?4
+                 SET status = ?2, updated_at = ?3
                  WHERE id = ?1",
-                params![id.to_string(), status.to_string(), ingested_markdown, now],
+                params![id.to_string(), status.to_string(), now],
             )?;
             conn.query_row(
                 "SELECT id, scope_kind, session_id, project_id, kind, status, filename,
-                        mime_type, content_bytes, byte_count, created_at, updated_at, ingested_markdown
+                        mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE id = ?1",
                 params![id.to_string()],
                 row_to_attachment,
@@ -441,9 +527,12 @@ impl BackgroundJobStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
+    use crate::model::{MaterialSourceKind, NewMaterial};
+    use crate::store::{MaterialStore, ProjectStore};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attachment_round_trips_and_background_job_states_transition() {
@@ -484,10 +573,10 @@ mod tests {
         assert_eq!(completed.state, BackgroundJobState::Completed);
 
         let updated = storage
-            .update_attachment_ingestion(attachment_id, AttachmentStatus::Ready, Some("hello"))
+            .update_attachment_ingestion(attachment_id, AttachmentStatus::Ready)
             .await
             .unwrap();
-        assert_eq!(updated.ingested_markdown.as_deref(), Some("hello"));
+        assert_eq!(updated.status, AttachmentStatus::Ready);
 
         let second_attachment_id = Uuid::new_v4();
         let second_job_id = Uuid::new_v4();
@@ -523,5 +612,152 @@ mod tests {
         assert_eq!(failed.state, BackgroundJobState::Failed);
         let retried = storage.retry_background_job(second_job_id).await.unwrap();
         assert_eq!(retried.state, BackgroundJobState::Retried);
+    }
+
+    #[test]
+    fn attachment_markdown_migration_moves_legacy_content_into_materials() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE attachments (
+                id TEXT NOT NULL PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                session_id TEXT,
+                project_id TEXT,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                content_bytes BLOB NOT NULL,
+                byte_count INTEGER NOT NULL,
+                ingested_markdown TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE materials (
+                id TEXT NOT NULL PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                session_id TEXT,
+                project_id TEXT,
+                source_kind TEXT NOT NULL,
+                source_attachment_id TEXT,
+                status TEXT NOT NULL,
+                title TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                content_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                archived_at TEXT
+            );
+            CREATE UNIQUE INDEX idx_materials_source_attachment_id
+                ON materials(source_attachment_id)
+                WHERE source_attachment_id IS NOT NULL;
+            ",
+        )
+        .unwrap();
+
+        let attachment_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO attachments (
+                id, scope_kind, session_id, project_id, kind, status, filename, mime_type,
+                content_bytes, byte_count, ingested_markdown, created_at, updated_at
+            ) VALUES (?1, 'project', NULL, ?2, 'document', 'ready', 'legacy.txt', 'text/plain', ?3, 6, ?4, ?5, ?5)",
+            params![
+                attachment_id,
+                Uuid::new_v4().to_string(),
+                b"legacy".to_vec(),
+                "legacy markdown",
+                now,
+            ],
+        )
+        .unwrap();
+
+        migrate_attachment_ingested_markdown_dedup(&conn).unwrap();
+
+        let material_content: String = conn
+            .query_row(
+                "SELECT content_text FROM materials WHERE source_attachment_id = ?1",
+                params![attachment_id.clone()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(material_content, "legacy markdown");
+
+        let attachment_markdown: Option<String> = conn
+            .query_row(
+                "SELECT ingested_markdown FROM attachments WHERE id = ?1",
+                params![attachment_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(attachment_markdown.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attachment_rows_do_not_persist_duplicate_ingested_markdown() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let project = storage.get_or_create_default().await.unwrap();
+        let attachment_id = Uuid::new_v4();
+        let (attachment, _) = storage
+            .queue_attachment_ingestion(
+                NewAttachment {
+                    id: attachment_id,
+                    scope_kind: AttachmentScopeKind::Project,
+                    session_id: None,
+                    project_id: Some(project.id),
+                    kind: AttachmentKind::Document,
+                    filename: "note.md".into(),
+                    mime_type: "text/markdown".into(),
+                    bytes: b"# Note".to_vec(),
+                },
+                NewBackgroundJob {
+                    id: Uuid::new_v4(),
+                    kind: BackgroundJobKind::AttachmentIngestion,
+                    attachment_id: Some(attachment_id),
+                    payload: json!({"attachment_id": attachment_id}),
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .update_attachment_ingestion(attachment.id, AttachmentStatus::Ready)
+            .await
+            .unwrap();
+        storage
+            .create_material(NewMaterial {
+                id: Uuid::new_v4(),
+                scope_kind: attachment.scope_kind.clone(),
+                session_id: attachment.session_id,
+                project_id: attachment.project_id,
+                source_kind: MaterialSourceKind::AttachmentIngestion,
+                source_attachment_id: Some(attachment.id),
+                title: attachment.filename.clone(),
+                relative_path: "attachments/note.md".into(),
+                mime_type: "text/markdown".into(),
+                content_text: "# Note".into(),
+            })
+            .await
+            .unwrap();
+
+        let persisted_markdown: Option<String> = storage
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT ingested_markdown FROM attachments WHERE id = ?1",
+                    params![attachment_id.to_string()],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(persisted_markdown.is_none());
+
+        let material = storage
+            .get_material_by_source_attachment(attachment.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(material.content_text, "# Note");
     }
 }

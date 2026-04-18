@@ -313,7 +313,7 @@ async fn background_jobs_cover_queued_running_completed_failed_and_retried_state
     assert_eq!(running_body["state"], "running");
 
     storage
-        .update_attachment_ingestion(invalid_attachment_id, AttachmentStatus::Failed, None)
+        .update_attachment_ingestion(invalid_attachment_id, AttachmentStatus::Failed)
         .await
         .unwrap();
     let failed = storage

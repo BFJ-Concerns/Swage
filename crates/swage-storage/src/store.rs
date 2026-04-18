@@ -167,7 +167,6 @@ pub trait AttachmentStore: Send + Sync {
         &self,
         id: Uuid,
         status: AttachmentStatus,
-        ingested_markdown: Option<&str>,
     ) -> Result<Attachment, StorageError>;
 }
 
@@ -1063,7 +1062,6 @@ mod tests {
             &self,
             _: Uuid,
             _: AttachmentStatus,
-            _: Option<&str>,
         ) -> Result<Attachment, StorageError> {
             unimplemented!()
         }

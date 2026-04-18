@@ -2571,7 +2571,6 @@ pub(crate) mod tests {
                 mime_type: attachment.mime_type,
                 bytes: attachment.bytes,
                 byte_count,
-                ingested_markdown: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -2637,7 +2636,6 @@ pub(crate) mod tests {
             &self,
             id: Uuid,
             status: AttachmentStatus,
-            ingested_markdown: Option<&str>,
         ) -> Result<Attachment, StorageError> {
             let mut db = self.db.lock().await;
             let attachment = db.attachments.get_mut(&id).ok_or(StorageError::NotFound {
@@ -2645,7 +2643,6 @@ pub(crate) mod tests {
                 id: id.to_string(),
             })?;
             attachment.status = status;
-            attachment.ingested_markdown = ingested_markdown.map(str::to_string);
             attachment.updated_at = chrono::Utc::now();
             Ok(attachment.clone())
         }

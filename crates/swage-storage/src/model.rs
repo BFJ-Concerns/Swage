@@ -413,7 +413,6 @@ pub struct Attachment {
     pub mime_type: String,
     pub bytes: Vec<u8>,
     pub byte_count: i64,
-    pub ingested_markdown: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

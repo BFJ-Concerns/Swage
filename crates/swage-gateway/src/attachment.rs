@@ -150,7 +150,7 @@ pub async fn create_attachment(
         )
         .await?;
     Ok(QueuedAttachmentResponse {
-        attachment: map_attachment(attachment),
+        attachment: map_attachment(state, attachment).await?,
         job: map_job(job),
     })
 }
@@ -169,7 +169,7 @@ pub async fn list_session_attachments(
         .list_attachments_by_session(session_id)
         .await?;
     Ok(AttachmentListResponse {
-        attachments: attachments.into_iter().map(map_attachment).collect(),
+        attachments: map_attachments(state, attachments).await?,
     })
 }
 
@@ -187,7 +187,7 @@ pub async fn list_project_attachments(
         .list_attachments_by_project(project_id)
         .await?;
     Ok(AttachmentListResponse {
-        attachments: attachments.into_iter().map(map_attachment).collect(),
+        attachments: map_attachments(state, attachments).await?,
     })
 }
 
@@ -213,7 +213,7 @@ pub async fn retry_background_job(
     if let Some(attachment_id) = retried.attachment_id {
         let _ = state
             .storage
-            .update_attachment_ingestion(attachment_id, AttachmentStatus::Pending, None)
+            .update_attachment_ingestion(attachment_id, AttachmentStatus::Pending)
             .await?;
     }
     Ok(map_job(retried))
@@ -287,11 +287,7 @@ async fn process_attachment_job(state: &AppState, job: &BackgroundJob) -> Result
         Ok(markdown) => {
             let _ = state
                 .storage
-                .update_attachment_ingestion(
-                    attachment.id,
-                    AttachmentStatus::Ready,
-                    markdown.as_deref(),
-                )
+                .update_attachment_ingestion(attachment.id, AttachmentStatus::Ready)
                 .await?;
             if let Some(markdown) = markdown.as_deref() {
                 let _ = crate::material::ensure_attachment_material(state, &attachment, markdown)
@@ -310,7 +306,7 @@ async fn process_attachment_job(state: &AppState, job: &BackgroundJob) -> Result
         Err(error) => {
             let _ = state
                 .storage
-                .update_attachment_ingestion(attachment.id, AttachmentStatus::Failed, None)
+                .update_attachment_ingestion(attachment.id, AttachmentStatus::Failed)
                 .await?;
             let _ = state.storage.fail_background_job(job.id, &error).await?;
         }
@@ -335,8 +331,31 @@ fn ingest_attachment_markdown(attachment: &Attachment) -> Result<Option<String>,
     }
 }
 
-fn map_attachment(attachment: Attachment) -> AttachmentResponse {
-    AttachmentResponse {
+async fn map_attachments(
+    state: &AppState,
+    attachments: Vec<Attachment>,
+) -> Result<Vec<AttachmentResponse>, GatewayError> {
+    let mut responses = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        responses.push(map_attachment(state, attachment).await?);
+    }
+    Ok(responses)
+}
+
+async fn map_attachment(
+    state: &AppState,
+    attachment: Attachment,
+) -> Result<AttachmentResponse, GatewayError> {
+    let ingested_markdown = if matches!(attachment.status, AttachmentStatus::Ready) {
+        state
+            .storage
+            .get_material_by_source_attachment(attachment.id)
+            .await?
+            .map(|material| material.content_text)
+    } else {
+        None
+    };
+    Ok(AttachmentResponse {
         id: attachment.id,
         scope_kind: attachment.scope_kind.to_string(),
         session_id: attachment.session_id,
@@ -346,10 +365,10 @@ fn map_attachment(attachment: Attachment) -> AttachmentResponse {
         filename: attachment.filename,
         mime_type: attachment.mime_type,
         byte_count: attachment.byte_count,
-        ingested_markdown: attachment.ingested_markdown,
+        ingested_markdown,
         created_at: attachment.created_at,
         updated_at: attachment.updated_at,
-    }
+    })
 }
 
 fn map_job(job: BackgroundJob) -> BackgroundJobResponse {

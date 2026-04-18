@@ -51,6 +51,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "027_shared_reference_events",
             CREATE_SHARED_REFERENCE_EVENT_TABLE,
         ),
+        ("028_deduplicate_attachment_ingestion_content", ""),
     ]
 }
 
@@ -965,6 +966,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 
         if name == "023_encrypt_managed_secrets_at_rest" {
             super::secret::migrate_managed_secret_storage(conn)?;
+        } else if name == "028_deduplicate_attachment_ingestion_content" {
+            super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
         } else {
             // Apply migration inside a transaction for atomicity.
             conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
