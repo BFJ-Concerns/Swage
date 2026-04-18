@@ -208,6 +208,7 @@ describe("App", () => {
     websocketHarness.reset();
     vi.clearAllMocks();
     setPath("/");
+    delete window.swageDesktop;
   });
 
   afterEach(() => {
@@ -262,6 +263,29 @@ describe("App", () => {
     const activePreview = document.querySelector(".conversation-item.active .preview");
     expect(activePreview?.textContent).toContain("Deep-linked conversation");
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
+  });
+
+  it("shows desktop shell context when the electron bridge is present", async () => {
+    window.swageDesktop = {
+      shell: "electron",
+      mode: "desktop",
+      gatewayUrl: "http://127.0.0.1:8787",
+      managedGateway: true,
+      versions: {
+        chrome: "136.0.0.0",
+        electron: "36.0.0",
+        node: "22.0.0",
+      },
+    };
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([makeProject()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(document.body.textContent).toContain("Desktop shell");
+    expect(document.body.textContent).toContain("Managed gateway");
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {

@@ -9,6 +9,7 @@
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
+  import type { DesktopRuntimeInfo } from "../runtime";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
@@ -23,6 +24,7 @@
     onRetry: () => void;
     isOperatorMode: boolean;
     onToggleOperatorMode: (next: boolean) => void;
+    desktopRuntime?: DesktopRuntimeInfo | null;
   }
 
   let {
@@ -34,6 +36,7 @@
     onRetry,
     isOperatorMode,
     onToggleOperatorMode,
+    desktopRuntime,
   }: Props = $props();
 </script>
 
@@ -57,6 +60,14 @@
         Operator
       </button>
     </div>
+    {#if desktopRuntime}
+      <div class="runtime-chip" title={desktopRuntime.gatewayUrl}>
+        <span class="runtime-label">Desktop shell</span>
+        <span class="runtime-meta">
+          {desktopRuntime.managedGateway ? "Managed gateway" : "Remote gateway"}
+        </span>
+      </div>
+    {/if}
     <ConversationList store={conversationStore} />
   </aside>
   <main class="conversation-area">
@@ -102,6 +113,32 @@
     padding: 10px 12px;
     border-bottom: 1px solid #e7ddd0;
     background: rgba(255, 255, 255, 0.68);
+  }
+
+  .runtime-chip {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    border: 1px solid rgba(146, 64, 14, 0.12);
+    border-radius: 14px;
+    background:
+      linear-gradient(135deg, rgba(255, 247, 237, 0.94), rgba(255, 255, 255, 0.88));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  }
+
+  .runtime-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #7c2d12;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .runtime-meta {
+    font-size: 0.82rem;
+    color: #6b7280;
   }
 
   .mode-btn {

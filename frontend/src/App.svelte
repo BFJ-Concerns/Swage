@@ -18,6 +18,7 @@
   import { createStreamingStore } from "./lib/stores/streaming";
   import { createProjectStore } from "./lib/stores/projects";
   import { createRouter } from "./lib/router";
+  import { getDesktopRuntime } from "./lib/runtime";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -125,6 +126,7 @@
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
   let isOperatorMode = $state(false);
+  const desktopRuntime = getDesktopRuntime();
 
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
@@ -216,6 +218,7 @@
     onRetry={handleRetry}
     {isOperatorMode}
     onToggleOperatorMode={handleToggleOperatorMode}
+    {desktopRuntime}
   />
 
   {#if notFound}
