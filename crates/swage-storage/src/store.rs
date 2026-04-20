@@ -256,7 +256,8 @@ pub trait TeamStore: Send + Sync {
         name: Option<String>,
         description: Option<String>,
         entry_agent_id: Option<String>,
-        members: Option<Vec<String>>,
+        agents: Option<Vec<crate::model::TeamAgentDefinition>>,
+        tasks: Option<Vec<crate::model::TeamTaskDefinition>>,
     ) -> Result<Team, StorageError>;
     /// Delete a team. Returns true if it existed and was removed.
     async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;

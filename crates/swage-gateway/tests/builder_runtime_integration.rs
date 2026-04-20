@@ -328,7 +328,23 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
             "name": "workspace-core",
             "description": "Owns the builder workflow.",
             "entry_agent_id": "default",
-            "members": ["reviewer"]
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Primary builder agent.",
+                    "instructions": "Own the builder workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                },
+                {
+                    "id": "reviewer",
+                    "display_name": "Reviewer",
+                    "description": "Reviews builder changes.",
+                    "instructions": "Review workspace mutations.",
+                    "model": null
+                }
+            ],
+            "tasks": []
         })),
     )
     .await;
@@ -390,27 +406,44 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn blocked_builder_request_returns_diagnostics_and_applies_nothing() {
+async fn conversational_builder_can_author_agents_and_tasks() {
     let _guard = SWAGE_HOME_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
-    let db_path = temp.path().join("builder-blocked.db");
+    let db_path = temp.path().join("builder-agent-task.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![
         json!({
-            "summary": "Create a new specialist agent for the project.",
+            "summary": "Add a reviewer agent and a review task to the delivery team.",
             "operations": [
                 {
                     "kind": "create_agent",
-                    "agent_id": "delivery-editor",
-                    "team_name": "workspace-core",
-                    "instructions": "Owns release edits."
+                    "agent_id": "reviewer",
+                    "team_name": "delivery-core",
+                    "display_name": "Reviewer",
+                    "description": "Reviews delivery work.",
+                    "instructions": "Review plans, call out risk, and stay concise.",
+                    "model": "claude-haiku-4-20250514"
+                },
+                {
+                    "kind": "create_task",
+                    "task_name": "review-plan",
+                    "team_name": "delivery-core",
+                    "description": "Review the current plan.",
+                    "instructions": "Return a concise review verdict.",
+                    "model": "claude-haiku-4-20250514",
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": { "type": "string" }
+                        }
+                    }
                 }
             ]
         })
@@ -423,7 +456,7 @@ async fn blocked_builder_request_returns_diagnostics_and_applies_nothing() {
         "POST",
         "/api/projects",
         Some(json!({
-            "name": "Blocked Builder Project",
+            "name": "Agent Builder Project",
             "workspace_path": workspace.to_string_lossy()
         })),
     )
@@ -431,35 +464,48 @@ async fn blocked_builder_request_returns_diagnostics_and_applies_nothing() {
     assert_eq!(project_status, StatusCode::CREATED);
     let project_id = project_body["id"].as_str().unwrap();
 
+    let (team_status, team_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/projects/{project_id}/teams"),
+        Some(json!({
+            "name": "delivery-core",
+            "description": "Owns delivery work.",
+            "entry_agent_id": "default",
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Primary delivery agent.",
+                    "instructions": "Own the delivery workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                }
+            ],
+            "tasks": []
+        })),
+    )
+    .await;
+    assert_eq!(team_status, StatusCode::CREATED);
+    let team_id = team_body["id"].as_str().unwrap();
+
     let (proposal_status, proposal_body) = request_json(
         &router,
         "POST",
         &format!("/api/projects/{project_id}/builder/proposals"),
         Some(json!({
-            "prompt": "Create a delivery-editor agent for this project."
+            "prompt": "Add a reviewer agent and a review task to the delivery team."
         })),
     )
     .await;
     assert_eq!(proposal_status, StatusCode::OK);
-    assert_eq!(proposal_body["can_apply"], json!(false));
-    let operation_diagnostics = proposal_body["operations"][0]["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|value| value.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        operation_diagnostics.contains("Agent authoring"),
-        "proposal diagnostics should explain the unsupported agent path"
-    );
+    assert_eq!(proposal_body["can_apply"], json!(true));
 
     let (apply_status, apply_body) = request_json(
         &router,
         "POST",
         &format!("/api/projects/{project_id}/builder/apply"),
         Some(json!({
-            "request_text": "Create a delivery-editor agent for this project.",
+            "request_text": "Add a reviewer agent and a review task to the delivery team.",
             "operations": proposal_body["operations"]
                 .as_array()
                 .unwrap()
@@ -469,27 +515,21 @@ async fn blocked_builder_request_returns_diagnostics_and_applies_nothing() {
         })),
     )
     .await;
-    assert_eq!(apply_status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(apply_body["success"], json!(false));
-    let diagnostics = apply_body["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|value| value.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        diagnostics.contains("Agent authoring"),
-        "apply diagnostics should stay explicit"
-    );
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(apply_body["success"], json!(true));
 
-    let (teams_status, teams_body) = request_json(
-        &router,
-        "GET",
-        &format!("/api/projects/{project_id}/teams"),
-        None,
-    )
-    .await;
-    assert_eq!(teams_status, StatusCode::OK);
-    assert_eq!(teams_body["teams"], json!([]));
+    let (team_status, team_detail_body) =
+        request_json(&router, "GET", &format!("/api/teams/{team_id}"), None).await;
+    assert_eq!(team_status, StatusCode::OK);
+    assert_eq!(team_detail_body["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(team_detail_body["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        team_detail_body["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == "reviewer")
+            .unwrap()["instructions"],
+        "Review plans, call out risk, and stay concise."
+    );
 }

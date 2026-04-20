@@ -15,7 +15,10 @@ use crate::{
         CreateProjectExtensionRequest, ProjectExtensionResponse, UpdateProjectExtensionRequest,
         validate_extension_body, validate_extension_name,
     },
-    service::{CreateTeamRequest, TeamResponse, TeamService, UpdateTeamRequest},
+    service::{
+        CreateTeamRequest, TeamAgentPayload, TeamResponse, TeamService, TeamTaskPayload,
+        UpdateTeamRequest,
+    },
     state::AppState,
 };
 
@@ -145,14 +148,52 @@ pub enum BuilderConfigOperation {
         #[serde(default)]
         team_name: Option<String>,
         #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
         instructions: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
     },
     UpdateAgent {
         agent_id: String,
         #[serde(default)]
         team_name: Option<String>,
         #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
         instructions: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
+    CreateTask {
+        task_name: String,
+        #[serde(default)]
+        team_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        output_schema: Option<serde_json::Value>,
+    },
+    UpdateTask {
+        task_name: String,
+        #[serde(default)]
+        team_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        output_schema: Option<serde_json::Value>,
     },
 }
 
@@ -675,24 +716,97 @@ impl BuilderConfigurationService {
                     ));
                 }
             }
-            BuilderConfigOperation::CreateAgent { agent_id, .. }
-            | BuilderConfigOperation::UpdateAgent { agent_id, .. } => {
-                diagnostics.push(format!(
-                    "Agent authoring for {} is not supported yet. This remains blocked on the separate agent-and-task authoring substrate.",
-                    agent_id
-                ));
+            BuilderConfigOperation::CreateAgent {
+                agent_id,
+                team_name,
+                ..
+            } => {
+                if agent_id.trim().is_empty() {
+                    diagnostics.push("agent_id must not be empty.".into());
+                }
+                let Some(team) = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                else {
+                    diagnostics.push("create_agent needs a target team.".into());
+                    return Ok(reviewed_operation(operation, diagnostics));
+                };
+                if team.agents.iter().any(|agent| agent.id == *agent_id) {
+                    diagnostics.push(format!(
+                        "Team {} already defines agent {}.",
+                        team.name, agent_id
+                    ));
+                }
+            }
+            BuilderConfigOperation::UpdateAgent {
+                agent_id,
+                team_name,
+                ..
+            } => {
+                if agent_id.trim().is_empty() {
+                    diagnostics.push("agent_id must not be empty.".into());
+                }
+                let Some(team) = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                else {
+                    diagnostics.push("update_agent needs a target team.".into());
+                    return Ok(reviewed_operation(operation, diagnostics));
+                };
+                if !team.agents.iter().any(|agent| agent.id == *agent_id) {
+                    diagnostics.push(format!(
+                        "Team {} does not define agent {}.",
+                        team.name, agent_id
+                    ));
+                }
+            }
+            BuilderConfigOperation::CreateTask {
+                task_name,
+                team_name,
+                ..
+            } => {
+                if task_name.trim().is_empty() {
+                    diagnostics.push("task_name must not be empty.".into());
+                }
+                let Some(team) = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                else {
+                    diagnostics.push("create_task needs a target team.".into());
+                    return Ok(reviewed_operation(operation, diagnostics));
+                };
+                if team.tasks.iter().any(|task| task.name == *task_name) {
+                    diagnostics.push(format!(
+                        "Team {} already defines task {}.",
+                        team.name, task_name
+                    ));
+                }
+            }
+            BuilderConfigOperation::UpdateTask {
+                task_name,
+                team_name,
+                ..
+            } => {
+                if task_name.trim().is_empty() {
+                    diagnostics.push("task_name must not be empty.".into());
+                }
+                let Some(team) = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                else {
+                    diagnostics.push("update_task needs a target team.".into());
+                    return Ok(reviewed_operation(operation, diagnostics));
+                };
+                if !team.tasks.iter().any(|task| task.name == *task_name) {
+                    diagnostics.push(format!(
+                        "Team {} does not define task {}.",
+                        team.name, task_name
+                    ));
+                }
             }
         }
 
-        let kind = operation.kind().to_string();
-        let summary = operation.summary();
-        Ok(BuilderReviewedOperation {
-            kind,
-            summary,
-            ready: diagnostics.is_empty(),
-            diagnostics,
-            operation,
-        })
+        Ok(reviewed_operation(operation, diagnostics))
     }
 
     async fn apply_operation(
@@ -791,8 +905,9 @@ impl BuilderConfigurationService {
                         CreateTeamRequest {
                             name,
                             description,
-                            entry_agent_id,
-                            members,
+                            entry_agent_id: entry_agent_id.clone(),
+                            agents: members_to_team_agents(&entry_agent_id, members),
+                            tasks: Vec::new(),
                         },
                         session_id,
                         source,
@@ -829,8 +944,10 @@ impl BuilderConfigurationService {
                         UpdateTeamRequest {
                             name,
                             description,
-                            entry_agent_id,
-                            members,
+                            entry_agent_id: entry_agent_id.clone(),
+                            agents: team_update_agents(entry_agent_id, members),
+                            tasks: None,
+                            members: None,
                         },
                         session_id,
                         source,
@@ -933,12 +1050,233 @@ impl BuilderConfigurationService {
                     entity_id: saved.name,
                 })
             }
-            BuilderConfigOperation::CreateAgent { agent_id, .. }
-            | BuilderConfigOperation::UpdateAgent { agent_id, .. } => {
-                Err(GatewayError::ValidationError(format!(
-                    "Agent authoring for {} is not supported yet.",
-                    agent_id
-                )))
+            BuilderConfigOperation::CreateAgent {
+                agent_id,
+                team_name,
+                display_name,
+                description,
+                instructions,
+                model,
+            } => {
+                let team = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("create_agent needs a target team.".into())
+                    })?;
+                let mut agents = team
+                    .agents
+                    .iter()
+                    .map(team_agent_to_payload)
+                    .collect::<Vec<_>>();
+                agents.push(TeamAgentPayload {
+                    id: agent_id.clone(),
+                    display_name: display_name.unwrap_or_else(|| agent_id.clone()),
+                    description: description.unwrap_or_default(),
+                    instructions: instructions.unwrap_or_default(),
+                    model,
+                });
+                let saved = self
+                    .update_team(
+                        team.id,
+                        UpdateTeamRequest {
+                            name: None,
+                            description: None,
+                            entry_agent_id: None,
+                            agents: Some(agents),
+                            tasks: None,
+                            members: None,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "create_agent".into(),
+                    summary: format!("Created agent {} in team {}.", agent_id, saved.name),
+                    entity_kind: "team_agent".into(),
+                    entity_id: format!("{}:{agent_id}", saved.id),
+                })
+            }
+            BuilderConfigOperation::UpdateAgent {
+                agent_id,
+                team_name,
+                display_name,
+                description,
+                instructions,
+                model,
+            } => {
+                let team = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("update_agent needs a target team.".into())
+                    })?;
+                let agents = team
+                    .agents
+                    .iter()
+                    .map(|agent| {
+                        if agent.id == agent_id {
+                            TeamAgentPayload {
+                                id: agent.id.clone(),
+                                display_name: display_name
+                                    .clone()
+                                    .unwrap_or_else(|| agent.display_name.clone()),
+                                description: description
+                                    .clone()
+                                    .unwrap_or_else(|| agent.description.clone()),
+                                instructions: instructions
+                                    .clone()
+                                    .unwrap_or_else(|| agent.instructions.clone()),
+                                model: model.clone().or_else(|| agent.model.clone()),
+                            }
+                        } else {
+                            team_agent_to_payload(agent)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let saved = self
+                    .update_team(
+                        team.id,
+                        UpdateTeamRequest {
+                            name: None,
+                            description: None,
+                            entry_agent_id: None,
+                            agents: Some(agents),
+                            tasks: None,
+                            members: None,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "update_agent".into(),
+                    summary: format!("Updated agent {} in team {}.", agent_id, saved.name),
+                    entity_kind: "team_agent".into(),
+                    entity_id: format!("{}:{agent_id}", saved.id),
+                })
+            }
+            BuilderConfigOperation::CreateTask {
+                task_name,
+                team_name,
+                description,
+                instructions,
+                model,
+                output_schema,
+            } => {
+                let team = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("create_task needs a target team.".into())
+                    })?;
+                let mut tasks = team
+                    .tasks
+                    .iter()
+                    .map(team_task_to_payload)
+                    .collect::<Vec<_>>();
+                tasks.push(TeamTaskPayload {
+                    name: task_name.clone(),
+                    description: description.unwrap_or_default(),
+                    instructions: instructions.unwrap_or_default(),
+                    model,
+                    output_schema,
+                    max_output_retries: None,
+                    tool_allow: None,
+                    tool_deny: None,
+                });
+                let saved = self
+                    .update_team(
+                        team.id,
+                        UpdateTeamRequest {
+                            name: None,
+                            description: None,
+                            entry_agent_id: None,
+                            agents: None,
+                            tasks: Some(tasks),
+                            members: None,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "create_task".into(),
+                    summary: format!("Created task {} in team {}.", task_name, saved.name),
+                    entity_kind: "team_task".into(),
+                    entity_id: format!("{}:{task_name}", saved.id),
+                })
+            }
+            BuilderConfigOperation::UpdateTask {
+                task_name,
+                team_name,
+                description,
+                instructions,
+                model,
+                output_schema,
+            } => {
+                let team = self
+                    .resolve_target_team(project_id, team_name.as_deref())
+                    .await?
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("update_task needs a target team.".into())
+                    })?;
+                let tasks = team
+                    .tasks
+                    .iter()
+                    .map(|task| {
+                        if task.name == task_name {
+                            TeamTaskPayload {
+                                name: task.name.clone(),
+                                description: description
+                                    .clone()
+                                    .unwrap_or_else(|| task.description.clone()),
+                                instructions: instructions
+                                    .clone()
+                                    .unwrap_or_else(|| task.instructions.clone()),
+                                model: model.clone().or_else(|| task.model.clone()),
+                                output_schema: output_schema
+                                    .clone()
+                                    .or_else(|| task.output_schema.clone()),
+                                max_output_retries: task.max_output_retries,
+                                tool_allow: task.tool_allow.clone(),
+                                tool_deny: task.tool_deny.clone(),
+                            }
+                        } else {
+                            team_task_to_payload(task)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let saved = self
+                    .update_team(
+                        team.id,
+                        UpdateTeamRequest {
+                            name: None,
+                            description: None,
+                            entry_agent_id: None,
+                            agents: None,
+                            tasks: Some(tasks),
+                            members: None,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "update_task".into(),
+                    summary: format!("Updated task {} in team {}.", task_name, saved.name),
+                    entity_kind: "team_task".into(),
+                    entity_id: format!("{}:{task_name}", saved.id),
+                })
             }
         }
     }
@@ -963,6 +1301,24 @@ impl BuilderConfigurationService {
         }
 
         Ok(None)
+    }
+
+    async fn resolve_target_team(
+        &self,
+        project_id: Uuid,
+        team_name: Option<&str>,
+    ) -> Result<Option<swage_storage::Team>, GatewayError> {
+        if let Some(team) = self.resolve_team(project_id, None, team_name).await? {
+            return Ok(Some(team));
+        }
+
+        Ok(self
+            .state
+            .storage
+            .list_teams_by_project(project_id)
+            .await?
+            .into_iter()
+            .next())
     }
 
     async fn record_audit(
@@ -1026,6 +1382,83 @@ impl BuilderConfigurationService {
     }
 }
 
+fn members_to_team_agents(entry_agent_id: &str, members: Vec<String>) -> Vec<TeamAgentPayload> {
+    let mut agent_ids = Vec::with_capacity(members.len() + 1);
+    agent_ids.push(entry_agent_id.to_string());
+    for member in members {
+        if !agent_ids.iter().any(|existing| existing == &member) {
+            agent_ids.push(member);
+        }
+    }
+
+    agent_ids
+        .into_iter()
+        .map(|agent_id| TeamAgentPayload {
+            display_name: agent_id.clone(),
+            id: agent_id,
+            description: String::new(),
+            instructions: String::new(),
+            model: None,
+        })
+        .collect()
+}
+
+fn team_update_agents(
+    entry_agent_id: Option<String>,
+    members: Option<Vec<String>>,
+) -> Option<Vec<TeamAgentPayload>> {
+    match (entry_agent_id, members) {
+        (Some(entry_agent_id), Some(members)) => {
+            Some(members_to_team_agents(&entry_agent_id, members))
+        }
+        (Some(entry_agent_id), None) => Some(members_to_team_agents(&entry_agent_id, Vec::new())),
+        (None, Some(members)) => {
+            let fallback_entry = members
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
+            Some(members_to_team_agents(&fallback_entry, members))
+        }
+        (None, None) => None,
+    }
+}
+
+fn reviewed_operation(
+    operation: BuilderConfigOperation,
+    diagnostics: Vec<String>,
+) -> BuilderReviewedOperation {
+    BuilderReviewedOperation {
+        kind: operation.kind().to_string(),
+        summary: operation.summary(),
+        ready: diagnostics.is_empty(),
+        diagnostics,
+        operation,
+    }
+}
+
+fn team_agent_to_payload(agent: &swage_storage::model::TeamAgentDefinition) -> TeamAgentPayload {
+    TeamAgentPayload {
+        id: agent.id.clone(),
+        display_name: agent.display_name.clone(),
+        description: agent.description.clone(),
+        instructions: agent.instructions.clone(),
+        model: agent.model.clone(),
+    }
+}
+
+fn team_task_to_payload(task: &swage_storage::model::TeamTaskDefinition) -> TeamTaskPayload {
+    TeamTaskPayload {
+        name: task.name.clone(),
+        description: task.description.clone(),
+        instructions: task.instructions.clone(),
+        model: task.model.clone(),
+        output_schema: task.output_schema.clone(),
+        max_output_retries: task.max_output_retries,
+        tool_allow: task.tool_allow.clone(),
+        tool_deny: task.tool_deny.clone(),
+    }
+}
+
 impl BuilderConfigOperation {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -1039,6 +1472,8 @@ impl BuilderConfigOperation {
             Self::ApproveWorkspaceExtension { .. } => "approve_workspace_extension",
             Self::CreateAgent { .. } => "create_agent",
             Self::UpdateAgent { .. } => "update_agent",
+            Self::CreateTask { .. } => "create_task",
+            Self::UpdateTask { .. } => "update_task",
         }
     }
 
@@ -1069,6 +1504,8 @@ impl BuilderConfigOperation {
             }
             Self::CreateAgent { agent_id, .. } => format!("Create agent {agent_id}."),
             Self::UpdateAgent { agent_id, .. } => format!("Update agent {agent_id}."),
+            Self::CreateTask { task_name, .. } => format!("Create task {task_name}."),
+            Self::UpdateTask { task_name, .. } => format!("Update task {task_name}."),
         }
     }
 }

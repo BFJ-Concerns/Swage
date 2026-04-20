@@ -1442,9 +1442,43 @@ impl NewAgentMessage {
 
 /// A team — the organisational unit for multi-agent orchestration.
 ///
-/// Teams belong to a project and define a member list plus an entry agent
-/// (the agent that receives user messages). Topology definitions reference
-/// teams to bind agents to tasks in a directed graph.
+/// Teams belong to a project and define durable agent and task definitions plus
+/// an entry agent (the agent that receives user messages). The legacy
+/// `members` list remains as a derived convenience surface backed by `agents`
+/// so older runtime paths can keep using stable agent IDs while the canonical
+/// authoring model moves to first-class definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamAgentDefinition {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeamTaskDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub max_output_retries: Option<u32>,
+    #[serde(default)]
+    pub tool_allow: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_deny: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Team {
     pub id: Uuid,
@@ -1454,10 +1488,22 @@ pub struct Team {
     pub description: String,
     /// The agent that receives user messages for this team.
     pub entry_agent_id: String,
-    /// Member agent IDs as a JSON-serialised array.
+    /// Legacy member convenience derived from the canonical agent definitions.
     pub members: Vec<String>,
+    /// Canonical durable agent definitions for this team.
+    #[serde(default)]
+    pub agents: Vec<TeamAgentDefinition>,
+    /// Canonical durable task definitions for this team.
+    #[serde(default)]
+    pub tasks: Vec<TeamTaskDefinition>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Team {
+    pub fn member_ids_from_agents(agents: &[TeamAgentDefinition]) -> Vec<String> {
+        agents.iter().map(|agent| agent.id.clone()).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,7 +1517,8 @@ pub struct NewTeam {
     pub name: String,
     pub description: String,
     pub entry_agent_id: String,
-    pub members: Vec<String>,
+    pub agents: Vec<TeamAgentDefinition>,
+    pub tasks: Vec<TeamTaskDefinition>,
 }
 
 /// Topology run lifecycle state.

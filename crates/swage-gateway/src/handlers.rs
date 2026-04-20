@@ -1999,6 +1999,34 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    fn team_agents(ids: &[&str]) -> Vec<swage_storage::model::TeamAgentDefinition> {
+        ids.iter()
+            .map(|id| swage_storage::model::TeamAgentDefinition {
+                id: (*id).to_string(),
+                display_name: (*id).to_string(),
+                description: String::new(),
+                instructions: String::new(),
+                model: None,
+            })
+            .collect()
+    }
+
+    fn team_tasks(names: &[&str]) -> Vec<swage_storage::model::TeamTaskDefinition> {
+        names
+            .iter()
+            .map(|name| swage_storage::model::TeamTaskDefinition {
+                name: (*name).to_string(),
+                description: String::new(),
+                instructions: format!("Task {name}"),
+                model: None,
+                output_schema: None,
+                max_output_retries: None,
+                tool_allow: None,
+                tool_deny: None,
+            })
+            .collect()
+    }
+
     /// Build an axum `Router` backed by an empty `MockStorage`.
     ///
     /// Returns the router and the storage handle so tests can inspect state.
@@ -3100,7 +3128,8 @@ mod tests {
                 name: "research".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: vec![],
             })
             .await
             .unwrap();
@@ -3110,7 +3139,8 @@ mod tests {
                 name: "review".into(),
                 description: String::new(),
                 entry_agent_id: "reviewer".into(),
-                members: vec!["reviewer".into()],
+                agents: team_agents(&["reviewer"]),
+                tasks: vec![],
             })
             .await
             .unwrap();
@@ -3149,7 +3179,8 @@ mod tests {
                 name: "research".into(),
                 description: "Initial".into(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: vec![],
             })
             .await
             .unwrap();
@@ -3194,7 +3225,8 @@ mod tests {
                 name: "temporary".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: vec![],
             })
             .await
             .unwrap();
@@ -3260,7 +3292,8 @@ mod tests {
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into(), "reviewer".into()],
+                agents: team_agents(&["planner", "reviewer"]),
+                tasks: team_tasks(&["draft-plan", "review-plan"]),
             })
             .await
             .unwrap();
@@ -3369,7 +3402,8 @@ def build_topology():
                 name: "single".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["draft-plan"]),
             })
             .await
             .unwrap();

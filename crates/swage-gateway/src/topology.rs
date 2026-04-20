@@ -14,7 +14,8 @@ use swage_core::{ChatMessage, Role, StorageError};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
     NewEdgeEvaluation, NewNodeExecution, NewNodeRetry, NewSession, NewThread, NewTopologyRun,
-    NodeExecutionState, Team, TopologyNodeRecordKind, TopologyRunState,
+    NodeExecutionState, Team, TeamAgentDefinition, TeamTaskDefinition, TopologyNodeRecordKind,
+    TopologyRunState,
 };
 use swage_storage::store::ThreadStore;
 use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind};
@@ -651,7 +652,7 @@ async fn execute_agent_node(
     input_json: &serde_json::Value,
     cancel_token: CancellationToken,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let config = resolve_node_config(project, team, agent_id)?;
+    let config = resolve_node_config(project, team, agent_id, node.task_name.as_deref())?;
     let rendered_input = render_node_input(node, input_json);
 
     let thread = ThreadStore::create(
@@ -861,10 +862,31 @@ fn resolve_node_config(
     project: &swage_storage::model::Project,
     team: &Team,
     agent_id: &str,
+    task_name: Option<&str>,
 ) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
-    swage_config::load_resolved_config_for_team(&project.slug, &team.name, agent_id)
-        .or_else(|_| swage_config::load_resolved_config(&project.slug, agent_id))
-        .map_err(TopologyEngineError::from)
+    let mut config =
+        swage_config::load_resolved_config_for_team(&project.slug, &team.name, agent_id)
+            .or_else(|_| swage_config::load_resolved_config(&project.slug, agent_id))
+            .map_err(TopologyEngineError::from)?;
+
+    if let Some(agent) = team
+        .agents
+        .iter()
+        .find(|candidate| candidate.id == agent_id)
+    {
+        config = apply_team_agent_definition(config, agent);
+    }
+    if let Some(task_name) = task_name {
+        if let Some(task) = team
+            .tasks
+            .iter()
+            .find(|candidate| candidate.name == task_name)
+        {
+            config = team_task_to_config(task).apply_to(config);
+        }
+    }
+
+    Ok(config)
 }
 
 fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> String {
@@ -881,6 +903,37 @@ fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> Str
             "{task_prefix}Input JSON:\n{}",
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         ),
+    }
+}
+
+fn apply_team_agent_definition(
+    mut config: swage_config::ResolvedConfig,
+    agent: &TeamAgentDefinition,
+) -> swage_config::ResolvedConfig {
+    if let Some(model) = agent.model.as_deref() {
+        config.provider.model = model.to_string();
+    }
+    if !agent.instructions.trim().is_empty() {
+        config.instructions = match config.instructions.trim().is_empty() {
+            true => agent.instructions.clone(),
+            false => format!("{}\n\n{}", config.instructions, agent.instructions),
+        };
+    }
+    config
+}
+
+fn team_task_to_config(task: &TeamTaskDefinition) -> swage_config::TaskDefinition {
+    swage_config::TaskDefinition {
+        name: task.name.clone(),
+        description: task.description.clone(),
+        instructions: task.instructions.clone(),
+        model: task.model.clone(),
+        output_schema: task.output_schema.clone(),
+        max_output_retries: task.max_output_retries,
+        tool_allow: task.tool_allow.clone(),
+        tool_deny: task.tool_deny.clone(),
+        tool_bundles: None,
+        tool_require_approval: None,
     }
 }
 
@@ -1081,6 +1134,34 @@ mod tests {
     use crate::lifecycle::ActivityTracker;
     use crate::turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider};
 
+    fn team_agents(ids: &[&str]) -> Vec<swage_storage::model::TeamAgentDefinition> {
+        ids.iter()
+            .map(|id| swage_storage::model::TeamAgentDefinition {
+                id: (*id).to_string(),
+                display_name: (*id).to_string(),
+                description: String::new(),
+                instructions: String::new(),
+                model: None,
+            })
+            .collect()
+    }
+
+    fn team_tasks(names: &[&str]) -> Vec<swage_storage::model::TeamTaskDefinition> {
+        names
+            .iter()
+            .map(|name| swage_storage::model::TeamTaskDefinition {
+                name: (*name).to_string(),
+                description: String::new(),
+                instructions: format!("Task {name}"),
+                model: None,
+                output_schema: None,
+                max_output_retries: None,
+                tool_allow: None,
+                tool_deny: None,
+            })
+            .collect()
+    }
+
     fn make_state(provider: Arc<dyn swage_provider::LlmProvider>) -> (AppState, Arc<MockStorage>) {
         let storage = Arc::new(MockStorage::new());
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
@@ -1228,7 +1309,8 @@ mod tests {
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into(), "reviewer".into()],
+                agents: team_agents(&["planner", "reviewer"]),
+                tasks: team_tasks(&["draft-plan", "review-plan"]),
             })
             .await
             .unwrap();
@@ -1344,7 +1426,8 @@ mod tests {
                 name: "fanout-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into(), "worker".into()],
+                agents: team_agents(&["planner", "worker"]),
+                tasks: team_tasks(&["draft-plan", "review-plan"]),
             })
             .await
             .unwrap();
@@ -1442,7 +1525,8 @@ mod tests {
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["draft-plan"]),
             })
             .await
             .unwrap();
@@ -1515,7 +1599,8 @@ mod tests {
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["draft-plan"]),
             })
             .await
             .unwrap();
@@ -1599,7 +1684,8 @@ mod tests {
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["draft-plan"]),
             })
             .await
             .unwrap();

@@ -1663,13 +1663,16 @@ pub(crate) mod tests {
     impl TeamStore for MockStorage {
         async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError> {
             let now = chrono::Utc::now();
+            let members = Team::member_ids_from_agents(&team.agents);
             let created = Team {
                 id: Uuid::new_v4(),
                 project_id: team.project_id,
                 name: team.name,
                 description: team.description,
                 entry_agent_id: team.entry_agent_id,
-                members: team.members,
+                members,
+                agents: team.agents,
+                tasks: team.tasks,
                 created_at: now,
                 updated_at: now,
             };
@@ -1720,7 +1723,8 @@ pub(crate) mod tests {
             name: Option<String>,
             description: Option<String>,
             entry_agent_id: Option<String>,
-            members: Option<Vec<String>>,
+            agents: Option<Vec<swage_storage::model::TeamAgentDefinition>>,
+            tasks: Option<Vec<swage_storage::model::TeamTaskDefinition>>,
         ) -> Result<Team, StorageError> {
             let mut db = self.db.lock().await;
             match db.teams.get_mut(&id) {
@@ -1738,8 +1742,12 @@ pub(crate) mod tests {
                     if let Some(entry_agent_id) = entry_agent_id {
                         team.entry_agent_id = entry_agent_id;
                     }
-                    if let Some(members) = members {
-                        team.members = members;
+                    if let Some(agents) = agents {
+                        team.members = Team::member_ids_from_agents(&agents);
+                        team.agents = agents;
+                    }
+                    if let Some(tasks) = tasks {
+                        team.tasks = tasks;
                     }
                     team.updated_at = chrono::Utc::now();
                     Ok(team.clone())

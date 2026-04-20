@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewTeam, Team};
+use crate::model::{NewTeam, Team, TeamAgentDefinition, TeamTaskDefinition};
 use crate::sqlite::SqliteStorage;
 use crate::store::TeamStore;
 
@@ -17,8 +17,12 @@ fn row_to_team(row: &rusqlite::Row<'_>) -> rusqlite::Result<Team> {
     let id: String = row.get(0)?;
     let project_id: String = row.get(1)?;
     let members_json: String = row.get(5)?;
-    let created: String = row.get(6)?;
-    let updated: String = row.get(7)?;
+    let agents_json: String = row.get(6)?;
+    let tasks_json: String = row.get(7)?;
+    let created: String = row.get(8)?;
+    let updated: String = row.get(9)?;
+
+    let agents = parse_agents(&agents_json)?;
 
     Ok(Team {
         id: parse_uuid(&id)?,
@@ -27,6 +31,8 @@ fn row_to_team(row: &rusqlite::Row<'_>) -> rusqlite::Result<Team> {
         description: row.get(3)?,
         entry_agent_id: row.get(4)?,
         members: parse_members(&members_json)?,
+        agents,
+        tasks: parse_tasks(&tasks_json)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
@@ -52,6 +58,95 @@ fn parse_members(s: &str) -> rusqlite::Result<Vec<String>> {
     })
 }
 
+fn parse_agents(s: &str) -> rusqlite::Result<Vec<TeamAgentDefinition>> {
+    serde_json::from_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn parse_tasks(s: &str) -> rusqlite::Result<Vec<TeamTaskDefinition>> {
+    serde_json::from_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+pub(crate) fn migrate_team_authoring_model(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(
+        "
+        BEGIN;
+        ALTER TABLE teams ADD COLUMN agents_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE teams ADD COLUMN tasks_json TEXT NOT NULL DEFAULT '[]';
+        COMMIT;
+        ",
+    )
+    .map_err(|error| {
+        StorageError::MigrationFailed(format!("failed to add team authoring columns: {error}"))
+    })?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, entry_agent_id, members FROM teams")
+        .map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to prepare team authoring backfill query: {error}"
+            ))
+        })?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to enumerate team authoring backfill rows: {error}"
+            ))
+        })?;
+
+    for row in rows {
+        let (id, entry_agent_id, members_json) = row.map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to read team authoring backfill row: {error}"
+            ))
+        })?;
+        let mut member_ids = parse_members(&members_json).map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to decode legacy team members for {id}: {error}"
+            ))
+        })?;
+        if !member_ids.iter().any(|member| member == &entry_agent_id) {
+            member_ids.insert(0, entry_agent_id.clone());
+        }
+        let agents = member_ids
+            .into_iter()
+            .map(|agent_id| TeamAgentDefinition {
+                display_name: agent_id.clone(),
+                id: agent_id,
+                description: String::new(),
+                instructions: String::new(),
+                model: None,
+            })
+            .collect::<Vec<_>>();
+        let agents_json = serde_json::to_string(&agents).map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to serialise team agents for {id}: {error}"
+            ))
+        })?;
+        conn.execute(
+            "UPDATE teams SET agents_json = ?2, tasks_json = '[]' WHERE id = ?1",
+            params![id, agents_json],
+        )
+        .map_err(|error| {
+            StorageError::MigrationFailed(format!(
+                "failed to write team authoring backfill for {id}: {error}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // TeamStore
 // ---------------------------------------------------------------------------
@@ -63,13 +158,20 @@ impl TeamStore for SqliteStorage {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            let members_json = serde_json::to_string(&team.members).map_err(|e| {
+            let members = Team::member_ids_from_agents(&team.agents);
+            let members_json = serde_json::to_string(&members).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            })?;
+            let agents_json = serde_json::to_string(&team.agents).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            })?;
+            let tasks_json = serde_json::to_string(&team.tasks).map_err(|e| {
                 rusqlite::Error::ToSqlConversionFailure(Box::new(e))
             })?;
 
             conn.execute(
-                "INSERT INTO teams (id, project_id, name, description, entry_agent_id, members, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                "INSERT INTO teams (id, project_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
                 params![
                     id.to_string(),
                     team.project_id.to_string(),
@@ -77,6 +179,8 @@ impl TeamStore for SqliteStorage {
                     &team.description,
                     &team.entry_agent_id,
                     members_json,
+                    agents_json,
+                    tasks_json,
                     &now_str,
                 ],
             )?;
@@ -87,7 +191,9 @@ impl TeamStore for SqliteStorage {
                 name: team.name,
                 description: team.description,
                 entry_agent_id: team.entry_agent_id,
-                members: team.members,
+                members,
+                agents: team.agents,
+                tasks: team.tasks,
                 created_at: now,
                 updated_at: now,
             })
@@ -98,7 +204,7 @@ impl TeamStore for SqliteStorage {
     async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, project_id, name, description, entry_agent_id, members, created_at, updated_at
+                "SELECT id, project_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE id = ?1",
                 params![id.to_string()],
                 row_to_team,
@@ -116,7 +222,7 @@ impl TeamStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, project_id, name, description, entry_agent_id, members, created_at, updated_at
+                "SELECT id, project_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE project_id = ?1 AND name = ?2",
                 params![project_id.to_string(), name],
                 row_to_team,
@@ -129,7 +235,7 @@ impl TeamStore for SqliteStorage {
     async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_id, name, description, entry_agent_id, members, created_at, updated_at
+                "SELECT id, project_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE project_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map(params![project_id.to_string()], row_to_team)?;
@@ -144,24 +250,46 @@ impl TeamStore for SqliteStorage {
         name: Option<String>,
         description: Option<String>,
         entry_agent_id: Option<String>,
-        members: Option<Vec<String>>,
+        agents: Option<Vec<TeamAgentDefinition>>,
+        tasks: Option<Vec<TeamTaskDefinition>>,
     ) -> Result<Team, StorageError> {
-        if self.get_team(id).await?.is_none() {
-            return Err(StorageError::NotFound {
+        let _existing = self
+            .get_team(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
                 entity: "Team".into(),
                 id: id.to_string(),
-            });
-        }
+            })?;
 
-        let members_json =
-            match members {
-                Some(members) => Some(serde_json::to_string(&members).map_err(|e| {
+        let agents_json =
+            match agents.as_ref() {
+                Some(agents) => Some(serde_json::to_string(agents).map_err(|e| {
                     StorageError::Serialisation {
                         message: e.to_string(),
                     }
                 })?),
                 None => None,
             };
+        let tasks_json = match tasks.as_ref() {
+            Some(tasks) => {
+                Some(
+                    serde_json::to_string(tasks).map_err(|e| StorageError::Serialisation {
+                        message: e.to_string(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+        let members_json = match agents.as_ref() {
+            Some(agents) => Some(
+                serde_json::to_string(&Team::member_ids_from_agents(agents)).map_err(|e| {
+                    StorageError::Serialisation {
+                        message: e.to_string(),
+                    }
+                })?,
+            ),
+            None => None,
+        };
 
         self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
@@ -173,13 +301,24 @@ impl TeamStore for SqliteStorage {
                      description = COALESCE(?3, description),
                      entry_agent_id = COALESCE(?4, entry_agent_id),
                      members = COALESCE(?5, members),
-                     updated_at = ?6
+                     agents_json = COALESCE(?6, agents_json),
+                     tasks_json = COALESCE(?7, tasks_json),
+                     updated_at = ?8
                  WHERE id = ?1",
-                params![id_str, name, description, entry_agent_id, members_json, now],
+                params![
+                    id_str,
+                    name,
+                    description,
+                    entry_agent_id,
+                    members_json,
+                    agents_json,
+                    tasks_json,
+                    now
+                ],
             )?;
 
             conn.query_row(
-                "SELECT id, project_id, name, description, entry_agent_id, members, created_at, updated_at
+                "SELECT id, project_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE id = ?1",
                 params![id.to_string()],
                 row_to_team,

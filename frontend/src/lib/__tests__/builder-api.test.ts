@@ -47,7 +47,16 @@ describe("builder api", () => {
       name: "core",
       description: "",
       entry_agent_id: "default",
-      members: [],
+      agents: [
+        {
+          id: "default",
+          display_name: "Default",
+          description: "",
+          instructions: "",
+          model: null,
+        },
+      ],
+      tasks: [],
     });
     const updated = await updateTeam("team-1", { description: "updated" });
 

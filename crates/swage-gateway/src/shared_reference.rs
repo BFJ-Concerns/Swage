@@ -7,7 +7,9 @@ use swage_core::{GatewayError, StorageError};
 use swage_storage::{NewSharedReferenceEvent, SharedReferenceKind, Team};
 
 use crate::{
-    builder_runtime::BuilderConfigurationService, service::UpdateTeamRequest, state::AppState,
+    builder_runtime::BuilderConfigurationService,
+    service::{TeamAgentPayload, UpdateTeamRequest},
+    state::AppState,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +157,13 @@ pub async fn update_team_topology_reference(
     team_id: Uuid,
     request: UpdateTeamTopologyReferenceRequest,
 ) -> Result<SharedReferenceDetailResponse, GatewayError> {
+    let existing = state.storage.get_team(team_id).await?.ok_or_else(|| {
+        GatewayError::Storage(StorageError::NotFound {
+            entity: "team".into(),
+            id: team_id.to_string(),
+        })
+    })?;
+    let agents = expand_topology_members(&existing, &request.entry_agent_id, &request.members);
     let service = BuilderConfigurationService::new(state.clone());
     service
         .update_team(
@@ -163,7 +172,9 @@ pub async fn update_team_topology_reference(
                 name: None,
                 description: None,
                 entry_agent_id: Some(request.entry_agent_id.clone()),
-                members: Some(request.members),
+                agents: Some(agents),
+                tasks: None,
+                members: None,
             },
             None,
             "shared_reference",
@@ -197,6 +208,41 @@ pub async fn update_team_topology_reference(
         &team_id.to_string(),
     )
     .await
+}
+
+fn expand_topology_members(
+    team: &Team,
+    entry_agent_id: &str,
+    members: &[String],
+) -> Vec<TeamAgentPayload> {
+    let mut ordered_ids = Vec::with_capacity(members.len() + 1);
+    ordered_ids.push(entry_agent_id.to_string());
+    for member in members {
+        if member != entry_agent_id && !ordered_ids.iter().any(|existing| existing == member) {
+            ordered_ids.push(member.clone());
+        }
+    }
+
+    ordered_ids
+        .into_iter()
+        .map(|agent_id| {
+            let existing = team.agents.iter().find(|agent| agent.id == agent_id);
+            TeamAgentPayload {
+                id: agent_id.clone(),
+                display_name: existing
+                    .map(|agent| agent.display_name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(agent_id.clone()),
+                description: existing
+                    .map(|agent| agent.description.clone())
+                    .unwrap_or_default(),
+                instructions: existing
+                    .map(|agent| agent.instructions.clone())
+                    .unwrap_or_default(),
+                model: existing.and_then(|agent| agent.model.clone()),
+            }
+        })
+        .collect()
 }
 
 async fn load_object(

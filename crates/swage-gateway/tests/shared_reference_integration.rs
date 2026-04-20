@@ -185,7 +185,30 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
             "name": "builders",
             "description": "Shapes the builder graph.",
             "entry_agent_id": "builder",
-            "members": ["reviewer", "qa"]
+            "agents": [
+                {
+                    "id": "builder",
+                    "display_name": "Builder",
+                    "description": "Shapes the builder graph.",
+                    "instructions": "Own the builder workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                },
+                {
+                    "id": "reviewer",
+                    "display_name": "Reviewer",
+                    "description": "Reviews graph edits.",
+                    "instructions": "Review graph updates.",
+                    "model": null
+                },
+                {
+                    "id": "qa",
+                    "display_name": "QA",
+                    "description": "Checks builder regressions.",
+                    "instructions": "Check builder regressions.",
+                    "model": null
+                }
+            ],
+            "tasks": []
         }),
     )
     .await;

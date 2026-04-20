@@ -149,23 +149,46 @@ export interface TeamSummary {
   name: string;
   description: string;
   entry_agent_id: string;
+  agents: TeamAgentDefinition[];
+  tasks: TeamTaskDefinition[];
   members: string[];
   created_at: string;
   updated_at: string;
+}
+
+export interface TeamAgentDefinition {
+  id: string;
+  display_name: string;
+  description: string;
+  instructions: string;
+  model?: string | null;
+}
+
+export interface TeamTaskDefinition {
+  name: string;
+  description: string;
+  instructions: string;
+  model?: string | null;
+  output_schema?: Record<string, unknown> | null;
+  max_output_retries?: number | null;
+  tool_allow?: string[] | null;
+  tool_deny?: string[] | null;
 }
 
 export interface CreateTeamRequest {
   name: string;
   description: string;
   entry_agent_id: string;
-  members: string[];
+  agents: TeamAgentDefinition[];
+  tasks: TeamTaskDefinition[];
 }
 
 export interface UpdateTeamRequest {
   name?: string;
   description?: string;
   entry_agent_id?: string;
-  members?: string[];
+  agents?: TeamAgentDefinition[];
+  tasks?: TeamTaskDefinition[];
 }
 
 export type ProjectExtensionStatus = "active" | "approval_required";
@@ -259,7 +282,19 @@ export type BuilderConfigOperation =
       kind: "create_agent" | "update_agent";
       agent_id: string;
       team_name?: string | null;
+      display_name?: string | null;
+      description?: string | null;
       instructions?: string | null;
+      model?: string | null;
+    }
+  | {
+      kind: "create_task" | "update_task";
+      task_name: string;
+      team_name?: string | null;
+      description?: string | null;
+      instructions?: string | null;
+      model?: string | null;
+      output_schema?: Record<string, unknown> | null;
     };
 
 export interface BuilderReviewedOperation {

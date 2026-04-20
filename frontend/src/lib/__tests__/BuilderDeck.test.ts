@@ -76,21 +76,35 @@ function mockProjectStore(): ProjectStore {
   };
 }
 
+function buildTeam(id: string, name: string) {
+  return {
+    id,
+    project_id: "project-1",
+    name,
+    description: `${name} team`,
+    entry_agent_id: "default",
+    agents: [
+      {
+        id: "default",
+        display_name: "Default",
+        description: "",
+        instructions: "",
+        model: null,
+      },
+    ],
+    tasks: [],
+    members: ["default"],
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+}
+
 describe("BuilderDeck", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
     vi.mocked(builderApi.listTeams).mockResolvedValue([
-      {
-        id: "team-1",
-        project_id: "project-1",
-        name: "core",
-        description: "Core team",
-        entry_agent_id: "default",
-        members: ["default"],
-        created_at: "2026-01-01T00:00:00Z",
-        updated_at: "2026-01-01T00:00:00Z",
-      },
+      buildTeam("team-1", "core"),
     ]);
     vi.mocked(builderApi.listProjectExtensions).mockResolvedValue([
       {
@@ -113,14 +127,19 @@ describe("BuilderDeck", () => {
       },
     ]);
     vi.mocked(builderApi.createTeam).mockResolvedValue({
-      id: "team-2",
-      project_id: "project-1",
-      name: "delivery",
+      ...buildTeam("team-2", "delivery"),
       description: "Delivery team",
-      entry_agent_id: "default",
+      agents: [
+        {
+          id: "default",
+          display_name: "Default",
+          description: "",
+          instructions: "",
+          model: null,
+        },
+      ],
+      tasks: [],
       members: ["default", "reviewer"],
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
     });
     vi.mocked(builderApi.createProjectExtension).mockResolvedValue({
       name: "delivery-brief",
@@ -296,7 +315,16 @@ describe("BuilderDeck", () => {
       name: "delivery",
       description: "Delivery team",
       entry_agent_id: "default",
-      members: [],
+      agents: [
+        {
+          id: "default",
+          display_name: "Default",
+          description: "",
+          instructions: "",
+          model: null,
+        },
+      ],
+      tasks: [],
     });
 
     const extensionCard = document.querySelector("article.extension-card") as HTMLElement;

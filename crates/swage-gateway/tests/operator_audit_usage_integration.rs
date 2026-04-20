@@ -372,7 +372,14 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
             name: "ops".into(),
             description: "ops".into(),
             entry_agent_id: "gateway".into(),
-            members: vec!["gateway".into()],
+            agents: vec![swage_storage::model::TeamAgentDefinition {
+                id: "gateway".into(),
+                display_name: "gateway".into(),
+                description: String::new(),
+                instructions: String::new(),
+                model: None,
+            }],
+            tasks: vec![],
         })
         .await
         .unwrap();

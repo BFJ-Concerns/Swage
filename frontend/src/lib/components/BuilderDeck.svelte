@@ -20,7 +20,9 @@
     LensDescriptor,
     LensSurface,
     ProjectExtensionSummary,
+    TeamAgentDefinition,
     TeamSummary,
+    TeamTaskDefinition,
   } from "../types";
 
   type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
@@ -53,7 +55,20 @@
   let teamName = $state("");
   let teamDescription = $state("");
   let teamEntryAgentId = $state("default");
-  let teamMembersCsv = $state("");
+  let teamAgents = $state<TeamAgentDefinition[]>([]);
+  let teamTasks = $state<TeamTaskDefinition[]>([]);
+  let selectedAgentDraftId = $state<string | null>(null);
+  let agentDraftId = $state("default");
+  let agentDraftDisplayName = $state("Default");
+  let agentDraftDescription = $state("");
+  let agentDraftInstructions = $state("");
+  let agentDraftModel = $state("");
+  let selectedTaskDraftName = $state<string | null>(null);
+  let taskDraftName = $state("");
+  let taskDraftDescription = $state("");
+  let taskDraftInstructions = $state("");
+  let taskDraftModel = $state("");
+  let taskDraftOutputSchema = $state("");
 
   let lensError = $state<string | null>(null);
   let lensNotice = $state<string | null>(null);
@@ -118,12 +133,78 @@
       .filter(Boolean);
   }
 
+  function blankAgent(id = "default"): TeamAgentDefinition {
+    return {
+      id,
+      display_name: id === "default" ? "Default" : id,
+      description: "",
+      instructions: "",
+      model: null,
+    };
+  }
+
+  function blankTask(): TeamTaskDefinition {
+    return {
+      name: "",
+      description: "",
+      instructions: "",
+      model: null,
+      output_schema: null,
+      max_output_retries: null,
+      tool_allow: null,
+      tool_deny: null,
+    };
+  }
+
+  function resetAgentDraft(agent: TeamAgentDefinition = blankAgent()): void {
+    selectedAgentDraftId = agent.id || null;
+    agentDraftId = agent.id;
+    agentDraftDisplayName = agent.display_name;
+    agentDraftDescription = agent.description;
+    agentDraftInstructions = agent.instructions;
+    agentDraftModel = agent.model ?? "";
+  }
+
+  function resetTaskDraft(task: TeamTaskDefinition = blankTask()): void {
+    selectedTaskDraftName = task.name || null;
+    taskDraftName = task.name;
+    taskDraftDescription = task.description;
+    taskDraftInstructions = task.instructions;
+    taskDraftModel = task.model ?? "";
+    taskDraftOutputSchema = task.output_schema
+      ? JSON.stringify(task.output_schema, null, 2)
+      : "";
+  }
+
+  function ensureEntryAgentStillExists(): void {
+    if (!teamAgents.some((agent) => agent.id === teamEntryAgentId)) {
+      teamEntryAgentId = teamAgents[0]?.id ?? "default";
+    }
+  }
+
+  function parseOptionalJson(
+    raw: string,
+    fieldName: string,
+  ): Record<string, unknown> | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${fieldName} must be a JSON object.`);
+    }
+    return parsed as Record<string, unknown>;
+  }
+
   function resetTeamForm(): void {
     selectedTeamId = null;
     teamName = "";
     teamDescription = "";
     teamEntryAgentId = "default";
-    teamMembersCsv = "";
+    teamAgents = [blankAgent()];
+    teamTasks = [];
+    resetAgentDraft(teamAgents[0]);
+    resetTaskDraft();
   }
 
   function resetLensForm(): void {
@@ -151,7 +232,122 @@
     teamName = team.name;
     teamDescription = team.description;
     teamEntryAgentId = team.entry_agent_id;
-    teamMembersCsv = team.members.join(", ");
+    const nextAgents =
+      team.agents?.length
+        ? [...team.agents]
+        : (team.members ?? [team.entry_agent_id]).map((agentId) => blankAgent(agentId));
+    teamAgents = nextAgents.length ? nextAgents : [blankAgent(team.entry_agent_id)];
+    teamTasks = [...(team.tasks ?? [])];
+    ensureEntryAgentStillExists();
+    resetAgentDraft(teamAgents[0] ?? blankAgent(team.entry_agent_id));
+    resetTaskDraft(teamTasks[0] ?? blankTask());
+  }
+
+  function saveAgentDraft(): void {
+    const id = agentDraftId.trim();
+    if (!id) {
+      teamError = "Agent ID must not be empty.";
+      return;
+    }
+
+    const nextAgent: TeamAgentDefinition = {
+      id,
+      display_name: agentDraftDisplayName.trim() || id,
+      description: agentDraftDescription.trim(),
+      instructions: agentDraftInstructions.trim(),
+      model: agentDraftModel.trim() || null,
+    };
+
+    const duplicate = teamAgents.find(
+      (agent) => agent.id === id && agent.id !== selectedAgentDraftId,
+    );
+    if (duplicate) {
+      teamError = `Agent ${id} already exists in this team.`;
+      return;
+    }
+
+    const existingIndex = teamAgents.findIndex(
+      (agent) => agent.id === selectedAgentDraftId,
+    );
+    if (existingIndex >= 0) {
+      teamAgents = teamAgents.map((agent, index) =>
+        index === existingIndex ? nextAgent : agent,
+      );
+    } else {
+      teamAgents = [...teamAgents, nextAgent];
+    }
+
+    if (selectedAgentDraftId === teamEntryAgentId || teamAgents.length === 1) {
+      teamEntryAgentId = nextAgent.id;
+    }
+    selectedAgentDraftId = nextAgent.id;
+    ensureEntryAgentStillExists();
+    teamError = null;
+  }
+
+  function removeSelectedAgent(): void {
+    if (!selectedAgentDraftId) return;
+    teamAgents = teamAgents.filter((agent) => agent.id !== selectedAgentDraftId);
+    if (teamAgents.length === 0) {
+      teamAgents = [blankAgent()];
+    }
+    ensureEntryAgentStillExists();
+    resetAgentDraft(teamAgents[0]);
+  }
+
+  function saveTaskDraft(): void {
+    const name = taskDraftName.trim();
+    if (!name) {
+      teamError = "Task name must not be empty.";
+      return;
+    }
+
+    let outputSchema: Record<string, unknown> | null;
+    try {
+      outputSchema = parseOptionalJson(taskDraftOutputSchema, "Task output schema");
+    } catch (error) {
+      teamError = error instanceof Error ? error.message : "Task output schema is invalid.";
+      return;
+    }
+
+    const nextTask: TeamTaskDefinition = {
+      name,
+      description: taskDraftDescription.trim(),
+      instructions: taskDraftInstructions.trim(),
+      model: taskDraftModel.trim() || null,
+      output_schema: outputSchema,
+      max_output_retries: null,
+      tool_allow: null,
+      tool_deny: null,
+    };
+
+    const duplicate = teamTasks.find(
+      (task) => task.name === name && task.name !== selectedTaskDraftName,
+    );
+    if (duplicate) {
+      teamError = `Task ${name} already exists in this team.`;
+      return;
+    }
+
+    const existingIndex = teamTasks.findIndex(
+      (task) => task.name === selectedTaskDraftName,
+    );
+    if (existingIndex >= 0) {
+      teamTasks = teamTasks.map((task, index) =>
+        index === existingIndex ? nextTask : task,
+      );
+    } else {
+      teamTasks = [...teamTasks, nextTask];
+    }
+
+    selectedTaskDraftName = nextTask.name;
+    teamError = null;
+  }
+
+  function removeSelectedTask(): void {
+    if (!selectedTaskDraftName) return;
+    teamTasks = teamTasks.filter((task) => task.name !== selectedTaskDraftName);
+    resetTaskDraft(teamTasks[0] ?? blankTask());
   }
 
   function resetExtensionForm(): void {
@@ -172,6 +368,8 @@
     extensionToolsCsv = extension.requested_tools.join(", ");
     extensionInstructions = extension.instructions;
   }
+
+  resetTeamForm();
 
   async function refreshBuilderData(projectId: string): Promise<void> {
     isLoading = true;
@@ -201,7 +399,8 @@
         name: teamName,
         description: teamDescription,
         entry_agent_id: teamEntryAgentId,
-        members: normaliseCsvList(teamMembersCsv),
+        agents: teamAgents,
+        tasks: teamTasks,
       };
 
       const saved = selectedTeamId
@@ -588,13 +787,102 @@
           <textarea bind:value={teamDescription} rows="3"></textarea>
         </label>
         <label>
-          <span>Entry agent ID</span>
-          <input bind:value={teamEntryAgentId} placeholder="default" />
+          <span>Entry agent</span>
+          <select bind:value={teamEntryAgentId}>
+            {#each teamAgents as agent}
+              <option value={agent.id}>{agent.display_name || agent.id}</option>
+            {/each}
+          </select>
         </label>
-        <label>
-          <span>Members</span>
-          <input bind:value={teamMembersCsv} placeholder="default, reviewer" />
-        </label>
+        <div class="authoring-columns">
+          <section class="authoring-panel">
+            <div class="subheading">
+              <strong>Agents</strong>
+              <span>{teamAgents.length} defined</span>
+            </div>
+            <div class="item-list compact-list">
+              {#each teamAgents as agent}
+                <button class="list-item" onclick={() => resetAgentDraft(agent)}>
+                  <strong>{agent.display_name || agent.id}</strong>
+                  <span>{agent.model ?? "Inherited model"}</span>
+                </button>
+              {/each}
+            </div>
+            <label>
+              <span>Agent ID</span>
+              <input bind:value={agentDraftId} placeholder="reviewer" />
+            </label>
+            <label>
+              <span>Display name</span>
+              <input bind:value={agentDraftDisplayName} placeholder="Reviewer" />
+            </label>
+            <label>
+              <span>Description</span>
+              <textarea bind:value={agentDraftDescription} rows="2"></textarea>
+            </label>
+            <label>
+              <span>Instructions</span>
+              <textarea bind:value={agentDraftInstructions} rows="4"></textarea>
+            </label>
+            <label>
+              <span>Model override</span>
+              <input bind:value={agentDraftModel} placeholder="claude-sonnet-4-20250514" />
+            </label>
+            <div class="inline-actions">
+              <button onclick={saveAgentDraft}>
+                {selectedAgentDraftId ? "Update agent draft" : "Add agent"}
+              </button>
+              <button onclick={() => resetAgentDraft(blankAgent())}>New draft</button>
+              <button onclick={removeSelectedAgent} disabled={teamAgents.length <= 1}>
+                Remove
+              </button>
+            </div>
+          </section>
+
+          <section class="authoring-panel">
+            <div class="subheading">
+              <strong>Tasks</strong>
+              <span>{teamTasks.length} defined</span>
+            </div>
+            <div class="item-list compact-list">
+              {#each teamTasks as task}
+                <button class="list-item" onclick={() => resetTaskDraft(task)}>
+                  <strong>{task.name}</strong>
+                  <span>{task.model ?? "Inherited model"}</span>
+                </button>
+              {/each}
+            </div>
+            <label>
+              <span>Task name</span>
+              <input bind:value={taskDraftName} placeholder="review-plan" />
+            </label>
+            <label>
+              <span>Description</span>
+              <textarea bind:value={taskDraftDescription} rows="2"></textarea>
+            </label>
+            <label>
+              <span>Instructions</span>
+              <textarea bind:value={taskDraftInstructions} rows="4"></textarea>
+            </label>
+            <label>
+              <span>Model override</span>
+              <input bind:value={taskDraftModel} placeholder="claude-haiku-4" />
+            </label>
+            <label>
+              <span>Output schema JSON</span>
+              <textarea bind:value={taskDraftOutputSchema} rows="5"></textarea>
+            </label>
+            <div class="inline-actions">
+              <button onclick={saveTaskDraft}>
+                {selectedTaskDraftName ? "Update task draft" : "Add task"}
+              </button>
+              <button onclick={() => resetTaskDraft(blankTask())}>New draft</button>
+              <button onclick={removeSelectedTask} disabled={!selectedTaskDraftName}>
+                Remove
+              </button>
+            </div>
+          </section>
+        </div>
         <div class="inline-actions">
           <button class="primary" onclick={saveTeam}>
             {selectedTeamId ? "Update team" : "Create team"}
@@ -605,7 +893,7 @@
           {#each teams as team}
             <button class="list-item" onclick={() => populateTeamForm(team)}>
               <strong>{team.name}</strong>
-              <span>{team.entry_agent_id}</span>
+              <span>{team.agents?.length ?? team.members.length} agent(s) · {team.tasks?.length ?? 0} task(s)</span>
             </button>
           {/each}
         </div>
@@ -964,6 +1252,36 @@
     gap: 10px;
   }
 
+  .authoring-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .authoring-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border-radius: 18px;
+    background: rgba(120, 53, 15, 0.04);
+    border: 1px solid rgba(120, 53, 15, 0.08);
+  }
+
+  .subheading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    color: #6b7280;
+    font-size: 0.85rem;
+  }
+
+  .compact-list {
+    max-height: 160px;
+    overflow: auto;
+  }
+
   .proposal-stack {
     display: flex;
     flex-direction: column;
@@ -1044,7 +1362,8 @@
   }
 
   @media (max-width: 1100px) {
-    .builder-grid {
+    .builder-grid,
+    .authoring-columns {
       grid-template-columns: 1fr;
     }
   }

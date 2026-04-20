@@ -53,6 +53,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("028_deduplicate_attachment_ingestion_content", ""),
         ("029_lens_catalog", CREATE_LENS_CATALOG_TABLES),
+        ("030_team_agent_and_task_authoring", ""),
     ]
 }
 
@@ -1018,6 +1019,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             super::secret::migrate_managed_secret_storage(conn)?;
         } else if name == "028_deduplicate_attachment_ingestion_content" {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
+        } else if name == "030_team_agent_and_task_authoring" {
+            super::team::migrate_team_authoring_model(conn)?;
         } else {
             // Apply migration inside a transaction for atomicity.
             conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))

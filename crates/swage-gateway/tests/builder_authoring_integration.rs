@@ -166,7 +166,36 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
             "name": "workspace-core",
             "description": "Owns the builder workflow.",
             "entry_agent_id": "default",
-            "members": ["reviewer"]
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Primary builder agent.",
+                    "instructions": "Own the builder workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                },
+                {
+                    "id": "reviewer",
+                    "display_name": "Reviewer",
+                    "description": "Reviews builder mutations.",
+                    "instructions": "Review builder changes.",
+                    "model": null
+                }
+            ],
+            "tasks": [
+                {
+                    "name": "review-plan",
+                    "description": "Review proposed plans.",
+                    "instructions": "Inspect the plan for risk.",
+                    "model": null,
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": { "type": "string" }
+                        }
+                    }
+                }
+            ]
         }),
     )
     .await;
@@ -178,7 +207,55 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
         &format!("/api/teams/{team_id}"),
         json!({
             "description": "Owns the durable builder workflow.",
-            "members": ["reviewer", "qa"]
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Primary builder agent.",
+                    "instructions": "Own the durable builder workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                },
+                {
+                    "id": "reviewer",
+                    "display_name": "Reviewer",
+                    "description": "Reviews builder mutations.",
+                    "instructions": "Review durable changes.",
+                    "model": null
+                },
+                {
+                    "id": "qa",
+                    "display_name": "QA",
+                    "description": "Checks builder regressions.",
+                    "instructions": "Catch regressions before apply.",
+                    "model": null
+                }
+            ],
+            "tasks": [
+                {
+                    "name": "review-plan",
+                    "description": "Review proposed plans.",
+                    "instructions": "Inspect the plan for risk.",
+                    "model": null,
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": { "type": "string" }
+                        }
+                    }
+                },
+                {
+                    "name": "qa-check",
+                    "description": "Check builder regressions.",
+                    "instructions": "Check regression risk.",
+                    "model": null,
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "status": { "type": "string" }
+                        }
+                    }
+                }
+            ]
         }),
     )
     .await;
@@ -188,6 +265,8 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
         "Owns the durable builder workflow."
     );
     assert_eq!(team_update_body["members"].as_array().unwrap().len(), 3);
+    assert_eq!(team_update_body["agents"].as_array().unwrap().len(), 3);
+    assert_eq!(team_update_body["tasks"].as_array().unwrap().len(), 2);
 
     let (extension_status, extension_body) = post_json(
         &router,
@@ -247,6 +326,8 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
         "Owns the durable builder workflow."
     );
     assert_eq!(restarted_team_body["members"].as_array().unwrap().len(), 3);
+    assert_eq!(restarted_team_body["agents"].as_array().unwrap().len(), 3);
+    assert_eq!(restarted_team_body["tasks"].as_array().unwrap().len(), 2);
 
     let (skills_status, skills_body) = get_json(
         &restarted_router,
