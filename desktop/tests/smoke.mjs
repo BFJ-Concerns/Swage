@@ -37,6 +37,27 @@ function createMockGateway() {
   const conversations = new Map();
   const socketsByConversation = new Map();
   const transportSockets = new Set();
+  const availableLenses = [
+    {
+      id: "assistant",
+      title: "Assistant",
+      summary: "General-purpose multi-agent workspace.",
+      default_surface: "conversation",
+      ui_modules: ["conversation", "operator"],
+      prominent_team_ids: [],
+      source_kind: "built_in",
+    },
+    {
+      id: "builder",
+      title: "Builder",
+      summary: "Compose lenses, teams, and extensions.",
+      default_surface: "builder",
+      ui_modules: ["conversation", "operator", "builder"],
+      prominent_team_ids: [],
+      source_kind: "built_in",
+    },
+  ];
+  let activeLens = "assistant";
   let conversationCounter = 0;
 
   function listConversationSummaries() {
@@ -54,6 +75,14 @@ function createMockGateway() {
   function writeJson(response, statusCode, body) {
     response.writeHead(statusCode, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
+  }
+
+  function buildLensRuntime() {
+    return {
+      active_lens: activeLens,
+      updated_at: new Date().toISOString(),
+      available_lenses: availableLenses,
+    };
   }
 
   async function writeAsset(response, pathname) {
@@ -98,6 +127,30 @@ function createMockGateway() {
 
     if (request.method === "GET" && pathname === "/api/projects") {
       writeJson(response, 200, { projects: [project] });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/lens-runtime") {
+      writeJson(response, 200, buildLensRuntime());
+      return;
+    }
+
+    if (request.method === "PUT" && pathname === "/api/lens-runtime") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const nextLens = JSON.parse(body || "{}").lens;
+        if (!availableLenses.some((lens) => lens.id === nextLens)) {
+          writeJson(response, 404, { error: "lens_not_found" });
+          return;
+        }
+
+        activeLens = nextLens;
+        writeJson(response, 200, buildLensRuntime());
+      });
       return;
     }
 

@@ -89,6 +89,9 @@ async function createWindow() {
     show: false,
     webPreferences: {
       contextIsolation: true,
+      // The desktop runtime bridge depends on the preload executing with full
+      // Electron preload semantics rather than the sandboxed subset.
+      sandbox: false,
       preload: preloadPath,
     },
   });
