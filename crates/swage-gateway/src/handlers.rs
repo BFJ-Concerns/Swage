@@ -22,6 +22,13 @@ use crate::{
     audit::{
         OperatorSearchQuery, OperatorSearchResponse, OperatorUsageQuery, OperatorUsageResponse,
     },
+    authoring_definition::{
+        ContextDefinitionListResponse, ContextDefinitionRecord, CreateContextDefinitionRequest,
+        CreateTopologyFlowDefinitionRequest, PreviewContextDefinitionRequest,
+        PreviewContextDefinitionResponse, TopologyFlowDefinitionListResponse,
+        TopologyFlowDefinitionRecord, UpdateContextDefinitionRequest,
+        UpdateTopologyFlowDefinitionRequest,
+    },
     builder_runtime::{
         BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
         BuilderProposalRequest, BuilderProposalResponse, ConfigurationVersionListResponse,
@@ -1197,6 +1204,109 @@ pub async fn get_topology_run(
     let svc = TopologyRunService::new(state);
     let resp = svc.get_run(id).await?;
     Ok(Json(resp))
+}
+
+/// `GET /api/projects/:id/topology-flows` — list durable topology flow definitions.
+pub async fn list_topology_flows(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<TopologyFlowDefinitionListResponse>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::list_topology_flows(&state, project_id).await?,
+    ))
+}
+
+/// `POST /api/projects/:id/topology-flows` — create a durable topology flow definition.
+pub async fn create_topology_flow(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(request): Json<CreateTopologyFlowDefinitionRequest>,
+) -> Result<(StatusCode, Json<TopologyFlowDefinitionRecord>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::authoring_definition::create_topology_flow(&state, project_id, request).await?),
+    ))
+}
+
+/// `GET /api/projects/:id/topology-flows/:name` — fetch one durable topology flow definition.
+pub async fn get_topology_flow(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::get_topology_flow(&state, project_id, &name).await?,
+    ))
+}
+
+/// `PUT /api/projects/:id/topology-flows/:name` — update a durable topology flow definition.
+pub async fn update_topology_flow(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<UpdateTopologyFlowDefinitionRequest>,
+) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::update_topology_flow(&state, project_id, &name, request)
+            .await?,
+    ))
+}
+
+/// `GET /api/projects/:id/context-definitions` — list durable context definition records.
+pub async fn list_context_definitions(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<ContextDefinitionListResponse>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::list_context_definitions(&state, project_id).await?,
+    ))
+}
+
+/// `POST /api/projects/:id/context-definitions` — create a durable context definition.
+pub async fn create_context_definition(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(request): Json<CreateContextDefinitionRequest>,
+) -> Result<(StatusCode, Json<ContextDefinitionRecord>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            crate::authoring_definition::create_context_definition(&state, project_id, request)
+                .await?,
+        ),
+    ))
+}
+
+/// `GET /api/projects/:id/context-definitions/:name` — fetch one durable context definition.
+pub async fn get_context_definition(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+) -> Result<Json<ContextDefinitionRecord>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::get_context_definition(&state, project_id, &name).await?,
+    ))
+}
+
+/// `PUT /api/projects/:id/context-definitions/:name` — update a durable context definition.
+pub async fn update_context_definition(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<UpdateContextDefinitionRequest>,
+) -> Result<Json<ContextDefinitionRecord>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::update_context_definition(&state, project_id, &name, request)
+            .await?,
+    ))
+}
+
+/// `POST /api/projects/:id/context-definitions/:name/preview` — render a stored context definition.
+pub async fn preview_context_definition(
+    State(state): State<AppState>,
+    Path((project_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<PreviewContextDefinitionRequest>,
+) -> Result<Json<PreviewContextDefinitionResponse>, ApiError> {
+    Ok(Json(
+        crate::authoring_definition::preview_context_definition(&state, project_id, &name, request)
+            .await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------

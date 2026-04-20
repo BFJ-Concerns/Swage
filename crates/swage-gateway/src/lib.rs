@@ -53,6 +53,7 @@
 pub mod assets;
 pub mod attachment;
 pub mod audit;
+pub mod authoring_definition;
 pub mod automated_turn;
 pub mod builder_runtime;
 pub mod capabilities;

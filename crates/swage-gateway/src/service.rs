@@ -1221,7 +1221,10 @@ fn team_to_response(team: Team) -> TeamResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTopologyRunRequest {
+    #[serde(default)]
     pub topology_source: String,
+    #[serde(default)]
+    pub flow_name: Option<String>,
     pub message: String,
     pub session_id: Option<Uuid>,
 }
@@ -1301,9 +1304,9 @@ impl TopologyRunService {
         team_id: Uuid,
         req: CreateTopologyRunRequest,
     ) -> Result<TopologyRunDetailResponse, GatewayError> {
-        if req.topology_source.trim().is_empty() {
+        if req.topology_source.trim().is_empty() && req.flow_name.is_none() {
             return Err(GatewayError::ValidationError(
-                "topology_source must not be empty".into(),
+                "topology_source or flow_name must be provided".into(),
             ));
         }
         if req.message.trim().is_empty() {
@@ -1331,14 +1334,32 @@ impl TopologyRunService {
                 .collect(),
         };
 
-        let graph = swage_python::topology::execute_topology_source_with_config(
-            &self.state.config.tools.python_execute,
-            &req.topology_source,
-            &format!("team-run:{team_id}"),
-            std::time::Duration::from_secs(self.state.config.context.timeout),
-            catalog,
-        )
-        .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let graph = if let Some(flow_name) = req.flow_name.as_deref() {
+            crate::authoring_definition::load_topology_flow_graph(
+                &self.state,
+                team.project_id,
+                flow_name,
+            )
+            .await?
+        } else {
+            swage_python::topology::execute_topology_source_with_config(
+                &self.state.config.tools.python_execute,
+                &req.topology_source,
+                &format!("team-run:{team_id}"),
+                std::time::Duration::from_secs(self.state.config.context.timeout),
+                catalog.clone(),
+            )
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))?
+        };
+        swage_topology::validate_graph(&graph, &catalog).map_err(|problems| {
+            GatewayError::ValidationError(
+                problems
+                    .into_iter()
+                    .map(|problem| problem.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
 
         let result = TopologyExecutor::new(self.state.clone())
             .execute(TopologyExecutionRequest {

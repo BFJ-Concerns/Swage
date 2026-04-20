@@ -108,6 +108,26 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::approve_workspace_extension),
         )
         .route(
+            "/api/projects/:id/topology-flows",
+            get(handlers::list_topology_flows).post(handlers::create_topology_flow),
+        )
+        .route(
+            "/api/projects/:id/topology-flows/:name",
+            get(handlers::get_topology_flow).put(handlers::update_topology_flow),
+        )
+        .route(
+            "/api/projects/:id/context-definitions",
+            get(handlers::list_context_definitions).post(handlers::create_context_definition),
+        )
+        .route(
+            "/api/projects/:id/context-definitions/:name",
+            get(handlers::get_context_definition).put(handlers::update_context_definition),
+        )
+        .route(
+            "/api/projects/:id/context-definitions/:name/preview",
+            post(handlers::preview_context_definition),
+        )
+        .route(
             "/api/projects/:id/builder/proposals",
             post(handlers::create_builder_proposal),
         )

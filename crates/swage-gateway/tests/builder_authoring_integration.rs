@@ -489,3 +489,199 @@ Stay local until a builder approves import.
 
     unsafe { std::env::remove_var("SWAGE_HOME") };
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtime() {
+    let _guard = SWAGE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let swage_home = temp.path().join("swage-home");
+    let db_path = temp.path().join("durable-authoring.db");
+    std::fs::create_dir_all(&swage_home).unwrap();
+    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+
+    let router = build_router(test_state(&db_path));
+    let (project_status, project_body) = post_json(
+        &router,
+        "/api/projects",
+        json!({
+            "name": "Runtime Authoring Project"
+        }),
+    )
+    .await;
+    assert_eq!(project_status, StatusCode::CREATED);
+    let project_id = project_body["id"].as_str().unwrap();
+
+    let (flow_status, flow_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/topology-flows"),
+        json!({
+            "name": "triage",
+            "description": "Run the default triage graph.",
+            "graph": {
+                "entry_node_id": "entry",
+                "budget": {},
+                "nodes": [
+                    {
+                        "id": "entry",
+                        "kind": "deterministic",
+                        "handler_name": "identity"
+                    }
+                ],
+                "edges": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(flow_status, StatusCode::CREATED);
+    assert_eq!(flow_body["name"], "triage");
+
+    let (flow_update_status, flow_update_body) = put_json(
+        &router,
+        &format!("/api/projects/{project_id}/topology-flows/triage"),
+        json!({
+            "description": "Run the persisted triage graph.",
+            "graph": {
+                "entry_node_id": "entry",
+                "budget": { "max_total_tokens": 128 },
+                "nodes": [
+                    {
+                        "id": "entry",
+                        "kind": "deterministic",
+                        "handler_name": "identity"
+                    }
+                ],
+                "edges": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(flow_update_status, StatusCode::OK);
+    assert_eq!(
+        flow_update_body["description"],
+        "Run the persisted triage graph."
+    );
+
+    let (context_status, context_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/context-definitions"),
+        json!({
+            "name": "triage-context",
+            "description": "Default assembly for triage sessions.",
+            "config": {
+                "assembly": "default",
+                "timeout": 5,
+                "budget": 64
+            }
+        }),
+    )
+    .await;
+    assert_eq!(context_status, StatusCode::CREATED);
+    assert_eq!(context_body["config"]["budget"], 64);
+
+    let (context_update_status, context_update_body) = put_json(
+        &router,
+        &format!("/api/projects/{project_id}/context-definitions/triage-context"),
+        json!({
+            "description": "Default assembly for durable triage sessions.",
+            "config": {
+                "assembly": "default",
+                "timeout": 10,
+                "budget": 128
+            }
+        }),
+    )
+    .await;
+    assert_eq!(context_update_status, StatusCode::OK);
+    assert_eq!(context_update_body["config"]["timeout"], 10);
+
+    let (team_status, team_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/teams"),
+        json!({
+            "name": "triage-team",
+            "description": "Runs durable triage flows.",
+            "entry_agent_id": "default",
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Default",
+                    "instructions": "Respond directly.",
+                    "model": null
+                }
+            ],
+            "tasks": []
+        }),
+    )
+    .await;
+    assert_eq!(team_status, StatusCode::CREATED);
+    let team_id = team_body["id"].as_str().unwrap();
+
+    let (run_status, run_body) = post_json(
+        &router,
+        &format!("/api/teams/{team_id}/runs"),
+        json!({
+            "flow_name": "triage",
+            "message": "Inspect the inbox."
+        }),
+    )
+    .await;
+    assert_eq!(run_status, StatusCode::CREATED);
+    assert_eq!(run_body["run"]["state"], "completed");
+    assert_eq!(
+        run_body["run"]["final_output"]["message"],
+        "Inspect the inbox."
+    );
+
+    let (preview_status, preview_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/context-definitions/triage-context/preview"),
+        json!({
+            "instructions": "Keep the response concise.",
+            "history": [
+                { "role": "user", "content": "Summarise the work." }
+            ],
+            "project_name": "Runtime Authoring Project"
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK);
+    assert_eq!(preview_body["report"]["assembly_name"], "default");
+    assert_eq!(preview_body["report"]["budget"], 128);
+
+    let restarted_router = build_router(test_state(&db_path));
+
+    let (flows_after_status, flows_after_body) = get_json(
+        &restarted_router,
+        &format!("/api/projects/{project_id}/topology-flows"),
+    )
+    .await;
+    assert_eq!(flows_after_status, StatusCode::OK);
+    assert!(
+        flows_after_body["flows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|flow| flow["name"] == "triage"
+                && flow["description"] == "Run the persisted triage graph.")
+    );
+
+    let (definitions_after_status, definitions_after_body) = get_json(
+        &restarted_router,
+        &format!("/api/projects/{project_id}/context-definitions"),
+    )
+    .await;
+    assert_eq!(definitions_after_status, StatusCode::OK);
+    assert!(
+        definitions_after_body["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|definition| definition["name"] == "triage-context"
+                && definition["config"]["timeout"] == 10)
+    );
+
+    unsafe { std::env::remove_var("SWAGE_HOME") };
+}
