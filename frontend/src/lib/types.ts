@@ -102,20 +102,41 @@ export interface ConversationResponse {
 // Lens runtime types
 // -------------------------------------------------------------------------
 
-export type AppLens = "assistant" | "builder";
+export type AppLens = string;
 export type LensSurface = "conversation" | "operator" | "builder";
+export type LensSourceKind = "built_in" | "authored" | "installed";
 
 export interface LensDescriptor {
   id: AppLens;
   title: string;
   summary: string;
   default_surface: LensSurface;
+  ui_modules: LensSurface[];
+  prominent_team_ids: string[];
+  source_kind: LensSourceKind;
 }
 
 export interface LensRuntimeResponse {
   active_lens: AppLens;
   updated_at: string;
   available_lenses: LensDescriptor[];
+}
+
+export interface CreateLensRequest {
+  id: string;
+  title: string;
+  summary: string;
+  default_surface: LensSurface;
+  ui_modules: LensSurface[];
+  prominent_team_ids: string[];
+}
+
+export interface UpdateLensRequest {
+  title: string;
+  summary: string;
+  default_surface: LensSurface;
+  ui_modules: LensSurface[];
+  prominent_team_ids: string[];
 }
 
 // -------------------------------------------------------------------------

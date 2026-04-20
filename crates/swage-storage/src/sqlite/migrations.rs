@@ -52,6 +52,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_SHARED_REFERENCE_EVENT_TABLE,
         ),
         ("028_deduplicate_attachment_ingestion_content", ""),
+        ("029_lens_catalog", CREATE_LENS_CATALOG_TABLES),
     ]
 }
 
@@ -121,6 +122,55 @@ const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_shared_reference_events_object
         ON shared_reference_events(object_kind, object_id, created_at);
+";
+
+const CREATE_LENS_CATALOG_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS lenses (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        title              TEXT NOT NULL,
+        summary            TEXT NOT NULL,
+        default_surface    TEXT NOT NULL,
+        ui_modules_json    TEXT NOT NULL,
+        prominent_teams_json TEXT NOT NULL,
+        source_kind        TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO lenses (
+        id,
+        title,
+        summary,
+        default_surface,
+        ui_modules_json,
+        prominent_teams_json,
+        source_kind,
+        created_at,
+        updated_at
+    )
+    VALUES
+        (
+            'assistant',
+            'Assistant lens',
+            'Conversation-first view for direct work with the active agent.',
+            'conversation',
+            '[\"conversation\",\"operator\"]',
+            '[\"default\"]',
+            'built_in',
+            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        ),
+        (
+            'builder',
+            'Builder lens',
+            'Workspace-first view that foregrounds system shaping and operator state.',
+            'builder',
+            '[\"builder\",\"conversation\"]',
+            '[\"workspace-core\"]',
+            'built_in',
+            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "

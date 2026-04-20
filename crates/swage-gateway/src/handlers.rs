@@ -35,7 +35,10 @@ use crate::{
         CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
         UpdateHeartbeatRequest,
     },
-    lens::{LensRuntimeResponse, UpdateLensRuntimeRequest},
+    lens::{
+        CreateLensRequest, InstallLensRequest, LensDescriptor, LensListResponse,
+        LensRuntimeResponse, UpdateLensRequest, UpdateLensRuntimeRequest,
+    },
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
@@ -189,6 +192,44 @@ pub async fn get_lens_runtime(
     State(state): State<AppState>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
     Ok(Json(crate::lens::get_lens_runtime(&state).await?))
+}
+
+/// `GET /api/lenses` — list durable lens records.
+pub async fn list_lenses(
+    State(state): State<AppState>,
+) -> Result<Json<LensListResponse>, ApiError> {
+    Ok(Json(crate::lens::list_lenses(&state).await?))
+}
+
+/// `POST /api/lenses` — create an authored lens.
+pub async fn create_lens(
+    State(state): State<AppState>,
+    Json(request): Json<CreateLensRequest>,
+) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::lens::create_lens(&state, request).await?),
+    ))
+}
+
+/// `PUT /api/lenses/:id` — update an authored or installed lens.
+pub async fn update_lens(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateLensRequest>,
+) -> Result<Json<LensDescriptor>, ApiError> {
+    Ok(Json(crate::lens::update_lens(&state, &id, request).await?))
+}
+
+/// `POST /api/lenses/install` — install a premade lens into durable storage.
+pub async fn install_lens(
+    State(state): State<AppState>,
+    Json(request): Json<InstallLensRequest>,
+) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::lens::install_lens(&state, request).await?),
+    ))
 }
 
 /// `PUT /api/lens-runtime` — persist the active assistant or builder lens.
@@ -2207,7 +2248,7 @@ mod tests {
         let stored = swage_storage::store::LensStore::get_active_lens(&*storage)
             .await
             .expect("stored lens");
-        assert_eq!(stored.active_lens, AppLens::Builder);
+        assert_eq!(stored.active_lens, AppLens::builder());
     }
 
     #[tokio::test]

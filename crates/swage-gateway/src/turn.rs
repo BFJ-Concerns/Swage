@@ -1500,13 +1500,40 @@ pub(crate) mod tests {
         pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
         pub(crate) managed_secret_values: HashMap<Uuid, String>,
         pub(crate) active_lens: swage_storage::AppLens,
+        pub(crate) lenses: HashMap<String, swage_storage::LensRecord>,
     }
 
     impl MockStorage {
         pub(crate) fn new() -> Self {
+            let assistant = swage_storage::LensRecord {
+                id: swage_storage::AppLens::assistant(),
+                title: "Assistant lens".to_string(),
+                summary: "Conversation-first view".to_string(),
+                default_surface: "conversation".to_string(),
+                ui_modules: vec!["conversation".to_string(), "operator".to_string()],
+                prominent_team_ids: vec!["default".to_string()],
+                source_kind: swage_storage::LensSourceKind::BuiltIn,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let builder = swage_storage::LensRecord {
+                id: swage_storage::AppLens::builder(),
+                title: "Builder lens".to_string(),
+                summary: "Workspace-first view".to_string(),
+                default_surface: "builder".to_string(),
+                ui_modules: vec!["builder".to_string(), "conversation".to_string()],
+                prominent_team_ids: vec!["workspace-core".to_string()],
+                source_kind: swage_storage::LensSourceKind::BuiltIn,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
             Self {
                 db: Mutex::new(InMemoryDb {
-                    active_lens: swage_storage::AppLens::Assistant,
+                    active_lens: swage_storage::AppLens::assistant(),
+                    lenses: HashMap::from([
+                        (assistant.id.to_string(), assistant),
+                        (builder.id.to_string(), builder),
+                    ]),
                     ..Default::default()
                 }),
             }
@@ -2076,7 +2103,7 @@ pub(crate) mod tests {
     impl swage_storage::store::LensStore for MockStorage {
         async fn get_active_lens(&self) -> Result<swage_storage::LensPreference, StorageError> {
             Ok(swage_storage::LensPreference {
-                active_lens: self.db.lock().await.active_lens,
+                active_lens: self.db.lock().await.active_lens.clone(),
                 updated_at: chrono::Utc::now(),
             })
         }
@@ -2085,11 +2112,80 @@ pub(crate) mod tests {
             &self,
             lens: swage_storage::AppLens,
         ) -> Result<swage_storage::LensPreference, StorageError> {
-            self.db.lock().await.active_lens = lens;
+            let mut db = self.db.lock().await;
+            if !db.lenses.contains_key(lens.as_str()) {
+                return Err(StorageError::NotFound {
+                    entity: "lens".to_string(),
+                    id: lens.to_string(),
+                });
+            }
+            db.active_lens = lens.clone();
             Ok(swage_storage::LensPreference {
                 active_lens: lens,
                 updated_at: chrono::Utc::now(),
             })
+        }
+
+        async fn list_lenses(&self) -> Result<Vec<swage_storage::LensRecord>, StorageError> {
+            Ok(self.db.lock().await.lenses.values().cloned().collect())
+        }
+
+        async fn get_lens(
+            &self,
+            lens: &swage_storage::AppLens,
+        ) -> Result<Option<swage_storage::LensRecord>, StorageError> {
+            Ok(self.db.lock().await.lenses.get(lens.as_str()).cloned())
+        }
+
+        async fn create_lens(
+            &self,
+            lens: swage_storage::NewLensRecord,
+        ) -> Result<swage_storage::LensRecord, StorageError> {
+            let mut db = self.db.lock().await;
+            if db.lenses.contains_key(lens.id.as_str()) {
+                return Err(StorageError::ConstraintViolation(format!(
+                    "lens {} already exists",
+                    lens.id
+                )));
+            }
+            let record = swage_storage::LensRecord {
+                id: lens.id.clone(),
+                title: lens.title,
+                summary: lens.summary,
+                default_surface: lens.default_surface,
+                ui_modules: lens.ui_modules,
+                prominent_team_ids: lens.prominent_team_ids,
+                source_kind: lens.source_kind,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            db.lenses.insert(record.id.to_string(), record.clone());
+            Ok(record)
+        }
+
+        async fn update_lens(
+            &self,
+            lens_id: &swage_storage::AppLens,
+            title: String,
+            summary: String,
+            default_surface: String,
+            ui_modules: Vec<String>,
+            prominent_team_ids: Vec<String>,
+        ) -> Result<swage_storage::LensRecord, StorageError> {
+            let mut db = self.db.lock().await;
+            let Some(existing) = db.lenses.get_mut(lens_id.as_str()) else {
+                return Err(StorageError::NotFound {
+                    entity: "lens".to_string(),
+                    id: lens_id.to_string(),
+                });
+            };
+            existing.title = title;
+            existing.summary = summary;
+            existing.default_surface = default_surface;
+            existing.ui_modules = ui_modules;
+            existing.prominent_team_ids = prominent_team_ids;
+            existing.updated_at = chrono::Utc::now();
+            Ok(existing.clone())
         }
     }
 
@@ -4652,7 +4748,11 @@ pub(crate) mod tests {
 
     async fn make_state_with_capturing_tools(
         rounds: Vec<Vec<StreamChunk>>,
-    ) -> (AppState, Uuid, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+    ) -> (
+        AppState,
+        Uuid,
+        Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    ) {
         let storage = Arc::new(MockStorage::new());
 
         let project = storage
@@ -5199,9 +5299,10 @@ pub(crate) mod tests {
 
         let (mut state, session_id, captured) =
             make_state_with_capturing_tools(vec![round_1, round_2]).await;
-        state.config.tools.permissions.require_approval = vec![
-            swage_config::model::RequireApprovalEntry::Simple("echo".into()),
-        ];
+        state.config.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "echo".into(),
+            )];
 
         let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -5730,9 +5831,10 @@ pub(crate) mod tests {
             config: swage_config::ResolvedConfig::default(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>,
-            ])),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                WorkingDirReadTool,
+            )
+                as Arc<dyn crate::tool::Tool>])),
             sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),

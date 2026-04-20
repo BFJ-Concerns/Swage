@@ -191,6 +191,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
         .route(
+            "/api/lenses",
+            get(handlers::list_lenses).post(handlers::create_lens),
+        )
+        .route("/api/lenses/install", post(handlers::install_lens))
+        .route("/api/lenses/:id", put(handlers::update_lens))
+        .route(
             "/api/lens-runtime",
             get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
         )
@@ -205,7 +211,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/shared-objects/team_topology/:id",
-            get(handlers::get_team_topology_reference).put(handlers::update_team_topology_reference),
+            get(handlers::get_team_topology_reference)
+                .put(handlers::update_team_topology_reference),
         )
         .route(
             "/api/secrets",

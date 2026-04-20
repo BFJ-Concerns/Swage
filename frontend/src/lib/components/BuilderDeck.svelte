@@ -8,10 +8,17 @@
     updateProjectExtension,
     updateTeam,
   } from "../api/builder";
+  import { createLens, installLensPreset, updateLens } from "../api/lens";
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { ProjectStore } from "../stores/projects";
-  import type { AppLens, ProjectExtensionSummary, TeamSummary } from "../types";
+  import type {
+    AppLens,
+    LensDescriptor,
+    LensSurface,
+    ProjectExtensionSummary,
+    TeamSummary,
+  } from "../types";
 
   type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
 
@@ -19,10 +26,19 @@
     projectStore?: ProjectStore;
     desktopRuntime?: DesktopRuntimeInfo | null;
     activeLens: AppLens;
+    availableLenses: LensDescriptor[];
     onSelectLens: (next: AppLens) => void | Promise<void>;
+    onRefreshLenses: (preferredSurface?: LensSurface) => void | Promise<void>;
   }
 
-  let { projectStore, desktopRuntime, activeLens, onSelectLens }: Props = $props();
+  let {
+    projectStore,
+    desktopRuntime,
+    activeLens,
+    availableLenses,
+    onSelectLens,
+    onRefreshLenses,
+  }: Props = $props();
 
   let loadError = $state<string | null>(null);
   let isLoading = $state(false);
@@ -35,6 +51,16 @@
   let teamDescription = $state("");
   let teamEntryAgentId = $state("default");
   let teamMembersCsv = $state("");
+
+  let lensError = $state<string | null>(null);
+  let lensNotice = $state<string | null>(null);
+  let selectedLensId = $state<string | null>(null);
+  let lensId = $state("");
+  let lensTitle = $state("");
+  let lensSummary = $state("");
+  let lensDefaultSurface = $state<LensSurface>("conversation");
+  let lensModulesCsv = $state("conversation, operator");
+  let lensProminentTeamsCsv = $state("default");
 
   let extensions = $state<ProjectExtensionSummary[]>([]);
   let extensionError = $state<string | null>(null);
@@ -87,6 +113,26 @@
     teamDescription = "";
     teamEntryAgentId = "default";
     teamMembersCsv = "";
+  }
+
+  function resetLensForm(): void {
+    selectedLensId = null;
+    lensId = "";
+    lensTitle = "";
+    lensSummary = "";
+    lensDefaultSurface = "conversation";
+    lensModulesCsv = "conversation, operator";
+    lensProminentTeamsCsv = "default";
+  }
+
+  function populateLensForm(lens: LensDescriptor): void {
+    selectedLensId = lens.id;
+    lensId = lens.id;
+    lensTitle = lens.title;
+    lensSummary = lens.summary;
+    lensDefaultSurface = lens.default_surface;
+    lensModulesCsv = lens.ui_modules.join(", ");
+    lensProminentTeamsCsv = lens.prominent_team_ids.join(", ");
   }
 
   function populateTeamForm(team: TeamSummary): void {
@@ -158,6 +204,51 @@
       populateTeamForm(saved);
     } catch (error) {
       teamError = error instanceof Error ? error.message : "Failed to save team.";
+    }
+  }
+
+  async function saveLens(): Promise<void> {
+    lensError = null;
+    lensNotice = null;
+
+    try {
+      const payload = {
+        title: lensTitle,
+        summary: lensSummary,
+        default_surface: lensDefaultSurface,
+        ui_modules: normaliseCsvList(lensModulesCsv) as LensSurface[],
+        prominent_team_ids: normaliseCsvList(lensProminentTeamsCsv),
+      };
+
+      const saved = selectedLensId
+        ? await updateLens(selectedLensId, payload)
+        : await createLens({
+            id: lensId,
+            ...payload,
+          });
+
+      lensNotice = selectedLensId
+        ? `Updated lens ${saved.title}.`
+        : `Created lens ${saved.title}.`;
+      await onRefreshLenses(saved.default_surface);
+      populateLensForm(saved);
+    } catch (error) {
+      lensError = error instanceof Error ? error.message : "Failed to save lens.";
+    }
+  }
+
+  async function installResearchLens(): Promise<void> {
+    lensError = null;
+    lensNotice = null;
+
+    try {
+      const installed = await installLensPreset("research");
+      lensNotice = `Installed preset lens ${installed.title}.`;
+      await onRefreshLenses(installed.default_surface);
+      populateLensForm(installed);
+    } catch (error) {
+      lensError =
+        error instanceof Error ? error.message : "Failed to install preset lens.";
     }
   }
 
@@ -263,27 +354,74 @@
         <div class="card-heading">
           <div>
             <p class="section-kicker">Presentation</p>
-            <h2>Lens hand-off</h2>
+            <h2>Lens catalogue</h2>
           </div>
           <span class="chip">{activeLens}</span>
         </div>
         <p class="section-copy">
-          Use the builder deck to decide which product lens should own the next
-          operator session.
+          Lenses are now durable records. Create authored lenses, install a
+          premade research lens, and choose which UI modules and team focus the
+          runtime should foreground.
         </p>
+        {#if lensError}
+          <p class="feedback error">{lensError}</p>
+        {/if}
+        {#if lensNotice}
+          <p class="feedback success">{lensNotice}</p>
+        {/if}
+        <label>
+          <span>Lens ID</span>
+          <input bind:value={lensId} placeholder="research" disabled={!!selectedLensId} />
+        </label>
+        <label>
+          <span>Title</span>
+          <input bind:value={lensTitle} placeholder="Research lens" />
+        </label>
+        <label>
+          <span>Summary</span>
+          <textarea bind:value={lensSummary} rows="3"></textarea>
+        </label>
+        <label>
+          <span>UI modules</span>
+          <input bind:value={lensModulesCsv} placeholder="conversation, operator" />
+        </label>
+        <label>
+          <span>Default surface</span>
+          <select bind:value={lensDefaultSurface}>
+            <option value="conversation">Conversation</option>
+            <option value="operator">Operator</option>
+            <option value="builder">Builder deck</option>
+          </select>
+        </label>
+        <label>
+          <span>Prominent teams</span>
+          <input bind:value={lensProminentTeamsCsv} placeholder="research-lead, reviewer" />
+        </label>
         <div class="inline-actions">
-          <button
-            class:activeChoice={activeLens === "builder"}
-            onclick={() => onSelectLens("builder")}
-          >
-            Keep builder active
+          <button class="primary" onclick={saveLens}>
+            {selectedLensId ? "Update lens" : "Create lens"}
           </button>
-          <button
-            class:activeChoice={activeLens === "assistant"}
-            onclick={() => onSelectLens("assistant")}
-          >
-            Hand off to assistant
-          </button>
+          <button onclick={resetLensForm}>Reset</button>
+          <button onclick={installResearchLens}>Install research preset</button>
+        </div>
+        <div class="item-list">
+          {#each availableLenses as lens}
+            <div class="list-item candidate">
+              <button class="lens-list-button" onclick={() => populateLensForm(lens)}>
+                <strong>{lens.title}</strong>
+                <span>{lens.ui_modules.join(", ")}</span>
+              </button>
+              <div class="lens-actions">
+                <span class="chip subtle">{lens.source_kind}</span>
+                <button
+                  class:activeChoice={activeLens === lens.id}
+                  onclick={() => onSelectLens(lens.id)}
+                >
+                  {activeLens === lens.id ? "Active lens" : "Activate"}
+                </button>
+              </div>
+            </div>
+          {/each}
         </div>
       </article>
 
@@ -624,7 +762,8 @@
   }
 
   input,
-  textarea {
+  textarea,
+  select {
     padding: 11px 12px;
     border-radius: 14px;
     border: 1px solid rgba(148, 163, 184, 0.32);
@@ -700,6 +839,28 @@
 
   .approve-btn {
     white-space: nowrap;
+  }
+
+  .lens-list-button {
+    all: unset;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: pointer;
+    min-width: 0;
+  }
+
+  .lens-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .chip.subtle {
+    background: rgba(15, 23, 42, 0.08);
+    color: #334155;
   }
 
   .operator-shell {

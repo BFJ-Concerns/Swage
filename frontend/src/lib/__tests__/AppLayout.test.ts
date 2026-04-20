@@ -28,7 +28,7 @@ vi.mock("../api/operator", () => ({
 type MountedComponent = ReturnType<typeof mount>;
 
 async function flushUi(): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
@@ -94,8 +94,20 @@ function mountLayout(): MountedComponent {
       streamingStore: mockStreamingStore(),
       onRetry: () => {},
       activeLens: "assistant",
+      availableLenses: [
+        {
+          id: "assistant",
+          title: "Assistant lens",
+          summary: "Conversation-first view",
+          default_surface: "conversation",
+          ui_modules: ["conversation", "operator"],
+          prominent_team_ids: ["default"],
+          source_kind: "built_in",
+        },
+      ],
       activeSurface: "conversation",
       onSelectLens: () => {},
+      onRefreshLenses: () => {},
       onSelectSurface: () => {},
     },
   });
@@ -110,8 +122,48 @@ function mountBuilderLayout(): MountedComponent {
       streamingStore: mockStreamingStore(),
       onRetry: () => {},
       activeLens: "builder",
+      availableLenses: [
+        {
+          id: "builder",
+          title: "Builder lens",
+          summary: "Workspace-first view",
+          default_surface: "builder",
+          ui_modules: ["builder", "conversation"],
+          prominent_team_ids: ["workspace-core"],
+          source_kind: "built_in",
+        },
+      ],
       activeSurface: "builder",
       onSelectLens: () => {},
+      onRefreshLenses: () => {},
+      onSelectSurface: () => {},
+    },
+  });
+}
+
+function mountResearchLayout(): MountedComponent {
+  return mount(AppLayout, {
+    target: document.body,
+    props: {
+      conversationStore: mockConversationStore(),
+      connectionStore: mockConnectionStore(),
+      streamingStore: mockStreamingStore(),
+      onRetry: () => {},
+      activeLens: "research",
+      availableLenses: [
+        {
+          id: "research",
+          title: "Research lens",
+          summary: "Operator-first research workspace",
+          default_surface: "operator",
+          ui_modules: ["operator", "conversation"],
+          prominent_team_ids: ["research-lead", "reviewer"],
+          source_kind: "installed",
+        },
+      ],
+      activeSurface: "operator",
+      onSelectLens: () => {},
+      onRefreshLenses: () => {},
       onSelectSurface: () => {},
     },
   });
@@ -214,5 +266,15 @@ describe("AppLayout: three-panel structure", () => {
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
+  });
+
+  it("renders lens-specific modules and prominent teams from lens data", async () => {
+    component = mountResearchLayout();
+    await waitForText("Live control surface for the running gateway");
+
+    expect(document.body.textContent).toContain("Research");
+    expect(document.body.textContent).toContain("research-lead");
+    expect(document.body.textContent).not.toContain("Builder deck");
+    expect(document.body.textContent).toContain("Operator");
   });
 });

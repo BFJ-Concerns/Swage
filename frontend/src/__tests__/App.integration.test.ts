@@ -222,21 +222,36 @@ function makeLensRuntime(
         title: "Assistant lens",
         summary: "Conversation-first view",
         default_surface: "conversation",
+        ui_modules: ["conversation", "operator"],
+        prominent_team_ids: ["default"],
+        source_kind: "built_in",
       },
       {
         id: "builder",
         title: "Builder lens",
         summary: "Workspace-first view",
         default_surface: "builder",
+        ui_modules: ["builder", "conversation"],
+        prominent_team_ids: ["workspace-core"],
+        source_kind: "built_in",
       },
     ],
   };
 }
 
 async function settleUi(): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+async function waitForText(text: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await settleUi();
+    if (document.body.textContent?.includes(text)) {
+      return;
+    }
   }
 }
 
@@ -444,7 +459,7 @@ describe("App", () => {
     expect(operatorButton).toBeDefined();
 
     flushSync(() => operatorButton!.click());
-    await settleUi();
+    await waitForText("Live control surface for the running gateway");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain(
@@ -467,7 +482,7 @@ describe("App", () => {
     );
 
     component = mount(App, { target: document.body });
-    await settleUi();
+    await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
@@ -494,7 +509,7 @@ describe("App", () => {
     expect(builderButton).toBeDefined();
 
     flushSync(() => builderButton!.click());
-    await settleUi();
+    await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("builder");
     expect(document.body.textContent).toContain("Builder deck");

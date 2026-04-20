@@ -9,7 +9,7 @@
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
-  import type { AppLens, LensSurface } from "../types";
+  import type { AppLens, LensDescriptor, LensSurface } from "../types";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
@@ -26,8 +26,10 @@
     onProjectChange?: () => void;
     onRetry: () => void;
     activeLens: AppLens;
+    availableLenses: LensDescriptor[];
     activeSurface: LensSurface;
     onSelectLens: (next: AppLens) => void | Promise<void>;
+    onRefreshLenses: (preferredSurface?: LensSurface) => void | Promise<void>;
     onSelectSurface: (next: LensSurface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
   }
@@ -40,14 +42,22 @@
     onProjectChange,
     onRetry,
     activeLens,
+    availableLenses,
     activeSurface,
     onSelectLens,
+    onRefreshLenses,
     onSelectSurface,
     desktopRuntime,
   }: Props = $props();
 
   let builderDeckModule = $state<Promise<BuilderDeckModule> | null>(null);
   let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
+  const activeLensDescriptor = $derived(
+    availableLenses.find((lens) => lens.id === activeLens) ?? null,
+  );
+  const surfaceTabs = $derived(
+    (activeLensDescriptor?.ui_modules ?? ["conversation"]) as LensSurface[],
+  );
 
   $effect(() => {
     if (activeSurface === "builder" && !builderDeckModule) {
@@ -65,54 +75,43 @@
     <!-- Project context at the top, conversation list fills the rest. -->
     <ProjectSelector {projectStore} {onProjectChange} />
     <div class="lens-switch" role="tablist" aria-label="Product lenses">
-      <button
-        class="toggle-btn"
-        class:active={activeLens === "assistant"}
-        onclick={() => onSelectLens("assistant")}
-      >
-        Assistant
-      </button>
-      <button
-        class="toggle-btn"
-        class:active={activeLens === "builder"}
-        onclick={() => onSelectLens("builder")}
-      >
-        Builder
-      </button>
+      {#each availableLenses as lens (lens.id)}
+        <button
+          class="toggle-btn"
+          class:active={activeLens === lens.id}
+          onclick={() => onSelectLens(lens.id)}
+        >
+          {lens.title.replace(/ lens$/i, "")}
+        </button>
+      {/each}
     </div>
     <div class="mode-switch" role="tablist" aria-label="Primary views">
-      {#if activeLens === "assistant"}
+      {#each surfaceTabs as surface (surface)}
         <button
           class="toggle-btn"
-          class:active={activeSurface === "conversation"}
-          onclick={() => onSelectSurface("conversation")}
+          class:active={activeSurface === surface}
+          onclick={() => onSelectSurface(surface)}
         >
-          Conversations
+          {surface === "builder"
+            ? "Builder deck"
+            : surface === "operator"
+              ? "Operator"
+              : "Conversations"}
         </button>
-        <button
-          class="toggle-btn"
-          class:active={activeSurface === "operator"}
-          onclick={() => onSelectSurface("operator")}
-        >
-          Operator
-        </button>
-      {:else}
-        <button
-          class="toggle-btn"
-          class:active={activeSurface === "builder"}
-          onclick={() => onSelectSurface("builder")}
-        >
-          Builder deck
-        </button>
-        <button
-          class="toggle-btn"
-          class:active={activeSurface === "conversation"}
-          onclick={() => onSelectSurface("conversation")}
-        >
-          Conversations
-        </button>
-      {/if}
+      {/each}
     </div>
+    {#if activeLensDescriptor}
+      <div class="lens-summary">
+        <span class="lens-summary-title">{activeLensDescriptor.summary}</span>
+        {#if activeLensDescriptor.prominent_team_ids.length}
+          <div class="team-chip-row" aria-label="Prominent teams">
+            {#each activeLensDescriptor.prominent_team_ids as teamId (teamId)}
+              <span class="team-chip">{teamId}</span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if desktopRuntime}
       <div class="runtime-chip" title={desktopRuntime.gatewayUrl}>
         <span class="runtime-label">Desktop shell</span>
@@ -151,7 +150,9 @@
             {projectStore}
             {desktopRuntime}
             {activeLens}
+            {availableLenses}
             {onSelectLens}
+            {onRefreshLenses}
           />
         {:catch error}
           <div class="surface-state" role="alert">
@@ -194,7 +195,7 @@
 
   .mode-switch {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
     gap: 6px;
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.58);
@@ -202,11 +203,38 @@
 
   .lens-switch {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
     gap: 6px;
     padding: 10px 12px;
     border-bottom: 1px solid #e7ddd0;
     background: rgba(255, 255, 255, 0.68);
+  }
+
+  .lens-summary {
+    display: grid;
+    gap: 8px;
+    padding: 10px 12px 2px;
+    color: #4b5563;
+  }
+
+  .lens-summary-title {
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+
+  .team-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .team-chip {
+    border-radius: 999px;
+    padding: 4px 9px;
+    background: rgba(17, 24, 39, 0.08);
+    color: #1f2937;
+    font-size: 0.76rem;
+    font-weight: 600;
   }
 
   .runtime-chip {

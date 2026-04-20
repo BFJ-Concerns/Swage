@@ -212,10 +212,7 @@ impl OpenAiProvider {
 
     /// Convert `ChatMessage` list to OpenAI wire format.
     fn convert_messages(messages: &[ChatMessage]) -> Vec<OpenAiMessage> {
-        messages
-            .iter()
-            .flat_map(Self::convert_message)
-            .collect()
+        messages.iter().flat_map(Self::convert_message).collect()
     }
 
     fn convert_message(message: &ChatMessage) -> Vec<OpenAiMessage> {
@@ -275,9 +272,7 @@ impl OpenAiProvider {
                                     block.get("content")?,
                                 )),
                                 name: None,
-                                tool_call_id: Some(
-                                    block.get("tool_use_id")?.as_str()?.to_string(),
-                                ),
+                                tool_call_id: Some(block.get("tool_use_id")?.as_str()?.to_string()),
                                 tool_calls: None,
                             })
                         })

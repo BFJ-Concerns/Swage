@@ -687,9 +687,7 @@ impl AnthropicProvider {
                         .get("input_schema")
                         .or_else(|| def.get("parameters"))
                         .cloned()
-                        .unwrap_or_else(
-                            || serde_json::json!({"type": "object", "properties": {}}),
-                        );
+                        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
                     Some(AnthropicTool {
                         name,
                         description,

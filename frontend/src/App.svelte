@@ -20,7 +20,7 @@
   import { createProjectStore } from "./lib/stores/projects";
   import { createRouter } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
-  import type { AppLens, LensSurface } from "./lib/types";
+  import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -129,10 +129,26 @@
   let notFound = $state(false);
   let activeLens = $state<AppLens>("assistant");
   let activeSurface = $state<LensSurface>("conversation");
+  let availableLenses = $state<LensDescriptor[]>([]);
   const desktopRuntime = getDesktopRuntime();
 
-  function defaultSurfaceForLens(lens: AppLens): LensSurface {
-    return lens === "builder" ? "builder" : "conversation";
+  function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
+    return availableLenses.find((lens) => lens.id === lensId);
+  }
+
+  function fallbackSurfaceForModules(modules: LensSurface[]): LensSurface {
+    if (modules.includes("conversation")) {
+      return "conversation";
+    }
+    return modules[0] ?? "conversation";
+  }
+
+  function defaultSurfaceForLens(lensId: AppLens): LensSurface {
+    const descriptor = getLensDescriptor(lensId);
+    if (descriptor) {
+      return descriptor.default_surface;
+    }
+    return "conversation";
   }
 
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
@@ -142,6 +158,12 @@
   }
 
   function handleSelectSurface(next: LensSurface): void {
+    const descriptor = getLensDescriptor(activeLens);
+    if (descriptor && !descriptor.ui_modules.includes(next)) {
+      activeSurface = fallbackSurfaceForModules(descriptor.ui_modules);
+      return;
+    }
+
     activeSurface = next;
 
     if (next !== "conversation") {
@@ -153,8 +175,22 @@
     if (id) connectionStore.connectTo(id);
   }
 
+  async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
+    const runtime = await fetchLensRuntime();
+    availableLenses = runtime.available_lenses;
+    activeLens = runtime.active_lens;
+
+    const descriptor = getLensDescriptor(runtime.active_lens);
+    const nextSurface =
+      preferredSurface && descriptor?.ui_modules.includes(preferredSurface)
+        ? preferredSurface
+        : defaultSurfaceForLens(runtime.active_lens);
+    handleSelectSurface(nextSurface);
+  }
+
   async function handleSelectLens(next: AppLens): Promise<void> {
     const runtime = await updateLensRuntime(next);
+    availableLenses = runtime.available_lenses;
     activeLens = runtime.active_lens;
     handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
   }
@@ -194,9 +230,7 @@
         await conversationStore.loadConversations(projectId);
       }
 
-      const lensRuntime = await fetchLensRuntime();
-      activeLens = lensRuntime.active_lens;
-      activeSurface = defaultSurfaceForLens(lensRuntime.active_lens);
+      await refreshLensRuntime();
 
       await router.init();
 
@@ -234,8 +268,10 @@
     onProjectChange={handleProjectChange}
     onRetry={handleRetry}
     {activeLens}
+    {availableLenses}
     {activeSurface}
     onSelectLens={handleSelectLens}
+    onRefreshLenses={refreshLensRuntime}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
   />

@@ -6,20 +6,35 @@ use swage_core::{Role, StorageError};
 use uuid::Uuid;
 
 /// Canonical product lens controlling presentation defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AppLens {
-    Assistant,
-    Builder,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AppLens(String);
+
+impl AppLens {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if !is_valid_lens_id(&value) {
+            return Err(format!("unknown app lens: {value}"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn assistant() -> Self {
+        Self("assistant".to_string())
+    }
+
+    pub fn builder() -> Self {
+        Self("builder".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for AppLens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            AppLens::Assistant => "assistant",
-            AppLens::Builder => "builder",
-        };
-        write!(f, "{value}")
+        write!(f, "{}", self.0)
     }
 }
 
@@ -27,18 +42,24 @@ impl FromStr for AppLens {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "assistant" => Ok(Self::Assistant),
-            "builder" => Ok(Self::Builder),
-            other => Err(format!("unknown app lens: {other}")),
-        }
+        Self::new(s)
     }
 }
 
 impl Default for AppLens {
     fn default() -> Self {
-        Self::Assistant
+        Self::assistant()
     }
+}
+
+fn is_valid_lens_id(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Persisted runtime preference for the active product lens.
@@ -46,6 +67,63 @@ impl Default for AppLens {
 pub struct LensPreference {
     pub active_lens: AppLens,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LensSourceKind {
+    BuiltIn,
+    Authored,
+    Installed,
+}
+
+impl std::fmt::Display for LensSourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            LensSourceKind::BuiltIn => "built_in",
+            LensSourceKind::Authored => "authored",
+            LensSourceKind::Installed => "installed",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for LensSourceKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "built_in" => Ok(Self::BuiltIn),
+            "authored" => Ok(Self::Authored),
+            "installed" => Ok(Self::Installed),
+            other => Err(format!("unknown lens source kind: {other}")),
+        }
+    }
+}
+
+/// Durable lens definition used to shape the UI without becoming a policy boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LensRecord {
+    pub id: AppLens,
+    pub title: String,
+    pub summary: String,
+    pub default_surface: String,
+    pub ui_modules: Vec<String>,
+    pub prominent_team_ids: Vec<String>,
+    pub source_kind: LensSourceKind,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewLensRecord {
+    pub id: AppLens,
+    pub title: String,
+    pub summary: String,
+    pub default_surface: String,
+    pub ui_modules: Vec<String>,
+    pub prominent_team_ids: Vec<String>,
+    pub source_kind: LensSourceKind,
 }
 
 /// Canonical kind of shared reference object exposed to users and the agent.

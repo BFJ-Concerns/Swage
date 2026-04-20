@@ -7,16 +7,16 @@ use crate::model::{
     ActiveSkillRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest, ApprovalState,
     Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, ContextSnapshotRecord,
     DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
-    HeartbeatRunState, InboundAudit, LensPreference, Material, Message, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink,
-    NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat,
-    NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewProject,
-    NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession, NewSharedReferenceEvent,
-    NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState,
-    NodeRetry, Project, ScheduledJob, ScheduledRun, ScheduledRunState, SecretRecord, Session,
-    SharedReferenceEvent, SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat,
-    UpdateScheduledJob,
+    HeartbeatRunState, InboundAudit, LensPreference, LensRecord, Material, Message,
+    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
+    NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
+    NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
+    ScheduledRunState, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Team,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,18 @@ pub trait SessionStore: Send + Sync {
 pub trait LensStore: Send + Sync {
     async fn get_active_lens(&self) -> Result<LensPreference, StorageError>;
     async fn set_active_lens(&self, lens: AppLens) -> Result<LensPreference, StorageError>;
+    async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError>;
+    async fn get_lens(&self, lens: &AppLens) -> Result<Option<LensRecord>, StorageError>;
+    async fn create_lens(&self, lens: NewLensRecord) -> Result<LensRecord, StorageError>;
+    async fn update_lens(
+        &self,
+        lens_id: &AppLens,
+        title: String,
+        summary: String,
+        default_surface: String,
+        ui_modules: Vec<String>,
+        prominent_team_ids: Vec<String>,
+    ) -> Result<LensRecord, StorageError>;
 }
 
 #[async_trait]
@@ -913,6 +925,30 @@ mod tests {
         }
 
         async fn set_active_lens(&self, _: AppLens) -> Result<LensPreference, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_lens(&self, _: &AppLens) -> Result<Option<LensRecord>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn create_lens(&self, _: NewLensRecord) -> Result<LensRecord, StorageError> {
+            unimplemented!()
+        }
+
+        async fn update_lens(
+            &self,
+            _: &AppLens,
+            _: String,
+            _: String,
+            _: String,
+            _: Vec<String>,
+            _: Vec<String>,
+        ) -> Result<LensRecord, StorageError> {
             unimplemented!()
         }
     }

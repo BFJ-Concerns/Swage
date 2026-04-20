@@ -34,6 +34,12 @@ vi.mock("../api/operator", () => ({
   enableHeartbeat: vi.fn(),
 }));
 
+vi.mock("../api/lens", () => ({
+  createLens: vi.fn(),
+  updateLens: vi.fn(),
+  installLensPreset: vi.fn(),
+}));
+
 type MountedComponent = ReturnType<typeof mount>;
 
 async function flushUi(): Promise<void> {
@@ -165,7 +171,28 @@ describe("BuilderDeck", () => {
       props: {
         projectStore: mockProjectStore(),
         activeLens: "builder",
+        availableLenses: [
+          {
+            id: "assistant",
+            title: "Assistant lens",
+            summary: "Conversation-first view",
+            default_surface: "conversation",
+            ui_modules: ["conversation", "operator"],
+            prominent_team_ids: ["default"],
+            source_kind: "built_in",
+          },
+          {
+            id: "builder",
+            title: "Builder lens",
+            summary: "Workspace-first view",
+            default_surface: "builder",
+            ui_modules: ["builder", "conversation"],
+            prominent_team_ids: ["workspace-core"],
+            source_kind: "built_in",
+          },
+        ],
         onSelectLens: vi.fn(),
+        onRefreshLenses: vi.fn(),
       },
     });
 
@@ -181,16 +208,41 @@ describe("BuilderDeck", () => {
       props: {
         projectStore: mockProjectStore(),
         activeLens: "builder",
+        availableLenses: [
+          {
+            id: "assistant",
+            title: "Assistant lens",
+            summary: "Conversation-first view",
+            default_surface: "conversation",
+            ui_modules: ["conversation", "operator"],
+            prominent_team_ids: ["default"],
+            source_kind: "built_in",
+          },
+          {
+            id: "builder",
+            title: "Builder lens",
+            summary: "Workspace-first view",
+            default_surface: "builder",
+            ui_modules: ["builder", "conversation"],
+            prominent_team_ids: ["workspace-core"],
+            source_kind: "built_in",
+          },
+        ],
         onSelectLens: vi.fn(),
+        onRefreshLenses: vi.fn(),
       },
     });
 
-    const inputs = Array.from(document.querySelectorAll("input"));
-    const textareas = Array.from(document.querySelectorAll("textarea"));
-    (inputs[0] as HTMLInputElement).value = "delivery";
-    inputs[0].dispatchEvent(new Event("input", { bubbles: true }));
-    (textareas[0] as HTMLTextAreaElement).value = "Delivery team";
-    textareas[0].dispatchEvent(new Event("input", { bubbles: true }));
+    const teamNameInput = document.querySelector(
+      'input[placeholder="workspace-core"]',
+    ) as HTMLInputElement;
+    const teamDescriptionInput = Array.from(
+      document.querySelectorAll(".builder-card textarea"),
+    )[1] as HTMLTextAreaElement;
+    teamNameInput.value = "delivery";
+    teamNameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    teamDescriptionInput.value = "Delivery team";
+    teamDescriptionInput.dispatchEvent(new Event("input", { bubbles: true }));
     (
       Array.from(document.querySelectorAll("button")).find(
         (button) => button.textContent?.trim() === "Create team",
@@ -205,12 +257,18 @@ describe("BuilderDeck", () => {
       members: [],
     });
 
-    (inputs[3] as HTMLInputElement).value = "delivery-brief";
-    inputs[3].dispatchEvent(new Event("input", { bubbles: true }));
-    (textareas[1] as HTMLTextAreaElement).value = "Managed extension";
-    textareas[1].dispatchEvent(new Event("input", { bubbles: true }));
-    (textareas[2] as HTMLTextAreaElement).value = "Keep the brief explicit.";
-    textareas[2].dispatchEvent(new Event("input", { bubbles: true }));
+    const extensionNameInput = document.querySelector(
+      'input[placeholder="builder-guardrails"]',
+    ) as HTMLInputElement;
+    const extensionTextareas = Array.from(
+      document.querySelectorAll(".extension-card textarea"),
+    ) as HTMLTextAreaElement[];
+    extensionNameInput.value = "delivery-brief";
+    extensionNameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    extensionTextareas[0].value = "Managed extension";
+    extensionTextareas[0].dispatchEvent(new Event("input", { bubbles: true }));
+    extensionTextareas[1].value = "Keep the brief explicit.";
+    extensionTextareas[1].dispatchEvent(new Event("input", { bubbles: true }));
     (
       Array.from(document.querySelectorAll("button")).find(
         (button) => button.textContent?.trim() === "Create extension",
@@ -233,7 +291,28 @@ describe("BuilderDeck", () => {
       props: {
         projectStore: mockProjectStore(),
         activeLens: "builder",
+        availableLenses: [
+          {
+            id: "assistant",
+            title: "Assistant lens",
+            summary: "Conversation-first view",
+            default_surface: "conversation",
+            ui_modules: ["conversation", "operator"],
+            prominent_team_ids: ["default"],
+            source_kind: "built_in",
+          },
+          {
+            id: "builder",
+            title: "Builder lens",
+            summary: "Workspace-first view",
+            default_surface: "builder",
+            ui_modules: ["builder", "conversation"],
+            prominent_team_ids: ["workspace-core"],
+            source_kind: "built_in",
+          },
+        ],
         onSelectLens: vi.fn(),
+        onRefreshLenses: vi.fn(),
       },
     });
 
