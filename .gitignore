@@ -49,3 +49,10 @@ AGENTS.md
 .opencode/
 .motes/
 forge-progress.md
+.codex/hooks.json
+.codex/loop/feature-inventory.md
+.codex/loop/plan.json
+.codex/loop/progress.md
+.codex/loop/prompt.md
+.codex/loop/session-start.py
+.codex/loop/stop-hook.py
