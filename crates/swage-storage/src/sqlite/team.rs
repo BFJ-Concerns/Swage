@@ -343,6 +343,16 @@ mod tests {
     use crate::sqlite::SqliteStorage;
     use crate::store::ProjectStore;
 
+    fn agent(id: &str) -> crate::model::TeamAgentDefinition {
+        crate::model::TeamAgentDefinition {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            description: String::new(),
+            instructions: String::new(),
+            model: None,
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_team() {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -354,7 +364,8 @@ mod tests {
                 name: "research".into(),
                 description: "Research team".into(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into(), "reviewer".into()],
+                agents: vec![agent("planner"), agent("reviewer")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -395,7 +406,8 @@ mod tests {
                 name: "shared-name".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -405,7 +417,8 @@ mod tests {
                 name: "shared-name".into(),
                 description: String::new(),
                 entry_agent_id: "reviewer".into(),
-                members: vec!["reviewer".into()],
+                agents: vec![agent("reviewer")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -430,7 +443,8 @@ mod tests {
                 name: "review".into(),
                 description: "Initial".into(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -441,7 +455,8 @@ mod tests {
                 Some("review-team".into()),
                 Some("Updated".into()),
                 Some("reviewer".into()),
-                Some(vec!["reviewer".into(), "critic".into()]),
+                Some(vec![agent("reviewer"), agent("critic")]),
+                None,
             )
             .await
             .unwrap();
@@ -463,7 +478,8 @@ mod tests {
                 name: "first".into(),
                 description: String::new(),
                 entry_agent_id: "a".into(),
-                members: vec!["a".into()],
+                agents: vec![agent("a")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -473,7 +489,8 @@ mod tests {
                 name: "second".into(),
                 description: String::new(),
                 entry_agent_id: "b".into(),
-                members: vec!["b".into()],
+                agents: vec![agent("b")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -499,7 +516,8 @@ mod tests {
                 name: "temporary".into(),
                 description: String::new(),
                 entry_agent_id: "agent".into(),
-                members: vec!["agent".into()],
+                agents: vec![agent("agent")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();

@@ -1488,6 +1488,7 @@ pub(crate) mod tests {
         pub(crate) snapshots: HashMap<Uuid, (String, chrono::DateTime<chrono::Utc>)>,
         pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
         pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
+        pub(crate) configuration_versions: Vec<swage_storage::ConfigurationVersion>,
         pub(crate) shared_reference_events: Vec<swage_storage::SharedReferenceEvent>,
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
         pub(crate) scheduled_jobs: HashMap<Uuid, ScheduledJob>,
@@ -3903,6 +3904,95 @@ pub(crate) mod tests {
                 .filter(|event| event.session_id == Some(session_id))
                 .cloned()
                 .collect())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::ConfigurationVersionStore for MockStorage {
+        async fn create_configuration_version(
+            &self,
+            version: swage_storage::NewConfigurationVersion,
+        ) -> Result<swage_storage::ConfigurationVersion, StorageError> {
+            let record = swage_storage::ConfigurationVersion {
+                id: version.id,
+                project_id: version.project_id,
+                session_id: version.session_id,
+                entity_kind: version.entity_kind,
+                entity_id: version.entity_id,
+                version_number: version.version_number,
+                operation_kind: version.operation_kind,
+                source: version.source,
+                summary: version.summary,
+                snapshot: version.snapshot,
+                diff: version.diff,
+                previous_version_id: version.previous_version_id,
+                rollback_to_version_id: version.rollback_to_version_id,
+                created_at: chrono::Utc::now(),
+            };
+            self.db
+                .lock()
+                .await
+                .configuration_versions
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn get_configuration_version(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<swage_storage::ConfigurationVersion>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .configuration_versions
+                .iter()
+                .find(|version| version.id == id)
+                .cloned())
+        }
+
+        async fn list_configuration_versions(
+            &self,
+            project_id: Option<Uuid>,
+        ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
+            let mut versions = self.db.lock().await.configuration_versions.clone();
+            if let Some(project_id) = project_id {
+                versions.retain(|version| version.project_id == Some(project_id));
+            }
+            versions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            Ok(versions)
+        }
+
+        async fn list_configuration_versions_for_entity(
+            &self,
+            entity_kind: &str,
+            entity_id: &str,
+        ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
+            let mut versions = self
+                .db
+                .lock()
+                .await
+                .configuration_versions
+                .iter()
+                .filter(|version| {
+                    version.entity_kind == entity_kind && version.entity_id == entity_id
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            versions.sort_by(|left, right| right.version_number.cmp(&left.version_number));
+            Ok(versions)
+        }
+
+        async fn get_latest_configuration_version(
+            &self,
+            entity_kind: &str,
+            entity_id: &str,
+        ) -> Result<Option<swage_storage::ConfigurationVersion>, StorageError> {
+            Ok(self
+                .list_configuration_versions_for_entity(entity_kind, entity_id)
+                .await?
+                .into_iter()
+                .next())
         }
     }
 

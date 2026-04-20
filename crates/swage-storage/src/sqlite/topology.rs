@@ -548,6 +548,16 @@ mod tests {
         Some(value)
     }
 
+    fn agent(id: &str) -> crate::model::TeamAgentDefinition {
+        crate::model::TeamAgentDefinition {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            description: String::new(),
+            instructions: String::new(),
+            model: None,
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_topology_run() {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -573,7 +583,8 @@ mod tests {
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -625,7 +636,8 @@ mod tests {
                 name: "research".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into(), "reviewer".into()],
+                agents: vec![agent("planner"), agent("reviewer")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -708,7 +720,8 @@ mod tests {
                 name: "delivery".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -800,7 +813,8 @@ mod tests {
                 name: "cascade-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();
@@ -883,7 +897,8 @@ mod tests {
                 name: "invalid-kind".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
-                members: vec!["planner".into()],
+                agents: vec![agent("planner")],
+                tasks: Vec::new(),
             })
             .await
             .unwrap();

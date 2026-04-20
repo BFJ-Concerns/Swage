@@ -24,7 +24,9 @@ use crate::{
     },
     builder_runtime::{
         BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
-        BuilderProposalRequest, BuilderProposalResponse,
+        BuilderProposalRequest, BuilderProposalResponse, ConfigurationVersionListResponse,
+        ConfigurationVersionQuery, RollbackConfigurationVersionRequest,
+        RollbackConfigurationVersionResponse,
     },
     capabilities::WorkflowCapabilitiesResponse,
     channel_gateway::{
@@ -213,7 +215,11 @@ pub async fn create_lens(
     let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
-        Json(service.create_lens(request, None, "visual_builder").await?),
+        Json(
+            service
+                .create_lens(request, None, None, "visual_builder")
+                .await?,
+        ),
     ))
 }
 
@@ -226,7 +232,7 @@ pub async fn update_lens(
     let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
         service
-            .update_lens(&id, request, None, "visual_builder")
+            .update_lens(&id, request, None, None, "visual_builder")
             .await?,
     ))
 }
@@ -241,7 +247,7 @@ pub async fn install_lens(
         StatusCode::CREATED,
         Json(
             service
-                .install_lens_preset(request, None, "visual_builder")
+                .install_lens_preset(request, None, None, "visual_builder")
                 .await?,
         ),
     ))
@@ -1091,6 +1097,34 @@ pub async fn apply_builder_proposal(
         StatusCode::UNPROCESSABLE_ENTITY
     };
     Ok((status, Json(response)))
+}
+
+/// `GET /api/projects/:id/config-versions` — inspect builder-managed configuration history.
+pub async fn list_configuration_versions(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Query(query): Query<ConfigurationVersionQuery>,
+) -> Result<Json<ConfigurationVersionListResponse>, ApiError> {
+    let service = BuilderConfigurationService::new(state);
+    Ok(Json(
+        service
+            .list_configuration_versions(project_id, query)
+            .await?,
+    ))
+}
+
+/// `POST /api/config-versions/:id/rollback` — restore a previous builder-managed configuration version.
+pub async fn rollback_configuration_version(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RollbackConfigurationVersionRequest>,
+) -> Result<Json<RollbackConfigurationVersionResponse>, ApiError> {
+    let service = BuilderConfigurationService::new(state);
+    Ok(Json(
+        service
+            .rollback_configuration_version(id, request.session_id, "operator_api")
+            .await?,
+    ))
 }
 
 /// `DELETE /api/teams/:id` — delete a team.

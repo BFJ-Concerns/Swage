@@ -351,6 +351,43 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// Durable version record for builder-managed configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigurationVersion {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub version_number: i64,
+    pub operation_kind: String,
+    pub source: String,
+    pub summary: String,
+    pub snapshot: serde_json::Value,
+    pub diff: serde_json::Value,
+    pub previous_version_id: Option<Uuid>,
+    pub rollback_to_version_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for creating a new configuration-version record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewConfigurationVersion {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub version_number: i64,
+    pub operation_kind: String,
+    pub source: String,
+    pub summary: String,
+    pub snapshot: serde_json::Value,
+    pub diff: serde_json::Value,
+    pub previous_version_id: Option<Uuid>,
+    pub rollback_to_version_id: Option<Uuid>,
+}
+
 /// A centrally managed secret or credential reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRecord {

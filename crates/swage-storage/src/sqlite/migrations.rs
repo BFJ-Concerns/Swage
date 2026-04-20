@@ -54,6 +54,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("028_deduplicate_attachment_ingestion_content", ""),
         ("029_lens_catalog", CREATE_LENS_CATALOG_TABLES),
         ("030_team_agent_and_task_authoring", ""),
+        (
+            "031_configuration_versioning",
+            CREATE_CONFIGURATION_VERSION_TABLE,
+        ),
     ]
 }
 
@@ -394,6 +398,32 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
     END;
+";
+
+const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS configuration_versions (
+        id                     TEXT NOT NULL PRIMARY KEY,
+        project_id             TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        session_id             TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        entity_kind            TEXT NOT NULL,
+        entity_id              TEXT NOT NULL,
+        version_number         INTEGER NOT NULL,
+        operation_kind         TEXT NOT NULL,
+        source                 TEXT NOT NULL,
+        summary                TEXT NOT NULL,
+        snapshot_json          TEXT NOT NULL,
+        diff_json              TEXT NOT NULL,
+        previous_version_id    TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
+        rollback_to_version_id TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
+        created_at             TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_configuration_versions_project
+        ON configuration_versions(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_configuration_versions_entity
+        ON configuration_versions(entity_kind, entity_id, version_number DESC);
+    CREATE INDEX IF NOT EXISTS idx_configuration_versions_session
+        ON configuration_versions(session_id, created_at DESC);
 ";
 
 const CREATE_SECRET_TABLES: &str = "

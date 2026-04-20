@@ -116,6 +116,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::apply_builder_proposal),
         )
         .route(
+            "/api/projects/:id/config-versions",
+            get(handlers::list_configuration_versions),
+        )
+        .route(
+            "/api/config-versions/:id/rollback",
+            post(handlers::rollback_configuration_version),
+        )
+        .route(
             "/api/teams/:id",
             get(handlers::get_team)
                 .put(handlers::update_team)

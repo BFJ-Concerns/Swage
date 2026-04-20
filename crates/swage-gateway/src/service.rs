@@ -834,7 +834,7 @@ pub struct TeamTaskPayload {
 }
 
 /// API response for a single team.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TeamResponse {
     pub id: Uuid,
     pub project_id: Uuid,

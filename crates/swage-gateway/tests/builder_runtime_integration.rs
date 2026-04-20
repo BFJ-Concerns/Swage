@@ -533,3 +533,259 @@ async fn conversational_builder_can_author_agents_and_tasks() {
         "Review plans, call out risk, and stay concise."
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
+    let _guard = SWAGE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let swage_home = temp.path().join("swage-home");
+    let workspace = temp.path().join("workspace");
+    let db_path = temp.path().join("builder-config-versioning.db");
+    std::fs::create_dir_all(&swage_home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+
+    let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
+
+    let (project_status, project_body) = request_json(
+        &router,
+        "POST",
+        "/api/projects",
+        Some(json!({
+            "name": "Builder Version Project",
+            "workspace_path": workspace.to_string_lossy()
+        })),
+    )
+    .await;
+    assert_eq!(project_status, StatusCode::CREATED);
+    let project_id = project_body["id"].as_str().unwrap();
+
+    let (apply_status, apply_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/projects/{project_id}/builder/apply"),
+        Some(json!({
+            "request_text": "Create the first delivery workspace shape.",
+            "operations": [
+                {
+                    "kind": "create_team",
+                    "name": "delivery-core",
+                    "description": "Owns delivery work.",
+                    "entry_agent_id": "default",
+                    "members": ["default"]
+                },
+                {
+                    "kind": "create_lens",
+                    "id": "delivery",
+                    "title": "Delivery lens",
+                    "summary": "Delivery-focused workspace.",
+                    "default_surface": "builder",
+                    "ui_modules": ["builder", "conversation"],
+                    "prominent_team_ids": ["delivery-core"]
+                },
+                {
+                    "kind": "create_project_extension",
+                    "name": "delivery-brief",
+                    "display_name": "Delivery Brief",
+                    "description": "Keep delivery constraints visible.",
+                    "requested_tools": ["file_read"],
+                    "instructions": "Restate the brief before editing."
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(apply_body["success"], json!(true));
+
+    let (agent_status, agent_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/projects/{project_id}/builder/apply"),
+        Some(json!({
+            "request_text": "Add a reviewer agent.",
+            "operations": [
+                {
+                    "kind": "create_agent",
+                    "team_name": "delivery-core",
+                    "agent_id": "reviewer",
+                    "display_name": "Reviewer",
+                    "description": "Reviews delivery work.",
+                    "instructions": "Review plans and call out risk.",
+                    "model": "claude-haiku-4-20250514"
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::OK);
+    assert_eq!(agent_body["success"], json!(true));
+
+    let (versions_status, versions_body) = request_json(
+        &router,
+        "GET",
+        &format!("/api/projects/{project_id}/config-versions"),
+        None,
+    )
+    .await;
+    assert_eq!(versions_status, StatusCode::OK);
+    let versions = versions_body["versions"].as_array().unwrap();
+    assert!(
+        versions
+            .iter()
+            .any(|version| version["entity_kind"] == "lens"),
+        "expected lens version history: {versions_body:#}"
+    );
+    assert!(
+        versions
+            .iter()
+            .any(|version| version["entity_kind"] == "team"),
+        "expected team version history: {versions_body:#}"
+    );
+    assert!(
+        versions
+            .iter()
+            .any(|version| version["entity_kind"] == "team_agent"),
+        "expected team_agent version history: {versions_body:#}"
+    );
+    assert!(
+        versions
+            .iter()
+            .any(|version| version["entity_kind"] == "project_extension"),
+        "expected project_extension version history: {versions_body:#}"
+    );
+    assert!(
+        versions.iter().all(|version| version["diff"].is_array()),
+        "expected structured diff arrays on every version: {versions_body:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configuration_version_rollback_restores_state_and_survives_restart() {
+    let _guard = SWAGE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let swage_home = temp.path().join("swage-home");
+    let workspace = temp.path().join("workspace");
+    let db_path = temp.path().join("builder-config-rollback.db");
+    std::fs::create_dir_all(&swage_home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+
+    let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
+
+    let (project_status, project_body) = request_json(
+        &router,
+        "POST",
+        "/api/projects",
+        Some(json!({
+            "name": "Builder Rollback Project",
+            "workspace_path": workspace.to_string_lossy()
+        })),
+    )
+    .await;
+    assert_eq!(project_status, StatusCode::CREATED);
+    let project_id = project_body["id"].as_str().unwrap();
+
+    let (create_status, team_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/projects/{project_id}/teams"),
+        Some(json!({
+            "name": "workspace-core",
+            "description": "Initial description.",
+            "entry_agent_id": "default",
+            "agents": [
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "description": "Primary builder agent.",
+                    "instructions": "Own the builder workflow.",
+                    "model": "claude-sonnet-4-20250514"
+                }
+            ],
+            "tasks": []
+        })),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    let team_id = team_body["id"].as_str().unwrap();
+
+    let (update_status, update_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/projects/{project_id}/builder/apply"),
+        Some(json!({
+            "request_text": "Tighten the team description.",
+            "operations": [
+                {
+                    "kind": "update_team",
+                    "team_id": team_id,
+                    "description": "Updated description for the workspace team."
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(update_body["success"], json!(true));
+
+    let (versions_status, versions_body) = request_json(
+        &router,
+        "GET",
+        &format!("/api/projects/{project_id}/config-versions?entity_kind=team&entity_id={team_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(versions_status, StatusCode::OK);
+    let versions = versions_body["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2, "expected create and update versions");
+    let restore_target_id = versions
+        .iter()
+        .find(|version| version["version_number"] == 1)
+        .and_then(|version| version["id"].as_str())
+        .expect("initial team version");
+
+    let (rollback_status, rollback_body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/config-versions/{restore_target_id}/rollback"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK);
+    assert_eq!(
+        rollback_body["restored_version"]["operation_kind"],
+        "rollback_configuration_version"
+    );
+
+    let (team_status, restored_team) =
+        request_json(&router, "GET", &format!("/api/teams/{team_id}"), None).await;
+    assert_eq!(team_status, StatusCode::OK);
+    assert_eq!(restored_team["description"], "Initial description.");
+
+    let restarted_router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
+    let (restarted_status, restarted_team) = request_json(
+        &restarted_router,
+        "GET",
+        &format!("/api/teams/{team_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(restarted_status, StatusCode::OK);
+    assert_eq!(restarted_team["description"], "Initial description.");
+
+    let storage = SqliteStorage::open(&db_path).unwrap();
+    let audit_events = storage.list_audit_events().await.unwrap();
+    assert!(
+        audit_events.iter().any(|event| {
+            event.event_kind == "builder_config_mutation"
+                && event.summary.contains("rollback_configuration_version")
+                && event.metadata["rollback_to_version_id"] == restore_target_id
+        }),
+        "expected rollback audit continuity: {audit_events:#?}"
+    );
+}

@@ -3,7 +3,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role};
-use swage_storage::NewAuditEvent;
+use swage_storage::{ConfigurationVersion, NewAuditEvent, NewConfigurationVersion};
 
 use crate::{
     lens::{
@@ -64,6 +64,47 @@ pub struct BuilderApplyResponse {
     pub summary: String,
     pub diagnostics: Vec<String>,
     pub applied: Vec<BuilderAppliedOperation>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ConfigurationVersionQuery {
+    pub entity_kind: Option<String>,
+    pub entity_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigurationVersionResponse {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub version_number: i64,
+    pub operation_kind: String,
+    pub source: String,
+    pub summary: String,
+    pub snapshot: serde_json::Value,
+    pub diff: serde_json::Value,
+    pub previous_version_id: Option<Uuid>,
+    pub rollback_to_version_id: Option<Uuid>,
+    pub created_at: String,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigurationVersionListResponse {
+    pub versions: Vec<ConfigurationVersionResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RollbackConfigurationVersionRequest {
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RollbackConfigurationVersionResponse {
+    pub restored_version: ConfigurationVersionResponse,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -370,16 +411,22 @@ impl BuilderConfigurationService {
     pub async fn create_lens(
         &self,
         request: CreateLensRequest,
+        project_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
+        let before = self.capture_lens_snapshot(&request.id).await?;
         let saved = crate::lens::create_lens(&self.state, request).await?;
-        self.record_audit(
+        self.record_configuration_change(
             "lens",
             saved.id.to_string(),
             "create_lens",
             source,
+            project_id,
             session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             None,
         )
         .await?;
@@ -390,16 +437,22 @@ impl BuilderConfigurationService {
         &self,
         lens_id: &str,
         request: UpdateLensRequest,
+        project_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
+        let before = self.capture_lens_snapshot(lens_id).await?;
         let saved = crate::lens::update_lens(&self.state, lens_id, request).await?;
-        self.record_audit(
+        self.record_configuration_change(
             "lens",
             saved.id.to_string(),
             "update_lens",
             source,
+            project_id,
             session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             None,
         )
         .await?;
@@ -409,16 +462,22 @@ impl BuilderConfigurationService {
     pub async fn install_lens_preset(
         &self,
         request: InstallLensRequest,
+        project_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
+        let before = self.capture_lens_preset_target(&request.preset_id).await?;
         let saved = crate::lens::install_lens(&self.state, request).await?;
-        self.record_audit(
+        self.record_configuration_change(
             "lens",
             saved.id.to_string(),
             "install_lens_preset",
             source,
+            project_id,
             session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             None,
         )
         .await?;
@@ -432,16 +491,21 @@ impl BuilderConfigurationService {
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<TeamResponse, GatewayError> {
+        let before = None;
         let saved = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
             .create_team(project_id, request)
             .await?;
-        self.record_audit(
+        self.record_configuration_change(
             "team",
             saved.id.to_string(),
             "create_team",
             source,
-            session_id,
             Some(project_id),
+            session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            None,
         )
         .await?;
         Ok(saved)
@@ -454,16 +518,21 @@ impl BuilderConfigurationService {
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<TeamResponse, GatewayError> {
+        let before = self.capture_team_snapshot(team_id).await?;
         let saved = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
             .update_team(team_id, request)
             .await?;
-        self.record_audit(
+        self.record_configuration_change(
             "team",
             saved.id.to_string(),
             "update_team",
             source,
-            session_id,
             Some(saved.project_id),
+            session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            None,
         )
         .await?;
         Ok(saved)
@@ -476,16 +545,23 @@ impl BuilderConfigurationService {
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let before = self
+            .capture_project_extension_snapshot(project_id, &request.name)
+            .await?;
         let saved =
             project_extension_api::create_project_extension(&self.state, project_id, request)
                 .await?;
-        self.record_audit(
+        self.record_configuration_change(
             "project_extension",
             saved.name.clone(),
             "create_project_extension",
             source,
-            session_id,
             Some(project_id),
+            session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            None,
         )
         .await?;
         Ok(saved)
@@ -499,6 +575,9 @@ impl BuilderConfigurationService {
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let before = self
+            .capture_project_extension_snapshot(project_id, extension_name)
+            .await?;
         let saved = project_extension_api::update_project_extension(
             &self.state,
             project_id,
@@ -506,13 +585,17 @@ impl BuilderConfigurationService {
             request,
         )
         .await?;
-        self.record_audit(
+        self.record_configuration_change(
             "project_extension",
             saved.name.clone(),
             "update_project_extension",
             source,
-            session_id,
             Some(project_id),
+            session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            None,
         )
         .await?;
         Ok(saved)
@@ -525,22 +608,128 @@ impl BuilderConfigurationService {
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let before = self
+            .capture_project_extension_snapshot(project_id, extension_name)
+            .await?;
         let saved = project_extension_api::approve_workspace_extension(
             &self.state,
             project_id,
             extension_name,
         )
         .await?;
-        self.record_audit(
+        self.record_configuration_change(
             "project_extension",
             saved.name.clone(),
             "approve_workspace_extension",
             source,
-            session_id,
             Some(project_id),
+            session_id,
+            before,
+            serde_json::to_value(&saved)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            None,
         )
         .await?;
         Ok(saved)
+    }
+
+    pub async fn list_configuration_versions(
+        &self,
+        project_id: Uuid,
+        query: ConfigurationVersionQuery,
+    ) -> Result<ConfigurationVersionListResponse, GatewayError> {
+        let versions = match (query.entity_kind.as_deref(), query.entity_id.as_deref()) {
+            (Some(entity_kind), Some(entity_id)) => {
+                self.state
+                    .storage
+                    .list_configuration_versions_for_entity(entity_kind, entity_id)
+                    .await?
+            }
+            (None, None) => {
+                self.state
+                    .storage
+                    .list_configuration_versions(Some(project_id))
+                    .await?
+            }
+            _ => {
+                return Err(GatewayError::ValidationError(
+                    "entity_kind and entity_id must be provided together".into(),
+                ));
+            }
+        };
+
+        let mut latest_by_entity = std::collections::HashMap::new();
+        for version in &versions {
+            latest_by_entity
+                .entry((version.entity_kind.clone(), version.entity_id.clone()))
+                .or_insert(version.id);
+        }
+
+        Ok(ConfigurationVersionListResponse {
+            versions: versions
+                .into_iter()
+                .filter(|version| version.project_id == Some(project_id))
+                .map(|version| {
+                    configuration_version_to_response(
+                        version.clone(),
+                        latest_by_entity
+                            .get(&(version.entity_kind.clone(), version.entity_id.clone()))
+                            .copied()
+                            == Some(version.id),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn rollback_configuration_version(
+        &self,
+        version_id: Uuid,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<RollbackConfigurationVersionResponse, GatewayError> {
+        let version = self
+            .state
+            .storage
+            .get_configuration_version(version_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::ValidationError(format!(
+                    "configuration version {version_id} does not exist"
+                ))
+            })?;
+
+        let restored = match version.entity_kind.as_str() {
+            "lens" => {
+                self.rollback_lens_version(&version, session_id, source)
+                    .await?
+            }
+            "team" => {
+                self.rollback_team_version(&version, session_id, source)
+                    .await?
+            }
+            "team_agent" => {
+                self.rollback_team_agent_version(&version, session_id, source)
+                    .await?
+            }
+            "team_task" => {
+                self.rollback_team_task_version(&version, session_id, source)
+                    .await?
+            }
+            "project_extension" => {
+                self.rollback_project_extension_version(&version, session_id, source)
+                    .await?
+            }
+            other => {
+                return Err(GatewayError::ValidationError(format!(
+                    "rollback is not supported for configuration entity kind {other}"
+                )));
+            }
+        };
+
+        Ok(RollbackConfigurationVersionResponse {
+            restored_version: configuration_version_to_response(restored, true),
+        })
     }
 
     async fn review_operations(
@@ -836,6 +1025,7 @@ impl BuilderConfigurationService {
                             ui_modules,
                             prominent_team_ids,
                         },
+                        Some(project_id),
                         session_id,
                         source,
                     )
@@ -867,6 +1057,7 @@ impl BuilderConfigurationService {
                             ui_modules,
                             prominent_team_ids,
                         },
+                        Some(project_id),
                         session_id,
                         source,
                     )
@@ -882,7 +1073,12 @@ impl BuilderConfigurationService {
             }
             BuilderConfigOperation::InstallLensPreset { preset_id } => {
                 let saved = self
-                    .install_lens_preset(InstallLensRequest { preset_id }, session_id, source)
+                    .install_lens_preset(
+                        InstallLensRequest { preset_id },
+                        Some(project_id),
+                        session_id,
+                        source,
+                    )
                     .await?;
                 self.record_request_text(request_text, "lens", saved.id.to_string(), session_id)
                     .await?;
@@ -1064,6 +1260,12 @@ impl BuilderConfigurationService {
                     .ok_or_else(|| {
                         GatewayError::ValidationError("create_agent needs a target team.".into())
                     })?;
+                let before = capture_team_agent_from_storage(&team, &agent_id)
+                    .map(|snapshot| {
+                        serde_json::to_value(snapshot)
+                            .map_err(|error| GatewayError::ValidationError(error.to_string()))
+                    })
+                    .transpose()?;
                 let mut agents = team
                     .agents
                     .iter()
@@ -1091,6 +1293,23 @@ impl BuilderConfigurationService {
                         source,
                     )
                     .await?;
+                let agent_snapshot = capture_team_agent_from_response(&saved, &agent_id)
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("created agent was not found".into())
+                    })?;
+                self.record_configuration_change(
+                    "team_agent",
+                    format!("{}:{agent_id}", saved.id),
+                    "create_agent",
+                    source,
+                    Some(saved.project_id),
+                    session_id,
+                    before,
+                    serde_json::to_value(agent_snapshot)
+                        .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+                    None,
+                )
+                .await?;
                 self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
                     .await?;
                 Ok(BuilderAppliedOperation {
@@ -1114,6 +1333,12 @@ impl BuilderConfigurationService {
                     .ok_or_else(|| {
                         GatewayError::ValidationError("update_agent needs a target team.".into())
                     })?;
+                let before = capture_team_agent_from_storage(&team, &agent_id)
+                    .map(|snapshot| {
+                        serde_json::to_value(snapshot)
+                            .map_err(|error| GatewayError::ValidationError(error.to_string()))
+                    })
+                    .transpose()?;
                 let agents = team
                     .agents
                     .iter()
@@ -1152,6 +1377,23 @@ impl BuilderConfigurationService {
                         source,
                     )
                     .await?;
+                let agent_snapshot = capture_team_agent_from_response(&saved, &agent_id)
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("updated agent was not found".into())
+                    })?;
+                self.record_configuration_change(
+                    "team_agent",
+                    format!("{}:{agent_id}", saved.id),
+                    "update_agent",
+                    source,
+                    Some(saved.project_id),
+                    session_id,
+                    before,
+                    serde_json::to_value(agent_snapshot)
+                        .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+                    None,
+                )
+                .await?;
                 self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
                     .await?;
                 Ok(BuilderAppliedOperation {
@@ -1175,6 +1417,12 @@ impl BuilderConfigurationService {
                     .ok_or_else(|| {
                         GatewayError::ValidationError("create_task needs a target team.".into())
                     })?;
+                let before = capture_team_task_from_storage(&team, &task_name)
+                    .map(|snapshot| {
+                        serde_json::to_value(snapshot)
+                            .map_err(|error| GatewayError::ValidationError(error.to_string()))
+                    })
+                    .transpose()?;
                 let mut tasks = team
                     .tasks
                     .iter()
@@ -1205,6 +1453,23 @@ impl BuilderConfigurationService {
                         source,
                     )
                     .await?;
+                let task_snapshot = capture_team_task_from_response(&saved, &task_name)
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("created task was not found".into())
+                    })?;
+                self.record_configuration_change(
+                    "team_task",
+                    format!("{}:{task_name}", saved.id),
+                    "create_task",
+                    source,
+                    Some(saved.project_id),
+                    session_id,
+                    before,
+                    serde_json::to_value(task_snapshot)
+                        .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+                    None,
+                )
+                .await?;
                 self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
                     .await?;
                 Ok(BuilderAppliedOperation {
@@ -1228,6 +1493,12 @@ impl BuilderConfigurationService {
                     .ok_or_else(|| {
                         GatewayError::ValidationError("update_task needs a target team.".into())
                     })?;
+                let before = capture_team_task_from_storage(&team, &task_name)
+                    .map(|snapshot| {
+                        serde_json::to_value(snapshot)
+                            .map_err(|error| GatewayError::ValidationError(error.to_string()))
+                    })
+                    .transpose()?;
                 let tasks = team
                     .tasks
                     .iter()
@@ -1269,6 +1540,23 @@ impl BuilderConfigurationService {
                         source,
                     )
                     .await?;
+                let task_snapshot = capture_team_task_from_response(&saved, &task_name)
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError("updated task was not found".into())
+                    })?;
+                self.record_configuration_change(
+                    "team_task",
+                    format!("{}:{task_name}", saved.id),
+                    "update_task",
+                    source,
+                    Some(saved.project_id),
+                    session_id,
+                    before,
+                    serde_json::to_value(task_snapshot)
+                        .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+                    None,
+                )
+                .await?;
                 self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
                     .await?;
                 Ok(BuilderAppliedOperation {
@@ -1321,6 +1609,425 @@ impl BuilderConfigurationService {
             .next())
     }
 
+    async fn capture_lens_snapshot(
+        &self,
+        lens_id: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let lens_id = swage_storage::AppLens::new(lens_id.to_string())
+            .map_err(GatewayError::ValidationError)?;
+        let lens = self.state.storage.get_lens(&lens_id).await?;
+        lens.map(|lens| {
+            serde_json::to_value(crate::lens::LensDescriptor {
+                id: lens.id,
+                title: lens.title,
+                summary: lens.summary,
+                default_surface: lens.default_surface,
+                ui_modules: lens.ui_modules,
+                prominent_team_ids: lens.prominent_team_ids,
+                source_kind: lens.source_kind.to_string(),
+            })
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))
+        })
+        .transpose()
+    }
+
+    async fn capture_lens_preset_target(
+        &self,
+        preset_id: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let preset = crate::lens::preset_lens(preset_id)?;
+        self.capture_lens_snapshot(preset.id.as_str()).await
+    }
+
+    async fn capture_team_snapshot(
+        &self,
+        team_id: Uuid,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let team = self.state.storage.get_team(team_id).await?;
+        team.map(|team| {
+            serde_json::to_value(team_to_version_response(team))
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))
+        })
+        .transpose()
+    }
+
+    async fn capture_project_extension_snapshot(
+        &self,
+        project_id: Uuid,
+        extension_name: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let extensions = project_extension_api::list_project_extensions(&self.state, project_id)
+            .await?
+            .extensions;
+        extensions
+            .into_iter()
+            .find(|extension| {
+                extension.name == extension_name && extension.source_kind == "managed"
+            })
+            .map(|extension| {
+                serde_json::to_value(extension)
+                    .map_err(|error| GatewayError::ValidationError(error.to_string()))
+            })
+            .transpose()
+    }
+
+    async fn record_configuration_change(
+        &self,
+        entity_kind: &str,
+        entity_id: String,
+        operation_kind: &str,
+        source: &str,
+        project_id: Option<Uuid>,
+        session_id: Option<Uuid>,
+        before_snapshot: Option<serde_json::Value>,
+        snapshot: serde_json::Value,
+        rollback_to_version_id: Option<Uuid>,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let previous_version = self
+            .state
+            .storage
+            .get_latest_configuration_version(entity_kind, &entity_id)
+            .await?;
+        let diff = diff_json_values(before_snapshot.as_ref(), &snapshot);
+        let version = self
+            .state
+            .storage
+            .create_configuration_version(NewConfigurationVersion {
+                id: Uuid::new_v4(),
+                project_id,
+                session_id,
+                entity_kind: entity_kind.to_string(),
+                entity_id: entity_id.clone(),
+                version_number: previous_version
+                    .as_ref()
+                    .map(|version| version.version_number + 1)
+                    .unwrap_or(1),
+                operation_kind: operation_kind.to_string(),
+                source: source.to_string(),
+                summary: format!("{operation_kind} via {source}"),
+                snapshot,
+                diff,
+                previous_version_id: previous_version.as_ref().map(|version| version.id),
+                rollback_to_version_id,
+            })
+            .await?;
+        self.record_audit(
+            entity_kind,
+            entity_id,
+            operation_kind,
+            source,
+            session_id,
+            project_id,
+            Some(version.id),
+            rollback_to_version_id,
+        )
+        .await?;
+        Ok(version)
+    }
+
+    async fn rollback_lens_version(
+        &self,
+        version: &ConfigurationVersion,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let snapshot: LensDescriptor = serde_json::from_value(version.snapshot.clone())
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let before = self.capture_lens_snapshot(snapshot.id.as_str()).await?;
+        let request = UpdateLensRequest {
+            title: snapshot.title.clone(),
+            summary: snapshot.summary.clone(),
+            default_surface: snapshot.default_surface.clone(),
+            ui_modules: snapshot.ui_modules.clone(),
+            prominent_team_ids: snapshot.prominent_team_ids.clone(),
+        };
+        let restored = if before.is_some() {
+            crate::lens::update_lens(&self.state, snapshot.id.as_str(), request).await?
+        } else {
+            crate::lens::create_lens(
+                &self.state,
+                CreateLensRequest {
+                    id: snapshot.id.to_string(),
+                    title: snapshot.title.clone(),
+                    summary: snapshot.summary.clone(),
+                    default_surface: snapshot.default_surface.clone(),
+                    ui_modules: snapshot.ui_modules.clone(),
+                    prominent_team_ids: snapshot.prominent_team_ids.clone(),
+                },
+            )
+            .await?
+        };
+        self.record_configuration_change(
+            "lens",
+            restored.id.to_string(),
+            "rollback_configuration_version",
+            source,
+            version.project_id,
+            session_id,
+            before,
+            serde_json::to_value(&restored)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            Some(version.id),
+        )
+        .await
+    }
+
+    async fn rollback_team_version(
+        &self,
+        version: &ConfigurationVersion,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let snapshot: TeamResponse = serde_json::from_value(version.snapshot.clone())
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let before = self.capture_team_snapshot(snapshot.id).await?;
+        let restored = if before.is_some() {
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .update_team(
+                    snapshot.id,
+                    UpdateTeamRequest {
+                        name: Some(snapshot.name.clone()),
+                        description: Some(snapshot.description.clone()),
+                        entry_agent_id: Some(snapshot.entry_agent_id.clone()),
+                        agents: Some(snapshot.agents.clone()),
+                        tasks: Some(snapshot.tasks.clone()),
+                        members: None,
+                    },
+                )
+                .await?
+        } else {
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .create_team(
+                    snapshot.project_id,
+                    CreateTeamRequest {
+                        name: snapshot.name.clone(),
+                        description: snapshot.description.clone(),
+                        entry_agent_id: snapshot.entry_agent_id.clone(),
+                        agents: snapshot.agents.clone(),
+                        tasks: snapshot.tasks.clone(),
+                    },
+                )
+                .await?
+        };
+        self.record_configuration_change(
+            "team",
+            restored.id.to_string(),
+            "rollback_configuration_version",
+            source,
+            Some(restored.project_id),
+            session_id,
+            before,
+            serde_json::to_value(&restored)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            Some(version.id),
+        )
+        .await
+    }
+
+    async fn rollback_team_agent_version(
+        &self,
+        version: &ConfigurationVersion,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let snapshot: TeamAgentVersionSnapshot =
+            serde_json::from_value(version.snapshot.clone())
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let before = self
+            .capture_team_agent_snapshot(snapshot.team_id, &snapshot.agent.id)
+            .await?;
+        let current_team =
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .get_team(snapshot.team_id)
+                .await?;
+        let mut agents = current_team.agents.clone();
+        if let Some(existing) = agents
+            .iter_mut()
+            .find(|agent| agent.id == snapshot.agent.id)
+        {
+            *existing = snapshot.agent.clone();
+        } else {
+            agents.push(snapshot.agent.clone());
+        }
+        let restored_team =
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .update_team(
+                    snapshot.team_id,
+                    UpdateTeamRequest {
+                        name: None,
+                        description: None,
+                        entry_agent_id: None,
+                        agents: Some(agents),
+                        tasks: None,
+                        members: None,
+                    },
+                )
+                .await?;
+        let after = capture_team_agent_from_response(&restored_team, &snapshot.agent.id)
+            .ok_or_else(|| {
+                GatewayError::ValidationError("restored team agent was not found".into())
+            })?;
+        self.record_configuration_change(
+            "team_agent",
+            format!("{}:{}", snapshot.team_id, snapshot.agent.id),
+            "rollback_configuration_version",
+            source,
+            Some(restored_team.project_id),
+            session_id,
+            before,
+            serde_json::to_value(after)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            Some(version.id),
+        )
+        .await
+    }
+
+    async fn rollback_team_task_version(
+        &self,
+        version: &ConfigurationVersion,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let snapshot: TeamTaskVersionSnapshot = serde_json::from_value(version.snapshot.clone())
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let before = self
+            .capture_team_task_snapshot(snapshot.team_id, &snapshot.task.name)
+            .await?;
+        let current_team =
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .get_team(snapshot.team_id)
+                .await?;
+        let mut tasks = current_team.tasks.clone();
+        if let Some(existing) = tasks
+            .iter_mut()
+            .find(|task| task.name == snapshot.task.name)
+        {
+            *existing = snapshot.task.clone();
+        } else {
+            tasks.push(snapshot.task.clone());
+        }
+        let restored_team =
+            TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+                .update_team(
+                    snapshot.team_id,
+                    UpdateTeamRequest {
+                        name: None,
+                        description: None,
+                        entry_agent_id: None,
+                        agents: None,
+                        tasks: Some(tasks),
+                        members: None,
+                    },
+                )
+                .await?;
+        let after = capture_team_task_from_response(&restored_team, &snapshot.task.name)
+            .ok_or_else(|| {
+                GatewayError::ValidationError("restored team task was not found".into())
+            })?;
+        self.record_configuration_change(
+            "team_task",
+            format!("{}:{}", snapshot.team_id, snapshot.task.name),
+            "rollback_configuration_version",
+            source,
+            Some(restored_team.project_id),
+            session_id,
+            before,
+            serde_json::to_value(after)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            Some(version.id),
+        )
+        .await
+    }
+
+    async fn rollback_project_extension_version(
+        &self,
+        version: &ConfigurationVersion,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ConfigurationVersion, GatewayError> {
+        let project_id = version.project_id.ok_or_else(|| {
+            GatewayError::ValidationError("project extension version is missing project_id".into())
+        })?;
+        let snapshot: ProjectExtensionResponse =
+            serde_json::from_value(version.snapshot.clone())
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+        let before = self
+            .capture_project_extension_snapshot(project_id, &snapshot.name)
+            .await?;
+        let restored = if before.is_some() {
+            project_extension_api::update_project_extension(
+                &self.state,
+                project_id,
+                &snapshot.name,
+                UpdateProjectExtensionRequest {
+                    display_name: snapshot.display_name.clone(),
+                    description: snapshot.description.clone(),
+                    requested_tools: snapshot.requested_tools.clone(),
+                    instructions: snapshot.instructions.clone(),
+                },
+            )
+            .await?
+        } else {
+            project_extension_api::create_project_extension(
+                &self.state,
+                project_id,
+                CreateProjectExtensionRequest {
+                    name: snapshot.name.clone(),
+                    display_name: snapshot.display_name.clone(),
+                    description: snapshot.description.clone(),
+                    requested_tools: snapshot.requested_tools.clone(),
+                    instructions: snapshot.instructions.clone(),
+                },
+            )
+            .await?
+        };
+        self.record_configuration_change(
+            "project_extension",
+            restored.name.clone(),
+            "rollback_configuration_version",
+            source,
+            Some(project_id),
+            session_id,
+            before,
+            serde_json::to_value(&restored)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            Some(version.id),
+        )
+        .await
+    }
+
+    async fn capture_team_agent_snapshot(
+        &self,
+        team_id: Uuid,
+        agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let team = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+            .get_team(team_id)
+            .await?;
+        Ok(capture_team_agent_from_response(&team, agent_id)
+            .map(|snapshot| {
+                serde_json::to_value(snapshot)
+                    .map_err(|error| GatewayError::ValidationError(error.to_string()))
+            })
+            .transpose()?)
+    }
+
+    async fn capture_team_task_snapshot(
+        &self,
+        team_id: Uuid,
+        task_name: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let team = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+            .get_team(team_id)
+            .await?;
+        Ok(capture_team_task_from_response(&team, task_name)
+            .map(|snapshot| {
+                serde_json::to_value(snapshot)
+                    .map_err(|error| GatewayError::ValidationError(error.to_string()))
+            })
+            .transpose()?)
+    }
+
     async fn record_audit(
         &self,
         entity_kind: &str,
@@ -1329,6 +2036,8 @@ impl BuilderConfigurationService {
         source: &str,
         session_id: Option<Uuid>,
         project_id: Option<Uuid>,
+        configuration_version_id: Option<Uuid>,
+        rollback_to_version_id: Option<Uuid>,
     ) -> Result<(), GatewayError> {
         self.state
             .storage
@@ -1344,6 +2053,8 @@ impl BuilderConfigurationService {
                     "operation_kind": operation_kind,
                     "source": source,
                     "project_id": project_id,
+                    "configuration_version_id": configuration_version_id,
+                    "rollback_to_version_id": rollback_to_version_id,
                 }),
             })
             .await?;
@@ -1420,6 +2131,161 @@ fn team_update_agents(
             Some(members_to_team_agents(&fallback_entry, members))
         }
         (None, None) => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeamAgentVersionSnapshot {
+    team_id: Uuid,
+    team_name: String,
+    agent: TeamAgentPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeamTaskVersionSnapshot {
+    team_id: Uuid,
+    team_name: String,
+    task: TeamTaskPayload,
+}
+
+fn configuration_version_to_response(
+    version: ConfigurationVersion,
+    is_current: bool,
+) -> ConfigurationVersionResponse {
+    ConfigurationVersionResponse {
+        id: version.id,
+        project_id: version.project_id,
+        session_id: version.session_id,
+        entity_kind: version.entity_kind,
+        entity_id: version.entity_id,
+        version_number: version.version_number,
+        operation_kind: version.operation_kind,
+        source: version.source,
+        summary: version.summary,
+        snapshot: version.snapshot,
+        diff: version.diff,
+        previous_version_id: version.previous_version_id,
+        rollback_to_version_id: version.rollback_to_version_id,
+        created_at: version.created_at.to_rfc3339(),
+        is_current,
+    }
+}
+
+fn team_to_version_response(team: swage_storage::Team) -> TeamResponse {
+    TeamResponse {
+        id: team.id,
+        project_id: team.project_id,
+        name: team.name,
+        description: team.description,
+        entry_agent_id: team.entry_agent_id,
+        agents: team.agents.iter().map(team_agent_to_payload).collect(),
+        tasks: team.tasks.iter().map(team_task_to_payload).collect(),
+        members: team.members,
+        created_at: team.created_at,
+        updated_at: team.updated_at,
+    }
+}
+
+fn capture_team_agent_from_storage(
+    team: &swage_storage::Team,
+    agent_id: &str,
+) -> Option<TeamAgentVersionSnapshot> {
+    team.agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| TeamAgentVersionSnapshot {
+            team_id: team.id,
+            team_name: team.name.clone(),
+            agent: team_agent_to_payload(agent),
+        })
+}
+
+fn capture_team_agent_from_response(
+    team: &TeamResponse,
+    agent_id: &str,
+) -> Option<TeamAgentVersionSnapshot> {
+    team.agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .cloned()
+        .map(|agent| TeamAgentVersionSnapshot {
+            team_id: team.id,
+            team_name: team.name.clone(),
+            agent,
+        })
+}
+
+fn capture_team_task_from_storage(
+    team: &swage_storage::Team,
+    task_name: &str,
+) -> Option<TeamTaskVersionSnapshot> {
+    team.tasks
+        .iter()
+        .find(|task| task.name == task_name)
+        .map(|task| TeamTaskVersionSnapshot {
+            team_id: team.id,
+            team_name: team.name.clone(),
+            task: team_task_to_payload(task),
+        })
+}
+
+fn capture_team_task_from_response(
+    team: &TeamResponse,
+    task_name: &str,
+) -> Option<TeamTaskVersionSnapshot> {
+    team.tasks
+        .iter()
+        .find(|task| task.name == task_name)
+        .cloned()
+        .map(|task| TeamTaskVersionSnapshot {
+            team_id: team.id,
+            team_name: team.name.clone(),
+            task,
+        })
+}
+
+fn diff_json_values(
+    before: Option<&serde_json::Value>,
+    after: &serde_json::Value,
+) -> serde_json::Value {
+    let null = serde_json::Value::Null;
+    let before = before.unwrap_or(&null);
+    let mut changes = Vec::new();
+    collect_json_diff(before, after, "", &mut changes);
+    serde_json::Value::Array(changes)
+}
+
+fn collect_json_diff(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    path: &str,
+    changes: &mut Vec<serde_json::Value>,
+) {
+    match (before, after) {
+        (serde_json::Value::Object(before_map), serde_json::Value::Object(after_map)) => {
+            let mut keys = before_map
+                .keys()
+                .chain(after_map.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let next_path = format!("{path}/{key}");
+                collect_json_diff(
+                    before_map.get(&key).unwrap_or(&serde_json::Value::Null),
+                    after_map.get(&key).unwrap_or(&serde_json::Value::Null),
+                    &next_path,
+                    changes,
+                );
+            }
+        }
+        _ if before == after => {}
+        _ => changes.push(json!({
+            "path": if path.is_empty() { "/" } else { path },
+            "before": before,
+            "after": after,
+        })),
     }
 }
 

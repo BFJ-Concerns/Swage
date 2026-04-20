@@ -5,18 +5,18 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest, ApprovalState,
-    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, ContextSnapshotRecord,
-    DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
-    HeartbeatRunState, InboundAudit, LensPreference, LensRecord, Material, Message,
+    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, ConfigurationVersion,
+    ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat,
+    HeartbeatRun, HeartbeatRunState, InboundAudit, LensPreference, LensRecord, Material, Message,
     NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
-    NewChannelLink, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
-    NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-    ScheduledRunState, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Team,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-    TurnState, UpdateHeartbeat, UpdateScheduledJob,
+    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation,
+    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial,
+    NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
+    NewSecretRecord, NewSession, NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall,
+    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
+    ScheduledRun, ScheduledRunState, SecretRecord, Session, SharedReferenceEvent,
+    SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
+    TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +140,32 @@ pub trait AuditStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<AuditEvent>, StorageError>;
+}
+
+#[async_trait]
+pub trait ConfigurationVersionStore: Send + Sync {
+    async fn create_configuration_version(
+        &self,
+        version: NewConfigurationVersion,
+    ) -> Result<ConfigurationVersion, StorageError>;
+    async fn get_configuration_version(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ConfigurationVersion>, StorageError>;
+    async fn list_configuration_versions(
+        &self,
+        project_id: Option<Uuid>,
+    ) -> Result<Vec<ConfigurationVersion>, StorageError>;
+    async fn list_configuration_versions_for_entity(
+        &self,
+        entity_kind: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ConfigurationVersion>, StorageError>;
+    async fn get_latest_configuration_version(
+        &self,
+        entity_kind: &str,
+        entity_id: &str,
+    ) -> Result<Option<ConfigurationVersion>, StorageError>;
 }
 
 #[async_trait]
@@ -791,6 +817,7 @@ pub trait Storage:
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
+    + ConfigurationVersionStore
     + SecretStore
     + ThreadStore
     + TurnStore
@@ -821,6 +848,7 @@ impl<T> Storage for T where
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
+        + ConfigurationVersionStore
         + SecretStore
         + ThreadStore
         + TurnStore
@@ -1037,6 +1065,46 @@ mod tests {
     }
 
     #[async_trait]
+    impl ConfigurationVersionStore for StubStorage {
+        async fn create_configuration_version(
+            &self,
+            _: NewConfigurationVersion,
+        ) -> Result<ConfigurationVersion, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_configuration_version(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_configuration_versions(
+            &self,
+            _: Option<Uuid>,
+        ) -> Result<Vec<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_configuration_versions_for_entity(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_latest_configuration_version(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
     impl SecretStore for StubStorage {
         async fn create_secret(&self, _: NewSecretRecord) -> Result<SecretRecord, StorageError> {
             unimplemented!()
@@ -1223,7 +1291,8 @@ mod tests {
             _: Option<String>,
             _: Option<String>,
             _: Option<String>,
-            _: Option<Vec<String>>,
+            _: Option<Vec<crate::model::TeamAgentDefinition>>,
+            _: Option<Vec<crate::model::TeamTaskDefinition>>,
         ) -> Result<Team, StorageError> {
             unimplemented!()
         }
@@ -1905,6 +1974,34 @@ mod tests {
             });
             let _ = t.list_audit_events();
             let _ = t.list_audit_events_by_session(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    #[test]
+    fn configuration_version_store_compile_check() {
+        fn _assert<T: ConfigurationVersionStore>(t: &T) {
+            let id = Uuid::new_v4();
+            let _ = t.create_configuration_version(NewConfigurationVersion {
+                id,
+                project_id: Some(Uuid::new_v4()),
+                session_id: None,
+                entity_kind: "team".into(),
+                entity_id: "team-1".into(),
+                version_number: 1,
+                operation_kind: "create_team".into(),
+                source: "test".into(),
+                summary: "created team".into(),
+                snapshot: serde_json::json!({"name": "workspace-core"}),
+                diff: serde_json::json!([]),
+                previous_version_id: None,
+                rollback_to_version_id: None,
+            });
+            let _ = t.get_configuration_version(id);
+            let _ = t.list_configuration_versions(Some(Uuid::new_v4()));
+            let _ = t.list_configuration_versions_for_entity("team", "team-1");
+            let _ = t.get_latest_configuration_version("team", "team-1");
         }
         let stub = StubStorage;
         _assert(&stub);

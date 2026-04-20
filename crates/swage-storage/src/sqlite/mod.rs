@@ -3,6 +3,7 @@ pub mod approval;
 pub mod attachment;
 pub mod audit;
 pub mod channel_link;
+pub mod config_version;
 pub mod context_snapshot;
 pub mod delivery;
 pub mod execution_host;
