@@ -1,16 +1,16 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 use uuid::Uuid;
 
-use swage_config::{
-    HierarchyLevel,
-    discovery::resolve_root,
-    skill::{SkillDefinition, parse_skill_file},
-};
+use swage_config::{HierarchyLevel, discovery::resolve_root};
 use swage_core::GatewayError;
 
+use crate::capability_bundle::{
+    CapabilityToolDefinition, CapabilityWriteRequest, discover_capability_bundles,
+    read_capability_bundle, validate_capability_name, validate_capability_parts,
+    write_capability_bundle,
+};
 use crate::state::AppState;
 
 const WORKSPACE_EXTENSION_ROOT: &str = ".swage/extensions";
@@ -22,6 +22,12 @@ pub struct CreateProjectExtensionRequest {
     pub description: String,
     #[serde(default)]
     pub requested_tools: Vec<String>,
+    #[serde(default)]
+    pub provided_ui_modules: Vec<String>,
+    #[serde(default)]
+    pub provider_integrations: Vec<String>,
+    #[serde(default)]
+    pub tool: Option<CapabilityToolDefinition>,
     pub instructions: String,
 }
 
@@ -31,6 +37,12 @@ pub struct UpdateProjectExtensionRequest {
     pub description: String,
     #[serde(default)]
     pub requested_tools: Vec<String>,
+    #[serde(default)]
+    pub provided_ui_modules: Vec<String>,
+    #[serde(default)]
+    pub provider_integrations: Vec<String>,
+    #[serde(default)]
+    pub tool: Option<CapabilityToolDefinition>,
     pub instructions: String,
 }
 
@@ -41,6 +53,9 @@ pub struct ProjectExtensionResponse {
     pub description: String,
     pub requested_tools: Vec<String>,
     pub instructions: String,
+    pub provided_ui_modules: Vec<String>,
+    pub provider_integrations: Vec<String>,
+    pub tool: Option<CapabilityToolDefinition>,
     pub status: String,
     pub source_kind: String,
 }
@@ -64,10 +79,16 @@ pub async fn list_project_extensions(
     let workspace_root = workspace_extension_root(project.workspace_path.as_deref());
 
     let mut extensions = Vec::new();
-    extensions.extend(scan_extension_root_path(&managed_root, "active", "managed").await?);
-    extensions.extend(
-        scan_extension_root(&workspace_root, "approval_required", "workspace_candidate").await?,
-    );
+    extensions.extend(scan_extension_root_path(
+        &managed_root,
+        "active",
+        "managed",
+    )?);
+    extensions.extend(scan_extension_root(
+        &workspace_root,
+        "approval_required",
+        "workspace_candidate",
+    )?);
     extensions.sort_by(|left, right| left.name.cmp(&right.name));
 
     Ok(ProjectExtensionListResponse { extensions })
@@ -88,20 +109,27 @@ pub async fn create_project_extension(
         &request.description,
         &request.requested_tools,
         &request.instructions,
+        &request.provided_ui_modules,
+        &request.provider_integrations,
+        request.tool.as_ref(),
     )?;
 
     let extension_dir = managed_extension_root(&project.slug)?.join(&name);
-    write_extension_dir(
+    write_capability_bundle(
         &extension_dir,
         &name,
-        request.display_name.as_deref(),
-        &request.description,
-        &request.requested_tools,
-        &request.instructions,
-    )
-    .await?;
+        &CapabilityWriteRequest {
+            display_name: request.display_name,
+            description: request.description,
+            requested_tools: request.requested_tools,
+            instructions: request.instructions,
+            provided_ui_modules: request.provided_ui_modules,
+            provider_integrations: request.provider_integrations,
+            tool: request.tool,
+        },
+    )?;
 
-    read_extension_response(&extension_dir, &name, "active".into(), "managed".into()).await
+    read_extension_response(&extension_dir, &name, "active".into(), "managed".into())
 }
 
 pub async fn update_project_extension(
@@ -120,20 +148,27 @@ pub async fn update_project_extension(
         &request.description,
         &request.requested_tools,
         &request.instructions,
+        &request.provided_ui_modules,
+        &request.provider_integrations,
+        request.tool.as_ref(),
     )?;
 
     let extension_dir = managed_extension_root(&project.slug)?.join(&name);
-    write_extension_dir(
+    write_capability_bundle(
         &extension_dir,
         &name,
-        request.display_name.as_deref(),
-        &request.description,
-        &request.requested_tools,
-        &request.instructions,
-    )
-    .await?;
+        &CapabilityWriteRequest {
+            display_name: request.display_name,
+            description: request.description,
+            requested_tools: request.requested_tools,
+            instructions: request.instructions,
+            provided_ui_modules: request.provided_ui_modules,
+            provider_integrations: request.provider_integrations,
+            tool: request.tool,
+        },
+    )?;
 
-    read_extension_response(&extension_dir, &name, "active".into(), "managed".into()).await
+    read_extension_response(&extension_dir, &name, "active".into(), "managed".into())
 }
 
 pub async fn approve_workspace_extension(
@@ -158,7 +193,7 @@ pub async fn approve_workspace_extension(
     let target_dir = managed_extension_root(&project.slug)?.join(&name);
     copy_directory_recursive(&source_dir, &target_dir).await?;
 
-    read_extension_response(&target_dir, &name, "active".into(), "managed".into()).await
+    read_extension_response(&target_dir, &name, "active".into(), "managed".into())
 }
 
 fn managed_extension_root(project_slug: &str) -> Result<PathBuf, GatewayError> {
@@ -173,7 +208,7 @@ fn workspace_extension_root(workspace_path: Option<&str>) -> Option<PathBuf> {
     workspace_path.map(|path| PathBuf::from(path).join(WORKSPACE_EXTENSION_ROOT))
 }
 
-async fn scan_extension_root(
+fn scan_extension_root(
     root: &Option<PathBuf>,
     status: &str,
     source_kind: &str,
@@ -181,203 +216,110 @@ async fn scan_extension_root(
     let Some(root) = root else {
         return Ok(Vec::new());
     };
-    scan_extension_root_path(root, status, source_kind).await
+    scan_extension_root_path(root, status, source_kind)
 }
 
-async fn scan_extension_root_path(
+fn scan_extension_root_path(
     root: &Path,
     status: &str,
     source_kind: &str,
 ) -> Result<Vec<ProjectExtensionResponse>, GatewayError> {
-    let mut extensions = Vec::new();
-    let mut entries = match fs::read_dir(root).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(extensions),
-        Err(error) => {
-            return Err(GatewayError::ValidationError(format!(
-                "failed to read extension directory {}: {error}",
-                root.display()
-            )));
-        }
-    };
-    while let Some(entry) = entries.next_entry().await.map_err(|error| {
-        GatewayError::ValidationError(format!(
-            "failed to read extension directory entry in {}: {error}",
-            root.display()
-        ))
-    })? {
-        let path = entry.path();
-        if !entry
-            .file_type()
-            .await
-            .map_err(|error| {
-                GatewayError::ValidationError(format!(
-                    "failed to read extension entry type for {}: {error}",
-                    path.display()
-                ))
-            })?
-            .is_dir()
-        {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if let Ok(response) =
-            read_extension_response(&path, name, status.to_string(), source_kind.to_string()).await
-        {
-            extensions.push(response);
-        }
+    let (bundles, warnings) = discover_capability_bundles(root, HierarchyLevel::Project);
+    for warning in warnings {
+        tracing::warn!(path = %warning.path.display(), reason = %warning.reason, "skipping invalid project capability bundle");
     }
-
-    Ok(extensions)
+    Ok(bundles
+        .into_iter()
+        .map(|bundle| ProjectExtensionResponse {
+            name: bundle.name,
+            display_name: bundle.display_name,
+            description: bundle.description,
+            requested_tools: bundle.requested_tools,
+            instructions: bundle.instructions,
+            provided_ui_modules: bundle.provided_ui_modules,
+            provider_integrations: bundle.provider_integrations,
+            tool: bundle.tool,
+            status: status.to_string(),
+            source_kind: source_kind.to_string(),
+        })
+        .collect())
 }
 
-async fn read_extension_response(
+fn read_extension_response(
     extension_dir: &Path,
     extension_name: &str,
     status: String,
     source_kind: String,
 ) -> Result<ProjectExtensionResponse, GatewayError> {
-    let skill = parse_skill_definition(extension_dir, extension_name).await?;
+    let capability =
+        read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Project)?;
     Ok(ProjectExtensionResponse {
-        name: skill.name,
-        display_name: skill.display_name,
-        description: skill.description,
-        requested_tools: skill.tools,
-        instructions: skill.instructions,
+        name: capability.name,
+        display_name: capability.display_name,
+        description: capability.description,
+        requested_tools: capability.requested_tools,
+        instructions: capability.instructions,
+        provided_ui_modules: capability.provided_ui_modules,
+        provider_integrations: capability.provider_integrations,
+        tool: capability.tool,
         status,
         source_kind,
     })
-}
-
-async fn parse_skill_definition(
-    extension_dir: &Path,
-    extension_name: &str,
-) -> Result<SkillDefinition, GatewayError> {
-    let skill_path = extension_dir.join("SKILL.md");
-    let parse_result = parse_skill_file(&skill_path, extension_name, HierarchyLevel::Project)
-        .map_err(|warning| GatewayError::ValidationError(warning.reason))?;
-    Ok(parse_result)
 }
 
 async fn ensure_skill_dir_exists(
     extension_dir: &Path,
     extension_name: &str,
 ) -> Result<(), GatewayError> {
-    let skill_path = extension_dir.join("SKILL.md");
-    let metadata = fs::metadata(&skill_path).await.map_err(|error| {
+    let metadata = tokio::fs::metadata(extension_dir).await.map_err(|error| {
         GatewayError::ValidationError(format!(
             "workspace extension '{extension_name}' is not available for approval: {error}"
         ))
     })?;
-    if !metadata.is_file() {
+    if !metadata.is_dir() {
         return Err(GatewayError::ValidationError(format!(
-            "workspace extension '{extension_name}' is missing SKILL.md"
+            "workspace extension '{extension_name}' is not a directory"
         )));
     }
+    let _ = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Project)?;
     Ok(())
-}
-
-async fn write_extension_dir(
-    extension_dir: &Path,
-    extension_name: &str,
-    display_name: Option<&str>,
-    description: &str,
-    requested_tools: &[String],
-    instructions: &str,
-) -> Result<(), GatewayError> {
-    fs::create_dir_all(extension_dir).await.map_err(|error| {
-        GatewayError::ValidationError(format!(
-            "failed to create extension directory {}: {error}",
-            extension_dir.display()
-        ))
-    })?;
-    let skill_path = extension_dir.join("SKILL.md");
-    fs::write(
-        &skill_path,
-        render_skill_markdown(display_name, description, requested_tools, instructions),
-    )
-    .await
-    .map_err(|error| {
-        GatewayError::ValidationError(format!(
-            "failed to write extension skill {}: {error}",
-            skill_path.display()
-        ))
-    })?;
-
-    let _ = parse_skill_definition(extension_dir, extension_name).await?;
-    Ok(())
-}
-
-fn render_skill_markdown(
-    display_name: Option<&str>,
-    description: &str,
-    requested_tools: &[String],
-    instructions: &str,
-) -> String {
-    let mut rendered = String::from("---\n");
-    if let Some(display_name) = display_name.filter(|value| !value.trim().is_empty()) {
-        rendered.push_str("name: ");
-        rendered.push_str(display_name.trim());
-        rendered.push('\n');
-    }
-    rendered.push_str("description: ");
-    rendered.push_str(description.trim());
-    rendered.push('\n');
-    if !requested_tools.is_empty() {
-        rendered.push_str("tools:\n");
-        for tool in requested_tools {
-            rendered.push_str("  - ");
-            rendered.push_str(tool);
-            rendered.push('\n');
-        }
-    }
-    rendered.push_str("---\n\n");
-    rendered.push_str(instructions.trim());
-    rendered.push('\n');
-    rendered
 }
 
 pub(crate) fn validate_extension_name(name: &str) -> Result<String, GatewayError> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(GatewayError::ValidationError(
-            "extension name must not be empty".into(),
-        ));
-    }
-    if !trimmed
-        .chars()
-        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
-    {
-        return Err(GatewayError::ValidationError(
-            "extension name must match [a-z0-9-]+".into(),
-        ));
-    }
-    Ok(trimmed.to_string())
+    validate_capability_name(name).map_err(|error| {
+        GatewayError::ValidationError(
+            error
+                .to_string()
+                .replace("capability", "extension")
+                .replace("Capability", "Extension"),
+        )
+    })
 }
 
 pub(crate) fn validate_extension_body(
     description: &str,
     requested_tools: &[String],
     instructions: &str,
+    provided_ui_modules: &[String],
+    provider_integrations: &[String],
+    tool: Option<&CapabilityToolDefinition>,
 ) -> Result<(), GatewayError> {
-    if description.trim().is_empty() {
-        return Err(GatewayError::ValidationError(
-            "extension description must not be empty".into(),
-        ));
-    }
-    if instructions.trim().is_empty() {
-        return Err(GatewayError::ValidationError(
-            "extension instructions must not be empty".into(),
-        ));
-    }
-    if requested_tools.iter().any(|tool| tool.trim().is_empty()) {
-        return Err(GatewayError::ValidationError(
-            "requested_tools must not contain empty entries".into(),
-        ));
-    }
-    Ok(())
+    validate_capability_parts(
+        description,
+        requested_tools,
+        instructions,
+        provided_ui_modules,
+        provider_integrations,
+        tool,
+    )
+    .map_err(|error| {
+        GatewayError::ValidationError(
+            error
+                .to_string()
+                .replace("capability", "extension")
+                .replace("Capability", "Extension"),
+        )
+    })
 }
 
 async fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), GatewayError> {

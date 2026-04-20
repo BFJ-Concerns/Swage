@@ -374,6 +374,45 @@ Stay local until a builder approves import.
 "#,
     )
     .unwrap();
+    std::fs::write(
+        workspace.join(".swage/extensions/workspace-skill/capability.json"),
+        serde_json::json!({
+            "provided_ui_modules": ["workspace-brief"],
+            "provider_integrations": ["openai.responses"],
+            "tool": {
+                "name": "workspace_brief",
+                "description": "Summarise workspace delivery state",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": { "type": "string" }
+                    }
+                },
+                "executable": "run.py"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join(".swage/extensions/workspace-skill/run.py"),
+        "#!/usr/bin/env python3\nprint('{}')\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms =
+            std::fs::metadata(workspace.join(".swage/extensions/workspace-skill/run.py"))
+                .unwrap()
+                .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(
+            workspace.join(".swage/extensions/workspace-skill/run.py"),
+            perms,
+        )
+        .unwrap();
+    }
 
     let router = build_router(test_state(&db_path));
     let (project_status, project_body) = post_json(
@@ -399,6 +438,15 @@ Stay local until a builder approves import.
         .expect("workspace candidate should be listed for approval");
     assert_eq!(workspace_extension["status"], "approval_required");
     assert_eq!(workspace_extension["source_kind"], "workspace_candidate");
+    assert_eq!(
+        workspace_extension["provided_ui_modules"],
+        json!(["workspace-brief"])
+    );
+    assert_eq!(
+        workspace_extension["provider_integrations"],
+        json!(["openai.responses"])
+    );
+    assert_eq!(workspace_extension["tool"]["name"], "workspace_brief");
 
     let (pre_approval_skills_status, pre_approval_skills_body) =
         get_json(&router, &format!("/api/skills?project_id={project_id}")).await;
@@ -421,6 +469,11 @@ Stay local until a builder approves import.
     assert_eq!(approve_status, StatusCode::OK);
     assert_eq!(approve_body["status"], "active");
     assert_eq!(approve_body["source_kind"], "managed");
+    assert_eq!(
+        approve_body["provided_ui_modules"],
+        json!(["workspace-brief"])
+    );
+    assert_eq!(approve_body["tool"]["name"], "workspace_brief");
 
     let (post_approval_skills_status, post_approval_skills_body) =
         get_json(&router, &format!("/api/skills?project_id={project_id}")).await;

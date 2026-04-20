@@ -56,6 +56,7 @@ pub mod audit;
 pub mod automated_turn;
 pub mod builder_runtime;
 pub mod capabilities;
+pub mod capability_bundle;
 pub mod channel_gateway;
 pub mod cli;
 pub mod context;

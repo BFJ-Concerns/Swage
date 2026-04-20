@@ -170,6 +170,12 @@ pub enum BuilderConfigOperation {
         description: String,
         #[serde(default)]
         requested_tools: Vec<String>,
+        #[serde(default)]
+        provided_ui_modules: Vec<String>,
+        #[serde(default)]
+        provider_integrations: Vec<String>,
+        #[serde(default)]
+        tool: Option<crate::capability_bundle::CapabilityToolDefinition>,
         instructions: String,
     },
     UpdateProjectExtension {
@@ -179,6 +185,12 @@ pub enum BuilderConfigOperation {
         description: String,
         #[serde(default)]
         requested_tools: Vec<String>,
+        #[serde(default)]
+        provided_ui_modules: Vec<String>,
+        #[serde(default)]
+        provider_integrations: Vec<String>,
+        #[serde(default)]
+        tool: Option<crate::capability_bundle::CapabilityToolDefinition>,
         instructions: String,
     },
     ApproveWorkspaceExtension {
@@ -857,11 +869,21 @@ impl BuilderConfigurationService {
                 name,
                 description,
                 requested_tools,
+                provided_ui_modules,
+                provider_integrations,
+                tool,
                 instructions,
                 ..
             } => {
                 validate_extension_name(name)?;
-                validate_extension_body(description, requested_tools, instructions)?;
+                validate_extension_body(
+                    description,
+                    requested_tools,
+                    instructions,
+                    provided_ui_modules,
+                    provider_integrations,
+                    tool.as_ref(),
+                )?;
                 let extensions =
                     project_extension_api::list_project_extensions(&self.state, project_id).await?;
                 if extensions
@@ -876,11 +898,21 @@ impl BuilderConfigurationService {
                 extension_name,
                 description,
                 requested_tools,
+                provided_ui_modules,
+                provider_integrations,
+                tool,
                 instructions,
                 ..
             } => {
                 validate_extension_name(extension_name)?;
-                validate_extension_body(description, requested_tools, instructions)?;
+                validate_extension_body(
+                    description,
+                    requested_tools,
+                    instructions,
+                    provided_ui_modules,
+                    provider_integrations,
+                    tool.as_ref(),
+                )?;
                 let extensions =
                     project_extension_api::list_project_extensions(&self.state, project_id).await?;
                 if !extensions.extensions.iter().any(|extension| {
@@ -1163,6 +1195,9 @@ impl BuilderConfigurationService {
                 display_name,
                 description,
                 requested_tools,
+                provided_ui_modules,
+                provider_integrations,
+                tool,
                 instructions,
             } => {
                 let saved = self
@@ -1173,6 +1208,9 @@ impl BuilderConfigurationService {
                             display_name,
                             description,
                             requested_tools,
+                            provided_ui_modules,
+                            provider_integrations,
+                            tool,
                             instructions,
                         },
                         session_id,
@@ -1198,6 +1236,9 @@ impl BuilderConfigurationService {
                 display_name,
                 description,
                 requested_tools,
+                provided_ui_modules,
+                provider_integrations,
+                tool,
                 instructions,
             } => {
                 let saved = self
@@ -1208,6 +1249,9 @@ impl BuilderConfigurationService {
                             display_name,
                             description,
                             requested_tools,
+                            provided_ui_modules,
+                            provider_integrations,
+                            tool,
                             instructions,
                         },
                         session_id,
@@ -1963,6 +2007,9 @@ impl BuilderConfigurationService {
                     display_name: snapshot.display_name.clone(),
                     description: snapshot.description.clone(),
                     requested_tools: snapshot.requested_tools.clone(),
+                    provided_ui_modules: snapshot.provided_ui_modules.clone(),
+                    provider_integrations: snapshot.provider_integrations.clone(),
+                    tool: snapshot.tool.clone(),
                     instructions: snapshot.instructions.clone(),
                 },
             )
@@ -1976,6 +2023,9 @@ impl BuilderConfigurationService {
                     display_name: snapshot.display_name.clone(),
                     description: snapshot.description.clone(),
                     requested_tools: snapshot.requested_tools.clone(),
+                    provided_ui_modules: snapshot.provided_ui_modules.clone(),
+                    provider_integrations: snapshot.provider_integrations.clone(),
+                    tool: snapshot.tool.clone(),
                     instructions: snapshot.instructions.clone(),
                 },
             )

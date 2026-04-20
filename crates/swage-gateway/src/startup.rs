@@ -674,12 +674,15 @@ mod tests {
         let plugin_dir = temp_dir.path().join("plugins").join("echo-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            plugin_dir.join("manifest.json"),
+            plugin_dir.join("capability.json"),
             serde_json::json!({
-                "name": "echo_plugin",
                 "description": "Echo plugin",
-                "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
-                "executable": "run.py"
+                "tool": {
+                    "name": "echo_plugin",
+                    "description": "Echo plugin",
+                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+                    "executable": "run.py"
+                }
             })
             .to_string(),
         )
