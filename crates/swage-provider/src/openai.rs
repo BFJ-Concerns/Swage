@@ -38,6 +38,8 @@ struct ChatCompletionsRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
 }
 
 /// Wire representation of a message in the OpenAI format.
@@ -212,55 +214,132 @@ impl OpenAiProvider {
     fn convert_messages(messages: &[ChatMessage]) -> Vec<OpenAiMessage> {
         messages
             .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-
-                // Extract plain text from content parts.
-                let content_text: String = msg
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-
-                let content = if content_text.is_empty() {
-                    None
-                } else {
-                    Some(content_text)
-                };
-
-                // Convert tool calls if present (assistant messages).
-                let tool_calls = msg.tool_calls.as_ref().map(|calls| {
-                    calls
-                        .iter()
-                        .map(|tc| OpenAiToolCall {
-                            id: tc.call_id.clone(),
-                            call_type: "function".to_string(),
-                            function: OpenAiFunctionCall {
-                                name: tc.name.clone(),
-                                arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                            },
-                        })
-                        .collect()
-                });
-
-                OpenAiMessage {
-                    role: role.to_string(),
-                    content,
-                    name: msg.name.clone(),
-                    tool_call_id: msg.tool_call_id.clone(),
-                    tool_calls,
-                }
-            })
+            .flat_map(Self::convert_message)
             .collect()
+    }
+
+    fn convert_message(message: &ChatMessage) -> Vec<OpenAiMessage> {
+        if let Some(blocks) = message.content_blocks.as_ref() {
+            match message.role {
+                Role::Assistant => {
+                    let text_content = blocks
+                        .iter()
+                        .filter(|block| block.get("type").and_then(|v| v.as_str()) == Some("text"))
+                        .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+
+                    let tool_calls: Vec<OpenAiToolCall> = blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                        })
+                        .filter_map(|block| {
+                            Some(OpenAiToolCall {
+                                id: block.get("id")?.as_str()?.to_string(),
+                                call_type: "function".to_string(),
+                                function: OpenAiFunctionCall {
+                                    name: block.get("name")?.as_str()?.to_string(),
+                                    arguments: serde_json::to_string(block.get("input")?).ok()?,
+                                },
+                            })
+                        })
+                        .collect();
+
+                    return vec![OpenAiMessage {
+                        role: "assistant".to_string(),
+                        content: if text_content.is_empty() {
+                            None
+                        } else {
+                            Some(text_content)
+                        },
+                        name: message.name.clone(),
+                        tool_call_id: None,
+                        tool_calls: if tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(tool_calls)
+                        },
+                    }];
+                }
+                Role::User => {
+                    let tool_result_messages: Vec<OpenAiMessage> = blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+                        })
+                        .filter_map(|block| {
+                            Some(OpenAiMessage {
+                                role: "tool".to_string(),
+                                content: Some(Self::tool_result_content_to_text(
+                                    block.get("content")?,
+                                )),
+                                name: None,
+                                tool_call_id: Some(
+                                    block.get("tool_use_id")?.as_str()?.to_string(),
+                                ),
+                                tool_calls: None,
+                            })
+                        })
+                        .collect();
+
+                    if !tool_result_messages.is_empty() {
+                        return tool_result_messages;
+                    }
+                }
+                Role::System | Role::Tool => {}
+            }
+        }
+
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+
+        let content_text: String = message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        let tool_calls = message.tool_calls.as_ref().map(|calls| {
+            calls
+                .iter()
+                .map(|tool_call| OpenAiToolCall {
+                    id: tool_call.call_id.clone(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: tool_call.name.clone(),
+                        arguments: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                    },
+                })
+                .collect()
+        });
+
+        vec![OpenAiMessage {
+            role: role.to_string(),
+            content: if content_text.is_empty() {
+                None
+            } else {
+                Some(content_text)
+            },
+            name: message.name.clone(),
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls,
+        }]
+    }
+
+    fn tool_result_content_to_text(content: &serde_json::Value) -> String {
+        match content {
+            serde_json::Value::String(text) => text.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        }
     }
 
     /// Build the request body for a text-only completion.
@@ -270,6 +349,7 @@ impl OpenAiProvider {
             .as_deref()
             .unwrap_or(&self.config.model)
             .to_string();
+        let tools = Self::convert_tool_definitions(&request.tool_definitions);
 
         ChatCompletionsRequest {
             model,
@@ -278,7 +358,12 @@ impl OpenAiProvider {
             temperature: request.temperature,
             stop: request.stop_sequences.clone(),
             stream: if stream { Some(true) } else { None },
-            tools: Vec::new(),
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some("auto".to_string())
+            },
+            tools,
         }
     }
 
@@ -295,12 +380,34 @@ impl OpenAiProvider {
             .to_string();
 
         // Convert JSON tool definitions to OpenAI wire format.
-        let tools: Vec<OpenAiTool> = request
-            .tool_definitions
+        let tools = Self::convert_tool_definitions(&request.tool_definitions);
+
+        ChatCompletionsRequest {
+            model,
+            messages: Self::convert_messages(&request.messages),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            stop: request.stop_sequences.clone(),
+            stream: if stream { Some(true) } else { None },
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some("auto".to_string())
+            },
+            tools,
+        }
+    }
+
+    fn convert_tool_definitions(definitions: &[serde_json::Value]) -> Vec<OpenAiTool> {
+        definitions
             .iter()
             .filter_map(|def| {
                 let name = def.get("name")?.as_str()?.to_string();
-                let description = def.get("description")?.as_str()?.to_string();
+                let description = def
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let parameters = def
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
@@ -316,17 +423,7 @@ impl OpenAiProvider {
                     },
                 })
             })
-            .collect();
-
-        ChatCompletionsRequest {
-            model,
-            messages: Self::convert_messages(&request.messages),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            stop: request.stop_sequences.clone(),
-            stream: if stream { Some(true) } else { None },
-            tools,
-        }
+            .collect()
     }
 
     /// Parse the OpenAI finish_reason string into our FinishReason enum.
@@ -639,7 +736,7 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_core::{ChatMessage, Role};
+    use swage_core::{ChatMessage, Role, ToolCall};
 
     // --- Message conversion ---
 
@@ -707,6 +804,7 @@ mod tests {
             temperature: Some(0.5),
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request(&request, false);
         assert_eq!(body.model, "custom-model");
@@ -724,6 +822,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request(&request, false);
         assert_eq!(body.model, "gpt-4o");
@@ -740,12 +839,78 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let non_streaming = provider.build_request(&request, false);
         assert!(non_streaming.stream.is_none());
 
         let streaming = provider.build_request(&request, true);
         assert_eq!(streaming.stream, Some(true));
+    }
+
+    #[test]
+    fn build_request_includes_tools_and_auto_choice_when_tool_definitions_exist() {
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::new(Role::User, "Use a tool")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![serde_json::json!({
+                "name": "ping",
+                "description": "Echoes the input value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]
+                }
+            })],
+        };
+
+        let body = provider.build_request(&request, true);
+        assert_eq!(body.tools.len(), 1);
+        assert_eq!(body.tools[0].tool_type, "function");
+        assert_eq!(body.tools[0].function.name, "ping");
+        assert_eq!(body.tool_choice.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn convert_messages_translates_tool_round_blocks_to_openai_messages() {
+        let messages = swage_core::build_tool_round_messages(
+            &[ToolCall {
+                call_id: "call_1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({ "command": "pwd" }),
+            }],
+            &[swage_core::ToolResult {
+                call_id: "call_1".into(),
+                content: "/workspace".into(),
+                is_error: false,
+            }],
+            "",
+        );
+
+        let converted = OpenAiProvider::convert_messages(&messages);
+        assert_eq!(converted.len(), 2);
+
+        assert_eq!(converted[0].role, "assistant");
+        assert!(converted[0].content.is_none());
+        let tool_calls = converted[0]
+            .tool_calls
+            .as_ref()
+            .expect("assistant tool call should be present");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "shell");
+        assert_eq!(tool_calls[0].function.arguments, "{\"command\":\"pwd\"}");
+
+        assert_eq!(converted[1].role, "tool");
+        assert_eq!(converted[1].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(converted[1].content.as_deref(), Some("/workspace"));
     }
 
     // --- Tool request building ---

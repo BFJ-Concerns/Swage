@@ -135,6 +135,7 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
         temperature: Some(0.3),
         stop_sequences: None,
         metadata: None,
+        tool_definitions: vec![],
     };
 
     match provider.complete(summarise_request).await {

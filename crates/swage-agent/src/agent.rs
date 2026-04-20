@@ -152,6 +152,11 @@ impl Agent {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: self
+                .tool_dispatcher
+                .as_ref()
+                .map(ToolDispatcher::tool_definitions)
+                .unwrap_or_default(),
         };
 
         // 5–6. Streaming LLM loop with tool dispatch.

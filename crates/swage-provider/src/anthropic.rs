@@ -677,7 +677,26 @@ impl AnthropicProvider {
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
             stream: if stream { Some(true) } else { None },
-            tools: vec![],
+            tools: request
+                .tool_definitions
+                .iter()
+                .filter_map(|def| {
+                    let name = def["name"].as_str()?.to_owned();
+                    let description = def["description"].as_str().unwrap_or("").to_owned();
+                    let input_schema = def
+                        .get("input_schema")
+                        .or_else(|| def.get("parameters"))
+                        .cloned()
+                        .unwrap_or_else(
+                            || serde_json::json!({"type": "object", "properties": {}}),
+                        );
+                    Some(AnthropicTool {
+                        name,
+                        description,
+                        input_schema,
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -1487,6 +1506,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request_for_completion(&request, false);
         assert_eq!(body.system.as_deref(), Some("be helpful"));
@@ -1505,6 +1525,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request_for_completion(&request, false);
         assert_eq!(body.model, "claude-3-opus");
@@ -1521,6 +1542,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request_for_completion(&request, false);
         assert_eq!(body.model, "claude-3-haiku");
@@ -1537,6 +1559,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let streaming = provider.build_request_for_completion(&request, true);
         let non_streaming = provider.build_request_for_completion(&request, false);

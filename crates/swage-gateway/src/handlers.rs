@@ -247,6 +247,21 @@ pub async fn create_shared_object_event(
 }
 
 /// `PUT /api/shared-objects/team_topology/:id` — update the editable team-topology shared object.
+pub async fn get_team_topology_reference(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::get_shared_object(
+            &state,
+            swage_storage::SharedReferenceKind::TeamTopology,
+            &id.to_string(),
+        )
+        .await?,
+    ))
+}
+
+/// `PUT /api/shared-objects/team_topology/:id` — update the editable team-topology shared object.
 pub async fn update_team_topology_reference(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

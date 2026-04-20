@@ -174,6 +174,7 @@ mod tests {
                 temperature: None,
                 stop_sequences: None,
                 metadata: None,
+                tool_definitions: vec![],
             })
             .await
             .unwrap();
@@ -200,6 +201,7 @@ mod tests {
                     temperature: Some(0.5),
                     stop_sequences: None,
                     metadata: None,
+                    tool_definitions: vec![],
                 })
                 .await
         });
@@ -256,6 +258,7 @@ mod tests {
                     temperature: None,
                     stop_sequences: None,
                     metadata: None,
+                    tool_definitions: vec![],
                 })
                 .await
         });

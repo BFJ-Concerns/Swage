@@ -124,6 +124,7 @@ impl SelectiveEvictionCompactor {
             temperature: Some(0.0),
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
 
         let response = provider

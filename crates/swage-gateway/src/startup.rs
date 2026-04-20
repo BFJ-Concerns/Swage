@@ -263,6 +263,15 @@ fn create_voice_provider(
     }
 }
 
+fn provider_base_url(config: &swage_config::ProviderConfig) -> &str {
+    config.base_url.as_deref().unwrap_or(match config.protocol {
+        swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
+        swage_config::Protocol::Anthropic => "https://api.anthropic.com",
+        swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
+        swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Logging helpers (private — not part of the public API)
 // ---------------------------------------------------------------------------
@@ -488,13 +497,7 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
                  The server will start, but messaging will fail \
                  until the API key is set."
             );
-            let base_url = match config.provider.protocol {
-                swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
-                swage_config::Protocol::Anthropic => "https://api.anthropic.com",
-                swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
-                swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
-            };
-            ProviderConfig::keyless(&config.provider.model, base_url)
+            ProviderConfig::keyless(&config.provider.model, provider_base_url(&config.provider))
         }
     };
 

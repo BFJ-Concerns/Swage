@@ -72,6 +72,7 @@ port = 3000
 protocol = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://global-provider.invalid/v1"
 "#;
 
     let project = r#"
@@ -102,6 +103,10 @@ port = 4000
     assert_eq!(config.provider.model, "claude-opus-4-20250514");
     // Global value inherited through project (project didn't set protocol)
     assert_eq!(config.provider.api_key_env, "ANTHROPIC_API_KEY");
+    assert_eq!(
+        config.provider.base_url.as_deref(),
+        Some("https://global-provider.invalid/v1")
+    );
 }
 
 /// Project-level list field replaces (not extends) the global-level list.
@@ -121,6 +126,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 protocol = "openai"
 model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
+base_url = "http://127.0.0.1:11434/v1"
 "#;
 
     let tmp = build_skeleton(Some(global), "myproject", Some(project), "assistant", None);
@@ -130,6 +136,10 @@ api_key_env = "OPENAI_API_KEY"
     // Project completely overrides provider section values
     assert_eq!(config.provider.model, "gpt-4o");
     assert_eq!(config.provider.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(
+        config.provider.base_url.as_deref(),
+        Some("http://127.0.0.1:11434/v1")
+    );
 }
 
 /// Missing intermediate config files are skipped without error.

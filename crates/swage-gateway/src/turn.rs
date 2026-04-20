@@ -1325,6 +1325,62 @@ pub(crate) mod tests {
         }
     }
 
+    /// A multi-round provider that records every incoming request.
+    pub(crate) struct CapturingMultiRoundProvider {
+        rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
+        captured: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl CapturingMultiRoundProvider {
+        pub(crate) fn new(
+            rounds: Vec<Vec<StreamChunk>>,
+        ) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    rounds: std::sync::Mutex::new(rounds.into_iter().collect()),
+                    captured: Arc::clone(&captured),
+                },
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingMultiRoundProvider {
+        fn model_id(&self) -> &str {
+            "mock-capturing-multi-round"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unimplemented!("not used in multi-round tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("not used in multi-round tests")
+        }
+
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            self.captured.lock().unwrap().push(request);
+            let chunks = self
+                .rounds
+                .lock()
+                .expect("mock lock poisoned")
+                .pop_front()
+                .unwrap_or_default();
+            Box::pin(stream::iter(chunks))
+        }
+    }
+
     #[async_trait]
     impl LlmProvider for MultiRoundMockProvider {
         fn model_id(&self) -> &str {
@@ -4594,6 +4650,76 @@ pub(crate) mod tests {
         (state, session_id)
     }
 
+    async fn make_state_with_capturing_tools(
+        rounds: Vec<Vec<StreamChunk>>,
+    ) -> (AppState, Uuid, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+        let storage = Arc::new(MockStorage::new());
+
+        let project = storage
+            .get_or_create_default()
+            .await
+            .expect("create default project");
+
+        let session = storage
+            .create_session(NewSession {
+                project_id: project.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create default thread");
+
+        let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            provider: Arc::new(provider) as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                EchoMockTool,
+            )
+                as Arc<dyn crate::tool::Tool>])),
+            sandbox: None,
+            hook_registry: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+        };
+
+        (state, session_id, captured)
+    }
+
     // -----------------------------------------------------------------------
     // Tool execution loop tests
     // -----------------------------------------------------------------------
@@ -4993,6 +5119,145 @@ pub(crate) mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, ServerEvent::TurnComplete { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn second_tool_round_request_keeps_structured_tool_messages() {
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+
+        let (state, session_id, captured) =
+            make_state_with_capturing_tools(vec![round_1, round_2]).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "expected two provider requests");
+
+        let second = &requests[1];
+        assert_eq!(second.messages.len(), 3);
+        assert_eq!(second.messages[1].role, Role::Assistant);
+        assert!(
+            second.messages[1].content_blocks.is_some(),
+            "assistant tool-use message should retain content_blocks"
+        );
+        assert_eq!(second.messages[2].role, Role::User);
+        assert!(
+            second.messages[2].content_blocks.is_some(),
+            "tool-result message should retain content_blocks"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resumption_keeps_structured_tool_messages() {
+        let round_1 = vec![
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+
+        let (mut state, session_id, captured) =
+            make_state_with_capturing_tools(vec![round_1, round_2]).await;
+        state.config.tools.permissions.require_approval = vec![
+            swage_config::model::RequireApprovalEntry::Simple("echo".into()),
+        ];
+
+        let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let approval_channels = Arc::clone(&state.approval_channels);
+
+        let turn_task = tokio::spawn(async move {
+            process_turn(
+                &state,
+                session_id,
+                None,
+                "Use echo".to_string(),
+                tx,
+                subscription,
+                None,
+            )
+            .await
+        });
+
+        let approval_sender = loop {
+            let maybe_sender = {
+                let mut locked = approval_channels.lock().unwrap();
+                let approval_id = locked.keys().next().copied();
+                approval_id.and_then(|id| locked.remove(&id))
+            };
+            if let Some(sender) = maybe_sender {
+                break sender;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+
+        approval_sender
+            .send(swage_agent::ApprovalDecision {
+                decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                reason: None,
+            })
+            .expect("approval decision should be delivered");
+
+        turn_task
+            .await
+            .expect("turn task should finish")
+            .expect("turn should complete");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "expected two provider requests");
+
+        let second = &requests[1];
+        assert_eq!(second.messages.len(), 3);
+        assert_eq!(second.messages[1].role, Role::Assistant);
+        assert!(
+            second.messages[1].content_blocks.is_some(),
+            "assistant tool-use message should retain content_blocks after approval"
+        );
+        assert_eq!(second.messages[2].role, Role::User);
+        assert!(
+            second.messages[2].content_blocks.is_some(),
+            "tool-result message should retain content_blocks after approval"
         );
     }
 
@@ -5440,6 +5705,75 @@ pub(crate) mod tests {
             req.is_some(),
             "provider should have been invoked for config-resolved turn"
         );
+    }
+
+    #[tokio::test]
+    async fn process_turn_stream_request_includes_registered_tool_definitions() {
+        let chunks = vec![
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (provider, captured_request) = CapturingProvider::new(chunks);
+        let (storage, session_id) = make_storage_with_session().await;
+
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            provider: Arc::new(provider) as Arc<dyn LlmProvider>,
+            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable for tests",
+            )) as Arc<dyn swage_provider::VoiceProvider>,
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>,
+            ])),
+            sandbox: None,
+            hook_registry: None,
+            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            channel_routes: Arc::new(Mutex::new(HashMap::new())),
+            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
+            execution_hosts: Arc::new(Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
+            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            secret_manager: Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+            )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
+
+        let req = captured_request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("provider request should be captured");
+        assert_eq!(req.tool_definitions.len(), 1);
+        assert_eq!(req.tool_definitions[0]["name"], "working_dir_read");
     }
 
     #[tokio::test]

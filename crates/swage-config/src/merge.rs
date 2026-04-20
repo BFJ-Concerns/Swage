@@ -26,6 +26,7 @@ pub struct PartialProviderConfig {
     pub protocol: Option<Protocol>,
     pub model: Option<String>,
     pub api_key_env: Option<String>,
+    pub base_url: Option<Option<String>>,
 }
 
 /// Partial mirror of `WorkspaceConfig`.
@@ -208,6 +209,7 @@ impl From<ResolvedConfig> for PartialConfig {
                 protocol: Some(r.provider.protocol),
                 model: Some(r.provider.model),
                 api_key_env: Some(r.provider.api_key_env),
+                base_url: Some(r.provider.base_url),
             }),
             workspace: Some(PartialWorkspaceConfig {
                 path: Some(r.workspace.path),
@@ -339,6 +341,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 protocol: o.protocol.or(b.protocol),
                 model: o.model.or(b.model),
                 api_key_env: o.api_key_env.or(b.api_key_env),
+                base_url: o.base_url.or(b.base_url),
             }
         }),
         workspace: merge_section(base.workspace, overlay.workspace, |b, o| {
@@ -496,6 +499,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             protocol: p.protocol.unwrap_or(dp.protocol),
             model: p.model.unwrap_or(dp.model),
             api_key_env: p.api_key_env.unwrap_or(dp.api_key_env),
+            base_url: p.base_url.unwrap_or(dp.base_url),
         },
         workspace: WorkspaceConfig {
             path: w.path.unwrap_or(dw.path),

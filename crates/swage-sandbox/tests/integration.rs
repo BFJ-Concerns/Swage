@@ -110,6 +110,7 @@ async fn llm_proxy_completion_through_ipc() {
                 temperature: None,
                 stop_sequences: None,
                 metadata: None,
+                tool_definitions: vec![],
             })
             .await
     });

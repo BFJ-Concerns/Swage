@@ -28,7 +28,7 @@ const KNOWN_SECTIONS: &[&str] = &[
 fn known_fields_for(section: &str) -> &'static [&'static str] {
     match section {
         "server" => &["host", "port"],
-        "provider" => &["protocol", "model", "api_key_env"],
+        "provider" => &["protocol", "model", "api_key_env", "base_url"],
         "workspace" => &["path"],
         "sandbox" => &["enabled"],
         "lifecycle" => &["idle_timeout"],
@@ -120,6 +120,7 @@ fn check_field_type(
         ("provider", "protocol") => ("string", matches!(value, Value::String(_))),
         ("provider", "model") => ("string", matches!(value, Value::String(_))),
         ("provider", "api_key_env") => ("string", matches!(value, Value::String(_))),
+        ("provider", "base_url") => ("string", matches!(value, Value::String(_))),
         ("workspace", "path") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
         ("lifecycle", "idle_timeout") => ("integer", matches!(value, Value::Integer(_))),

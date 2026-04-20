@@ -285,4 +285,20 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
     assert_eq!(team_detail_status, StatusCode::OK);
     assert_eq!(team_detail_body["entry_agent_id"], "reviewer");
     assert_eq!(team_detail_body["members"].as_array().unwrap().len(), 4);
+
+    let (team_object_status, team_object_body) = get_json(
+        &router,
+        &format!("/api/shared-objects/team_topology/{team_id}"),
+    )
+    .await;
+    assert_eq!(team_object_status, StatusCode::OK);
+    assert_eq!(team_object_body["object"]["kind"], "team_topology");
+    assert_eq!(
+        team_object_body["object"]["payload"]["entry_agent_id"],
+        "reviewer"
+    );
+    assert_eq!(
+        team_object_body["interactions"].as_array().unwrap().len(),
+        2
+    );
 }

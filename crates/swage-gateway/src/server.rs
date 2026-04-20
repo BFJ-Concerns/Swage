@@ -205,7 +205,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/shared-objects/team_topology/:id",
-            put(handlers::update_team_topology_reference),
+            get(handlers::get_team_topology_reference).put(handlers::update_team_topology_reference),
         )
         .route(
             "/api/secrets",

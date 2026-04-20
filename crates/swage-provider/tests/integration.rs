@@ -189,6 +189,7 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
         temperature: None,
         stop_sequences: None,
         metadata: None,
+        tool_definitions: vec![],
     };
 
     let response = provider.complete(request).await.unwrap();
@@ -356,6 +357,7 @@ async fn circuit_open_triggers_failover_to_secondary() {
         temperature: None,
         stop_sequences: None,
         metadata: None,
+        tool_definitions: vec![],
     };
 
     // Send 3 requests — all hit primary and fail, tripping the circuit.
@@ -403,6 +405,7 @@ async fn streaming_through_reliability_stack_delivers_chunks() {
         temperature: None,
         stop_sequences: None,
         metadata: None,
+        tool_definitions: vec![],
     };
 
     let chunks: Vec<StreamChunk> = wrapped.stream(request).collect().await;
@@ -458,6 +461,7 @@ async fn permanent_error_bypasses_retry_and_failover() {
         temperature: None,
         stop_sequences: None,
         metadata: None,
+        tool_definitions: vec![],
     };
 
     let result = provider.complete(request).await;

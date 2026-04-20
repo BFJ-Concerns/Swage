@@ -39,6 +39,7 @@ pub struct ProviderConfig {
     pub protocol: Protocol,
     pub model: String,
     pub api_key_env: String,
+    pub base_url: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -47,6 +48,7 @@ impl Default for ProviderConfig {
             protocol: Protocol::Anthropic,
             model: "claude-sonnet-4-20250514".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: None,
         }
     }
 }
@@ -570,6 +572,7 @@ mod tests {
         assert_eq!(cfg.protocol, Protocol::Anthropic);
         assert_eq!(cfg.model, "claude-sonnet-4-20250514");
         assert_eq!(cfg.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(cfg.base_url, None);
     }
 
     #[test]
@@ -604,6 +607,7 @@ mod tests {
         assert_eq!(cfg.provider.protocol, Protocol::Anthropic);
         assert_eq!(cfg.provider.model, "claude-sonnet-4-20250514");
         assert_eq!(cfg.provider.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(cfg.provider.base_url, None);
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.lifecycle.idle_timeout, 300);

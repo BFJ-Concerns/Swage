@@ -64,8 +64,8 @@ impl HostLlmHandler {
     /// token usage, and finish reason. Provider errors become `SandboxError`.
     pub async fn handle_request(&self, request: LlmRequest) -> Result<LlmResponse, SandboxError> {
         // Convert IPC request to swage-core's CompletionRequest.
-        // tool_definitions are currently not forwarded on this path — the
-        // basic completion API does not carry a tool schema.
+        // This IPC request type does not currently carry tool definitions, so
+        // the basic completion path remains text-only from the sandbox side.
         let completion_req = CompletionRequest {
             messages: request.messages,
             model: request.model,
@@ -73,6 +73,7 @@ impl HostLlmHandler {
             temperature: request.temperature,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
 
         let response = (self.complete_fn)(completion_req).await?;

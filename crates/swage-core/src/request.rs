@@ -195,6 +195,12 @@ pub struct CompletionRequest {
     /// Arbitrary provider-specific metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Tool definitions available to the model during streaming or text turns.
+    ///
+    /// Empty means the provider should make a plain text request with no
+    /// function-calling schema attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_definitions: Vec<serde_json::Value>,
 }
 
 /// A completion response from an LLM provider.
@@ -436,6 +442,7 @@ mod tests {
             temperature: Some(0.7),
             stop_sequences: Some(vec!["STOP".into()]),
             metadata: Some(serde_json::json!({"stream": true})),
+            tool_definitions: vec![],
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -455,6 +462,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
 
         let json = serde_json::to_string(&request).unwrap();

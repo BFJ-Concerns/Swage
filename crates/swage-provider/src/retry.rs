@@ -266,6 +266,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         }
     }
 

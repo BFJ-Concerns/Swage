@@ -60,18 +60,25 @@ impl TryFrom<&swage_config::ProviderConfig> for ProviderConfig {
         })?;
 
         // Derive the provider base URL from the configured protocol.
-        let base_url = match config.protocol {
-            swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
-            swage_config::Protocol::Anthropic => "https://api.anthropic.com",
-            swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
-            swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
-        };
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| default_base_url(config.protocol.clone()).to_owned());
 
         Ok(Self {
             api_key: Some(api_key),
             model: config.model.clone(),
-            base_url: base_url.to_owned(),
+            base_url,
         })
+    }
+}
+
+fn default_base_url(protocol: swage_config::Protocol) -> &'static str {
+    match protocol {
+        swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
+        swage_config::Protocol::Anthropic => "https://api.anthropic.com",
+        swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
+        swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
     }
 }
 
@@ -256,6 +263,7 @@ mod tests {
             protocol: swage_config::Protocol::Anthropic,
             model: "claude".into(),
             api_key_env: "TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into(),
+            base_url: None,
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
@@ -272,6 +280,7 @@ mod tests {
             protocol: swage_config::Protocol::Anthropic,
             model: "claude-sonnet".into(),
             api_key_env: "TEVIK_TEST_API_KEY_XYZ".into(),
+            base_url: Some("http://127.0.0.1:11434/v1".into()),
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
@@ -280,7 +289,7 @@ mod tests {
         let cfg = ProviderConfig::try_from(&raw).unwrap();
         assert_eq!(cfg.api_key, Some("test-key-value".into()));
         assert_eq!(cfg.model, "claude-sonnet");
-        assert!(cfg.base_url.contains("anthropic"));
+        assert_eq!(cfg.base_url, "http://127.0.0.1:11434/v1");
 
         unsafe { std::env::remove_var("TEVIK_TEST_API_KEY_XYZ") };
     }
@@ -307,6 +316,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let response = provider.complete(request).await.unwrap();
         assert_eq!(response.content, "mock response");
@@ -350,6 +360,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let chunks: Vec<StreamChunk> = provider.stream(request).collect().await;
 
@@ -386,6 +397,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let response = provider.complete(request).await.unwrap();
         assert_eq!(response.content, "mock response");

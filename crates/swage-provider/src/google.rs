@@ -344,11 +344,42 @@ impl GoogleProvider {
             None
         };
 
+        let declarations: Vec<GeminiFunctionDeclaration> = request
+            .tool_definitions
+            .iter()
+            .filter_map(|def| {
+                let name = def.get("name")?.as_str()?.to_string();
+                let description = def
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let parameters = def
+                    .get("parameters")
+                    .or_else(|| def.get("input_schema"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({"type": "object"}));
+                Some(GeminiFunctionDeclaration {
+                    name,
+                    description,
+                    parameters,
+                })
+            })
+            .collect();
+
+        let tools = if declarations.is_empty() {
+            Vec::new()
+        } else {
+            vec![GeminiTool {
+                function_declarations: declarations,
+            }]
+        };
+
         GenerateContentRequest {
             contents,
             system_instruction,
             generation_config,
-            tools: Vec::new(),
+            tools,
         }
     }
 
@@ -827,6 +858,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: None,
+            tool_definitions: vec![],
         };
         let body = provider.build_request(&request);
         assert!(body.system_instruction.is_some());
