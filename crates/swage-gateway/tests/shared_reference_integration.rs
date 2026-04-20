@@ -214,6 +214,51 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
     .await;
     assert_eq!(team_status, StatusCode::CREATED);
     let team_id = team_body["id"].as_str().unwrap();
+    let flow_shared_id = format!("{project_id}:triage-flow");
+    let context_shared_id = format!("{project_id}:triage-context");
+
+    let (flow_status, flow_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/topology-flows"),
+        json!({
+            "name": "triage-flow",
+            "description": "Triage incoming work.",
+            "graph": {
+                "entry_node_id": "entry",
+                "budget": {},
+                "nodes": [
+                    {
+                        "id": "entry",
+                        "kind": "deterministic",
+                        "handler_name": "identity"
+                    }
+                ],
+                "edges": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(flow_status, StatusCode::CREATED, "body: {flow_body:?}");
+
+    let (context_definition_status, context_definition_body) = post_json(
+        &router,
+        &format!("/api/projects/{project_id}/context-definitions"),
+        json!({
+            "name": "triage-context",
+            "description": "Context profile for triage work.",
+            "config": {
+                "assembly": "default",
+                "timeout": 5,
+                "budget": 128
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        context_definition_status,
+        StatusCode::CREATED,
+        "body: {context_definition_body:?}"
+    );
 
     let (list_status, list_body) = get_json(
         &router,
@@ -233,6 +278,18 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
             object["kind"] == "context_snapshot" && object["id"] == turn.id.to_string()
         }),
         "expected context snapshot object in {objects:?}"
+    );
+    assert!(
+        objects.iter().any(|object| {
+            object["kind"] == "orchestration_flow" && object["id"] == flow_shared_id
+        }),
+        "expected orchestration flow object in {objects:?}"
+    );
+    assert!(
+        objects.iter().any(|object| {
+            object["kind"] == "context_definition" && object["id"] == context_shared_id
+        }),
+        "expected context definition object in {objects:?}"
     );
 
     let (snapshot_event_status, snapshot_event_body) = post_json(
@@ -265,6 +322,117 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
         "Recent build notes"
     );
     assert_eq!(snapshot_body["interactions"].as_array().unwrap().len(), 1);
+
+    let (flow_event_status, flow_event_body) = post_json(
+        &router,
+        &format!("/api/shared-objects/orchestration_flow/{flow_shared_id}/events"),
+        json!({
+            "event_kind": "selected",
+            "payload": {
+                "node_id": "entry",
+                "source": "builder-lens"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(flow_event_status, StatusCode::CREATED);
+    assert_eq!(flow_event_body["payload"]["node_id"], "entry");
+
+    let (flow_update_status, flow_update_body) = put_json(
+        &router,
+        &format!("/api/shared-objects/orchestration_flow/{flow_shared_id}"),
+        json!({
+            "description": "Triage incoming work with collection.",
+            "graph": {
+                "entry_node_id": "entry",
+                "budget": {},
+                "nodes": [
+                    {
+                        "id": "entry",
+                        "kind": "deterministic",
+                        "handler_name": "identity"
+                    },
+                    {
+                        "id": "collect",
+                        "kind": "deterministic",
+                        "handler_name": "collect-results"
+                    }
+                ],
+                "edges": [
+                    {
+                        "id": "edge_1",
+                        "source_node_id": "entry",
+                        "target_node_id": "collect",
+                        "routing": {
+                            "type": "unconditional"
+                        }
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        flow_update_status,
+        StatusCode::OK,
+        "body: {flow_update_body:?}"
+    );
+    assert_eq!(
+        flow_update_body["object"]["payload"]["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        flow_update_body["interactions"].as_array().unwrap().len(),
+        2
+    );
+
+    let (context_event_status, context_event_body) = post_json(
+        &router,
+        &format!("/api/shared-objects/context_definition/{context_shared_id}/events"),
+        json!({
+            "event_kind": "annotated",
+            "payload": {
+                "field": "budget",
+                "comment": "Needs a bit more room."
+            }
+        }),
+    )
+    .await;
+    assert_eq!(context_event_status, StatusCode::CREATED);
+    assert_eq!(context_event_body["payload"]["field"], "budget");
+
+    let (context_update_status, context_update_body) = put_json(
+        &router,
+        &format!("/api/shared-objects/context_definition/{context_shared_id}"),
+        json!({
+            "description": "Context profile for durable triage work.",
+            "config": {
+                "assembly": "default",
+                "timeout": 10,
+                "budget": 256
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        context_update_status,
+        StatusCode::OK,
+        "body: {context_update_body:?}"
+    );
+    assert_eq!(
+        context_update_body["object"]["payload"]["config"]["budget"],
+        256
+    );
+    assert_eq!(
+        context_update_body["interactions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let (team_event_status, team_event_body) = post_json(
         &router,
@@ -322,6 +490,41 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
     );
     assert_eq!(
         team_object_body["interactions"].as_array().unwrap().len(),
+        2
+    );
+
+    let restarted_router = build_router(test_state(&db_path).0);
+
+    let (flow_object_status, flow_object_body) = get_json(
+        &restarted_router,
+        &format!("/api/shared-objects/orchestration_flow/{flow_shared_id}"),
+    )
+    .await;
+    assert_eq!(flow_object_status, StatusCode::OK);
+    assert_eq!(
+        flow_object_body["object"]["payload"]["description"],
+        "Triage incoming work with collection."
+    );
+    assert_eq!(
+        flow_object_body["interactions"].as_array().unwrap().len(),
+        2
+    );
+
+    let (context_object_status, context_object_body) = get_json(
+        &restarted_router,
+        &format!("/api/shared-objects/context_definition/{context_shared_id}"),
+    )
+    .await;
+    assert_eq!(context_object_status, StatusCode::OK);
+    assert_eq!(
+        context_object_body["object"]["payload"]["config"]["timeout"],
+        10
+    );
+    assert_eq!(
+        context_object_body["interactions"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
 }

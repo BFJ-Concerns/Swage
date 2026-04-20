@@ -132,6 +132,8 @@ pub struct NewLensRecord {
 pub enum SharedReferenceKind {
     TeamTopology,
     ContextSnapshot,
+    OrchestrationFlow,
+    ContextDefinition,
 }
 
 impl std::fmt::Display for SharedReferenceKind {
@@ -139,6 +141,8 @@ impl std::fmt::Display for SharedReferenceKind {
         let value = match self {
             SharedReferenceKind::TeamTopology => "team_topology",
             SharedReferenceKind::ContextSnapshot => "context_snapshot",
+            SharedReferenceKind::OrchestrationFlow => "orchestration_flow",
+            SharedReferenceKind::ContextDefinition => "context_definition",
         };
         write!(f, "{value}")
     }
@@ -151,6 +155,8 @@ impl FromStr for SharedReferenceKind {
         match s {
             "team_topology" => Ok(Self::TeamTopology),
             "context_snapshot" => Ok(Self::ContextSnapshot),
+            "orchestration_flow" => Ok(Self::OrchestrationFlow),
+            "context_definition" => Ok(Self::ContextDefinition),
             other => Err(format!("unknown shared reference kind: {other}")),
         }
     }

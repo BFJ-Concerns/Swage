@@ -251,6 +251,16 @@ pub fn build_router(state: AppState) -> Router {
                 .put(handlers::update_team_topology_reference),
         )
         .route(
+            "/api/shared-objects/orchestration_flow/:id",
+            get(handlers::get_orchestration_flow_reference)
+                .put(handlers::update_orchestration_flow_reference),
+        )
+        .route(
+            "/api/shared-objects/context_definition/:id",
+            get(handlers::get_context_definition_reference)
+                .put(handlers::update_context_definition_reference),
+        )
+        .route(
             "/api/secrets",
             get(handlers::list_secrets).post(handlers::create_secret),
         )

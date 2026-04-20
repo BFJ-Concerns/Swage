@@ -7,6 +7,10 @@ use swage_core::{GatewayError, StorageError};
 use swage_storage::{NewSharedReferenceEvent, SharedReferenceKind, Team};
 
 use crate::{
+    authoring_definition::{
+        ContextDefinitionRecord, TopologyFlowDefinitionRecord, UpdateContextDefinitionRequest,
+        UpdateTopologyFlowDefinitionRequest,
+    },
     builder_runtime::BuilderConfigurationService,
     service::{TeamAgentPayload, UpdateTeamRequest},
     state::AppState,
@@ -69,6 +73,18 @@ pub struct UpdateTeamTopologyReferenceRequest {
     pub members: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateOrchestrationFlowReferenceRequest {
+    pub description: String,
+    pub graph: swage_topology::TopologyGraph,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateContextDefinitionReferenceRequest {
+    pub description: String,
+    pub config: swage_config::ContextConfig,
+}
+
 pub async fn list_shared_objects(
     state: &AppState,
     query: SharedReferenceListQuery,
@@ -89,10 +105,27 @@ pub async fn list_shared_objects(
         .storage
         .list_snapshots_by_project(query.project_id, query.snapshot_limit)
         .await?;
+    let topology_flows = crate::authoring_definition::list_topology_flows(state, query.project_id)
+        .await?
+        .flows;
+    let context_definitions =
+        crate::authoring_definition::list_context_definitions(state, query.project_id)
+            .await?
+            .definitions;
 
     let mut objects: Vec<SharedReferenceSummary> =
         teams.into_iter().map(team_topology_summary).collect();
     objects.extend(snapshots.into_iter().filter_map(context_snapshot_summary));
+    objects.extend(
+        topology_flows
+            .into_iter()
+            .map(|flow| orchestration_flow_summary(query.project_id, flow)),
+    );
+    objects.extend(
+        context_definitions
+            .into_iter()
+            .map(|definition| context_definition_summary(query.project_id, definition)),
+    );
     objects.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(SharedReferenceListResponse { objects })
 }
@@ -210,6 +243,68 @@ pub async fn update_team_topology_reference(
     .await
 }
 
+pub async fn update_orchestration_flow_reference(
+    state: &AppState,
+    id: &str,
+    request: UpdateOrchestrationFlowReferenceRequest,
+) -> Result<SharedReferenceDetailResponse, GatewayError> {
+    let (project_id, flow_name) = parse_project_scoped_object_id(id, "orchestration flow")?;
+    let updated = crate::authoring_definition::update_topology_flow(
+        state,
+        project_id,
+        &flow_name,
+        UpdateTopologyFlowDefinitionRequest {
+            description: request.description,
+            graph: request.graph,
+        },
+    )
+    .await?;
+    record_structural_shared_reference_event(
+        state,
+        SharedReferenceKind::OrchestrationFlow,
+        id,
+        serde_json::json!({
+            "project_id": project_id,
+            "name": updated.name,
+            "description": updated.description,
+            "graph": updated.graph,
+        }),
+    )
+    .await?;
+    get_shared_object(state, SharedReferenceKind::OrchestrationFlow, id).await
+}
+
+pub async fn update_context_definition_reference(
+    state: &AppState,
+    id: &str,
+    request: UpdateContextDefinitionReferenceRequest,
+) -> Result<SharedReferenceDetailResponse, GatewayError> {
+    let (project_id, definition_name) = parse_project_scoped_object_id(id, "context definition")?;
+    let updated = crate::authoring_definition::update_context_definition(
+        state,
+        project_id,
+        &definition_name,
+        UpdateContextDefinitionRequest {
+            description: request.description,
+            config: request.config,
+        },
+    )
+    .await?;
+    record_structural_shared_reference_event(
+        state,
+        SharedReferenceKind::ContextDefinition,
+        id,
+        serde_json::json!({
+            "project_id": project_id,
+            "name": updated.name,
+            "description": updated.description,
+            "config": updated.config,
+        }),
+    )
+    .await?;
+    get_shared_object(state, SharedReferenceKind::ContextDefinition, id).await
+}
+
 fn expand_topology_members(
     team: &Team,
     entry_agent_id: &str,
@@ -277,6 +372,24 @@ async fn load_object(
                 .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
             Ok(context_snapshot_object(turn_id, report))
         }
+        SharedReferenceKind::OrchestrationFlow => {
+            let (project_id, flow_name) = parse_project_scoped_object_id(id, "orchestration flow")?;
+            let flow =
+                crate::authoring_definition::get_topology_flow(state, project_id, &flow_name)
+                    .await?;
+            Ok(orchestration_flow_object(project_id, flow))
+        }
+        SharedReferenceKind::ContextDefinition => {
+            let (project_id, definition_name) =
+                parse_project_scoped_object_id(id, "context definition")?;
+            let definition = crate::authoring_definition::get_context_definition(
+                state,
+                project_id,
+                &definition_name,
+            )
+            .await?;
+            Ok(context_definition_object(project_id, definition))
+        }
     }
 }
 
@@ -310,6 +423,39 @@ fn context_snapshot_summary(
         ),
         updated_at: snapshot.created_at.to_rfc3339(),
     })
+}
+
+fn orchestration_flow_summary(
+    project_id: Uuid,
+    flow: TopologyFlowDefinitionRecord,
+) -> SharedReferenceSummary {
+    SharedReferenceSummary {
+        kind: SharedReferenceKind::OrchestrationFlow.to_string(),
+        id: project_scoped_object_id(project_id, &flow.name),
+        title: flow.name.clone(),
+        subtitle: format!(
+            "{} node(s) · {} edge(s)",
+            flow.graph.nodes.len(),
+            flow.graph.edges.len()
+        ),
+        updated_at: flow.updated_at.to_rfc3339(),
+    }
+}
+
+fn context_definition_summary(
+    project_id: Uuid,
+    definition: ContextDefinitionRecord,
+) -> SharedReferenceSummary {
+    SharedReferenceSummary {
+        kind: SharedReferenceKind::ContextDefinition.to_string(),
+        id: project_scoped_object_id(project_id, &definition.name),
+        title: definition.name.clone(),
+        subtitle: format!(
+            "{} · timeout {}s",
+            definition.config.assembly, definition.config.timeout
+        ),
+        updated_at: definition.updated_at.to_rfc3339(),
+    }
 }
 
 fn team_topology_object(team: Team) -> SharedReferenceObject {
@@ -395,6 +541,91 @@ fn context_snapshot_object(turn_id: Uuid, report: AssemblyReport) -> SharedRefer
             "elements": elements,
         }),
     }
+}
+
+fn orchestration_flow_object(
+    project_id: Uuid,
+    flow: TopologyFlowDefinitionRecord,
+) -> SharedReferenceObject {
+    let flow_name = flow.name.clone();
+    let description = flow.description.clone();
+    SharedReferenceObject {
+        kind: SharedReferenceKind::OrchestrationFlow.to_string(),
+        id: project_scoped_object_id(project_id, &flow_name),
+        title: flow_name.clone(),
+        subtitle: description.clone(),
+        payload: serde_json::json!({
+            "project_id": project_id,
+            "name": flow_name,
+            "description": description,
+            "entry_node_id": flow.graph.entry_node_id,
+            "budget": flow.graph.budget,
+            "nodes": flow.graph.nodes,
+            "edges": flow.graph.edges,
+            "created_at": flow.created_at,
+            "updated_at": flow.updated_at,
+        }),
+    }
+}
+
+fn context_definition_object(
+    project_id: Uuid,
+    definition: ContextDefinitionRecord,
+) -> SharedReferenceObject {
+    let definition_name = definition.name.clone();
+    let description = definition.description.clone();
+    SharedReferenceObject {
+        kind: SharedReferenceKind::ContextDefinition.to_string(),
+        id: project_scoped_object_id(project_id, &definition_name),
+        title: definition_name.clone(),
+        subtitle: description.clone(),
+        payload: serde_json::json!({
+            "project_id": project_id,
+            "name": definition_name,
+            "description": description,
+            "config": definition.config,
+            "created_at": definition.created_at,
+            "updated_at": definition.updated_at,
+        }),
+    }
+}
+
+fn project_scoped_object_id(project_id: Uuid, name: &str) -> String {
+    format!("{project_id}:{name}")
+}
+
+fn parse_project_scoped_object_id(id: &str, label: &str) -> Result<(Uuid, String), GatewayError> {
+    let (project_id, name) = id.split_once(':').ok_or_else(|| {
+        GatewayError::ValidationError(format!("{label} id must have the form <project-id>:<name>"))
+    })?;
+    let project_id = project_id.parse().map_err(|_| {
+        GatewayError::ValidationError(format!("{label} id must start with a valid project UUID"))
+    })?;
+    if name.trim().is_empty() {
+        return Err(GatewayError::ValidationError(format!(
+            "{label} id must include a non-empty name"
+        )));
+    }
+    Ok((project_id, name.to_string()))
+}
+
+async fn record_structural_shared_reference_event(
+    state: &AppState,
+    kind: SharedReferenceKind,
+    id: &str,
+    payload: Value,
+) -> Result<(), GatewayError> {
+    state
+        .storage
+        .create_shared_reference_event(NewSharedReferenceEvent {
+            id: Uuid::new_v4(),
+            object_kind: kind,
+            object_id: id.to_string(),
+            event_kind: "updated".into(),
+            payload,
+        })
+        .await?;
+    Ok(())
 }
 
 fn default_snapshot_limit() -> usize {

@@ -85,6 +85,7 @@ use crate::{
     shared_reference::{
         CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
         SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
+        UpdateContextDefinitionReferenceRequest, UpdateOrchestrationFlowReferenceRequest,
         UpdateTeamTopologyReferenceRequest,
     },
     state::AppState,
@@ -338,6 +339,58 @@ pub async fn update_team_topology_reference(
 ) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
     Ok(Json(
         crate::shared_reference::update_team_topology_reference(&state, id, request).await?,
+    ))
+}
+
+/// `PUT /api/shared-objects/orchestration_flow/:id` — update a durable orchestration-flow shared object.
+pub async fn update_orchestration_flow_reference(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateOrchestrationFlowReferenceRequest>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::update_orchestration_flow_reference(&state, &id, request).await?,
+    ))
+}
+
+/// `GET /api/shared-objects/orchestration_flow/:id` — inspect one durable orchestration-flow shared object.
+pub async fn get_orchestration_flow_reference(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::get_shared_object(
+            &state,
+            swage_storage::SharedReferenceKind::OrchestrationFlow,
+            &id,
+        )
+        .await?,
+    ))
+}
+
+/// `PUT /api/shared-objects/context_definition/:id` — update a durable context-definition shared object.
+pub async fn update_context_definition_reference(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateContextDefinitionReferenceRequest>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::update_context_definition_reference(&state, &id, request).await?,
+    ))
+}
+
+/// `GET /api/shared-objects/context_definition/:id` — inspect one durable context-definition shared object.
+pub async fn get_context_definition_reference(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
+    Ok(Json(
+        crate::shared_reference::get_shared_object(
+            &state,
+            swage_storage::SharedReferenceKind::ContextDefinition,
+            &id,
+        )
+        .await?,
     ))
 }
 
