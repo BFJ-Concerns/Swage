@@ -1,4 +1,7 @@
 import type {
+  BuilderApplyResponse,
+  BuilderConfigOperation,
+  BuilderProposalResponse,
   ContextSnapshotSharedReferencePayload,
   CreateProjectExtensionRequest,
   SharedReferenceDetailResponse,
@@ -103,6 +106,34 @@ export async function approveWorkspaceExtension(
     "POST",
   );
   return response.json() as Promise<ProjectExtensionSummary>;
+}
+
+export async function createBuilderProposal(
+  projectId: string,
+  prompt: string,
+): Promise<BuilderProposalResponse> {
+  const response = await request(`/api/projects/${projectId}/builder/proposals`, "POST", {
+    prompt,
+  });
+  return response.json() as Promise<BuilderProposalResponse>;
+}
+
+export async function applyBuilderProposal(
+  projectId: string,
+  operations: BuilderConfigOperation[],
+  requestText?: string,
+): Promise<{ status: number; body: BuilderApplyResponse }> {
+  const response = await fetch(`${baseUrl}/api/projects/${projectId}/builder/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      request_text: requestText ?? null,
+      operations,
+    }),
+  });
+
+  const body = (await response.json()) as BuilderApplyResponse;
+  return { status: response.status, body };
 }
 
 export async function listSharedReferences(

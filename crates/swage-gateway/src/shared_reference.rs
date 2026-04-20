@@ -7,8 +7,7 @@ use swage_core::{GatewayError, StorageError};
 use swage_storage::{NewSharedReferenceEvent, SharedReferenceKind, Team};
 
 use crate::{
-    service::{TeamService, UpdateTeamRequest},
-    state::AppState,
+    builder_runtime::BuilderConfigurationService, service::UpdateTeamRequest, state::AppState,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,7 +155,7 @@ pub async fn update_team_topology_reference(
     team_id: Uuid,
     request: UpdateTeamTopologyReferenceRequest,
 ) -> Result<SharedReferenceDetailResponse, GatewayError> {
-    let service = TeamService::new(state.storage.clone(), state.project_store.clone());
+    let service = BuilderConfigurationService::new(state.clone());
     service
         .update_team(
             team_id,
@@ -166,6 +165,8 @@ pub async fn update_team_topology_reference(
                 entry_agent_id: Some(request.entry_agent_id.clone()),
                 members: Some(request.members),
             },
+            None,
+            "shared_reference",
         )
         .await?;
 

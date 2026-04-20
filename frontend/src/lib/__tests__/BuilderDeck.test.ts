@@ -9,6 +9,8 @@ import * as builderApi from "../api/builder";
 import * as operatorApi from "../api/operator";
 
 vi.mock("../api/builder", () => ({
+  createBuilderProposal: vi.fn(),
+  applyBuilderProposal: vi.fn(),
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
@@ -138,6 +140,42 @@ describe("BuilderDeck", () => {
       status: "active",
       source_kind: "managed",
     });
+    vi.mocked(builderApi.createBuilderProposal).mockResolvedValue({
+      summary: "Create a delivery workspace.",
+      operations: [
+        {
+          kind: "create_team",
+          summary: "Create team delivery-core.",
+          ready: true,
+          diagnostics: [],
+          operation: {
+            kind: "create_team",
+            name: "delivery-core",
+            description: "Delivery team",
+            entry_agent_id: "default",
+            members: ["reviewer"],
+          },
+        },
+      ],
+      diagnostics: [],
+      can_apply: true,
+    });
+    vi.mocked(builderApi.applyBuilderProposal).mockResolvedValue({
+      status: 200,
+      body: {
+        success: true,
+        summary: "Applied 1 builder change(s).",
+        diagnostics: [],
+        applied: [
+          {
+            kind: "create_team",
+            summary: "Created team delivery-core.",
+            entity_kind: "team",
+            entity_id: "team-2",
+          },
+        ],
+      },
+    });
     vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
       gateway: {
@@ -203,6 +241,7 @@ describe("BuilderDeck", () => {
   });
 
   it("creates a team and a managed extension through the builder forms", async () => {
+    const refreshLenses = vi.fn();
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
@@ -229,16 +268,19 @@ describe("BuilderDeck", () => {
           },
         ],
         onSelectLens: vi.fn(),
-        onRefreshLenses: vi.fn(),
+        onRefreshLenses: refreshLenses,
       },
     });
 
-    const teamNameInput = document.querySelector(
+    await flushUi();
+
+    const teamCard = Array.from(document.querySelectorAll("article.builder-card")).find((card) =>
+      card.textContent?.includes("Entry team"),
+    ) as HTMLElement;
+    const teamNameInput = teamCard.querySelector(
       'input[placeholder="workspace-core"]',
     ) as HTMLInputElement;
-    const teamDescriptionInput = Array.from(
-      document.querySelectorAll(".builder-card textarea"),
-    )[1] as HTMLTextAreaElement;
+    const teamDescriptionInput = teamCard.querySelector("textarea") as HTMLTextAreaElement;
     teamNameInput.value = "delivery";
     teamNameInput.dispatchEvent(new Event("input", { bubbles: true }));
     teamDescriptionInput.value = "Delivery team";
@@ -257,11 +299,12 @@ describe("BuilderDeck", () => {
       members: [],
     });
 
-    const extensionNameInput = document.querySelector(
+    const extensionCard = document.querySelector("article.extension-card") as HTMLElement;
+    const extensionNameInput = extensionCard.querySelector(
       'input[placeholder="builder-guardrails"]',
     ) as HTMLInputElement;
     const extensionTextareas = Array.from(
-      document.querySelectorAll(".extension-card textarea"),
+      extensionCard.querySelectorAll("textarea"),
     ) as HTMLTextAreaElement[];
     extensionNameInput.value = "delivery-brief";
     extensionNameInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -283,6 +326,7 @@ describe("BuilderDeck", () => {
       requested_tools: [],
       instructions: "Keep the brief explicit.",
     });
+    expect(refreshLenses).not.toHaveBeenCalled();
   });
 
   it("approves workspace extension candidates", async () => {
@@ -328,5 +372,70 @@ describe("BuilderDeck", () => {
       "project-1",
       "workspace-skill",
     );
+  });
+
+  it("proposes and applies conversational builder changes", async () => {
+    const refreshLenses = vi.fn();
+    component = mount(BuilderDeck, {
+      target: document.body,
+      props: {
+        projectStore: mockProjectStore(),
+        activeLens: "builder",
+        availableLenses: [
+          {
+            id: "assistant",
+            title: "Assistant lens",
+            summary: "Conversation-first view",
+            default_surface: "conversation",
+            ui_modules: ["conversation", "operator"],
+            prominent_team_ids: ["default"],
+            source_kind: "built_in",
+          },
+          {
+            id: "builder",
+            title: "Builder lens",
+            summary: "Workspace-first view",
+            default_surface: "builder",
+            ui_modules: ["builder", "conversation"],
+            prominent_team_ids: ["workspace-core"],
+            source_kind: "built_in",
+          },
+        ],
+        onSelectLens: vi.fn(),
+        onRefreshLenses: refreshLenses,
+      },
+    });
+
+    await flushUi();
+
+    const conversationalCard = Array.from(
+      document.querySelectorAll("article.builder-card"),
+    ).find((card) => card.textContent?.includes("Conversational builder runtime")) as HTMLElement;
+    const prompt = conversationalCard.querySelector("textarea") as HTMLTextAreaElement;
+    prompt.value = "Create a delivery workspace.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    (
+      Array.from(conversationalCard.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Propose changes",
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+
+    expect(builderApi.createBuilderProposal).toHaveBeenCalledWith(
+      "project-1",
+      "Create a delivery workspace.",
+    );
+    expect(document.body.textContent).toContain("Create team delivery-core.");
+
+    (
+      Array.from(conversationalCard.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Apply reviewed changes",
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+
+    expect(builderApi.applyBuilderProposal).toHaveBeenCalled();
+    expect(refreshLenses).toHaveBeenCalled();
   });
 });

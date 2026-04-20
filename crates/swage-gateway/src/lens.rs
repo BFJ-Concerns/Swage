@@ -61,7 +61,7 @@ pub struct LensListResponse {
     pub lenses: Vec<LensDescriptor>,
 }
 
-fn validate_lens_payload(
+pub(crate) fn validate_lens_payload(
     title: &str,
     summary: &str,
     default_surface: &str,
@@ -97,7 +97,7 @@ fn validate_lens_payload(
     Ok(())
 }
 
-fn preset_lens(preset_id: &str) -> Result<NewLensRecord, GatewayError> {
+pub(crate) fn preset_lens(preset_id: &str) -> Result<NewLensRecord, GatewayError> {
     match preset_id {
         "research" => Ok(NewLensRecord {
             id: AppLens::new("research").map_err(GatewayError::ValidationError)?,

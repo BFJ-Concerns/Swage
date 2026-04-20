@@ -1,0 +1,1087 @@
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
+
+use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role};
+use swage_storage::NewAuditEvent;
+
+use crate::{
+    lens::{
+        CreateLensRequest, InstallLensRequest, LensDescriptor, UpdateLensRequest,
+        validate_lens_payload,
+    },
+    project_extension as project_extension_api,
+    project_extension::{
+        CreateProjectExtensionRequest, ProjectExtensionResponse, UpdateProjectExtensionRequest,
+        validate_extension_body, validate_extension_name,
+    },
+    service::{CreateTeamRequest, TeamResponse, TeamService, UpdateTeamRequest},
+    state::AppState,
+};
+
+const BUILDER_CONFIG_SERVICE_NAME: &str = "builder_configuration";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuilderProposalRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuilderApplyRequest {
+    #[serde(default)]
+    pub request_text: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub operations: Vec<BuilderConfigOperation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderProposalResponse {
+    pub summary: String,
+    pub operations: Vec<BuilderReviewedOperation>,
+    pub diagnostics: Vec<String>,
+    pub can_apply: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderReviewedOperation {
+    pub kind: String,
+    pub summary: String,
+    pub ready: bool,
+    pub diagnostics: Vec<String>,
+    pub operation: BuilderConfigOperation,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderApplyResponse {
+    pub success: bool,
+    pub summary: String,
+    pub diagnostics: Vec<String>,
+    pub applied: Vec<BuilderAppliedOperation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderAppliedOperation {
+    pub kind: String,
+    pub summary: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BuilderConfigOperation {
+    CreateLens {
+        id: String,
+        title: String,
+        summary: String,
+        default_surface: String,
+        #[serde(default)]
+        ui_modules: Vec<String>,
+        #[serde(default)]
+        prominent_team_ids: Vec<String>,
+    },
+    UpdateLens {
+        lens_id: String,
+        title: String,
+        summary: String,
+        default_surface: String,
+        #[serde(default)]
+        ui_modules: Vec<String>,
+        #[serde(default)]
+        prominent_team_ids: Vec<String>,
+    },
+    InstallLensPreset {
+        preset_id: String,
+    },
+    CreateTeam {
+        name: String,
+        #[serde(default)]
+        description: String,
+        entry_agent_id: String,
+        #[serde(default)]
+        members: Vec<String>,
+    },
+    UpdateTeam {
+        #[serde(default)]
+        team_id: Option<Uuid>,
+        #[serde(default)]
+        team_name: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        entry_agent_id: Option<String>,
+        #[serde(default)]
+        members: Option<Vec<String>>,
+    },
+    CreateProjectExtension {
+        name: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        description: String,
+        #[serde(default)]
+        requested_tools: Vec<String>,
+        instructions: String,
+    },
+    UpdateProjectExtension {
+        extension_name: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        description: String,
+        #[serde(default)]
+        requested_tools: Vec<String>,
+        instructions: String,
+    },
+    ApproveWorkspaceExtension {
+        extension_name: String,
+    },
+    CreateAgent {
+        agent_id: String,
+        #[serde(default)]
+        team_name: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    UpdateAgent {
+        agent_id: String,
+        #[serde(default)]
+        team_name: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct BuilderPlannerOutput {
+    summary: String,
+    #[serde(default)]
+    operations: Vec<BuilderConfigOperation>,
+    #[serde(default)]
+    diagnostics: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct BuilderConfigurationService {
+    state: AppState,
+}
+
+impl BuilderConfigurationService {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+
+    pub async fn propose_changes(
+        &self,
+        project_id: Uuid,
+        request: BuilderProposalRequest,
+    ) -> Result<BuilderProposalResponse, GatewayError> {
+        if request.prompt.trim().is_empty() {
+            return Err(GatewayError::ValidationError(
+                "builder prompt must not be empty".into(),
+            ));
+        }
+
+        let project = self
+            .state
+            .project_store
+            .get(project_id)
+            .await?
+            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+
+        let lenses = self.state.storage.list_lenses().await?;
+        let teams = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+            .list_teams(project_id)
+            .await?
+            .teams;
+        let extensions = project_extension_api::list_project_extensions(&self.state, project_id)
+            .await?
+            .extensions;
+
+        let prompt_context = json!({
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "slug": project.slug,
+                "workspace_path": project.workspace_path,
+            },
+            "lenses": lenses,
+            "teams": teams,
+            "extensions": extensions,
+            "constraints": [
+                "Return strict JSON only. Do not wrap it in markdown fences.",
+                "Plan only operations that the builder runtime can persist.",
+                "Agent authoring is not supported yet. If the user asks for agent creation or edits, emit a create_agent or update_agent operation so the runtime can return an explicit diagnostic instead of inventing unsupported storage.",
+                "Prefer updating existing entities when the request clearly refers to them."
+            ],
+        });
+
+        let system_prompt = [
+            "You are the Swage builder runtime planner.",
+            "Translate the user's natural-language request into a JSON change proposal.",
+            "Use this exact shape:",
+            r#"{"summary":"string","operations":[{"kind":"create_lens"}],"diagnostics":["string"]}"#,
+            "Valid operation kinds are: create_lens, update_lens, install_lens_preset, create_team, update_team, create_project_extension, update_project_extension, approve_workspace_extension, create_agent, update_agent.",
+            "Do not include commentary outside JSON.",
+        ]
+        .join("\n");
+
+        let user_prompt = format!(
+            "Project context:\n{}\n\nUser request:\n{}",
+            serde_json::to_string_pretty(&prompt_context)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
+            request.prompt.trim()
+        );
+
+        let completion = self
+            .state
+            .provider
+            .complete(CompletionRequest {
+                messages: vec![
+                    ChatMessage::new(Role::System, system_prompt),
+                    ChatMessage::new(Role::User, user_prompt),
+                ],
+                model: None,
+                max_tokens: Some(1_200),
+                temperature: Some(0.0),
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: Vec::new(),
+            })
+            .await
+            .map_err(|error| {
+                GatewayError::ValidationError(format!(
+                    "builder proposal generation failed: {error}"
+                ))
+            })?;
+
+        let planner_output = parse_builder_output(&completion.content)?;
+        let reviewed = self
+            .review_operations(project_id, &planner_output.operations)
+            .await?;
+        let can_apply = !reviewed.is_empty() && reviewed.iter().all(|operation| operation.ready);
+
+        Ok(BuilderProposalResponse {
+            summary: planner_output.summary,
+            operations: reviewed,
+            diagnostics: planner_output.diagnostics,
+            can_apply,
+        })
+    }
+
+    pub async fn apply_operations(
+        &self,
+        project_id: Uuid,
+        request: BuilderApplyRequest,
+    ) -> Result<BuilderApplyResponse, GatewayError> {
+        let reviewed = self
+            .review_operations(project_id, &request.operations)
+            .await?;
+        let diagnostics: Vec<String> = reviewed
+            .iter()
+            .flat_map(|operation| operation.diagnostics.clone())
+            .collect();
+
+        if reviewed.is_empty() {
+            return Ok(BuilderApplyResponse {
+                success: false,
+                summary: "No changes were applied.".into(),
+                diagnostics: vec!["The builder proposal contained no operations.".into()],
+                applied: Vec::new(),
+            });
+        }
+
+        if reviewed.iter().any(|operation| !operation.ready) {
+            return Ok(BuilderApplyResponse {
+                success: false,
+                summary: "Builder review blocked the requested changes.".into(),
+                diagnostics,
+                applied: Vec::new(),
+            });
+        }
+
+        let mut applied = Vec::new();
+        for operation in request.operations {
+            applied.push(
+                self.apply_operation(
+                    project_id,
+                    operation,
+                    request.session_id,
+                    "conversational_builder",
+                    request.request_text.as_deref(),
+                )
+                .await?,
+            );
+        }
+
+        Ok(BuilderApplyResponse {
+            success: true,
+            summary: format!("Applied {} builder change(s).", applied.len()),
+            diagnostics: Vec::new(),
+            applied,
+        })
+    }
+
+    pub async fn create_lens(
+        &self,
+        request: CreateLensRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<LensDescriptor, GatewayError> {
+        let saved = crate::lens::create_lens(&self.state, request).await?;
+        self.record_audit(
+            "lens",
+            saved.id.to_string(),
+            "create_lens",
+            source,
+            session_id,
+            None,
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn update_lens(
+        &self,
+        lens_id: &str,
+        request: UpdateLensRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<LensDescriptor, GatewayError> {
+        let saved = crate::lens::update_lens(&self.state, lens_id, request).await?;
+        self.record_audit(
+            "lens",
+            saved.id.to_string(),
+            "update_lens",
+            source,
+            session_id,
+            None,
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn install_lens_preset(
+        &self,
+        request: InstallLensRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<LensDescriptor, GatewayError> {
+        let saved = crate::lens::install_lens(&self.state, request).await?;
+        self.record_audit(
+            "lens",
+            saved.id.to_string(),
+            "install_lens_preset",
+            source,
+            session_id,
+            None,
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn create_team(
+        &self,
+        project_id: Uuid,
+        request: CreateTeamRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<TeamResponse, GatewayError> {
+        let saved = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+            .create_team(project_id, request)
+            .await?;
+        self.record_audit(
+            "team",
+            saved.id.to_string(),
+            "create_team",
+            source,
+            session_id,
+            Some(project_id),
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn update_team(
+        &self,
+        team_id: Uuid,
+        request: UpdateTeamRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<TeamResponse, GatewayError> {
+        let saved = TeamService::new(self.state.storage.clone(), self.state.project_store.clone())
+            .update_team(team_id, request)
+            .await?;
+        self.record_audit(
+            "team",
+            saved.id.to_string(),
+            "update_team",
+            source,
+            session_id,
+            Some(saved.project_id),
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn create_project_extension(
+        &self,
+        project_id: Uuid,
+        request: CreateProjectExtensionRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let saved =
+            project_extension_api::create_project_extension(&self.state, project_id, request)
+                .await?;
+        self.record_audit(
+            "project_extension",
+            saved.name.clone(),
+            "create_project_extension",
+            source,
+            session_id,
+            Some(project_id),
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn update_project_extension(
+        &self,
+        project_id: Uuid,
+        extension_name: &str,
+        request: UpdateProjectExtensionRequest,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let saved = project_extension_api::update_project_extension(
+            &self.state,
+            project_id,
+            extension_name,
+            request,
+        )
+        .await?;
+        self.record_audit(
+            "project_extension",
+            saved.name.clone(),
+            "update_project_extension",
+            source,
+            session_id,
+            Some(project_id),
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    pub async fn approve_workspace_extension(
+        &self,
+        project_id: Uuid,
+        extension_name: &str,
+        session_id: Option<Uuid>,
+        source: &str,
+    ) -> Result<ProjectExtensionResponse, GatewayError> {
+        let saved = project_extension_api::approve_workspace_extension(
+            &self.state,
+            project_id,
+            extension_name,
+        )
+        .await?;
+        self.record_audit(
+            "project_extension",
+            saved.name.clone(),
+            "approve_workspace_extension",
+            source,
+            session_id,
+            Some(project_id),
+        )
+        .await?;
+        Ok(saved)
+    }
+
+    async fn review_operations(
+        &self,
+        project_id: Uuid,
+        operations: &[BuilderConfigOperation],
+    ) -> Result<Vec<BuilderReviewedOperation>, GatewayError> {
+        let mut reviewed = Vec::with_capacity(operations.len());
+        for operation in operations {
+            reviewed.push(self.review_operation(project_id, operation.clone()).await?);
+        }
+        Ok(reviewed)
+    }
+
+    async fn review_operation(
+        &self,
+        project_id: Uuid,
+        operation: BuilderConfigOperation,
+    ) -> Result<BuilderReviewedOperation, GatewayError> {
+        let mut diagnostics = Vec::new();
+
+        match &operation {
+            BuilderConfigOperation::CreateLens {
+                id,
+                title,
+                summary,
+                default_surface,
+                ui_modules,
+                ..
+            } => {
+                validate_lens_payload(title, summary, default_surface, ui_modules)?;
+                swage_storage::AppLens::new(id.clone()).map_err(GatewayError::ValidationError)?;
+                if self
+                    .state
+                    .storage
+                    .get_lens(
+                        &swage_storage::AppLens::new(id.clone())
+                            .map_err(GatewayError::ValidationError)?,
+                    )
+                    .await?
+                    .is_some()
+                {
+                    diagnostics.push(format!("Lens {id} already exists."));
+                }
+            }
+            BuilderConfigOperation::UpdateLens {
+                lens_id,
+                title,
+                summary,
+                default_surface,
+                ui_modules,
+                ..
+            } => {
+                validate_lens_payload(title, summary, default_surface, ui_modules)?;
+                let lens_id = swage_storage::AppLens::new(lens_id.clone())
+                    .map_err(GatewayError::ValidationError)?;
+                let existing = self.state.storage.get_lens(&lens_id).await?;
+                match existing {
+                    None => diagnostics.push(format!("Lens {} does not exist.", lens_id)),
+                    Some(record)
+                        if record.source_kind == swage_storage::LensSourceKind::BuiltIn =>
+                    {
+                        diagnostics.push(format!("Built-in lens {} cannot be edited.", lens_id))
+                    }
+                    Some(_) => {}
+                }
+            }
+            BuilderConfigOperation::InstallLensPreset { preset_id } => {
+                crate::lens::preset_lens(preset_id)?;
+            }
+            BuilderConfigOperation::CreateTeam {
+                name,
+                entry_agent_id,
+                members,
+                ..
+            } => {
+                if name.trim().is_empty() {
+                    diagnostics.push("Team name must not be empty.".into());
+                }
+                if entry_agent_id.trim().is_empty() {
+                    diagnostics.push("entry_agent_id must not be empty.".into());
+                }
+                if members.iter().any(|member| member.trim().is_empty()) {
+                    diagnostics.push("members must not contain empty agent IDs.".into());
+                }
+                if self
+                    .state
+                    .storage
+                    .get_team_by_name(project_id, name)
+                    .await?
+                    .is_some()
+                {
+                    diagnostics.push(format!("A team named {name} already exists."));
+                }
+            }
+            BuilderConfigOperation::UpdateTeam {
+                team_id,
+                team_name,
+                entry_agent_id,
+                members,
+                ..
+            } => {
+                if team_id.is_none() && team_name.as_deref().unwrap_or("").trim().is_empty() {
+                    diagnostics.push("update_team needs team_id or team_name.".into());
+                }
+                if let Some(entry_agent_id) = entry_agent_id {
+                    if entry_agent_id.trim().is_empty() {
+                        diagnostics.push("entry_agent_id must not be empty.".into());
+                    }
+                }
+                if let Some(members) = members {
+                    if members.iter().any(|member| member.trim().is_empty()) {
+                        diagnostics.push("members must not contain empty agent IDs.".into());
+                    }
+                }
+                if self
+                    .resolve_team(project_id, *team_id, team_name.as_deref())
+                    .await?
+                    .is_none()
+                {
+                    diagnostics.push("The referenced team does not exist in this project.".into());
+                }
+            }
+            BuilderConfigOperation::CreateProjectExtension {
+                name,
+                description,
+                requested_tools,
+                instructions,
+                ..
+            } => {
+                validate_extension_name(name)?;
+                validate_extension_body(description, requested_tools, instructions)?;
+                let extensions =
+                    project_extension_api::list_project_extensions(&self.state, project_id).await?;
+                if extensions
+                    .extensions
+                    .iter()
+                    .any(|extension| extension.name == *name && extension.source_kind == "managed")
+                {
+                    diagnostics.push(format!("Managed extension {name} already exists."));
+                }
+            }
+            BuilderConfigOperation::UpdateProjectExtension {
+                extension_name,
+                description,
+                requested_tools,
+                instructions,
+                ..
+            } => {
+                validate_extension_name(extension_name)?;
+                validate_extension_body(description, requested_tools, instructions)?;
+                let extensions =
+                    project_extension_api::list_project_extensions(&self.state, project_id).await?;
+                if !extensions.extensions.iter().any(|extension| {
+                    extension.name == *extension_name && extension.source_kind == "managed"
+                }) {
+                    diagnostics.push(format!(
+                        "Managed extension {} does not exist.",
+                        extension_name
+                    ));
+                }
+            }
+            BuilderConfigOperation::ApproveWorkspaceExtension { extension_name } => {
+                validate_extension_name(extension_name)?;
+                let extensions =
+                    project_extension_api::list_project_extensions(&self.state, project_id).await?;
+                if !extensions.extensions.iter().any(|extension| {
+                    extension.name == *extension_name && extension.status == "approval_required"
+                }) {
+                    diagnostics.push(format!(
+                        "Workspace extension {} is not awaiting approval.",
+                        extension_name
+                    ));
+                }
+            }
+            BuilderConfigOperation::CreateAgent { agent_id, .. }
+            | BuilderConfigOperation::UpdateAgent { agent_id, .. } => {
+                diagnostics.push(format!(
+                    "Agent authoring for {} is not supported yet. This remains blocked on the separate agent-and-task authoring substrate.",
+                    agent_id
+                ));
+            }
+        }
+
+        let kind = operation.kind().to_string();
+        let summary = operation.summary();
+        Ok(BuilderReviewedOperation {
+            kind,
+            summary,
+            ready: diagnostics.is_empty(),
+            diagnostics,
+            operation,
+        })
+    }
+
+    async fn apply_operation(
+        &self,
+        project_id: Uuid,
+        operation: BuilderConfigOperation,
+        session_id: Option<Uuid>,
+        source: &str,
+        request_text: Option<&str>,
+    ) -> Result<BuilderAppliedOperation, GatewayError> {
+        match operation {
+            BuilderConfigOperation::CreateLens {
+                id,
+                title,
+                summary,
+                default_surface,
+                ui_modules,
+                prominent_team_ids,
+            } => {
+                let saved = self
+                    .create_lens(
+                        CreateLensRequest {
+                            id,
+                            title,
+                            summary,
+                            default_surface,
+                            ui_modules,
+                            prominent_team_ids,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "lens", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "create_lens".into(),
+                    summary: format!("Created lens {}.", saved.title),
+                    entity_kind: "lens".into(),
+                    entity_id: saved.id.to_string(),
+                })
+            }
+            BuilderConfigOperation::UpdateLens {
+                lens_id,
+                title,
+                summary,
+                default_surface,
+                ui_modules,
+                prominent_team_ids,
+            } => {
+                let saved = self
+                    .update_lens(
+                        &lens_id,
+                        UpdateLensRequest {
+                            title,
+                            summary,
+                            default_surface,
+                            ui_modules,
+                            prominent_team_ids,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "lens", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "update_lens".into(),
+                    summary: format!("Updated lens {}.", saved.title),
+                    entity_kind: "lens".into(),
+                    entity_id: saved.id.to_string(),
+                })
+            }
+            BuilderConfigOperation::InstallLensPreset { preset_id } => {
+                let saved = self
+                    .install_lens_preset(InstallLensRequest { preset_id }, session_id, source)
+                    .await?;
+                self.record_request_text(request_text, "lens", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "install_lens_preset".into(),
+                    summary: format!("Installed preset lens {}.", saved.title),
+                    entity_kind: "lens".into(),
+                    entity_id: saved.id.to_string(),
+                })
+            }
+            BuilderConfigOperation::CreateTeam {
+                name,
+                description,
+                entry_agent_id,
+                members,
+            } => {
+                let saved = self
+                    .create_team(
+                        project_id,
+                        CreateTeamRequest {
+                            name,
+                            description,
+                            entry_agent_id,
+                            members,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "create_team".into(),
+                    summary: format!("Created team {}.", saved.name),
+                    entity_kind: "team".into(),
+                    entity_id: saved.id.to_string(),
+                })
+            }
+            BuilderConfigOperation::UpdateTeam {
+                team_id,
+                team_name,
+                name,
+                description,
+                entry_agent_id,
+                members,
+            } => {
+                let team = self
+                    .resolve_team(project_id, team_id, team_name.as_deref())
+                    .await?
+                    .ok_or_else(|| {
+                        GatewayError::ValidationError(
+                            "The referenced team does not exist in this project.".into(),
+                        )
+                    })?;
+                let saved = self
+                    .update_team(
+                        team.id,
+                        UpdateTeamRequest {
+                            name,
+                            description,
+                            entry_agent_id,
+                            members,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(request_text, "team", saved.id.to_string(), session_id)
+                    .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "update_team".into(),
+                    summary: format!("Updated team {}.", saved.name),
+                    entity_kind: "team".into(),
+                    entity_id: saved.id.to_string(),
+                })
+            }
+            BuilderConfigOperation::CreateProjectExtension {
+                name,
+                display_name,
+                description,
+                requested_tools,
+                instructions,
+            } => {
+                let saved = self
+                    .create_project_extension(
+                        project_id,
+                        CreateProjectExtensionRequest {
+                            name,
+                            display_name,
+                            description,
+                            requested_tools,
+                            instructions,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(
+                    request_text,
+                    "project_extension",
+                    saved.name.clone(),
+                    session_id,
+                )
+                .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "create_project_extension".into(),
+                    summary: format!("Created extension {}.", saved.name),
+                    entity_kind: "project_extension".into(),
+                    entity_id: saved.name,
+                })
+            }
+            BuilderConfigOperation::UpdateProjectExtension {
+                extension_name,
+                display_name,
+                description,
+                requested_tools,
+                instructions,
+            } => {
+                let saved = self
+                    .update_project_extension(
+                        project_id,
+                        &extension_name,
+                        UpdateProjectExtensionRequest {
+                            display_name,
+                            description,
+                            requested_tools,
+                            instructions,
+                        },
+                        session_id,
+                        source,
+                    )
+                    .await?;
+                self.record_request_text(
+                    request_text,
+                    "project_extension",
+                    saved.name.clone(),
+                    session_id,
+                )
+                .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "update_project_extension".into(),
+                    summary: format!("Updated extension {}.", saved.name),
+                    entity_kind: "project_extension".into(),
+                    entity_id: saved.name,
+                })
+            }
+            BuilderConfigOperation::ApproveWorkspaceExtension { extension_name } => {
+                let saved = self
+                    .approve_workspace_extension(project_id, &extension_name, session_id, source)
+                    .await?;
+                self.record_request_text(
+                    request_text,
+                    "project_extension",
+                    saved.name.clone(),
+                    session_id,
+                )
+                .await?;
+                Ok(BuilderAppliedOperation {
+                    kind: "approve_workspace_extension".into(),
+                    summary: format!("Approved workspace extension {}.", saved.name),
+                    entity_kind: "project_extension".into(),
+                    entity_id: saved.name,
+                })
+            }
+            BuilderConfigOperation::CreateAgent { agent_id, .. }
+            | BuilderConfigOperation::UpdateAgent { agent_id, .. } => {
+                Err(GatewayError::ValidationError(format!(
+                    "Agent authoring for {} is not supported yet.",
+                    agent_id
+                )))
+            }
+        }
+    }
+
+    async fn resolve_team(
+        &self,
+        project_id: Uuid,
+        team_id: Option<Uuid>,
+        team_name: Option<&str>,
+    ) -> Result<Option<swage_storage::Team>, GatewayError> {
+        if let Some(team_id) = team_id {
+            let team = self.state.storage.get_team(team_id).await?;
+            return Ok(team.filter(|team| team.project_id == project_id));
+        }
+
+        if let Some(team_name) = team_name {
+            return Ok(self
+                .state
+                .storage
+                .get_team_by_name(project_id, team_name)
+                .await?);
+        }
+
+        Ok(None)
+    }
+
+    async fn record_audit(
+        &self,
+        entity_kind: &str,
+        entity_id: String,
+        operation_kind: &str,
+        source: &str,
+        session_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+    ) -> Result<(), GatewayError> {
+        self.state
+            .storage
+            .create_audit_event(NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id,
+                entity_kind: entity_kind.to_string(),
+                entity_id,
+                event_kind: "builder_config_mutation".into(),
+                summary: format!("{operation_kind} via {source}"),
+                metadata: json!({
+                    "service": BUILDER_CONFIG_SERVICE_NAME,
+                    "operation_kind": operation_kind,
+                    "source": source,
+                    "project_id": project_id,
+                }),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn record_request_text(
+        &self,
+        request_text: Option<&str>,
+        entity_kind: &str,
+        entity_id: String,
+        session_id: Option<Uuid>,
+    ) -> Result<(), GatewayError> {
+        let Some(request_text) = request_text else {
+            return Ok(());
+        };
+        if request_text.trim().is_empty() {
+            return Ok(());
+        }
+        self.state
+            .storage
+            .create_audit_event(NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id,
+                entity_kind: entity_kind.to_string(),
+                entity_id,
+                event_kind: "builder_request_text".into(),
+                summary: "conversational builder request".into(),
+                metadata: json!({
+                    "service": BUILDER_CONFIG_SERVICE_NAME,
+                    "request_text": request_text,
+                }),
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+impl BuilderConfigOperation {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::CreateLens { .. } => "create_lens",
+            Self::UpdateLens { .. } => "update_lens",
+            Self::InstallLensPreset { .. } => "install_lens_preset",
+            Self::CreateTeam { .. } => "create_team",
+            Self::UpdateTeam { .. } => "update_team",
+            Self::CreateProjectExtension { .. } => "create_project_extension",
+            Self::UpdateProjectExtension { .. } => "update_project_extension",
+            Self::ApproveWorkspaceExtension { .. } => "approve_workspace_extension",
+            Self::CreateAgent { .. } => "create_agent",
+            Self::UpdateAgent { .. } => "update_agent",
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            Self::CreateLens { title, id, .. } => format!("Create lens {title} ({id})."),
+            Self::UpdateLens { lens_id, .. } => format!("Update lens {lens_id}."),
+            Self::InstallLensPreset { preset_id } => {
+                format!("Install lens preset {preset_id}.")
+            }
+            Self::CreateTeam { name, .. } => format!("Create team {name}."),
+            Self::UpdateTeam {
+                team_id, team_name, ..
+            } => format!(
+                "Update team {}.",
+                team_name
+                    .clone()
+                    .unwrap_or_else(|| team_id.map(|value| value.to_string()).unwrap_or_default())
+            ),
+            Self::CreateProjectExtension { name, .. } => {
+                format!("Create project extension {name}.")
+            }
+            Self::UpdateProjectExtension { extension_name, .. } => {
+                format!("Update project extension {extension_name}.")
+            }
+            Self::ApproveWorkspaceExtension { extension_name } => {
+                format!("Approve workspace extension {extension_name}.")
+            }
+            Self::CreateAgent { agent_id, .. } => format!("Create agent {agent_id}."),
+            Self::UpdateAgent { agent_id, .. } => format!("Update agent {agent_id}."),
+        }
+    }
+}
+
+fn parse_builder_output(content: &str) -> Result<BuilderPlannerOutput, GatewayError> {
+    let trimmed = content.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim();
+    let trimmed = trimmed.strip_suffix("```").unwrap_or(trimmed).trim();
+    serde_json::from_str(trimmed).map_err(|error| {
+        GatewayError::ValidationError(format!("builder proposal was not valid JSON: {error}"))
+    })
+}

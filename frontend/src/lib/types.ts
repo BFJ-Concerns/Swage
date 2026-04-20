@@ -196,6 +196,99 @@ export interface UpdateProjectExtensionRequest {
   instructions: string;
 }
 
+export type BuilderConfigOperation =
+  | {
+      kind: "create_lens";
+      id: string;
+      title: string;
+      summary: string;
+      default_surface: LensSurface;
+      ui_modules: string[];
+      prominent_team_ids: string[];
+    }
+  | {
+      kind: "update_lens";
+      lens_id: string;
+      title: string;
+      summary: string;
+      default_surface: LensSurface;
+      ui_modules: string[];
+      prominent_team_ids: string[];
+    }
+  | {
+      kind: "install_lens_preset";
+      preset_id: string;
+    }
+  | {
+      kind: "create_team";
+      name: string;
+      description: string;
+      entry_agent_id: string;
+      members: string[];
+    }
+  | {
+      kind: "update_team";
+      team_id?: string;
+      team_name?: string;
+      name?: string;
+      description?: string;
+      entry_agent_id?: string;
+      members?: string[];
+    }
+  | {
+      kind: "create_project_extension";
+      name: string;
+      display_name?: string | null;
+      description: string;
+      requested_tools: string[];
+      instructions: string;
+    }
+  | {
+      kind: "update_project_extension";
+      extension_name: string;
+      display_name?: string | null;
+      description: string;
+      requested_tools: string[];
+      instructions: string;
+    }
+  | {
+      kind: "approve_workspace_extension";
+      extension_name: string;
+    }
+  | {
+      kind: "create_agent" | "update_agent";
+      agent_id: string;
+      team_name?: string | null;
+      instructions?: string | null;
+    };
+
+export interface BuilderReviewedOperation {
+  kind: string;
+  summary: string;
+  ready: boolean;
+  diagnostics: string[];
+  operation: BuilderConfigOperation;
+}
+
+export interface BuilderProposalResponse {
+  summary: string;
+  operations: BuilderReviewedOperation[];
+  diagnostics: string[];
+  can_apply: boolean;
+}
+
+export interface BuilderApplyResponse {
+  success: boolean;
+  summary: string;
+  diagnostics: string[];
+  applied: Array<{
+    kind: string;
+    summary: string;
+    entity_kind: string;
+    entity_id: string;
+  }>;
+}
+
 // -------------------------------------------------------------------------
 // Shared reference object types
 // -------------------------------------------------------------------------

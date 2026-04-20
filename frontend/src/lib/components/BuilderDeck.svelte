@@ -1,5 +1,7 @@
 <script lang="ts">
   import {
+    applyBuilderProposal,
+    createBuilderProposal,
     approveWorkspaceExtension,
     createProjectExtension,
     createTeam,
@@ -14,6 +16,7 @@
   import type { ProjectStore } from "../stores/projects";
   import type {
     AppLens,
+    BuilderProposalResponse,
     LensDescriptor,
     LensSurface,
     ProjectExtensionSummary,
@@ -76,6 +79,14 @@
 
   let lastLoadedProjectId = "";
   let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
+  let builderPrompt = $state(
+    "Create a review workspace with an operator-first lens, a delivery team, and a project brief extension.",
+  );
+  let builderProposal = $state<BuilderProposalResponse | null>(null);
+  let builderRuntimeError = $state<string | null>(null);
+  let builderRuntimeNotice = $state<string | null>(null);
+  let isGeneratingProposal = $state(false);
+  let isApplyingProposal = $state(false);
 
   const currentProject = $derived(projectStore?.currentProject ?? null);
   const managedExtensions = $derived(
@@ -303,6 +314,57 @@
     if (!currentProject) return;
     await refreshBuilderData(currentProject.id);
   }
+
+  async function requestBuilderProposal(): Promise<void> {
+    if (!currentProject) return;
+    builderRuntimeError = null;
+    builderRuntimeNotice = null;
+    isGeneratingProposal = true;
+
+    try {
+      builderProposal = await createBuilderProposal(currentProject.id, builderPrompt);
+      builderRuntimeNotice = builderProposal.can_apply
+        ? "Reviewed proposal ready."
+        : "Proposal returned diagnostics that need attention before apply.";
+    } catch (error) {
+      builderRuntimeError =
+        error instanceof Error ? error.message : "Failed to generate builder proposal.";
+    } finally {
+      isGeneratingProposal = false;
+    }
+  }
+
+  async function applyCurrentProposal(): Promise<void> {
+    if (!currentProject || !builderProposal) return;
+    builderRuntimeError = null;
+    builderRuntimeNotice = null;
+    isApplyingProposal = true;
+
+    try {
+      const response = await applyBuilderProposal(
+        currentProject.id,
+        builderProposal.operations.map((operation) => operation.operation),
+        builderPrompt,
+      );
+
+      if (!response.body.success) {
+        builderRuntimeError =
+          response.body.diagnostics.join(" ") || "Builder apply failed review.";
+        return;
+      }
+
+      builderRuntimeNotice = response.body.summary;
+      await Promise.all([
+        refreshBuilderData(currentProject.id),
+        onRefreshLenses(),
+      ]);
+    } catch (error) {
+      builderRuntimeError =
+        error instanceof Error ? error.message : "Failed to apply builder proposal.";
+    } finally {
+      isApplyingProposal = false;
+    }
+  }
 </script>
 
 <section class="builder-deck">
@@ -350,6 +412,78 @@
     </section>
   {:else}
     <section class="builder-grid">
+      <article class="builder-card conversational-card">
+        <div class="card-heading">
+          <div>
+            <p class="section-kicker">Conversation</p>
+            <h2>Conversational builder runtime</h2>
+          </div>
+          <span class="chip">{builderProposal?.operations.length ?? 0} change(s)</span>
+        </div>
+        <p class="section-copy">
+          Describe the workspace you want in natural language. The builder
+          runtime turns that request into a reviewed change set, then applies it
+          through the same durable config path the visual editors use.
+        </p>
+        {#if builderRuntimeError}
+          <p class="feedback error">{builderRuntimeError}</p>
+        {/if}
+        {#if builderRuntimeNotice}
+          <p class="feedback success">{builderRuntimeNotice}</p>
+        {/if}
+        <label>
+          <span>Workspace request</span>
+          <textarea bind:value={builderPrompt} rows="5"></textarea>
+        </label>
+        <div class="inline-actions">
+          <button class="primary" onclick={requestBuilderProposal} disabled={isGeneratingProposal}>
+            {isGeneratingProposal ? "Reviewing request…" : "Propose changes"}
+          </button>
+          <button
+            onclick={applyCurrentProposal}
+            disabled={!builderProposal || !builderProposal.can_apply || isApplyingProposal}
+          >
+            {isApplyingProposal ? "Applying…" : "Apply reviewed changes"}
+          </button>
+        </div>
+
+        {#if builderProposal}
+          <div class="proposal-stack">
+            <div class="proposal-summary">
+              <strong>{builderProposal.summary}</strong>
+              {#if builderProposal.diagnostics.length}
+                <ul class="diagnostic-list">
+                  {#each builderProposal.diagnostics as diagnostic}
+                    <li>{diagnostic}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="item-list">
+              {#each builderProposal.operations as reviewed}
+                <div class="list-item candidate reviewed-operation" class:blocked={!reviewed.ready}>
+                  <div>
+                    <strong>{reviewed.summary}</strong>
+                    <span>{reviewed.kind}</span>
+                    {#if reviewed.diagnostics.length}
+                      <ul class="diagnostic-list compact">
+                        {#each reviewed.diagnostics as diagnostic}
+                          <li>{diagnostic}</li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                  <span class:chip={true} class:subtle={!reviewed.ready}>
+                    {reviewed.ready ? "Ready" : "Blocked"}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </article>
+
       <article class="builder-card">
         <div class="card-heading">
           <div>
@@ -722,6 +856,12 @@
     gap: 12px;
   }
 
+  .conversational-card {
+    background:
+      radial-gradient(circle at top right, rgba(180, 83, 9, 0.12), transparent 28%),
+      linear-gradient(180deg, rgba(255, 250, 240, 0.98), rgba(248, 242, 232, 0.95));
+  }
+
   .extension-card {
     grid-column: 1 / -1;
   }
@@ -824,6 +964,19 @@
     gap: 10px;
   }
 
+  .proposal-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .proposal-summary {
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(120, 53, 15, 0.05);
+    border: 1px solid rgba(120, 53, 15, 0.12);
+  }
+
   .list-item {
     align-items: start;
     text-align: left;
@@ -835,6 +988,23 @@
     justify-content: space-between;
     align-items: center;
     gap: 16px;
+  }
+
+  .reviewed-operation.blocked {
+    border-color: rgba(153, 27, 27, 0.16);
+    background: rgba(254, 242, 242, 0.9);
+  }
+
+  .diagnostic-list {
+    margin: 10px 0 0;
+    padding-left: 18px;
+    color: #7c2d12;
+    font-size: 0.88rem;
+  }
+
+  .diagnostic-list.compact {
+    margin-top: 6px;
+    font-size: 0.82rem;
   }
 
   .approve-btn {

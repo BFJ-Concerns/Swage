@@ -339,7 +339,7 @@ fn render_skill_markdown(
     rendered
 }
 
-fn validate_extension_name(name: &str) -> Result<String, GatewayError> {
+pub(crate) fn validate_extension_name(name: &str) -> Result<String, GatewayError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(GatewayError::ValidationError(
@@ -357,7 +357,7 @@ fn validate_extension_name(name: &str) -> Result<String, GatewayError> {
     Ok(trimmed.to_string())
 }
 
-fn validate_extension_body(
+pub(crate) fn validate_extension_body(
     description: &str,
     requested_tools: &[String],
     instructions: &str,

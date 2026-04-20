@@ -22,6 +22,10 @@ use crate::{
     audit::{
         OperatorSearchQuery, OperatorSearchResponse, OperatorUsageQuery, OperatorUsageResponse,
     },
+    builder_runtime::{
+        BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
+        BuilderProposalRequest, BuilderProposalResponse,
+    },
     capabilities::WorkflowCapabilitiesResponse,
     channel_gateway::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
@@ -206,9 +210,10 @@ pub async fn create_lens(
     State(state): State<AppState>,
     Json(request): Json<CreateLensRequest>,
 ) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
+    let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
-        Json(crate::lens::create_lens(&state, request).await?),
+        Json(service.create_lens(request, None, "visual_builder").await?),
     ))
 }
 
@@ -218,7 +223,12 @@ pub async fn update_lens(
     Path(id): Path<String>,
     Json(request): Json<UpdateLensRequest>,
 ) -> Result<Json<LensDescriptor>, ApiError> {
-    Ok(Json(crate::lens::update_lens(&state, &id, request).await?))
+    let service = BuilderConfigurationService::new(state.clone());
+    Ok(Json(
+        service
+            .update_lens(&id, request, None, "visual_builder")
+            .await?,
+    ))
 }
 
 /// `POST /api/lenses/install` — install a premade lens into durable storage.
@@ -226,9 +236,14 @@ pub async fn install_lens(
     State(state): State<AppState>,
     Json(request): Json<InstallLensRequest>,
 ) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
+    let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
-        Json(crate::lens::install_lens(&state, request).await?),
+        Json(
+            service
+                .install_lens_preset(request, None, "visual_builder")
+                .await?,
+        ),
     ))
 }
 
@@ -960,8 +975,10 @@ pub async fn create_team(
     Path(project_id): Path<Uuid>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = TeamService::new(state.storage, state.project_store);
-    let resp = svc.create_team(project_id, req).await?;
+    let svc = BuilderConfigurationService::new(state.clone());
+    let resp = svc
+        .create_team(project_id, req, None, "visual_builder")
+        .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -991,10 +1008,13 @@ pub async fn create_project_extension(
     Path(project_id): Path<Uuid>,
     Json(request): Json<CreateProjectExtensionRequest>,
 ) -> Result<(StatusCode, Json<ProjectExtensionResponse>), ApiError> {
+    let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
         Json(
-            crate::project_extension::create_project_extension(&state, project_id, request).await?,
+            service
+                .create_project_extension(project_id, request, None, "visual_builder")
+                .await?,
         ),
     ))
 }
@@ -1005,8 +1025,10 @@ pub async fn update_project_extension(
     Path((project_id, name)): Path<(Uuid, String)>,
     Json(request): Json<UpdateProjectExtensionRequest>,
 ) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
-        crate::project_extension::update_project_extension(&state, project_id, &name, request)
+        service
+            .update_project_extension(project_id, &name, request, None, "visual_builder")
             .await?,
     ))
 }
@@ -1016,8 +1038,11 @@ pub async fn approve_workspace_extension(
     State(state): State<AppState>,
     Path((project_id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
-        crate::project_extension::approve_workspace_extension(&state, project_id, &name).await?,
+        service
+            .approve_workspace_extension(project_id, &name, None, "visual_builder")
+            .await?,
     ))
 }
 
@@ -1037,9 +1062,35 @@ pub async fn update_team(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTeamRequest>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.project_store);
-    let resp = svc.update_team(id, req).await?;
+    let svc = BuilderConfigurationService::new(state.clone());
+    let resp = svc.update_team(id, req, None, "visual_builder").await?;
     Ok(Json(resp))
+}
+
+/// `POST /api/projects/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
+pub async fn create_builder_proposal(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(request): Json<BuilderProposalRequest>,
+) -> Result<Json<BuilderProposalResponse>, ApiError> {
+    let service = BuilderConfigurationService::new(state);
+    Ok(Json(service.propose_changes(project_id, request).await?))
+}
+
+/// `POST /api/projects/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
+pub async fn apply_builder_proposal(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    Json(request): Json<BuilderApplyRequest>,
+) -> Result<(StatusCode, Json<BuilderApplyResponse>), ApiError> {
+    let service = BuilderConfigurationService::new(state);
+    let response = service.apply_operations(project_id, request).await?;
+    let status = if response.success {
+        StatusCode::OK
+    } else {
+        StatusCode::UNPROCESSABLE_ENTITY
+    };
+    Ok((status, Json(response)))
 }
 
 /// `DELETE /api/teams/:id` — delete a team.
