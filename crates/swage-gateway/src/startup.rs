@@ -373,10 +373,10 @@ fn build_tool_dispatcher(
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, shell::ShellTool, url_fetch::UrlFetchTool,
-        web_search::WebSearchTool, workspace::resolve_workspace_root,
+        Tool, agent_memory::AgentMemoryTool, file_list::FileListTool, file_read::FileReadTool,
+        file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool, shell::ShellTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool, workspace::resolve_workspace_root,
     };
     use std::time::Duration;
 
@@ -411,6 +411,7 @@ fn build_tool_dispatcher(
         Arc::new(swage_tool::delegate::DelegateTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
+        Arc::new(AgentMemoryTool),
     ];
 
     let plugin_tools = resolve_plugin_directory(config)

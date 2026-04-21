@@ -12,6 +12,7 @@ use crate::tool::Tool;
 /// These names are reserved for Swage's built-in tool implementations.
 /// Attempting to register a custom tool under any of these names returns an error.
 const PROTECTED_NAMES: &[&str] = &[
+    "agent_memory",
     "shell",
     "file_read",
     "file_write",

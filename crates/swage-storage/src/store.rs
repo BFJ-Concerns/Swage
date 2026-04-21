@@ -4,19 +4,20 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest, ApprovalState,
-    Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink, ConfigurationVersion,
-    ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, Heartbeat,
-    HeartbeatRun, HeartbeatRunState, InboundAudit, LensPreference, LensRecord, Material, Message,
-    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
-    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation,
-    NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial,
-    NewMessage, NewNodeExecution, NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun,
-    NewSecretRecord, NewSession, NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall,
-    NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob,
-    ScheduledRun, ScheduledRunState, SecretRecord, Session, SharedReferenceEvent,
-    SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink,
+    ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
+    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit,
+    LensPreference, LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink,
+    NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
+    NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
+    NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
+    ScheduledRunState, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Team,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+    TurnState, UpdateHeartbeat, UpdateScheduledJob,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +141,23 @@ pub trait AuditStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<AuditEvent>, StorageError>;
+}
+
+#[async_trait]
+pub trait AgentMemoryStore: Send + Sync {
+    async fn create_agent_memory(
+        &self,
+        record: NewAgentMemoryRecord,
+    ) -> Result<AgentMemoryRecord, StorageError>;
+    async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError>;
+    async fn list_agent_memories(
+        &self,
+        project_id: Uuid,
+        agent_id: Option<&str>,
+        session_id: Option<Uuid>,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AgentMemoryRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -817,6 +835,7 @@ pub trait Storage:
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
+    + AgentMemoryStore
     + ConfigurationVersionStore
     + SecretStore
     + ThreadStore
@@ -848,6 +867,7 @@ impl<T> Storage for T where
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
+        + AgentMemoryStore
         + ConfigurationVersionStore
         + SecretStore
         + ThreadStore
@@ -1060,6 +1080,34 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<AuditEvent>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AgentMemoryStore for StubStorage {
+        async fn create_agent_memory(
+            &self,
+            _: NewAgentMemoryRecord,
+        ) -> Result<AgentMemoryRecord, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_agent_memory(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<AgentMemoryRecord>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_agent_memories(
+            &self,
+            _: Uuid,
+            _: Option<&str>,
+            _: Option<Uuid>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<AgentMemoryRecord>, StorageError> {
             unimplemented!()
         }
     }
@@ -1974,6 +2022,33 @@ mod tests {
             });
             let _ = t.list_audit_events();
             let _ = t.list_audit_events_by_session(Uuid::new_v4());
+        }
+        let stub = StubStorage;
+        _assert(&stub);
+    }
+
+    #[test]
+    fn agent_memory_store_compile_check() {
+        fn _assert<T: AgentMemoryStore>(t: &T) {
+            let id = Uuid::new_v4();
+            let _ = t.create_agent_memory(NewAgentMemoryRecord {
+                id,
+                project_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                turn_id: Uuid::new_v4(),
+                topology_run_id: None,
+                node_execution_id: None,
+                agent_id: "agent-a".into(),
+                memory_kind: "insight".into(),
+                title: "Remember this".into(),
+                content: "content".into(),
+                tags: vec!["tag".into()],
+                outcome_status: Some("succeeded".into()),
+                source_summary: "turn completed".into(),
+                metadata: serde_json::json!({}),
+            });
+            let _ = t.get_agent_memory(id);
+            let _ = t.list_agent_memories(Uuid::new_v4(), Some("agent-a"), None, Some("tag"), 10);
         }
         let stub = StubStorage;
         _assert(&stub);

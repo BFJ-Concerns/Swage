@@ -357,6 +357,46 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// A durable agent-authored memory record tied to concrete run provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMemoryRecord {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub session_id: Uuid,
+    pub turn_id: Uuid,
+    pub topology_run_id: Option<Uuid>,
+    pub node_execution_id: Option<Uuid>,
+    pub agent_id: String,
+    pub memory_kind: String,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub outcome_status: Option<String>,
+    pub source_summary: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating a durable agent-memory record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAgentMemoryRecord {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub session_id: Uuid,
+    pub turn_id: Uuid,
+    pub topology_run_id: Option<Uuid>,
+    pub node_execution_id: Option<Uuid>,
+    pub agent_id: String,
+    pub memory_kind: String,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub outcome_status: Option<String>,
+    pub source_summary: String,
+    pub metadata: serde_json::Value,
+}
+
 /// Durable version record for builder-managed configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationVersion {

@@ -270,6 +270,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/secrets/:id/revoke", post(handlers::revoke_secret))
         .route("/api/secrets/:id/restore", post(handlers::restore_secret))
         .route("/api/secrets/:id/validate", post(handlers::validate_secret))
+        .route(
+            "/api/operator/memories",
+            get(handlers::list_operator_memories),
+        )
+        .route(
+            "/api/operator/memories/:id",
+            get(handlers::get_operator_memory),
+        )
         .route("/api/operator/runs", get(handlers::list_operator_runs))
         .route(
             "/api/operator/runs/:kind/:id",

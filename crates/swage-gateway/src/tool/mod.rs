@@ -4,6 +4,7 @@
 //! re-exports them so the rest of the gateway can import from `crate::tool`
 //! without updating every import site.
 
+pub mod agent_memory;
 pub mod file_list;
 pub mod file_read;
 pub mod file_search;

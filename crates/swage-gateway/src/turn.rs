@@ -239,6 +239,7 @@ pub(crate) async fn build_gateway_dispatcher(
         ws_tx,
         execution_host,
         state.secret_manager.clone(),
+        state.storage.clone(),
     )))
 }
 
@@ -1488,6 +1489,7 @@ pub(crate) mod tests {
         pub(crate) snapshots: HashMap<Uuid, (String, chrono::DateTime<chrono::Utc>)>,
         pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
         pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
+        pub(crate) agent_memories: Vec<swage_storage::AgentMemoryRecord>,
         pub(crate) configuration_versions: Vec<swage_storage::ConfigurationVersion>,
         pub(crate) shared_reference_events: Vec<swage_storage::SharedReferenceEvent>,
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
@@ -3904,6 +3906,85 @@ pub(crate) mod tests {
                 .filter(|event| event.session_id == Some(session_id))
                 .cloned()
                 .collect())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::AgentMemoryStore for MockStorage {
+        async fn create_agent_memory(
+            &self,
+            record: swage_storage::NewAgentMemoryRecord,
+        ) -> Result<swage_storage::AgentMemoryRecord, StorageError> {
+            let record = swage_storage::AgentMemoryRecord {
+                id: record.id,
+                project_id: record.project_id,
+                session_id: record.session_id,
+                turn_id: record.turn_id,
+                topology_run_id: record.topology_run_id,
+                node_execution_id: record.node_execution_id,
+                agent_id: record.agent_id,
+                memory_kind: record.memory_kind,
+                title: record.title,
+                content: record.content,
+                tags: record.tags,
+                outcome_status: record.outcome_status,
+                source_summary: record.source_summary,
+                metadata: record.metadata,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            self.db.lock().await.agent_memories.push(record.clone());
+            Ok(record)
+        }
+
+        async fn get_agent_memory(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<swage_storage::AgentMemoryRecord>, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .agent_memories
+                .iter()
+                .find(|record| record.id == id)
+                .cloned())
+        }
+
+        async fn list_agent_memories(
+            &self,
+            project_id: Uuid,
+            agent_id: Option<&str>,
+            session_id: Option<Uuid>,
+            query: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<swage_storage::AgentMemoryRecord>, StorageError> {
+            let query = query.map(|value| value.to_lowercase());
+            let mut records = self
+                .db
+                .lock()
+                .await
+                .agent_memories
+                .iter()
+                .filter(|record| record.project_id == project_id)
+                .filter(|record| agent_id.is_none_or(|id| record.agent_id == id))
+                .filter(|record| session_id.is_none_or(|id| record.session_id == id))
+                .filter(|record| {
+                    query.as_ref().is_none_or(|needle| {
+                        record.title.to_lowercase().contains(needle)
+                            || record.content.to_lowercase().contains(needle)
+                            || record.source_summary.to_lowercase().contains(needle)
+                            || record
+                                .tags
+                                .iter()
+                                .any(|tag| tag.to_lowercase().contains(needle))
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            records.truncate(limit);
+            Ok(records)
         }
     }
 

@@ -21,14 +21,14 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, HeartbeatRunState, HeartbeatStatus, NewApprovalRequest, NewHeartbeat,
-    NewNodeExecution, NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread,
-    NewTopologyRun, NewTurn, NodeExecutionState, ScheduledJobKind, ScheduledJobStatus,
+    ApprovalKind, HeartbeatRunState, HeartbeatStatus, NewAgentMemoryRecord, NewApprovalRequest,
+    NewHeartbeat, NewNodeExecution, NewScheduledJob, NewScheduledRun, NewSession, NewTeam,
+    NewThread, NewTopologyRun, NewTurn, NodeExecutionState, ScheduledJobKind, ScheduledJobStatus,
     ScheduledRunState, ScheduledRunTrigger, SqliteStorage, TopologyRunState, TurnState,
     model::{AppendMessage, TopologyNodeRecordKind},
     store::{
-        ApprovalStore, HeartbeatStore, MessageStore, ProjectStore, ScheduleStore, SessionStore,
-        Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
+        AgentMemoryStore, ApprovalStore, HeartbeatStore, MessageStore, ProjectStore, ScheduleStore,
+        SessionStore, Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
     },
 };
 
@@ -257,6 +257,116 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         delivery_body["results"][0]["session_id"],
         session_id.to_string()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_memory_surfaces_expose_provenance_and_searchability() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = test_state(Arc::clone(&storage));
+    let router = build_router(state);
+    let (project_id, session_id, thread_id) = seed_session(&storage).await;
+
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id,
+            agent_id: "gateway".into(),
+            state: TurnState::Completed,
+            user_input: Some("remember this".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let team = storage
+        .create_team(NewTeam {
+            project_id,
+            name: "ops".into(),
+            description: "ops".into(),
+            entry_agent_id: "gateway".into(),
+            agents: vec![swage_storage::model::TeamAgentDefinition {
+                id: "gateway".into(),
+                display_name: "Gateway".into(),
+                description: String::new(),
+                instructions: String::new(),
+                model: None,
+            }],
+            tasks: vec![],
+        })
+        .await
+        .unwrap();
+    let topology_run = storage
+        .create_topology_run(NewTopologyRun {
+            team_id: team.id,
+            session_id,
+            source_turn_id: Some(turn.id),
+            state: TopologyRunState::Completed,
+            final_output: Some(json!({"result": "done"})),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+    let node = storage
+        .create_node_execution(NewNodeExecution {
+            topology_run_id: topology_run.id,
+            node_id: "node-a".into(),
+            node_kind: TopologyNodeRecordKind::Llm,
+            agent_id: Some("gateway".into()),
+            task_name: Some("research".into()),
+            state: NodeExecutionState::Completed,
+            input_json: None,
+            output_json: Some(json!({"summary": "done"})),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+    let memory = storage
+        .create_agent_memory(NewAgentMemoryRecord {
+            id: Uuid::new_v4(),
+            project_id,
+            session_id,
+            turn_id: turn.id,
+            topology_run_id: Some(topology_run.id),
+            node_execution_id: Some(node.id),
+            agent_id: "gateway".into(),
+            memory_kind: "outcome".into(),
+            title: "Preview route requirement".into(),
+            content: "The builder runtime still depends on the preview route.".into(),
+            tags: vec!["builder".into(), "preview".into()],
+            outcome_status: Some("succeeded".into()),
+            source_summary: "topology node research".into(),
+            metadata: json!({"confidence": "high"}),
+        })
+        .await
+        .unwrap();
+
+    let (list_status, list_body) = get_json(
+        &router,
+        &format!("/api/operator/memories?session_id={session_id}"),
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(list_body["memories"][0]["id"], memory.id.to_string());
+    assert_eq!(
+        list_body["memories"][0]["topology_run_id"],
+        topology_run.id.to_string()
+    );
+    assert_eq!(
+        list_body["memories"][0]["node_execution_id"],
+        node.id.to_string()
+    );
+
+    let (detail_status, detail_body) =
+        get_json(&router, &format!("/api/operator/memories/{}", memory.id)).await;
+    assert_eq!(detail_status, StatusCode::OK);
+    assert_eq!(detail_body["title"], "Preview route requirement");
+
+    let (search_status, search_body) = get_json(
+        &router,
+        "/api/operator/search?kind=agent_memory&q=preview%20route",
+    )
+    .await;
+    assert_eq!(search_status, StatusCode::OK);
+    assert_eq!(search_body["results"][0]["id"], memory.id.to_string());
+    assert_eq!(search_body["results"][0]["kind"], "agent_memory");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use swage_core::{SandboxError, ToolError};
 use swage_sandbox::Sandbox;
+use swage_storage::store::Storage;
 use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
@@ -26,18 +27,28 @@ use crate::websocket::ServerEvent;
 pub struct GatewayToolContext {
     base: SerializableToolContext,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    storage: Arc<dyn Storage>,
 }
 
 impl GatewayToolContext {
-    pub fn new(ctx: &dyn ToolContext, ws_tx: mpsc::UnboundedSender<ServerEvent>) -> Self {
+    pub fn new(
+        ctx: &dyn ToolContext,
+        ws_tx: mpsc::UnboundedSender<ServerEvent>,
+        storage: Arc<dyn Storage>,
+    ) -> Self {
         Self {
             base: SerializableToolContext::from_context(ctx),
             ws_tx,
+            storage,
         }
     }
 
     pub fn ws_tx(&self) -> &mpsc::UnboundedSender<ServerEvent> {
         &self.ws_tx
+    }
+
+    pub fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
     }
 }
 
@@ -141,6 +152,8 @@ pub struct GatewayExecutionStrategy {
     execution_host: Option<RegisteredExecutionHost>,
     /// Canonical secret resolution surface.
     secret_manager: Arc<SecretManager>,
+    /// Durable storage surfaced to authorised host-side tools.
+    storage: Arc<dyn Storage>,
 }
 
 impl GatewayExecutionStrategy {
@@ -149,12 +162,14 @@ impl GatewayExecutionStrategy {
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
         execution_host: Option<RegisteredExecutionHost>,
         secret_manager: Arc<SecretManager>,
+        storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
             inner,
             ws_tx,
             execution_host,
             secret_manager,
+            storage,
         }
     }
 }
@@ -173,6 +188,8 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         } else {
             resolve_secret_params(params, tool.host_secret_keys(), &self.secret_manager).await?
         };
+        let gateway_ctx =
+            GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage));
 
         if self
             .execution_host
@@ -192,20 +209,19 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         }
 
         if tool_name == "python_execute" {
-            let gateway_ctx = GatewayToolContext::new(ctx, self.ws_tx.clone());
             tool.execute(resolved_params, &gateway_ctx).await
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
             if !tool.host_secret_keys().is_empty() {
-                return tool.execute(resolved_params, ctx).await;
+                return tool.execute(resolved_params, &gateway_ctx).await;
             }
             match &self.inner {
                 Some(strategy) => {
                     strategy
-                        .execute(tool, tool_name, &resolved_params, ctx)
+                        .execute(tool, tool_name, &resolved_params, &gateway_ctx)
                         .await
                 }
-                None => tool.execute(resolved_params, ctx).await,
+                None => tool.execute(resolved_params, &gateway_ctx).await,
             }
         }
     }
@@ -531,11 +547,16 @@ mod tests {
     async fn gateway_strategy_executes_python_on_host_with_gateway_context() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let secret_manager = Arc::new(crate::secret::SecretManager::new(Arc::new(
-            SqliteStorage::in_memory().unwrap(),
-        )));
-        let executor =
-            GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
+        let storage: Arc<dyn swage_storage::store::Storage> =
+            Arc::new(SqliteStorage::in_memory().unwrap());
+        let secret_manager = Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage)));
+        let executor = GatewayExecutionStrategy::new(
+            Some(inner.clone()),
+            ws_tx,
+            None,
+            secret_manager,
+            storage,
+        );
         let tool = ObservingTool::new(json!({"via": "tool"}));
         let turn_id =
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("valid UUID");
@@ -577,11 +598,16 @@ mod tests {
     async fn gateway_strategy_keeps_non_python_tools_on_inner_strategy() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
-        let secret_manager = Arc::new(crate::secret::SecretManager::new(Arc::new(
-            SqliteStorage::in_memory().unwrap(),
-        )));
-        let executor =
-            GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
+        let storage: Arc<dyn swage_storage::store::Storage> =
+            Arc::new(SqliteStorage::in_memory().unwrap());
+        let secret_manager = Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage)));
+        let executor = GatewayExecutionStrategy::new(
+            Some(inner.clone()),
+            ws_tx,
+            None,
+            secret_manager,
+            storage,
+        );
         let tool = ObservingTool::new(json!({"via": "tool"}));
 
         let result = executor
@@ -603,8 +629,8 @@ mod tests {
             .expect("inner strategy should have been called");
         assert_eq!(last_call.0, "shell");
         assert!(
-            !last_call.1,
-            "non-python tools should keep their original tool context",
+            last_call.1,
+            "gateway tools should receive the gateway execution context",
         );
     }
 
@@ -630,8 +656,13 @@ mod tests {
             })
             .await
             .unwrap();
-        let executor =
-            GatewayExecutionStrategy::new(Some(inner.clone()), ws_tx, None, secret_manager);
+        let executor = GatewayExecutionStrategy::new(
+            Some(inner.clone()),
+            ws_tx,
+            None,
+            secret_manager,
+            storage,
+        );
 
         let result = executor
             .execute(
