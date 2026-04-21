@@ -18,6 +18,7 @@ import App from "../App.svelte";
 import * as builderApi from "../lib/api/builder";
 import * as conversationsApi from "../lib/api/conversations";
 import * as lensApi from "../lib/api/lens";
+import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
 import * as projectsApi from "../lib/api/projects";
 import type {
@@ -99,6 +100,13 @@ vi.mock("../lib/api/builder", () => ({
   createProjectExtension: vi.fn(),
   updateProjectExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
+  listSharedReferences: vi.fn(),
+}));
+
+vi.mock("../lib/api/materials", () => ({
+  listProjectMaterials: vi.fn(),
+  listSessionMaterials: vi.fn(),
+  createMaterial: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -271,6 +279,10 @@ describe("App", () => {
     vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
     vi.mocked(builderApi.listTeams).mockResolvedValue([]);
     vi.mocked(builderApi.listProjectExtensions).mockResolvedValue([]);
+    vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
+    vi.mocked(materialsApi.listProjectMaterials).mockResolvedValue([]);
+    vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
   });
 
   afterEach(() => {
@@ -461,7 +473,7 @@ describe("App", () => {
     flushSync(() => operatorButton!.click());
     await waitForText("Live control surface for the running gateway");
 
-    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
     expect(document.body.textContent).toContain(
       "Live control surface for the running gateway",
     );
@@ -489,6 +501,52 @@ describe("App", () => {
     );
     expect(document.body.textContent).toContain("Workbench");
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps materials, shared references, and operator pulse visible in the workbench rail", async () => {
+    const defaultProject = makeProject({ name: "Workbench" });
+
+    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-rail", message_preview: "Live thread" }),
+    ]);
+    vi.mocked(materialsApi.listProjectMaterials).mockResolvedValueOnce([
+      {
+        id: "mat-1",
+        scope_kind: "project",
+        session_id: null,
+        project_id: defaultProject.id,
+        source_kind: "manual",
+        source_attachment_id: null,
+        status: "active",
+        title: "Workspace brief",
+        relative_path: "shared/brief.md",
+        absolute_path: "/tmp/default/shared/brief.md",
+        mime_type: "text/markdown",
+        content_text: "brief",
+        created_at: "2026-04-07T12:00:00Z",
+        updated_at: "2026-04-07T12:01:00Z",
+        archived_at: null,
+      },
+    ]);
+    vi.mocked(materialsApi.listSessionMaterials).mockResolvedValueOnce([]);
+    vi.mocked(builderApi.listSharedReferences).mockResolvedValueOnce([
+      {
+        kind: "team_topology",
+        id: "default",
+        title: "Workspace team",
+        subtitle: "default lead",
+        updated_at: "2026-04-07T12:01:00Z",
+      },
+    ]);
+
+    component = mount(App, { target: document.body });
+    await waitForText("Capture material");
+
+    expect(document.body.textContent).toContain("Capture material");
+    expect(document.body.textContent).toContain("Workspace brief");
+    expect(document.body.textContent).toContain("Workspace team");
+    expect(document.body.textContent).toContain("Operator pulse");
   });
 
   it("persists a lens switch and changes the available primary surface", async () => {

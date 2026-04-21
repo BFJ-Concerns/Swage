@@ -34,6 +34,8 @@
     availableLenses: LensDescriptor[];
     onSelectLens: (next: AppLens) => void | Promise<void>;
     onRefreshLenses: (preferredSurface?: LensSurface) => void | Promise<void>;
+    showSharedReferences?: boolean;
+    showOperatorDeck?: boolean;
   }
 
   let {
@@ -43,6 +45,8 @@
     availableLenses,
     onSelectLens,
     onRefreshLenses,
+    showSharedReferences = true,
+    showOperatorDeck = true,
   }: Props = $props();
 
   let loadError = $state<string | null>(null);
@@ -984,28 +988,32 @@
         </div>
       </article>
 
-      <SharedReferenceStudio
-        projectId={currentProject.id}
-        onTeamTopologyUpdated={handleTeamTopologyUpdate}
-      />
+      {#if showSharedReferences}
+        <SharedReferenceStudio
+          projectId={currentProject.id}
+          onTeamTopologyUpdated={handleTeamTopologyUpdate}
+        />
+      {/if}
     </section>
 
-    <div class="operator-shell">
-      {#if operatorDashboardModule}
-        {#await operatorDashboardModule then module}
-          {@const OperatorDashboard = module.default}
-          <OperatorDashboard />
-        {:catch error}
-          <div class="operator-shell-state" role="alert">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load the operator deck."}
-          </div>
-        {/await}
-      {:else}
-        <div class="operator-shell-state">Loading operator deck…</div>
-      {/if}
-    </div>
+    {#if showOperatorDeck}
+      <div class="operator-shell">
+        {#if operatorDashboardModule}
+          {#await operatorDashboardModule then module}
+            {@const OperatorDashboard = module.default}
+            <OperatorDashboard />
+          {:catch error}
+            <div class="operator-shell-state" role="alert">
+              {error instanceof Error
+                ? error.message
+                : "Failed to load the operator deck."}
+            </div>
+          {/await}
+        {:else}
+          <div class="operator-shell-state">Loading operator deck…</div>
+        {/if}
+      </div>
+    {/if}
   {/if}
 </section>
 

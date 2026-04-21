@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Tests for the three-panel AppLayout component.
+ * Tests for the AppLayout workbench shell.
  *
- * Verifies that all child components are imported and positioned in the
- * correct panels. AppLayout threads store props to children but owns no
- * state itself — it is a pure layout shell.
+ * Verifies that the primary stage and the persistent workbench rail coexist
+ * inside one coordinated workspace frame.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
@@ -173,7 +172,7 @@ function mountResearchLayout(): MountedComponent {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("AppLayout: three-panel structure", () => {
+describe("AppLayout: workbench shell", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
@@ -215,6 +214,12 @@ describe("AppLayout: three-panel structure", () => {
     component = mountLayout();
 
     expect(document.querySelector(".conversation-area")).not.toBeNull();
+  });
+
+  it("renders a persistent workbench rail", () => {
+    component = mountLayout();
+
+    expect(document.querySelector(".workbench-rail")).not.toBeNull();
   });
 
   it("renders ProjectSelector inside the sidebar", () => {
@@ -266,6 +271,7 @@ describe("AppLayout: three-panel structure", () => {
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
+    expect(document.querySelector(".workbench-rail")).not.toBeNull();
   });
 
   it("renders lens-specific modules and prominent teams from lens data", async () => {

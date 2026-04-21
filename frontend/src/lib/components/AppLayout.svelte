@@ -1,5 +1,5 @@
 <!--
-  Three-panel layout shell: sidebar (conversation list), main area (messages), input.
+  Desktop workbench shell: sidebar, primary stage, persistent context rail.
   Pure renderer — threads store props to child components.
 -->
 <script lang="ts">
@@ -8,6 +8,7 @@
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import WorkbenchRail from "./WorkbenchRail.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { AppLens, LensDescriptor, LensSurface } from "../types";
   import type { ConversationStore } from "../stores/conversations";
@@ -58,6 +59,8 @@
   const surfaceTabs = $derived(
     (activeLensDescriptor?.ui_modules ?? ["conversation"]) as LensSurface[],
   );
+  const currentProject = $derived(projectStore?.currentProject ?? null);
+  const activeConversationId = $derived(conversationStore.activeConversation?.id ?? null);
 
   $effect(() => {
     if (activeSurface === "builder" && !builderDeckModule) {
@@ -122,56 +125,68 @@
     {/if}
     <ConversationList store={conversationStore} />
   </aside>
-  <main class="conversation-area">
-    <!--
-      ConnectionIndicator is non-intrusive — hidden when connected,
-      visible as a banner when the WebSocket is down or reconnecting.
-    -->
-    {#if activeSurface === "operator"}
-      {#if operatorDashboardModule}
-        {#await operatorDashboardModule then module}
-          {@const OperatorDashboard = module.default}
-          <OperatorDashboard />
-        {:catch error}
-          <div class="surface-state" role="alert">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load the operator surface."}
-          </div>
-        {/await}
+  <div class="workspace-shell" data-surface={activeSurface}>
+    <main class="conversation-area">
+      <!--
+        ConnectionIndicator is non-intrusive — hidden when connected,
+        visible as a banner when the WebSocket is down or reconnecting.
+      -->
+      {#if activeSurface === "operator"}
+        {#if operatorDashboardModule}
+          {#await operatorDashboardModule then module}
+            {@const OperatorDashboard = module.default}
+            <OperatorDashboard />
+          {:catch error}
+            <div class="surface-state" role="alert">
+              {error instanceof Error
+                ? error.message
+                : "Failed to load the operator surface."}
+            </div>
+          {/await}
+        {:else}
+          <div class="surface-state">Loading operator surface…</div>
+        {/if}
+      {:else if activeSurface === "builder"}
+        {#if builderDeckModule}
+          {#await builderDeckModule then module}
+            {@const BuilderDeck = module.default}
+            <BuilderDeck
+              {projectStore}
+              {desktopRuntime}
+              {activeLens}
+              {availableLenses}
+              {onSelectLens}
+              {onRefreshLenses}
+              showSharedReferences={false}
+              showOperatorDeck={false}
+            />
+          {:catch error}
+            <div class="surface-state" role="alert">
+              {error instanceof Error
+                ? error.message
+                : "Failed to load the builder surface."}
+            </div>
+          {/await}
+        {:else}
+          <div class="surface-state">Loading builder surface…</div>
+        {/if}
       {:else}
-        <div class="surface-state">Loading operator surface…</div>
+        <ConnectionIndicator store={connectionStore} {onRetry} />
+        <!-- Messages fill the available space and scroll independently. -->
+        <MessageDisplay store={conversationStore} {streamingStore} />
+        <!-- Input anchors to the bottom of the conversation area. -->
+        <MessageInput store={streamingStore} />
       {/if}
-    {:else if activeSurface === "builder"}
-      {#if builderDeckModule}
-        {#await builderDeckModule then module}
-          {@const BuilderDeck = module.default}
-          <BuilderDeck
-            {projectStore}
-            {desktopRuntime}
-            {activeLens}
-            {availableLenses}
-            {onSelectLens}
-            {onRefreshLenses}
-          />
-        {:catch error}
-          <div class="surface-state" role="alert">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load the builder surface."}
-          </div>
-        {/await}
-      {:else}
-        <div class="surface-state">Loading builder surface…</div>
-      {/if}
-    {:else}
-      <ConnectionIndicator store={connectionStore} {onRetry} />
-      <!-- Messages fill the available space and scroll independently. -->
-      <MessageDisplay store={conversationStore} {streamingStore} />
-      <!-- Input anchors to the bottom of the conversation area. -->
-      <MessageInput store={streamingStore} />
-    {/if}
-  </main>
+    </main>
+
+    <WorkbenchRail
+      projectId={currentProject?.id ?? null}
+      projectName={currentProject?.name ?? null}
+      sessionId={activeConversationId}
+      {activeSurface}
+      {desktopRuntime}
+    />
+  </div>
 </div>
 
 <style>
@@ -179,6 +194,7 @@
     display: flex;
     height: 100%;
     width: 100%;
+    min-height: 0;
   }
 
   .sidebar {
@@ -280,12 +296,24 @@
     border-color: #1f2937;
   }
 
-  .conversation-area {
+  .workspace-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
     flex: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .conversation-area {
     display: flex;
     flex-direction: column;
     /* min-width: 0 prevents flex children from overflowing at narrow widths. */
     min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at top left, rgba(251, 191, 36, 0.08), transparent 28%),
+      linear-gradient(180deg, rgba(255, 253, 248, 0.9), rgba(247, 242, 234, 0.84));
   }
 
   .surface-state {
@@ -307,6 +335,10 @@
       width: 100%;
       border-right: none;
       border-bottom: 1px solid #e0e0e0;
+    }
+
+    .workspace-shell {
+      grid-template-columns: 1fr;
     }
 
     .conversation-area {

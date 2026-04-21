@@ -219,6 +219,40 @@ export interface UpdateProjectExtensionRequest {
   instructions: string;
 }
 
+// -------------------------------------------------------------------------
+// Materials and attachments
+// -------------------------------------------------------------------------
+
+export type MaterialScopeKind = "session" | "project";
+
+export interface MaterialRecord {
+  id: string;
+  scope_kind: MaterialScopeKind;
+  session_id: string | null;
+  project_id: string | null;
+  source_kind: string;
+  source_attachment_id: string | null;
+  status: string;
+  title: string;
+  relative_path: string;
+  absolute_path: string;
+  mime_type: string;
+  content_text: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export interface CreateMaterialRequest {
+  scope_kind: MaterialScopeKind;
+  session_id?: string;
+  project_id?: string;
+  title: string;
+  relative_path: string;
+  mime_type?: string;
+  content_text: string;
+}
+
 export type BuilderConfigOperation =
   | {
       kind: "create_lens";
@@ -328,7 +362,11 @@ export interface BuilderApplyResponse {
 // Shared reference object types
 // -------------------------------------------------------------------------
 
-export type SharedReferenceKind = "team_topology" | "context_snapshot";
+export type SharedReferenceKind =
+  | "team_topology"
+  | "context_snapshot"
+  | "orchestration_flow"
+  | "context_definition";
 
 export interface SharedReferenceSummary {
   kind: SharedReferenceKind;
