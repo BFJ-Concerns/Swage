@@ -196,9 +196,6 @@ impl TopologyExecutor {
                     ))
                 })?;
 
-                // TODO Add regression test for iteration-limit cancellation
-                // This branch aborts the run when a cyclic or re-queued node exceeds its iteration_limit, but the inline tests only cover fan-out and hook failures. Add a topology execution test that drives a bounded cycle past the limit and asserts Failed state plus persisted cancellation of later work.
-                // ---
                 let visit_count = visit_counts.entry(node.id.clone()).or_default();
                 *visit_count += 1;
                 if let Some(limit) = node.iteration_limit {
@@ -258,9 +255,6 @@ impl TopologyExecutor {
                 }
             };
 
-            // TODO Add regression test for topology token budget enforcement
-            // The executor fails the run once accumulated node usage exceeds max_total_tokens, but there is no behavioural test proving the persisted run state and terminal result handling on that path. Add a multi-node execution test that crosses the budget and asserts the run is marked Failed with no successful completion payload.
-            // ---
             if let Some(max_total_tokens) = request.graph.budget.max_total_tokens {
                 let node_tokens = completed.input_tokens as u64 + completed.output_tokens as u64;
                 total_tokens_consumed =
@@ -1519,6 +1513,256 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].state, TopologyRunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn iteration_limit_failure_marks_run_failed_and_skips_later_pending_work() {
+        let provider = Arc::new(MockProvider::new(vec![swage_core::StreamChunk::Done {
+            finish_reason: Some(swage_core::FinishReason::Stop),
+        }]));
+        let (state, storage) = make_state(provider);
+        let bench = BenchStore::create(
+            storage.as_ref(),
+            NewBench {
+                name: "iteration-limit-bench".into(),
+                slug: "iteration-limit-bench".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                bench_id: bench.id,
+                name: "iteration-limit-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                agents: team_agents(&["planner"]),
+                tasks: vec![],
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "loop".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(2),
+                max_concurrency: Some(1),
+                max_total_tokens: Some(100),
+            },
+            nodes: vec![
+                TopologyNode {
+                    id: "loop".into(),
+                    kind: TopologyNodeKind::Deterministic,
+                    agent_id: None,
+                    task_name: None,
+                    handler_name: Some("identity".into()),
+                    output_schema: None,
+                    iteration_limit: Some(1),
+                },
+                TopologyNode {
+                    id: "later".into(),
+                    kind: TopologyNodeKind::Deterministic,
+                    agent_id: None,
+                    task_name: None,
+                    handler_name: Some("identity".into()),
+                    output_schema: None,
+                    iteration_limit: None,
+                },
+            ],
+            edges: vec![
+                swage_topology::TopologyEdge {
+                    id: "loop-again".into(),
+                    source_node_id: "loop".into(),
+                    target_node_id: "loop".into(),
+                    routing: EdgeRouting::Unconditional,
+                },
+                swage_topology::TopologyEdge {
+                    id: "loop-to-later".into(),
+                    source_node_id: "loop".into(),
+                    target_node_id: "later".into(),
+                    routing: EdgeRouting::Unconditional,
+                },
+            ],
+        };
+
+        let executor = TopologyExecutor::new(state.clone());
+        let error = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect_err("the second loop activation should exceed the iteration limit");
+
+        assert!(error.to_string().contains("exceeded iteration limit"));
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Failed);
+        assert!(runs[0].final_output.is_none());
+        assert!(
+            runs[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("exceeded iteration limit"))
+        );
+
+        let executions = state
+            .storage
+            .list_node_executions_by_run(runs[0].id)
+            .await
+            .unwrap();
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].node_id, "loop");
+        assert_eq!(executions[0].state, NodeExecutionState::Completed);
+        assert!(
+            executions
+                .iter()
+                .all(|execution| execution.node_id != "later"),
+            "pending work queued after the cyclic activation must not execute"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_budget_failure_marks_run_failed_without_final_output() {
+        let provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"decision\":\"review\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "{\"result\":\"approved\"}".into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+        ]));
+        let (state, storage) = make_state(provider);
+        let bench = BenchStore::create(
+            storage.as_ref(),
+            NewBench {
+                name: "token-budget-bench".into(),
+                slug: "token-budget-bench".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                bench_id: bench.id,
+                name: "token-budget-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                agents: team_agents(&["planner", "reviewer"]),
+                tasks: team_tasks(&["draft-plan", "review-plan"]),
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget {
+                max_fan_out: Some(1),
+                max_concurrency: Some(1),
+                max_total_tokens: Some(10),
+            },
+            nodes: vec![
+                TopologyNode {
+                    id: "plan".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("planner".into()),
+                    task_name: Some("draft-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "decision": {"type": "string"}
+                    }))),
+                    iteration_limit: None,
+                },
+                TopologyNode {
+                    id: "review".into(),
+                    kind: TopologyNodeKind::Llm,
+                    agent_id: Some("reviewer".into()),
+                    task_name: Some("review-plan".into()),
+                    handler_name: None,
+                    output_schema: Some(schema(serde_json::json!({
+                        "result": {"type": "string"}
+                    }))),
+                    iteration_limit: None,
+                },
+            ],
+            edges: vec![swage_topology::TopologyEdge {
+                id: "plan-to-review".into(),
+                source_node_id: "plan".into(),
+                target_node_id: "review".into(),
+                routing: EdgeRouting::Condition {
+                    field_path: "decision".into(),
+                    equals: serde_json::json!("review"),
+                },
+            }],
+        };
+
+        let executor = TopologyExecutor::new(state.clone());
+        let error = executor
+            .execute(TopologyExecutionRequest {
+                team: team.clone(),
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect_err("the second node should push the run over the token budget");
+
+        assert!(error.to_string().contains("token budget exceeded"));
+        let runs = state
+            .storage
+            .list_topology_runs_by_team(team.id)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, TopologyRunState::Failed);
+        assert!(runs[0].final_output.is_none());
+        assert!(
+            runs[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("token budget exceeded"))
+        );
+
+        let executions = state
+            .storage
+            .list_node_executions_by_run(runs[0].id)
+            .await
+            .unwrap();
+        assert_eq!(executions.len(), 2);
+        assert_eq!(
+            executions
+                .iter()
+                .map(|execution| (&execution.node_id, &execution.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (&"plan".to_string(), &NodeExecutionState::Completed),
+                (&"review".to_string(), &NodeExecutionState::Completed),
+            ]
+        );
     }
 
     #[tokio::test]
