@@ -35,6 +35,15 @@ use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerE
 // and turn submission, session-scoped WebSocket events for live approval and
 // delegation updates, and in-process routing between running agents.
 
+fn map_turn_creation_error(error: swage_core::StorageError, session_id: Uuid) -> GatewayError {
+    match error {
+        swage_core::StorageError::ConstraintViolation(_) => {
+            GatewayError::TurnInProgress { session_id }
+        }
+        other => GatewayError::Storage(other),
+    }
+}
+
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
@@ -634,7 +643,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                     user_input: Some(content.clone()),
                     parent_turn_id: None,
                 })
-                .await?
+                .await
+                .map_err(|error| map_turn_creation_error(error, session_id))?
                 .id
         }
     };
@@ -797,6 +807,17 @@ pub(crate) async fn process_turn_with_existing_turn(
                 code: "agent_construction_error".to_string(),
                 message: e.to_string(),
             });
+            if let Err(error) = state
+                .storage
+                .update_turn_state(prepared_turn_id, TurnState::Failed)
+                .await
+            {
+                tracing::warn!(
+                    turn_id = %prepared_turn_id,
+                    error = %error,
+                    "failed to mark turn failed after agent construction error"
+                );
+            }
             // Cleanup cancellation token before returning.
             let mut turns = state.active_turns.lock().await;
             turns.remove(&session_id);

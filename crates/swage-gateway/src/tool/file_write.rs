@@ -11,7 +11,7 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::validate_path;
+use crate::tool::workspace::validate_new_path;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -66,7 +66,7 @@ impl Tool for FileWriteTool {
             .to_string();
 
         // Validate the target path. The file may not exist yet.
-        let resolved = validate_path(&self.workspace_root, &path_str).map_err(|msg| {
+        let resolved = validate_new_path(&self.workspace_root, &path_str).map_err(|msg| {
             ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: msg,
@@ -179,6 +179,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("outside"), "got: {}", err);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_new_file_beneath_symlink_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        let err = tool(&dir)
+            .execute(
+                json!({ "path": "link/escape.txt", "content": "bad" }),
+                &ctx(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(!outside.path().join("escape.txt").exists());
     }
 
     #[tokio::test]

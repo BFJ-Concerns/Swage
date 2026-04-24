@@ -4,7 +4,7 @@
 //! returned as-is. Binary content types are rejected. Output is truncated
 //! to the configured byte limit.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -72,6 +72,7 @@ impl Tool for UrlFetchTool {
 
         let client = reqwest::Client::builder()
             .timeout(self.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!(
                 "Swage/",
                 env!("CARGO_PKG_VERSION"),
@@ -100,6 +101,7 @@ impl Tool for UrlFetchTool {
                 message,
             }
         })?;
+        ensure_connected_peer_is_safe(response.remote_addr(), self.name())?;
 
         let status = response.status();
         if !status.is_success() {
@@ -242,6 +244,20 @@ fn ensure_public_ip(ip: IpAddr, tool_name: &str) -> Result<(), ToolError> {
         });
     }
     Ok(())
+}
+
+fn ensure_connected_peer_is_safe(
+    remote_addr: Option<SocketAddr>,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    let Some(remote_addr) = remote_addr else {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: "Could not verify the connected peer address".to_owned(),
+        });
+    };
+
+    ensure_public_ip(remote_addr.ip(), tool_name)
 }
 
 fn is_private_or_metadata_ip(ip: IpAddr) -> bool {
@@ -401,6 +417,28 @@ mod tests {
         assert!(!is_private_or_metadata_ip(IpAddr::V4(Ipv4Addr::new(
             93, 184, 216, 34
         ))));
+    }
+
+    #[test]
+    fn connected_peer_validation_rejects_private_address() {
+        let err = ensure_connected_peer_is_safe(
+            Some(SocketAddr::from(([127, 0, 0, 1], 80))),
+            "url_fetch",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Blocked private or metadata destination")
+        );
+    }
+
+    #[test]
+    fn connected_peer_validation_rejects_missing_remote_address() {
+        let err = ensure_connected_peer_is_safe(None, "url_fetch").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Could not verify the connected peer address")
+        );
     }
 
     #[tokio::test]

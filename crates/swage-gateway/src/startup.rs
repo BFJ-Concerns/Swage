@@ -127,7 +127,13 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
 
     // Step 8: Initialise the sandbox when enabled.
-    let sandbox = build_sandbox(&config, Arc::clone(&provider)).await;
+    let sandbox = match build_sandbox(&config, Arc::clone(&provider)).await {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            eprintln!("Sandbox initialisation failed: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Step 9: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
@@ -534,13 +540,13 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
 async fn build_sandbox(
     config: &swage_config::ResolvedConfig,
     provider: Arc<dyn swage_provider::LlmProvider>,
-) -> Option<Arc<dyn swage_sandbox::Sandbox>> {
+) -> Result<Option<Arc<dyn swage_sandbox::Sandbox>>, swage_core::SandboxError> {
     use crate::tool::workspace::resolve_workspace_root;
     use swage_core::SandboxError;
     use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
 
     if !config.sandbox.enabled {
-        return None;
+        return Ok(None);
     }
 
     let workspace_root = resolve_workspace_root(config);
@@ -552,8 +558,9 @@ async fn build_sandbox(
     {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to build sandbox config: {e} — sandbox disabled");
-            return None;
+            return Err(SandboxError::SpawnFailed {
+                message: format!("failed to build sandbox config: {e}"),
+            });
         }
     };
 
@@ -570,19 +577,9 @@ async fn build_sandbox(
     match sandbox.spawn_agent().await {
         Ok(()) => {
             info!("Sandbox agent spawned — tool calls will run in an isolated process");
-            Some(Arc::new(sandbox) as Arc<dyn swage_sandbox::Sandbox>)
+            Ok(Some(Arc::new(sandbox) as Arc<dyn swage_sandbox::Sandbox>))
         }
-        Err(SandboxError::Unavailable { .. }) => {
-            warn!(
-                "Sandbox enabled but bubblewrap not available — \
-                 falling back to direct execution"
-            );
-            None
-        }
-        Err(e) => {
-            warn!("Sandbox initialisation failed: {e} — falling back to direct execution");
-            None
-        }
+        Err(e) => Err(e),
     }
 }
 

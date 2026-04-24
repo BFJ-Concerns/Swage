@@ -63,6 +63,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "033_workspace_attachments",
             CREATE_WORKSPACE_ATTACHMENT_TABLE,
         ),
+        (
+            "034_one_in_flight_turn_per_thread",
+            CREATE_ONE_IN_FLIGHT_TURN_INDEX,
+        ),
     ]
 }
 
@@ -782,6 +786,9 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_turns_thread_id ON turns(thread_id);
     CREATE INDEX IF NOT EXISTS idx_turns_agent_id  ON turns(agent_id);
     CREATE INDEX IF NOT EXISTS idx_turns_state     ON turns(state);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_in_flight_per_thread
+        ON turns(thread_id)
+        WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
 
     -- Messages: individual messages within a thread.
     CREATE TABLE IF NOT EXISTS messages (
@@ -1005,6 +1012,27 @@ const ADD_TURN_PARENT_TURN_ID: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_turns_parent_turn_id
         ON turns(parent_turn_id);
+";
+
+const CREATE_ONE_IN_FLIGHT_TURN_INDEX: &str = "
+    UPDATE turns
+    SET state = 'failed',
+        completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating')
+      AND EXISTS (
+          SELECT 1
+          FROM turns AS earlier
+          WHERE earlier.thread_id = turns.thread_id
+            AND earlier.state IN ('pending', 'processing', 'awaiting_approval', 'delegating')
+            AND (
+                earlier.created_at < turns.created_at
+                OR (earlier.created_at = turns.created_at AND earlier.id < turns.id)
+            )
+      );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_in_flight_per_thread
+        ON turns(thread_id)
+        WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
 ";
 
 /// Teams: the organisational unit for multi-agent orchestration.

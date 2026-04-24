@@ -53,16 +53,22 @@ pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, 
         return Err(format!("Path is outside the workspace: {}", requested));
     }
 
-    // If the path exists on disk, canonicalize to catch symlink escapes.
-    if normalised.exists() {
-        let canonical = normalised.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err(format!("Path is outside the workspace: {}", requested));
-        }
-        Ok(canonical)
-    } else {
-        Ok(normalised)
+    let resolved = resolve_existing_prefix(&normalised, requested)?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(format!("Path is outside the workspace: {}", requested));
     }
+
+    Ok(resolved)
+}
+
+/// Validates a not-yet-created path without allowing symlink ancestors to
+/// redirect the final write outside the workspace.
+pub fn validate_new_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, String> {
+    let resolved = validate_path(workspace_root, requested)?;
+    if resolved.file_name().is_none() {
+        return Err(format!("Path has no file name: {requested}"));
+    }
+    Ok(resolved)
 }
 
 /// Heuristic check: returns `true` if `bytes` appears to be binary content.
@@ -149,6 +155,30 @@ fn normalise_path(path: &Path) -> PathBuf {
     stack.iter().collect()
 }
 
+fn resolve_existing_prefix(path: &Path, requested: &str) -> Result<PathBuf, String> {
+    if path.exists() {
+        return path.canonicalize().map_err(|e| e.to_string());
+    }
+
+    let mut existing = path;
+    let mut missing_components = Vec::new();
+    while !existing.exists() {
+        let file_name = existing
+            .file_name()
+            .ok_or_else(|| format!("Path is outside the workspace: {}", requested))?;
+        missing_components.push(file_name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| format!("Path is outside the workspace: {}", requested))?;
+    }
+
+    let mut resolved = existing.canonicalize().map_err(|e| e.to_string())?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -191,6 +221,34 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         let result = validate_path(dir.path(), "subdir/file.txt");
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_new_path_rejects_symlink_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp_workspace();
+        let outside = tmp_workspace();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        let result = validate_new_path(dir.path(), "link/new.txt");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_rejects_missing_file_beneath_symlink_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp_workspace();
+        let outside = tmp_workspace();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        let result = validate_path(dir.path(), "link/new.txt");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside"));
     }
 
     #[test]

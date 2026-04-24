@@ -119,6 +119,19 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     (bench.id, session.id, thread.id)
 }
 
+async fn seed_thread(storage: &Arc<SqliteStorage>, session_id: Uuid) -> Uuid {
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
 async fn age_turn(storage: &Arc<SqliteStorage>, turn_id: Uuid, age: Duration) {
     let stale_time = (Utc::now() - age).to_rfc3339();
     storage
@@ -156,7 +169,12 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_bench_id, _session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, session_id, thread_id) = seed_session(&storage).await;
+    let awaiting_thread_id = seed_thread(&storage, session_id).await;
+    let delegating_thread_id = seed_thread(&storage, session_id).await;
+    let stuck_thread_id = seed_thread(&storage, session_id).await;
+    let failed_thread_id = seed_thread(&storage, session_id).await;
+    let completed_thread_id = seed_thread(&storage, session_id).await;
 
     let running_turn = storage
         .create_turn(NewTurn {
@@ -170,7 +188,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
         .unwrap();
     let awaiting_turn = storage
         .create_turn(NewTurn {
-            thread_id,
+            thread_id: awaiting_thread_id,
             agent_id: "gateway".into(),
             state: TurnState::AwaitingApproval,
             user_input: Some("approval".into()),
@@ -180,7 +198,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
         .unwrap();
     let delegating_turn = storage
         .create_turn(NewTurn {
-            thread_id,
+            thread_id: delegating_thread_id,
             agent_id: "gateway".into(),
             state: TurnState::Delegating,
             user_input: Some("delegate".into()),
@@ -190,7 +208,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
         .unwrap();
     let stuck_turn = storage
         .create_turn(NewTurn {
-            thread_id,
+            thread_id: stuck_thread_id,
             agent_id: "gateway".into(),
             state: TurnState::Processing,
             user_input: Some("stale".into()),
@@ -202,7 +220,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
 
     let failed_turn = storage
         .create_turn(NewTurn {
-            thread_id,
+            thread_id: failed_thread_id,
             agent_id: "gateway".into(),
             state: TurnState::Processing,
             user_input: Some("fail".into()),
@@ -217,7 +235,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
 
     let completed_turn = storage
         .create_turn(NewTurn {
-            thread_id,
+            thread_id: completed_thread_id,
             agent_id: "gateway".into(),
             state: TurnState::Processing,
             user_input: Some("done".into()),

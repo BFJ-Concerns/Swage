@@ -330,6 +330,11 @@ mod tests {
     // Threads are inserted via raw SQL because the ThreadStore SQLite
     // implementation lives in a separate task and may not be wired yet.
     async fn make_thread() -> (SqliteStorage, Uuid) {
+        let (storage, _session_id, thread_id) = make_session_thread().await;
+        (storage, thread_id)
+    }
+
+    async fn make_session_thread() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let bench = storage
             .create(NewBench {
@@ -361,7 +366,26 @@ mod tests {
             .await
             .unwrap();
 
-        (storage, thread_id)
+        (storage, session.id, thread_id)
+    }
+
+    async fn insert_thread(storage: &SqliteStorage, session_id: Uuid, agent_id: &str) -> Uuid {
+        let thread_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        let agent_id = agent_id.to_string();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO threads (id, session_id, agent_id, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    params![thread_id.to_string(), session_id.to_string(), agent_id, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        thread_id
     }
 
     fn new_turn(thread_id: Uuid) -> NewTurn {
@@ -401,6 +425,10 @@ mod tests {
         let (storage, thread_id) = make_thread().await;
 
         let t1 = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        storage
+            .update_turn_state(t1.id, TurnState::Completed)
+            .await
+            .unwrap();
         let t2 = storage.create_turn(new_turn(thread_id)).await.unwrap();
 
         let turns = storage.list_turns_by_thread(thread_id).await.unwrap();
@@ -444,7 +472,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn find_in_progress_by_agent_filters_by_agent_id() {
-        let (storage, thread_id) = make_thread().await;
+        let (storage, session_id, thread_id) = make_session_thread().await;
+        let agent_b_thread_id = insert_thread(&storage, session_id, "agent-b").await;
+        let completed_agent_a_thread_id = insert_thread(&storage, session_id, "agent-a").await;
+        let approval_agent_a_thread_id = insert_thread(&storage, session_id, "agent-a").await;
 
         // Create turns for two different agents.
         let t1 = storage
@@ -459,7 +490,7 @@ mod tests {
             .unwrap();
         let t2 = storage
             .create_turn(NewTurn {
-                thread_id,
+                thread_id: agent_b_thread_id,
                 agent_id: "agent-b".to_string(),
                 state: TurnState::Pending,
                 user_input: None,
@@ -476,7 +507,7 @@ mod tests {
         // Complete t3 for agent-a — must NOT appear in results.
         let t3 = storage
             .create_turn(NewTurn {
-                thread_id,
+                thread_id: completed_agent_a_thread_id,
                 agent_id: "agent-a".to_string(),
                 state: TurnState::Pending,
                 user_input: None,
@@ -492,7 +523,7 @@ mod tests {
         // t4 for agent-a in AwaitingApproval — still active, must appear.
         let t4 = storage
             .create_turn(NewTurn {
-                thread_id,
+                thread_id: approval_agent_a_thread_id,
                 agent_id: "agent-a".to_string(),
                 state: TurnState::Pending,
                 user_input: None,
@@ -544,6 +575,34 @@ mod tests {
             updated.assistant_response.as_deref(),
             Some("The assistant replied.")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_turn_rejects_second_in_flight_turn_for_thread() {
+        let (storage, thread_id) = make_thread().await;
+
+        storage.create_turn(new_turn(thread_id)).await.unwrap();
+        let result = storage.create_turn(new_turn(thread_id)).await;
+
+        assert!(
+            matches!(result, Err(StorageError::ConstraintViolation(_))),
+            "expected unique in-flight turn constraint, got: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_turn_allows_new_in_flight_after_terminal_turn() {
+        let (storage, thread_id) = make_thread().await;
+
+        let completed = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        storage
+            .update_turn_state(completed.id, TurnState::Completed)
+            .await
+            .unwrap();
+
+        let next = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        assert_eq!(next.thread_id, thread_id);
+        assert_eq!(next.state, TurnState::Pending);
     }
 
     #[tokio::test(flavor = "multi_thread")]

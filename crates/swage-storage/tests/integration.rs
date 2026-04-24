@@ -415,6 +415,16 @@ async fn turn_recovery_finds_pending_and_processing() {
     .await
     .unwrap();
 
+    let processing_thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: AGENT_A.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
     // Create one Pending turn and one Processing turn.
     let pending_turn = storage
         .create_turn(NewTurn {
@@ -429,7 +439,7 @@ async fn turn_recovery_finds_pending_and_processing() {
 
     let processing_turn = storage
         .create_turn(NewTurn {
-            thread_id: thread.id,
+            thread_id: processing_thread.id,
             agent_id: AGENT_A.to_string(),
             state: TurnState::Processing,
             user_input: None,

@@ -1769,7 +1769,13 @@ pub async fn submit_turn(
             parent_turn_id: None,
         })
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|error| match error {
+            swage_core::StorageError::ConstraintViolation(_) => GatewayError::TurnInProgress {
+                session_id: req.conversation_id,
+            }
+            .into(),
+            other => ApiError::internal(other.to_string()),
+        })?;
 
     let turn_id = turn.id;
     let thread_id = thread.id;
