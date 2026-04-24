@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -281,10 +281,43 @@ impl LlmProvider for CircuitBreakerProvider {
                 }
             }));
         }
-        // Stream success/failure counting is not wired here; the circuit is
-        // driven by complete() and complete_with_tools() call outcomes.
-        // TODO(debt): wire stream failure counting when stream observability lands
-        self.inner.stream(request)
+        let stream = self.inner.stream(request);
+        let state = Arc::clone(&self.state);
+
+        Box::pin(futures::stream::unfold(
+            (stream, state, false),
+            |(mut stream, state, is_recorded)| async move {
+                match stream.next().await {
+                    Some(chunk) => {
+                        let mut next_is_recorded = is_recorded;
+                        if !is_recorded {
+                            match &chunk {
+                                StreamChunk::Error { message } => {
+                                    state.lock().unwrap().record_failure(
+                                        &ProviderError::StreamError(message.clone()),
+                                    );
+                                    next_is_recorded = true;
+                                }
+                                StreamChunk::Done { .. } => {
+                                    state.lock().unwrap().record_success();
+                                    next_is_recorded = true;
+                                }
+                                StreamChunk::Delta { .. }
+                                | StreamChunk::Usage(_)
+                                | StreamChunk::ToolUse { .. } => {}
+                            }
+                        }
+                        Some((chunk, (stream, state, next_is_recorded)))
+                    }
+                    None => {
+                        if !is_recorded {
+                            state.lock().unwrap().record_success();
+                        }
+                        None
+                    }
+                }
+            },
+        ))
     }
 }
 
@@ -359,6 +392,52 @@ mod tests {
             _request: CompletionRequest,
         ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(futures::stream::empty())
+        }
+    }
+
+    struct MockStreamProvider {
+        model: String,
+        streams: Arc<Mutex<VecDeque<Vec<StreamChunk>>>>,
+        stream_call_count: Arc<AtomicUsize>,
+    }
+
+    impl MockStreamProvider {
+        fn new(streams: Vec<Vec<StreamChunk>>) -> Self {
+            Self {
+                model: "mock-stream-model".into(),
+                streams: Arc::new(Mutex::new(streams.into())),
+                stream_call_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockStreamProvider {
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unimplemented!("not needed for circuit breaker stream tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unimplemented!("not needed for circuit breaker stream tests")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            self.stream_call_count.fetch_add(1, Ordering::SeqCst);
+            let chunks = self.streams.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(futures::stream::iter(chunks))
         }
     }
 
@@ -631,6 +710,76 @@ mod tests {
                 "backend called every time"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: streaming outcomes
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stream_errors_open_circuit_after_threshold() {
+        let threshold = 2u32;
+        let mock = MockStreamProvider::new(vec![
+            vec![StreamChunk::Error {
+                message: "stream lost".into(),
+            }],
+            vec![StreamChunk::Error {
+                message: "stream lost again".into(),
+            }],
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }],
+        ]);
+        let stream_call_count = mock.stream_call_count.clone();
+        let breaker = CircuitBreakerProvider::new(
+            Box::new(mock),
+            CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: Duration::from_secs(60),
+            },
+        );
+        let req = test_request();
+
+        for _ in 0..threshold {
+            let chunks: Vec<StreamChunk> = breaker.stream(req.clone()).collect().await;
+            assert!(matches!(chunks.as_slice(), [StreamChunk::Error { .. }]));
+        }
+
+        let chunks: Vec<StreamChunk> = breaker.stream(req.clone()).collect().await;
+        assert!(
+            matches!(chunks.as_slice(), [StreamChunk::Error { message }] if message.contains("circuit is open"))
+        );
+        assert_eq!(stream_call_count.load(Ordering::SeqCst), threshold as usize);
+    }
+
+    #[tokio::test]
+    async fn stream_success_after_recovery_timeout_closes_circuit() {
+        let mock = MockStreamProvider::new(vec![
+            vec![StreamChunk::Error {
+                message: "stream lost".into(),
+            }],
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            vec![StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            }],
+        ]);
+        let stream_call_count = mock.stream_call_count.clone();
+        let breaker = CircuitBreakerProvider::new(Box::new(mock), tight_config(1));
+        let req = test_request();
+
+        let chunks: Vec<StreamChunk> = breaker.stream(req.clone()).collect().await;
+        assert!(matches!(chunks.as_slice(), [StreamChunk::Error { .. }]));
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let chunks: Vec<StreamChunk> = breaker.stream(req.clone()).collect().await;
+        assert!(matches!(chunks.as_slice(), [StreamChunk::Done { .. }]));
+
+        let chunks: Vec<StreamChunk> = breaker.stream(req.clone()).collect().await;
+        assert!(matches!(chunks.as_slice(), [StreamChunk::Done { .. }]));
+        assert_eq!(stream_call_count.load(Ordering::SeqCst), 3);
     }
 
     // -----------------------------------------------------------------------
