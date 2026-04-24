@@ -1,21 +1,21 @@
-//! Cross-task integration tests for Phase 06: Project Workspace & Agent Memory.
+//! Cross-task integration tests for Phase 06: Bench Workspace & Agent Memory.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together:
 //!
-//! 1. **Project session isolation** — sessions created in Project A are absent
-//!    when listing Project B's sessions (spans: storage CRUD, project-scoped
-//!    session routes, project API handlers).
+//! 1. **Bench session isolation** — sessions created in Bench A are absent
+//!    when listing Bench B's sessions (spans: storage CRUD, bench-scoped
+//!    session routes, bench API handlers).
 //!
-//! 2. **Memory scoping** — memory written in Project A's context is inaccessible
-//!    from Project B's context (spans: MemoryTool, project context in turn
-//!    executor, project CRUD).
+//! 2. **Memory scoping** — memory written in Bench A's context is inaccessible
+//!    from Bench B's context (spans: MemoryTool, bench context in turn
+//!    executor, bench CRUD).
 //!
-//! 3. **Per-project config resolution** — different projects resolve different
+//! 3. **Per-bench config resolution** — different benches resolve different
 //!    config (model, instructions) when processing turns (spans: turn executor
-//!    project context, config resolution, storage CRUD).
+//!    bench context, config resolution, storage CRUD).
 //!
-//! Core Journey proved: #3 (Project Workspace) — projects are genuinely isolated.
+//! Core Journey proved: #3 (Bench Workspace) — benches are genuinely isolated.
 
 use std::sync::Arc;
 
@@ -41,7 +41,7 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -65,21 +65,21 @@ impl swage_provider::LlmProvider for StubProvider {
         &self,
         _request: swage_core::CompletionRequest,
     ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-        unimplemented!("not used in project integration tests")
+        unimplemented!("not used in bench integration tests")
     }
 
     async fn complete_with_tools(
         &self,
         _request: swage_core::ToolCompletionRequest,
     ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
-        unimplemented!("not used in project integration tests")
+        unimplemented!("not used in bench integration tests")
     }
 
     fn stream(
         &self,
         _request: swage_core::CompletionRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
-        unimplemented!("not used in project integration tests")
+        unimplemented!("not used in bench integration tests")
     }
 }
 
@@ -114,57 +114,52 @@ async fn http_json(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Project session isolation
+// Test 1: Bench session isolation
 // ---------------------------------------------------------------------------
 // Spans: [m780] slug migration, [gsos] slug model, [n548] full CRUD,
-//        [k2zw] project CRUD routes, [3ans] project-scoped session routes
+//        [k2zw] bench CRUD routes, [3ans] bench-scoped session routes
 //
-// Proves: Core Journey #3 — conversations created in one project are absent
-// when listing another project's conversations.
+// Proves: Core Journey #3 — conversations created in one bench are absent
+// when listing another bench's conversations.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sessions_are_isolated_between_projects() {
+async fn sessions_are_isolated_between_benches() {
     let (router, _storage) = make_test_router();
 
-    // Create two projects with distinct workspace paths.
-    // (We use /tmp as a known-valid path on the test host.)
-    let (status_a, project_a) = http_json(
+    // Create two scratch-only benches.
+    let (status_a, bench_a) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "Alpha", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "Alpha" })),
     )
     .await;
     assert_eq!(
         status_a,
         StatusCode::CREATED,
-        "project A creation should succeed"
+        "bench A creation should succeed"
     );
-    let project_a_id = project_a["id"]
-        .as_str()
-        .expect("project A should have an id");
+    let bench_a_id = bench_a["id"].as_str().expect("bench A should have an id");
 
-    let (status_b, project_b) = http_json(
+    let (status_b, bench_b) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "Bravo", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "Bravo" })),
     )
     .await;
     assert_eq!(
         status_b,
         StatusCode::CREATED,
-        "project B creation should succeed"
+        "bench B creation should succeed"
     );
-    let project_b_id = project_b["id"]
-        .as_str()
-        .expect("project B should have an id");
+    let bench_b_id = bench_b["id"].as_str().expect("bench B should have an id");
 
-    // Create two sessions in project A.
+    // Create two sessions in bench A.
     let (s1_status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_a_id}/sessions"),
+        &format!("/api/benches/{bench_a_id}/sessions"),
         None,
     )
     .await;
@@ -173,27 +168,27 @@ async fn sessions_are_isolated_between_projects() {
     let (s2_status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_a_id}/sessions"),
+        &format!("/api/benches/{bench_a_id}/sessions"),
         None,
     )
     .await;
     assert_eq!(s2_status, StatusCode::CREATED);
 
-    // Create one session in project B.
+    // Create one session in bench B.
     let (s3_status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_b_id}/sessions"),
+        &format!("/api/benches/{bench_b_id}/sessions"),
         None,
     )
     .await;
     assert_eq!(s3_status, StatusCode::CREATED);
 
-    // List project A's sessions — should see exactly 2.
+    // List bench A's sessions — should see exactly 2.
     let (list_a_status, list_a) = http_json(
         &router,
         "GET",
-        &format!("/api/projects/{project_a_id}/sessions"),
+        &format!("/api/benches/{bench_a_id}/sessions"),
         None,
     )
     .await;
@@ -204,14 +199,14 @@ async fn sessions_are_isolated_between_projects() {
     assert_eq!(
         sessions_a.len(),
         2,
-        "project A should have exactly 2 sessions"
+        "bench A should have exactly 2 sessions"
     );
 
-    // List project B's sessions — should see exactly 1.
+    // List bench B's sessions — should see exactly 1.
     let (list_b_status, list_b) = http_json(
         &router,
         "GET",
-        &format!("/api/projects/{project_b_id}/sessions"),
+        &format!("/api/benches/{bench_b_id}/sessions"),
         None,
     )
     .await;
@@ -219,76 +214,68 @@ async fn sessions_are_isolated_between_projects() {
     let sessions_b = list_b["conversations"]
         .as_array()
         .expect("sessions should be an array");
-    assert_eq!(
-        sessions_b.len(),
-        1,
-        "project B should have exactly 1 session"
-    );
+    assert_eq!(sessions_b.len(), 1, "bench B should have exactly 1 session");
 
-    // The default project should still exist and be unaffected.
-    let (list_status, project_list) = http_json(&router, "GET", "/api/projects", None).await;
+    // The default bench should still exist and be unaffected.
+    let (list_status, bench_list) = http_json(&router, "GET", "/api/benches", None).await;
     assert_eq!(list_status, StatusCode::OK);
-    let projects = project_list["projects"]
+    let benches = bench_list["benches"]
         .as_array()
-        .expect("projects should be an array");
-    // Default + Alpha + Bravo = 3 projects.
-    assert_eq!(
-        projects.len(),
-        3,
-        "should have default + 2 created projects"
-    );
+        .expect("benches should be an array");
+    // Default + Alpha + Bravo = 3 benches.
+    assert_eq!(benches.len(), 3, "should have default + 2 created benches");
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Memory scoping between projects
+// Test 2: Memory scoping between benches
 // ---------------------------------------------------------------------------
-// Spans: [3wjo] MemoryTool, [cg5i] project context, [k2zw] project CRUD,
+// Spans: [3wjo] MemoryTool, [cg5i] bench context, [k2zw] bench CRUD,
 //        [ybvv] memory registration
 //
-// Proves: Delivery Closure — memory written in Project A is not accessible
-// from Project B. Memory tool uses per-project filesystem scoping.
+// Proves: Delivery Closure — memory written in Bench A is not accessible
+// from Bench B. Memory tool uses per-bench filesystem scoping.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_is_isolated_between_projects() {
+async fn memory_is_isolated_between_benches() {
     let (router, _storage) = make_test_router();
 
-    // Create two projects.
-    let (_, project_a) = http_json(
+    // Create two benches.
+    let (_, bench_a) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "MemA", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "MemA" })),
     )
     .await;
-    let slug_a = project_a["slug"]
+    let slug_a = bench_a["slug"]
         .as_str()
-        .expect("project A should have a slug");
+        .expect("bench A should have a slug");
 
-    let (_, project_b) = http_json(
+    let (_, bench_b) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "MemB", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "MemB" })),
     )
     .await;
-    let slug_b = project_b["slug"]
+    let slug_b = bench_b["slug"]
         .as_str()
-        .expect("project B should have a slug");
+        .expect("bench B should have a slug");
 
-    // Verify the two projects have different slugs.
-    assert_ne!(slug_a, slug_b, "projects should have distinct slugs");
+    // Verify the two benches have different slugs.
+    assert_ne!(slug_a, slug_b, "benches should have distinct slugs");
 
-    // Write a memory file into project A's memory directory directly.
+    // Write a memory file into bench A's memory directory directly.
     // (In production, the agent does this via the memory tool during a turn.
-    //  Here we verify the filesystem scoping by checking that project B's
+    //  Here we verify the filesystem scoping by checking that bench B's
     //  memory directory does not contain the file.)
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let mem_dir_a = std::path::PathBuf::from(&home)
-        .join(".swage/projects")
+        .join(".swage/benches")
         .join(slug_a)
         .join("memory");
     let mem_dir_b = std::path::PathBuf::from(&home)
-        .join(".swage/projects")
+        .join(".swage/benches")
         .join(slug_b)
         .join("memory");
 
@@ -296,18 +283,18 @@ async fn memory_is_isolated_between_projects() {
     std::fs::create_dir_all(&mem_dir_a).expect("create memory dir A");
     std::fs::write(
         mem_dir_a.join("context.md"),
-        "# Project A context\nImportant fact.",
+        "# Bench A context\nImportant fact.",
     )
     .expect("write memory file in A");
 
-    // Project B's memory directory should either not exist or be empty.
+    // Bench B's memory directory should either not exist or be empty.
     if mem_dir_b.exists() {
         let entries: Vec<_> = std::fs::read_dir(&mem_dir_b)
             .expect("read B memory dir")
             .collect();
         assert!(
             entries.is_empty(),
-            "project B's memory directory should be empty, but found {} entries",
+            "bench B's memory directory should be empty, but found {} entries",
             entries.len()
         );
     }
@@ -316,53 +303,53 @@ async fn memory_is_isolated_between_projects() {
     // Verify A's file exists.
     assert!(
         mem_dir_a.join("context.md").exists(),
-        "project A should have the memory file"
+        "bench A should have the memory file"
     );
 
     // Clean up the test directories.
     let _ = std::fs::remove_dir_all(
         std::path::PathBuf::from(&home)
-            .join(".swage/projects")
+            .join(".swage/benches")
             .join(slug_a),
     );
     let _ = std::fs::remove_dir_all(
         std::path::PathBuf::from(&home)
-            .join(".swage/projects")
+            .join(".swage/benches")
             .join(slug_b),
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Default project cannot be deleted
+// Test 3: Default bench cannot be deleted
 // ---------------------------------------------------------------------------
-// Spans: [k2zw] project CRUD handlers, [n548] storage CRUD
+// Spans: [k2zw] bench CRUD handlers, [n548] storage CRUD
 //
-// Proves: Delivery Closure — the default project is protected from deletion.
+// Proves: Delivery Closure — the default bench is protected from deletion.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_project_cannot_be_deleted() {
+async fn default_bench_cannot_be_deleted() {
     let (router, _storage) = make_test_router();
 
-    // List all projects to find the default one (auto-created by migrations).
-    let (list_status, list_body) = http_json(&router, "GET", "/api/projects", None).await;
+    // List all benches to find the default one (auto-created by migrations).
+    let (list_status, list_body) = http_json(&router, "GET", "/api/benches", None).await;
     assert_eq!(list_status, StatusCode::OK);
 
-    let projects = list_body["projects"]
+    let benches = list_body["benches"]
         .as_array()
-        .expect("projects should be an array");
-    let default_project = projects
+        .expect("benches should be an array");
+    let default_bench = benches
         .iter()
         .find(|p| p["name"].as_str() == Some("default"))
-        .expect("default project should exist in the list");
-    let default_id = default_project["id"]
+        .expect("default bench should exist in the list");
+    let default_id = default_bench["id"]
         .as_str()
-        .expect("default project should have an id");
+        .expect("default bench should have an id");
 
     // Attempt to delete it — should fail with 409 Conflict.
     let (status, _body) = http_json(
         &router,
         "DELETE",
-        &format!("/api/projects/{default_id}"),
+        &format!("/api/benches/{default_id}"),
         None,
     )
     .await;
@@ -370,46 +357,46 @@ async fn default_project_cannot_be_deleted() {
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "deleting the default project should return 409"
+        "deleting the default bench should return 409"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Project deletion preserves other projects' sessions
+// Test 4: Bench deletion preserves other benches' sessions
 // ---------------------------------------------------------------------------
-// Spans: [k2zw] project CRUD, [3ans] session routes, [n548] storage CRUD
+// Spans: [k2zw] bench CRUD, [3ans] session routes, [n548] storage CRUD
 //
-// Proves: Delivery Closure — deleting a project removes its conversations
-// but does not affect other projects.
+// Proves: Delivery Closure — deleting a bench removes its conversations
+// but does not affect other benches.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_project_does_not_affect_other_projects() {
+async fn deleting_bench_does_not_affect_other_benches() {
     let (router, _storage) = make_test_router();
 
-    // Create two projects.
-    let (_, project_a) = http_json(
+    // Create two benches.
+    let (_, bench_a) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "Keeper", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "Keeper" })),
     )
     .await;
-    let project_a_id = project_a["id"].as_str().unwrap();
+    let bench_a_id = bench_a["id"].as_str().unwrap();
 
-    let (_, project_b) = http_json(
+    let (_, bench_b) = http_json(
         &router,
         "POST",
-        "/api/projects",
-        Some(json!({ "name": "Doomed", "workspace_path": "/tmp" })),
+        "/api/benches",
+        Some(json!({ "name": "Doomed" })),
     )
     .await;
-    let project_b_id = project_b["id"].as_str().unwrap();
+    let bench_b_id = bench_b["id"].as_str().unwrap();
 
-    // Create a session in each project.
+    // Create a session in each bench.
     http_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_a_id}/sessions"),
+        &format!("/api/benches/{bench_a_id}/sessions"),
         None,
     )
     .await;
@@ -417,26 +404,26 @@ async fn deleting_project_does_not_affect_other_projects() {
     http_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_b_id}/sessions"),
+        &format!("/api/benches/{bench_b_id}/sessions"),
         None,
     )
     .await;
 
-    // Delete project B.
+    // Delete bench B.
     let (del_status, _) = http_json(
         &router,
         "DELETE",
-        &format!("/api/projects/{project_b_id}"),
+        &format!("/api/benches/{bench_b_id}"),
         None,
     )
     .await;
     assert_eq!(del_status, StatusCode::NO_CONTENT);
 
-    // Project A's session should still be there.
+    // Bench A's session should still be there.
     let (list_status, list_body) = http_json(
         &router,
         "GET",
-        &format!("/api/projects/{project_a_id}/sessions"),
+        &format!("/api/benches/{bench_a_id}/sessions"),
         None,
     )
     .await;
@@ -447,16 +434,11 @@ async fn deleting_project_does_not_affect_other_projects() {
     assert_eq!(
         sessions.len(),
         1,
-        "project A should still have its session after project B was deleted"
+        "bench A should still have its session after bench B was deleted"
     );
 
-    // Project B should no longer exist.
-    let (get_status, _) = http_json(
-        &router,
-        "GET",
-        &format!("/api/projects/{project_b_id}"),
-        None,
-    )
-    .await;
+    // Bench B should no longer exist.
+    let (get_status, _) =
+        http_json(&router, "GET", &format!("/api/benches/{bench_b_id}"), None).await;
     assert_eq!(get_status, StatusCode::NOT_FOUND);
 }

@@ -72,7 +72,7 @@ async fn activity_recording_middleware(
 /// # Routes
 ///
 /// The router handles the following endpoints (in priority order):
-/// - `POST /api/projects` / `GET /api/projects` - project management
+/// - `POST /api/benches` / `GET /api/benches` - bench management
 /// - `POST /api/teams` / topology-run routes - team and topology execution
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/:id/ws` - WebSocket upgrade for live turn events
@@ -80,63 +80,75 @@ async fn activity_recording_middleware(
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        // Project CRUD
+        // Bench CRUD
         .route(
-            "/api/projects",
-            post(handlers::create_project).get(handlers::list_projects),
+            "/api/benches",
+            post(handlers::create_bench).get(handlers::list_benches),
         )
         .route(
-            "/api/projects/:id",
-            get(handlers::get_project)
-                .put(handlers::update_project)
-                .delete(handlers::delete_project),
+            "/api/benches/:id",
+            get(handlers::get_bench)
+                .put(handlers::update_bench)
+                .delete(handlers::delete_bench),
         )
         .route(
-            "/api/projects/:project_id/teams",
+            "/api/benches/:id/workspaces",
+            get(handlers::list_bench_workspaces).post(handlers::attach_bench_workspace),
+        )
+        .route(
+            "/api/benches/:bench_id/workspaces/:workspace_id",
+            axum::routing::delete(handlers::detach_bench_workspace),
+        )
+        .route(
+            "/api/benches/:bench_id/workspaces/:workspace_id/trust",
+            put(handlers::update_bench_workspace_trust),
+        )
+        .route(
+            "/api/benches/:bench_id/teams",
             get(handlers::list_teams).post(handlers::create_team),
         )
         .route(
-            "/api/projects/:id/extensions",
-            get(handlers::list_project_extensions).post(handlers::create_project_extension),
+            "/api/benches/:id/extensions",
+            get(handlers::list_bench_extensions).post(handlers::create_bench_extension),
         )
         .route(
-            "/api/projects/:id/extensions/:name",
-            put(handlers::update_project_extension),
+            "/api/benches/:id/extensions/:name",
+            put(handlers::update_bench_extension),
         )
         .route(
-            "/api/projects/:id/extensions/:name/approve-workspace",
+            "/api/benches/:id/extensions/:name/approve-workspace",
             post(handlers::approve_workspace_extension),
         )
         .route(
-            "/api/projects/:id/topology-flows",
+            "/api/benches/:id/topology-flows",
             get(handlers::list_topology_flows).post(handlers::create_topology_flow),
         )
         .route(
-            "/api/projects/:id/topology-flows/:name",
+            "/api/benches/:id/topology-flows/:name",
             get(handlers::get_topology_flow).put(handlers::update_topology_flow),
         )
         .route(
-            "/api/projects/:id/context-definitions",
+            "/api/benches/:id/context-definitions",
             get(handlers::list_context_definitions).post(handlers::create_context_definition),
         )
         .route(
-            "/api/projects/:id/context-definitions/:name",
+            "/api/benches/:id/context-definitions/:name",
             get(handlers::get_context_definition).put(handlers::update_context_definition),
         )
         .route(
-            "/api/projects/:id/context-definitions/:name/preview",
+            "/api/benches/:id/context-definitions/:name/preview",
             post(handlers::preview_context_definition),
         )
         .route(
-            "/api/projects/:id/builder/proposals",
+            "/api/benches/:id/builder/proposals",
             post(handlers::create_builder_proposal),
         )
         .route(
-            "/api/projects/:id/builder/apply",
+            "/api/benches/:id/builder/apply",
             post(handlers::apply_builder_proposal),
         )
         .route(
-            "/api/projects/:id/config-versions",
+            "/api/benches/:id/config-versions",
             get(handlers::list_configuration_versions),
         )
         .route(
@@ -175,21 +187,21 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sessions/:id/materials",
             get(handlers::list_session_materials),
         )
-        // Project-scoped session routes. These supplement /api/conversations
-        // and allow the frontend to fetch/create sessions per project.
+        // Bench-scoped session routes. These supplement /api/conversations
+        // and allow the frontend to fetch/create sessions per bench.
         .route(
-            "/api/projects/:project_id/sessions",
-            get(handlers::list_project_sessions).post(handlers::create_project_session),
+            "/api/benches/:bench_id/sessions",
+            get(handlers::list_bench_sessions).post(handlers::create_bench_session),
         )
         .route(
-            "/api/projects/:id/attachments",
-            get(handlers::list_project_attachments),
+            "/api/benches/:id/attachments",
+            get(handlers::list_bench_attachments),
         )
         .route(
-            "/api/projects/:id/materials",
-            get(handlers::list_project_materials),
+            "/api/benches/:id/materials",
+            get(handlers::list_bench_materials),
         )
-        // Skills listing — resolved hierarchy for a project/agent combination.
+        // Skills listing — resolved hierarchy for a bench/agent combination.
         .route("/api/skills", get(handlers::list_skills))
         .route("/api/capabilities", get(handlers::workflow_capabilities))
         // External communication channel gateway.
@@ -233,7 +245,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/lenses/install", post(handlers::install_lens))
         .route("/api/lenses/:id", put(handlers::update_lens))
         .route(
-            "/api/lens-runtime",
+            "/api/benches/:id/lens-runtime",
             get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
         )
         .route("/api/shared-objects", get(handlers::list_shared_objects))

@@ -157,6 +157,7 @@ impl PythonWorkerRuntime {
             Ok(transport) => Ok(ReadyWorker {
                 child,
                 transport,
+                sandboxed,
                 _worker_dir: worker_dir,
             }),
             Err(error) => {
@@ -173,9 +174,11 @@ impl PythonWorkerRuntime {
         logical_working_directory: &Path,
         tool_host: &dyn NestedToolHost,
     ) -> Result<PythonExecutionResult, PythonWorkerError> {
+        let execution_working_directory =
+            worker.execution_working_directory(logical_working_directory);
         let payload = ExecutePayload::PythonExecute {
             code: code.to_string(),
-            working_directory: logical_working_directory.display().to_string(),
+            working_directory: execution_working_directory.display().to_string(),
         };
         self.run_payload(worker, payload, Some(tool_host)).await
     }
@@ -347,10 +350,22 @@ impl PythonWorkerRuntime {
 pub struct ReadyWorker {
     child: ChildProcessManager,
     transport: WorkerTransport,
+    sandboxed: bool,
     _worker_dir: WorkerDirectory,
 }
 
 impl ReadyWorker {
+    fn execution_working_directory<'a>(&'a self, logical_working_directory: &'a Path) -> &'a Path {
+        if self.sandboxed {
+            // Sandboxed workers are pooled before a turn supplies its logical
+            // workspace, so only the worker directory is guaranteed mounted.
+            // Host-side nested tools still receive the logical workspace.
+            self._worker_dir.work_dir()
+        } else {
+            logical_working_directory
+        }
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), PythonWorkerError> {
         self.transport.send(&HostToWorkerMessage::Shutdown).await?;
         match self

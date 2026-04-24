@@ -3,23 +3,23 @@
     applyBuilderProposal,
     createBuilderProposal,
     approveWorkspaceExtension,
-    createProjectExtension,
+    createBenchExtension,
     createTeam,
-    listProjectExtensions,
+    listBenchExtensions,
     listTeams,
-    updateProjectExtension,
+    updateBenchExtension,
     updateTeam,
   } from "../api/builder";
   import { createLens, installLensPreset, updateLens } from "../api/lens";
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
-  import type { ProjectStore } from "../stores/projects";
+  import type { BenchStore } from "../stores/benches";
   import type {
     AppLens,
     BuilderProposalResponse,
     LensDescriptor,
     LensSurface,
-    ProjectExtensionSummary,
+    BenchExtensionSummary,
     TeamAgentDefinition,
     TeamSummary,
     TeamTaskDefinition,
@@ -28,7 +28,7 @@
   type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
 
   interface Props {
-    projectStore?: ProjectStore;
+    benchStore?: BenchStore;
     desktopRuntime?: DesktopRuntimeInfo | null;
     activeLens: AppLens;
     availableLenses: LensDescriptor[];
@@ -39,7 +39,7 @@
   }
 
   let {
-    projectStore,
+    benchStore,
     desktopRuntime,
     activeLens,
     availableLenses,
@@ -84,7 +84,7 @@
   let lensModulesCsv = $state("conversation, operator");
   let lensProminentTeamsCsv = $state("default");
 
-  let extensions = $state<ProjectExtensionSummary[]>([]);
+  let extensions = $state<BenchExtensionSummary[]>([]);
   let extensionError = $state<string | null>(null);
   let extensionNotice = $state<string | null>(null);
   let selectedExtensionName = $state<string | null>(null);
@@ -96,10 +96,10 @@
     "Describe the builder behaviour this extension should inject.",
   );
 
-  let lastLoadedProjectId = "";
+  let lastLoadedBenchId = "";
   let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
   let builderPrompt = $state(
-    "Create a review workspace with an operator-first lens, a delivery team, and a project brief extension.",
+    "Create a review workspace with an operator-first lens, a delivery team, and a bench brief extension.",
   );
   let builderProposal = $state<BuilderProposalResponse | null>(null);
   let builderRuntimeError = $state<string | null>(null);
@@ -107,7 +107,7 @@
   let isGeneratingProposal = $state(false);
   let isApplyingProposal = $state(false);
 
-  const currentProject = $derived(projectStore?.currentProject ?? null);
+  const currentBench = $derived(benchStore?.currentBench ?? null);
   const managedExtensions = $derived(
     extensions.filter((extension) => extension.source_kind === "managed"),
   );
@@ -122,12 +122,12 @@
   });
 
   $effect(() => {
-    const projectId = currentProject?.id ?? "";
-    if (!projectId || projectId === lastLoadedProjectId) {
+    const benchId = currentBench?.id ?? "";
+    if (!benchId || benchId === lastLoadedBenchId) {
       return;
     }
-    lastLoadedProjectId = projectId;
-    void refreshBuilderData(projectId);
+    lastLoadedBenchId = benchId;
+    void refreshBuilderData(benchId);
   });
 
   function normaliseCsvList(value: string): string[] {
@@ -364,7 +364,7 @@
       "Describe the builder behaviour this extension should inject.";
   }
 
-  function populateExtensionForm(extension: ProjectExtensionSummary): void {
+  function populateExtensionForm(extension: BenchExtensionSummary): void {
     selectedExtensionName = extension.name;
     extensionName = extension.name;
     extensionDisplayName = extension.display_name ?? "";
@@ -375,13 +375,13 @@
 
   resetTeamForm();
 
-  async function refreshBuilderData(projectId: string): Promise<void> {
+  async function refreshBuilderData(benchId: string): Promise<void> {
     isLoading = true;
     loadError = null;
     try {
       const [nextTeams, nextExtensions] = await Promise.all([
-        listTeams(projectId),
-        listProjectExtensions(projectId),
+        listTeams(benchId),
+        listBenchExtensions(benchId),
       ]);
       teams = nextTeams;
       extensions = nextExtensions;
@@ -394,7 +394,7 @@
   }
 
   async function saveTeam(): Promise<void> {
-    if (!currentProject) return;
+    if (!currentBench) return;
     teamError = null;
     teamNotice = null;
 
@@ -409,12 +409,12 @@
 
       const saved = selectedTeamId
         ? await updateTeam(selectedTeamId, payload)
-        : await createTeam(currentProject.id, payload);
+        : await createTeam(currentBench.id, payload);
 
       teamNotice = selectedTeamId
         ? `Updated team ${saved.name}.`
         : `Created team ${saved.name}.`;
-      await refreshBuilderData(currentProject.id);
+      await refreshBuilderData(currentBench.id);
       populateTeamForm(saved);
     } catch (error) {
       teamError = error instanceof Error ? error.message : "Failed to save team.";
@@ -467,7 +467,7 @@
   }
 
   async function saveExtension(): Promise<void> {
-    if (!currentProject) return;
+    if (!currentBench) return;
     extensionError = null;
     extensionNotice = null;
 
@@ -480,8 +480,8 @@
       };
 
       const saved = selectedExtensionName
-        ? await updateProjectExtension(currentProject.id, selectedExtensionName, payload)
-        : await createProjectExtension(currentProject.id, {
+        ? await updateBenchExtension(currentBench.id, selectedExtensionName, payload)
+        : await createBenchExtension(currentBench.id, {
             name: extensionName,
             ...payload,
           });
@@ -489,7 +489,7 @@
       extensionNotice = selectedExtensionName
         ? `Updated extension ${saved.name}.`
         : `Created extension ${saved.name}.`;
-      await refreshBuilderData(currentProject.id);
+      await refreshBuilderData(currentBench.id);
       populateExtensionForm(saved);
     } catch (error) {
       extensionError =
@@ -498,14 +498,14 @@
   }
 
   async function importWorkspaceExtension(name: string): Promise<void> {
-    if (!currentProject) return;
+    if (!currentBench) return;
     extensionError = null;
     extensionNotice = null;
 
     try {
-      const imported = await approveWorkspaceExtension(currentProject.id, name);
+      const imported = await approveWorkspaceExtension(currentBench.id, name);
       extensionNotice = `Approved workspace extension ${imported.name}.`;
-      await refreshBuilderData(currentProject.id);
+      await refreshBuilderData(currentBench.id);
       populateExtensionForm(imported);
     } catch (error) {
       extensionError =
@@ -514,18 +514,18 @@
   }
 
   async function handleTeamTopologyUpdate(): Promise<void> {
-    if (!currentProject) return;
-    await refreshBuilderData(currentProject.id);
+    if (!currentBench) return;
+    await refreshBuilderData(currentBench.id);
   }
 
   async function requestBuilderProposal(): Promise<void> {
-    if (!currentProject) return;
+    if (!currentBench) return;
     builderRuntimeError = null;
     builderRuntimeNotice = null;
     isGeneratingProposal = true;
 
     try {
-      builderProposal = await createBuilderProposal(currentProject.id, builderPrompt);
+      builderProposal = await createBuilderProposal(currentBench.id, builderPrompt);
       builderRuntimeNotice = builderProposal.can_apply
         ? "Reviewed proposal ready."
         : "Proposal returned diagnostics that need attention before apply.";
@@ -538,14 +538,14 @@
   }
 
   async function applyCurrentProposal(): Promise<void> {
-    if (!currentProject || !builderProposal) return;
+    if (!currentBench || !builderProposal) return;
     builderRuntimeError = null;
     builderRuntimeNotice = null;
     isApplyingProposal = true;
 
     try {
       const response = await applyBuilderProposal(
-        currentProject.id,
+        currentBench.id,
         builderProposal.operations.map((operation) => operation.operation),
         builderPrompt,
       );
@@ -558,7 +558,7 @@
 
       builderRuntimeNotice = response.body.summary;
       await Promise.all([
-        refreshBuilderData(currentProject.id),
+        refreshBuilderData(currentBench.id),
         onRefreshLenses(),
       ]);
     } catch (error) {
@@ -576,7 +576,7 @@
       <p class="eyebrow">Builder Lens</p>
       <h1>Author the workspace, then let the agent live in it.</h1>
       <p class="lede">
-        Builder mode now edits the durable shape of a project: which team leads
+        Builder mode now edits the durable shape of a bench: which team leads
         it, which extension bundles are trusted, and which presentation lens
         should take over next.
       </p>
@@ -584,10 +584,10 @@
 
     <div class="status-board">
       <article class="status-card">
-        <span class="label">Current project</span>
-        <strong>{currentProject?.name ?? "No project selected"}</strong>
+        <span class="label">Current bench</span>
+        <strong>{currentBench?.name ?? "No bench selected"}</strong>
         <span class="meta mono">
-          {currentProject?.workspace_path ?? "workspace pending"}
+          {currentBench ? `bench:${currentBench.slug}` : "scratch-only until selected"}
         </span>
       </article>
 
@@ -609,9 +609,9 @@
     </div>
   </header>
 
-  {#if !currentProject}
+  {#if !currentBench}
     <section class="empty-state">
-      Select a project before editing teams or extensions.
+      Select a bench before editing teams or extensions.
     </section>
   {:else}
     <section class="builder-grid">
@@ -773,7 +773,7 @@
           {/if}
         </div>
         <p class="section-copy">
-          Shape the durable team that a project exposes for topology runs and
+          Shape the durable team that a bench exposes for topology runs and
           builder-side orchestration.
         </p>
         {#if teamError}
@@ -907,12 +907,12 @@
         <div class="card-heading">
           <div>
             <p class="section-kicker">Extension</p>
-            <h2>Project extension bundles</h2>
+            <h2>Bench extension bundles</h2>
           </div>
           <span class="chip">{managedExtensions.length} active</span>
         </div>
         <p class="section-copy">
-          Managed extensions are written into the project config tree and load
+          Managed extensions are written into the bench config tree and load
           again after restart. Workspace bundles stay inert until the builder
           approves them.
         </p>
@@ -990,7 +990,7 @@
 
       {#if showSharedReferences}
         <SharedReferenceStudio
-          projectId={currentProject.id}
+          benchId={currentBench.id}
           onTeamTopologyUpdated={handleTeamTopologyUpdate}
         />
       {/if}

@@ -193,12 +193,12 @@ impl ToolCallStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewProject, NewSession, NewTurn, TurnState};
-    use crate::store::{ProjectStore, SessionStore, ToolCallStore, TurnStore};
+    use crate::model::{NewBench, NewSession, NewTurn, TurnState};
+    use crate::store::{BenchStore, SessionStore, ToolCallStore, TurnStore};
 
     use super::*;
 
-    /// Set up an in-memory DB with a project, session, thread, and turn.
+    /// Set up an in-memory DB with a bench, session, thread, and turn.
     ///
     /// Inserts the thread via raw SQL because create_thread (task 6ay8) is not
     /// yet implemented. Task 1byf will update this once the trait lands.
@@ -207,17 +207,16 @@ mod tests {
         use rusqlite::params as sql_params;
 
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })

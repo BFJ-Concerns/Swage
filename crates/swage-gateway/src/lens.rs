@@ -2,6 +2,7 @@ use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use swage_core::GatewayError;
 use swage_storage::model::{AppLens, LensPreference, LensRecord, LensSourceKind, NewLensRecord};
+use uuid::Uuid;
 
 const ALLOWED_UI_MODULES: &[&str] = &["conversation", "operator", "builder"];
 
@@ -18,6 +19,7 @@ pub struct LensDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensRuntimeResponse {
+    pub bench_id: Uuid,
     pub active_lens: AppLens,
     pub updated_at: String,
     pub available_lenses: Vec<LensDescriptor>,
@@ -129,6 +131,7 @@ fn to_descriptor(record: LensRecord) -> LensDescriptor {
 
 fn to_response(preference: LensPreference, lenses: Vec<LensRecord>) -> LensRuntimeResponse {
     LensRuntimeResponse {
+        bench_id: preference.bench_id,
         active_lens: preference.active_lens,
         updated_at: preference.updated_at.to_rfc3339(),
         available_lenses: lenses.into_iter().map(to_descriptor).collect(),
@@ -234,10 +237,18 @@ pub async fn install_lens(
     Ok(to_descriptor(lens))
 }
 
-pub async fn get_lens_runtime(state: &AppState) -> Result<LensRuntimeResponse, GatewayError> {
+pub async fn get_lens_runtime(
+    state: &AppState,
+    bench_id: Uuid,
+) -> Result<LensRuntimeResponse, GatewayError> {
+    state
+        .bench_store
+        .get(bench_id)
+        .await?
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
     let preference = state
         .storage
-        .get_active_lens()
+        .get_active_lens(bench_id)
         .await
         .map_err(GatewayError::Storage)?;
     let lenses = state
@@ -250,11 +261,17 @@ pub async fn get_lens_runtime(state: &AppState) -> Result<LensRuntimeResponse, G
 
 pub async fn update_lens_runtime(
     state: &AppState,
+    bench_id: Uuid,
     request: UpdateLensRuntimeRequest,
 ) -> Result<LensRuntimeResponse, GatewayError> {
+    state
+        .bench_store
+        .get(bench_id)
+        .await?
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
     let preference = state
         .storage
-        .set_active_lens(request.lens)
+        .set_active_lens(bench_id, request.lens)
         .await
         .map_err(GatewayError::Storage)?;
     let lenses = state

@@ -381,29 +381,28 @@ mod tests {
     use rusqlite::params;
     use uuid::Uuid;
 
-    use crate::model::{ApprovalKind, ApprovalState, NewApprovalRequest, NewProject, NewSession};
+    use crate::model::{ApprovalKind, ApprovalState, NewApprovalRequest, NewBench, NewSession};
     use crate::sqlite::SqliteStorage;
-    use crate::store::{ApprovalStore, ProjectStore, SessionStore};
+    use crate::store::{ApprovalStore, BenchStore, SessionStore};
     use swage_core::{ApprovalTimeoutPolicy, StorageError};
 
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
 
-    /// Build a full project → session → thread → turn chain and return the
+    /// Build a full bench → session → thread → turn chain and return the
     /// storage instance plus the newly created turn's id.
     async fn make_turn(storage: &SqliteStorage) -> Uuid {
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
@@ -767,17 +766,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn remember_approval_round_trips_by_session_tool_and_fingerprint() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -819,17 +817,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn approval_memory_cascades_with_session_delete() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })

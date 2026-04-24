@@ -28,8 +28,8 @@ pub struct OperatorGatewaySummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorSessionSummary {
     pub id: Uuid,
-    pub project_id: Uuid,
-    pub project_name: String,
+    pub bench_id: Uuid,
+    pub bench_name: String,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
@@ -147,13 +147,13 @@ fn classify_gateway_health(
 async fn list_operator_sessions(
     state: &AppState,
 ) -> Result<Vec<OperatorSessionSummary>, GatewayError> {
-    let projects = state.project_store.list_all().await?;
+    let benches = state.bench_store.list_all().await?;
     let active_connections = state.active_connections.lock().await.clone();
     let active_turns = state.active_turns.lock().await.clone();
     let mut sessions = Vec::new();
 
-    for project in projects {
-        for session in state.storage.list_by_project(project.id).await? {
+    for bench in benches {
+        for session in state.storage.list_by_bench(bench.id).await? {
             let preview = state
                 .storage
                 .get_latest_for_session(session.id)
@@ -163,8 +163,8 @@ async fn list_operator_sessions(
 
             sessions.push(OperatorSessionSummary {
                 id: session.id,
-                project_id: session.project_id,
-                project_name: project.name.clone(),
+                bench_id: session.bench_id,
+                bench_name: bench.name.clone(),
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,

@@ -30,6 +30,10 @@ use crate::{
         TopologyFlowDefinitionRecord, UpdateContextDefinitionRequest,
         UpdateTopologyFlowDefinitionRequest,
     },
+    bench_extension::{
+        BenchExtensionListResponse, BenchExtensionResponse, CreateBenchExtensionRequest,
+        UpdateBenchExtensionRequest,
+    },
     builder_runtime::{
         BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
         BuilderProposalRequest, BuilderProposalResponse, ConfigurationVersionListResponse,
@@ -63,10 +67,6 @@ use crate::{
     },
     operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
-    project_extension::{
-        CreateProjectExtensionRequest, ProjectExtensionListResponse, ProjectExtensionResponse,
-        UpdateProjectExtensionRequest,
-    },
     schedule::{
         CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
         ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
@@ -76,12 +76,14 @@ use crate::{
         SecretResponse, SecretValidationResponse,
     },
     service::{
-        ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
-        ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
-        CreateProjectRequest, CreateTeamRequest, CreateTopologyRunRequest, ProjectListResponse,
-        ProjectResponse, ProjectService, TeamListResponse, TeamResponse, TeamService,
-        TopologyRunDetailResponse, TopologyRunResponse, TopologyRunService, UpdateProjectRequest,
-        UpdateTeamRequest,
+        BenchListResponse, BenchResponse, BenchService, ConversationBranchResponse,
+        ConversationDetail, ConversationResponse, ConversationService, ConversationSummary,
+        ConversationThreadDetail, CreateBenchRequest, CreateConversationBranchRequest,
+        CreateTeamRequest, CreateTopologyRunRequest, CreateWorkspaceAttachmentRequest,
+        TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
+        TopologyRunResponse, TopologyRunService, UpdateBenchRequest, UpdateTeamRequest,
+        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
+        WorkspaceAttachmentService,
     },
     shared_reference::{
         CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
@@ -223,11 +225,12 @@ pub async fn operator_usage(
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
 }
 
-/// `GET /api/lens-runtime` — inspect the active assistant or builder lens.
+/// `GET /api/benches/:id/lens-runtime` — inspect the active lens for a bench.
 pub async fn get_lens_runtime(
     State(state): State<AppState>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(crate::lens::get_lens_runtime(&state).await?))
+    Ok(Json(crate::lens::get_lens_runtime(&state, bench_id).await?))
 }
 
 /// `GET /api/lenses` — list durable lens records.
@@ -283,17 +286,18 @@ pub async fn install_lens(
     ))
 }
 
-/// `PUT /api/lens-runtime` — persist the active assistant or builder lens.
+/// `PUT /api/benches/:id/lens-runtime` — persist the active lens for a bench.
 pub async fn update_lens_runtime(
     State(state): State<AppState>,
+    Path(bench_id): Path<Uuid>,
     Json(request): Json<UpdateLensRuntimeRequest>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
     Ok(Json(
-        crate::lens::update_lens_runtime(&state, request).await?,
+        crate::lens::update_lens_runtime(&state, bench_id, request).await?,
     ))
 }
 
-/// `GET /api/shared-objects` — list shared reference objects for a project.
+/// `GET /api/shared-objects` — list shared reference objects for a bench.
 pub async fn list_shared_objects(
     State(state): State<AppState>,
     Query(query): Query<SharedReferenceListQuery>,
@@ -530,13 +534,13 @@ pub async fn list_session_attachments(
     ))
 }
 
-/// `GET /api/projects/:id/attachments` — list project-scoped attachments.
-pub async fn list_project_attachments(
+/// `GET /api/benches/:id/attachments` — list bench-scoped attachments.
+pub async fn list_bench_attachments(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AttachmentListResponse>, ApiError> {
     Ok(Json(
-        crate::attachment::list_project_attachments(&state, id).await?,
+        crate::attachment::list_bench_attachments(&state, id).await?,
     ))
 }
 
@@ -589,13 +593,13 @@ pub async fn list_session_materials(
     ))
 }
 
-/// `GET /api/projects/:id/materials` — list project-scoped managed materials.
-pub async fn list_project_materials(
+/// `GET /api/benches/:id/materials` — list bench-scoped managed materials.
+pub async fn list_bench_materials(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MaterialListResponse>, ApiError> {
     Ok(Json(
-        crate::material::list_project_materials(&state, id).await?,
+        crate::material::list_bench_materials(&state, id).await?,
     ))
 }
 
@@ -924,7 +928,7 @@ pub struct ConversationListResponse {
 pub async fn create_conversation(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let resp: ConversationResponse = svc.create_conversation().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -935,7 +939,7 @@ pub async fn create_conversation(
 pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -947,32 +951,32 @@ pub async fn get_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let detail = svc.get_conversation(id).await?;
     Ok(Json(detail))
 }
 
-/// `GET /api/projects/:project_id/sessions` — list sessions for a project.
+/// `GET /api/benches/:bench_id/sessions` — list sessions for a bench.
 ///
-/// Returns 200 with `{ conversations: [...] }`, or 404 if the project is not found.
-pub async fn list_project_sessions(
+/// Returns 200 with `{ conversations: [...] }`, or 404 if the bench is not found.
+pub async fn list_bench_sessions(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
-    let conversations = svc.list_sessions_by_project(project_id).await?;
+    let svc = ConversationService::new(state.storage, state.bench_store);
+    let conversations = svc.list_sessions_by_bench(bench_id).await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
 
-/// `POST /api/projects/:project_id/sessions` — create a session in a project.
+/// `POST /api/benches/:bench_id/sessions` — create a session in a bench.
 ///
-/// Returns 201 Created with the new session's metadata, or 404 if the project is not found.
-pub async fn create_project_session(
+/// Returns 201 Created with the new session's metadata, or 404 if the bench is not found.
+pub async fn create_bench_session(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
-    let resp = svc.create_session_in_project(project_id).await?;
+    let svc = ConversationService::new(state.storage, state.bench_store);
+    let resp = svc.create_session_in_bench(bench_id).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -983,73 +987,115 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     svc.delete_conversation(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
-// Project handlers
+// Bench handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /api/projects` — create a new project.
+/// `POST /api/benches` — create a new bench.
 ///
-/// Returns 201 Created with the project's metadata, or 409/422 on error.
-pub async fn create_project(
+/// Returns 201 Created with the bench's metadata, or 409/422 on error.
+pub async fn create_bench(
     State(state): State<AppState>,
-    Json(req): Json<CreateProjectRequest>,
+    Json(req): Json<CreateBenchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ProjectService::new(state.project_store);
-    let resp = svc.create_project(req).await?;
+    let svc = BenchService::new(state.bench_store);
+    let resp = svc.create_bench(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// `GET /api/projects` — list all projects.
+/// `GET /api/benches` — list all benches.
 ///
-/// Returns 200 with `{ projects: [...] }`.
-pub async fn list_projects(
+/// Returns 200 with `{ benches: [...] }`.
+pub async fn list_benches(
     State(state): State<AppState>,
-) -> Result<Json<ProjectListResponse>, ApiError> {
-    let svc = ProjectService::new(state.project_store);
-    let resp = svc.list_projects().await?;
+) -> Result<Json<BenchListResponse>, ApiError> {
+    let svc = BenchService::new(state.bench_store);
+    let resp = svc.list_benches().await?;
     Ok(Json(resp))
 }
 
-/// `GET /api/projects/:id` — get a project by ID.
+/// `GET /api/benches/:id` — get a bench by ID.
 ///
-/// Returns 200 with the project, or 404 if not found.
-pub async fn get_project(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<ProjectResponse>, ApiError> {
-    let svc = ProjectService::new(state.project_store);
-    let resp = svc.get_project(id).await?;
-    Ok(Json(resp))
-}
-
-/// `PUT /api/projects/:id` — partially update a project.
-///
-/// Returns 200 with the updated project, 404 if not found, or 422/409 on error.
-pub async fn update_project(
+/// Returns 200 with the bench, or 404 if not found.
+pub async fn get_bench(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateProjectRequest>,
-) -> Result<Json<ProjectResponse>, ApiError> {
-    let svc = ProjectService::new(state.project_store);
-    let resp = svc.update_project(id, req).await?;
+) -> Result<Json<BenchResponse>, ApiError> {
+    let svc = BenchService::new(state.bench_store);
+    let resp = svc.get_bench(id).await?;
     Ok(Json(resp))
 }
 
-/// `DELETE /api/projects/:id` — delete a project.
+/// `PUT /api/benches/:id` — partially update a bench.
+///
+/// Returns 200 with the updated bench, 404 if not found, or 422/409 on error.
+pub async fn update_bench(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateBenchRequest>,
+) -> Result<Json<BenchResponse>, ApiError> {
+    let svc = BenchService::new(state.bench_store);
+    let resp = svc.update_bench(id, req).await?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/benches/:id` — delete a bench.
 ///
 /// Returns 204 No Content on success, 404 if not found, or 409 if refusing
-/// to delete the default project.
-pub async fn delete_project(
+/// to delete the default bench.
+pub async fn delete_bench(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ProjectService::new(state.project_store);
-    svc.delete_project(id).await?;
+    let svc = BenchService::new(state.bench_store);
+    svc.delete_bench(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/benches/:id/workspaces` — list workspaces attached to a bench.
+pub async fn list_bench_workspaces(
+    State(state): State<AppState>,
+    Path(bench_id): Path<Uuid>,
+) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
+    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
+    Ok(Json(svc.list_workspaces(bench_id).await?))
+}
+
+/// `POST /api/benches/:id/workspaces` — attach an external workspace.
+pub async fn attach_bench_workspace(
+    State(state): State<AppState>,
+    Path(bench_id): Path<Uuid>,
+    Json(req): Json<CreateWorkspaceAttachmentRequest>,
+) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
+    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
+    Ok((
+        StatusCode::CREATED,
+        Json(svc.attach_workspace(bench_id, req).await?),
+    ))
+}
+
+/// `PUT /api/benches/:bench_id/workspaces/:workspace_id/trust` — set workspace trust.
+pub async fn update_bench_workspace_trust(
+    State(state): State<AppState>,
+    Path((bench_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<UpdateWorkspaceTrustRequest>,
+) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
+    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
+    Ok(Json(svc.set_trust(bench_id, workspace_id, req).await?))
+}
+
+/// `DELETE /api/benches/:bench_id/workspaces/:workspace_id` — detach a workspace.
+pub async fn detach_bench_workspace(
+    State(state): State<AppState>,
+    Path((bench_id, workspace_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
+    svc.detach_workspace(bench_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1057,79 +1103,79 @@ pub async fn delete_project(
 // Team handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /api/projects/:project_id/teams` — create a team in a project.
+/// `POST /api/benches/:bench_id/teams` — create a team in a bench.
 pub async fn create_team(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = BuilderConfigurationService::new(state.clone());
     let resp = svc
-        .create_team(project_id, req, None, "visual_builder")
+        .create_team(bench_id, req, None, "visual_builder")
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// `GET /api/projects/:project_id/teams` — list teams in a project.
+/// `GET /api/benches/:bench_id/teams` — list teams in a bench.
 pub async fn list_teams(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<Json<TeamListResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.project_store);
-    let resp = svc.list_teams(project_id).await?;
+    let svc = TeamService::new(state.storage, state.bench_store);
+    let resp = svc.list_teams(bench_id).await?;
     Ok(Json(resp))
 }
 
-/// `GET /api/projects/:id/extensions` — list managed and workspace extension candidates.
-pub async fn list_project_extensions(
+/// `GET /api/benches/:id/extensions` — list managed and workspace extension candidates.
+pub async fn list_bench_extensions(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
-) -> Result<Json<ProjectExtensionListResponse>, ApiError> {
+    Path(bench_id): Path<Uuid>,
+) -> Result<Json<BenchExtensionListResponse>, ApiError> {
     Ok(Json(
-        crate::project_extension::list_project_extensions(&state, project_id).await?,
+        crate::bench_extension::list_bench_extensions(&state, bench_id).await?,
     ))
 }
 
-/// `POST /api/projects/:id/extensions` — create a managed project extension.
-pub async fn create_project_extension(
+/// `POST /api/benches/:id/extensions` — create a managed bench extension.
+pub async fn create_bench_extension(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
-    Json(request): Json<CreateProjectExtensionRequest>,
-) -> Result<(StatusCode, Json<ProjectExtensionResponse>), ApiError> {
+    Path(bench_id): Path<Uuid>,
+    Json(request): Json<CreateBenchExtensionRequest>,
+) -> Result<(StatusCode, Json<BenchExtensionResponse>), ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
         Json(
             service
-                .create_project_extension(project_id, request, None, "visual_builder")
+                .create_bench_extension(bench_id, request, None, "visual_builder")
                 .await?,
         ),
     ))
 }
 
-/// `PUT /api/projects/:id/extensions/:name` — update a managed project extension.
-pub async fn update_project_extension(
+/// `PUT /api/benches/:id/extensions/:name` — update a managed bench extension.
+pub async fn update_bench_extension(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<UpdateProjectExtensionRequest>,
-) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    Path((bench_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<UpdateBenchExtensionRequest>,
+) -> Result<Json<BenchExtensionResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
         service
-            .update_project_extension(project_id, &name, request, None, "visual_builder")
+            .update_bench_extension(bench_id, &name, request, None, "visual_builder")
             .await?,
     ))
 }
 
-/// `POST /api/projects/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
+/// `POST /api/benches/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
 pub async fn approve_workspace_extension(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
-) -> Result<Json<ProjectExtensionResponse>, ApiError> {
+    Path((bench_id, name)): Path<(Uuid, String)>,
+) -> Result<Json<BenchExtensionResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
         service
-            .approve_workspace_extension(project_id, &name, None, "visual_builder")
+            .approve_workspace_extension(bench_id, &name, None, "visual_builder")
             .await?,
     ))
 }
@@ -1139,7 +1185,7 @@ pub async fn get_team(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.project_store);
+    let svc = TeamService::new(state.storage, state.bench_store);
     let resp = svc.get_team(id).await?;
     Ok(Json(resp))
 }
@@ -1155,24 +1201,24 @@ pub async fn update_team(
     Ok(Json(resp))
 }
 
-/// `POST /api/projects/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
+/// `POST /api/benches/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
 pub async fn create_builder_proposal(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Json(request): Json<BuilderProposalRequest>,
 ) -> Result<Json<BuilderProposalResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state);
-    Ok(Json(service.propose_changes(project_id, request).await?))
+    Ok(Json(service.propose_changes(bench_id, request).await?))
 }
 
-/// `POST /api/projects/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
+/// `POST /api/benches/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
 pub async fn apply_builder_proposal(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Json(request): Json<BuilderApplyRequest>,
 ) -> Result<(StatusCode, Json<BuilderApplyResponse>), ApiError> {
     let service = BuilderConfigurationService::new(state);
-    let response = service.apply_operations(project_id, request).await?;
+    let response = service.apply_operations(bench_id, request).await?;
     let status = if response.success {
         StatusCode::OK
     } else {
@@ -1181,17 +1227,15 @@ pub async fn apply_builder_proposal(
     Ok((status, Json(response)))
 }
 
-/// `GET /api/projects/:id/config-versions` — inspect builder-managed configuration history.
+/// `GET /api/benches/:id/config-versions` — inspect builder-managed configuration history.
 pub async fn list_configuration_versions(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Query(query): Query<ConfigurationVersionQuery>,
 ) -> Result<Json<ConfigurationVersionListResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state);
     Ok(Json(
-        service
-            .list_configuration_versions(project_id, query)
-            .await?,
+        service.list_configuration_versions(bench_id, query).await?,
     ))
 }
 
@@ -1214,7 +1258,7 @@ pub async fn delete_team(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = TeamService::new(state.storage, state.project_store);
+    let svc = TeamService::new(state.storage, state.bench_store);
     svc.delete_team(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1225,7 +1269,7 @@ pub async fn create_conversation_branch(
     Path(session_id): Path<Uuid>,
     Json(req): Json<CreateConversationBranchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let resp = svc.create_branch(session_id, req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1235,7 +1279,7 @@ pub async fn list_conversation_branches(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<Vec<ConversationBranchResponse>>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let resp = svc.list_branches(session_id).await?;
     Ok(Json(resp))
 }
@@ -1245,7 +1289,7 @@ pub async fn get_thread_detail(
     State(state): State<AppState>,
     Path(thread_id): Path<Uuid>,
 ) -> Result<Json<ConversationThreadDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.project_store);
+    let svc = ConversationService::new(state.storage, state.bench_store);
     let resp = svc.get_thread_detail(thread_id).await?;
     Ok(Json(resp))
 }
@@ -1281,105 +1325,104 @@ pub async fn get_topology_run(
     Ok(Json(resp))
 }
 
-/// `GET /api/projects/:id/topology-flows` — list durable topology flow definitions.
+/// `GET /api/benches/:id/topology-flows` — list durable topology flow definitions.
 pub async fn list_topology_flows(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<Json<TopologyFlowDefinitionListResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::list_topology_flows(&state, project_id).await?,
+        crate::authoring_definition::list_topology_flows(&state, bench_id).await?,
     ))
 }
 
-/// `POST /api/projects/:id/topology-flows` — create a durable topology flow definition.
+/// `POST /api/benches/:id/topology-flows` — create a durable topology flow definition.
 pub async fn create_topology_flow(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Json(request): Json<CreateTopologyFlowDefinitionRequest>,
 ) -> Result<(StatusCode, Json<TopologyFlowDefinitionRecord>), ApiError> {
     Ok((
         StatusCode::CREATED,
-        Json(crate::authoring_definition::create_topology_flow(&state, project_id, request).await?),
+        Json(crate::authoring_definition::create_topology_flow(&state, bench_id, request).await?),
     ))
 }
 
-/// `GET /api/projects/:id/topology-flows/:name` — fetch one durable topology flow definition.
+/// `GET /api/benches/:id/topology-flows/:name` — fetch one durable topology flow definition.
 pub async fn get_topology_flow(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
+    Path((bench_id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::get_topology_flow(&state, project_id, &name).await?,
+        crate::authoring_definition::get_topology_flow(&state, bench_id, &name).await?,
     ))
 }
 
-/// `PUT /api/projects/:id/topology-flows/:name` — update a durable topology flow definition.
+/// `PUT /api/benches/:id/topology-flows/:name` — update a durable topology flow definition.
 pub async fn update_topology_flow(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
+    Path((bench_id, name)): Path<(Uuid, String)>,
     Json(request): Json<UpdateTopologyFlowDefinitionRequest>,
 ) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::update_topology_flow(&state, project_id, &name, request)
-            .await?,
+        crate::authoring_definition::update_topology_flow(&state, bench_id, &name, request).await?,
     ))
 }
 
-/// `GET /api/projects/:id/context-definitions` — list durable context definition records.
+/// `GET /api/benches/:id/context-definitions` — list durable context definition records.
 pub async fn list_context_definitions(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
 ) -> Result<Json<ContextDefinitionListResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::list_context_definitions(&state, project_id).await?,
+        crate::authoring_definition::list_context_definitions(&state, bench_id).await?,
     ))
 }
 
-/// `POST /api/projects/:id/context-definitions` — create a durable context definition.
+/// `POST /api/benches/:id/context-definitions` — create a durable context definition.
 pub async fn create_context_definition(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(bench_id): Path<Uuid>,
     Json(request): Json<CreateContextDefinitionRequest>,
 ) -> Result<(StatusCode, Json<ContextDefinitionRecord>), ApiError> {
     Ok((
         StatusCode::CREATED,
         Json(
-            crate::authoring_definition::create_context_definition(&state, project_id, request)
+            crate::authoring_definition::create_context_definition(&state, bench_id, request)
                 .await?,
         ),
     ))
 }
 
-/// `GET /api/projects/:id/context-definitions/:name` — fetch one durable context definition.
+/// `GET /api/benches/:id/context-definitions/:name` — fetch one durable context definition.
 pub async fn get_context_definition(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
+    Path((bench_id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<ContextDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::get_context_definition(&state, project_id, &name).await?,
+        crate::authoring_definition::get_context_definition(&state, bench_id, &name).await?,
     ))
 }
 
-/// `PUT /api/projects/:id/context-definitions/:name` — update a durable context definition.
+/// `PUT /api/benches/:id/context-definitions/:name` — update a durable context definition.
 pub async fn update_context_definition(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
+    Path((bench_id, name)): Path<(Uuid, String)>,
     Json(request): Json<UpdateContextDefinitionRequest>,
 ) -> Result<Json<ContextDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::update_context_definition(&state, project_id, &name, request)
+        crate::authoring_definition::update_context_definition(&state, bench_id, &name, request)
             .await?,
     ))
 }
 
-/// `POST /api/projects/:id/context-definitions/:name/preview` — render a stored context definition.
+/// `POST /api/benches/:id/context-definitions/:name/preview` — render a stored context definition.
 pub async fn preview_context_definition(
     State(state): State<AppState>,
-    Path((project_id, name)): Path<(Uuid, String)>,
+    Path((bench_id, name)): Path<(Uuid, String)>,
     Json(request): Json<PreviewContextDefinitionRequest>,
 ) -> Result<Json<PreviewContextDefinitionResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::preview_context_definition(&state, project_id, &name, request)
+        crate::authoring_definition::preview_context_definition(&state, bench_id, &name, request)
             .await?,
     ))
 }
@@ -1391,8 +1434,8 @@ pub async fn preview_context_definition(
 /// Query parameters for `GET /api/skills`.
 #[derive(Debug, Deserialize)]
 pub struct SkillsQueryParams {
-    /// ID of the project to list skills for (required).
-    pub project_id: Uuid,
+    /// ID of the bench to list skills for (required).
+    pub bench_id: Uuid,
     /// Agent ID to include agent-level skills. When provided, the agent's
     /// directory is searched for a `skills/` folder.
     pub agent_id: Option<String>,
@@ -1404,7 +1447,7 @@ pub struct SkillItem {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
-    /// Hierarchy level where this skill was resolved: "agent", "project",
+    /// Hierarchy level where this skill was resolved: "agent", "bench",
     /// "team", "lens", or "global".
     pub level: String,
     /// Tool names the skill requests access to.
@@ -1420,14 +1463,14 @@ pub struct SkillListResponse {
     pub skills: Vec<SkillItem>,
 }
 
-/// `GET /api/skills` — list skills available for a project/agent combination.
+/// `GET /api/skills` — list skills available for a bench/agent combination.
 ///
-/// Resolves skills from the Swage config hierarchy (global → project → agent),
+/// Resolves skills from the Swage config hierarchy (global → bench → agent),
 /// applying override rules when the same skill name appears at multiple levels.
 /// Returns 200 with `{ skills: [...] }`, sorted agent-first then alphabetically.
 ///
-/// Returns 404 if `project_id` does not correspond to a known project.
-/// Returns 400 if `project_id` is missing or not a valid UUID (axum `Query`
+/// Returns 404 if `bench_id` does not correspond to a known bench.
+/// Returns 400 if `bench_id` is missing or not a valid UUID (axum `Query`
 /// extractor enforces this automatically).
 ///
 /// When the Swage config root directory does not exist (e.g. on a fresh
@@ -1440,15 +1483,15 @@ pub async fn list_skills(
     use swage_config::skill::discover_skills;
     use swage_config::{HierarchyLevel, resolve_root};
 
-    // Verify the project exists — return 404 for unknown IDs.
-    let project = state
-        .project_store
-        .get(params.project_id)
+    // Verify the bench exists — return 404 for unknown IDs.
+    let bench = state
+        .bench_store
+        .get(params.bench_id)
         .await
         .map_err(|e| ApiError(GatewayError::Storage(e)))?
         .ok_or_else(|| {
-            ApiError(GatewayError::ProjectNotFound {
-                id: params.project_id,
+            ApiError(GatewayError::BenchNotFound {
+                id: params.bench_id,
             })
         })?;
 
@@ -1460,17 +1503,17 @@ pub async fn list_skills(
         Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
     };
 
-    // Build the hierarchy: global always included; project and agent directories
+    // Build the hierarchy: global always included; bench and agent directories
     // are included only when they exist on disk.
-    let project_dir = root.join("projects").join(&project.slug);
+    let bench_dir = root.join("benches").join(&bench.slug);
     let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> =
         vec![(HierarchyLevel::Global, root.clone())];
 
-    if project_dir.is_dir() {
-        levels.push((HierarchyLevel::Project, project_dir.clone()));
+    if bench_dir.is_dir() {
+        levels.push((HierarchyLevel::Bench, bench_dir.clone()));
 
         if let Some(ref agent_id) = params.agent_id {
-            let agent_dir = project_dir.join("agents").join(agent_id);
+            let agent_dir = bench_dir.join("agents").join(agent_id);
             if agent_dir.is_dir() {
                 levels.push((HierarchyLevel::Agent, agent_dir));
             }
@@ -1492,8 +1535,7 @@ pub async fn list_skills(
             let level = match s.level {
                 HierarchyLevel::Agent => "agent",
                 HierarchyLevel::Team => "team",
-                HierarchyLevel::Project => "project",
-                HierarchyLevel::Lens => "lens",
+                HierarchyLevel::Bench => "bench",
                 HierarchyLevel::Global => "global",
             };
             SkillItem {
@@ -2203,7 +2245,7 @@ mod tests {
     use swage_provider::LlmProvider;
     use swage_storage::{
         AppLens,
-        store::{MessageStore, ProjectStore, SessionStore, Storage, TeamStore},
+        store::{BenchStore, MessageStore, SessionStore, Storage, TeamStore},
     };
 
     use super::*;
@@ -2262,7 +2304,7 @@ mod tests {
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn BenchStore>,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -2497,20 +2539,24 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
-        assert!(body["project_id"].is_string());
+        assert!(body["bench_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
     }
 
     #[tokio::test]
     async fn get_lens_runtime_defaults_to_assistant() {
-        let (router, _storage) = make_router();
+        let (router, storage) = make_router();
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/lens-runtime")
+                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2526,12 +2572,16 @@ mod tests {
     #[tokio::test]
     async fn put_lens_runtime_persists_builder_lens() {
         let (router, storage) = make_router();
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/lens-runtime")
+                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
                     .unwrap(),
@@ -2543,7 +2593,7 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["active_lens"], "builder");
 
-        let stored = swage_storage::store::LensStore::get_active_lens(&*storage)
+        let stored = swage_storage::store::LensStore::get_active_lens(&*storage, bench.id)
             .await
             .expect("stored lens");
         assert_eq!(stored.active_lens, AppLens::builder());
@@ -2551,7 +2601,11 @@ mod tests {
 
     #[tokio::test]
     async fn switching_lenses_does_not_change_workflow_capabilities() {
-        let (router, _storage) = make_router();
+        let (router, storage) = make_router();
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
 
         let before = router
             .clone()
@@ -2571,7 +2625,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/lens-runtime")
+                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
                     .unwrap(),
@@ -2818,19 +2872,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/projects
+    // POST /api/benches
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_projects_returns_201_with_json() {
+    async fn post_benches_returns_201_with_json() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"name":"My Project"}"#))
+                    .body(axum::body::Body::from(r#"{"name":"My Bench"}"#))
                     .unwrap(),
             )
             .await
@@ -2840,17 +2894,17 @@ mod tests {
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
         assert!(body["slug"].is_string(), "response should have a slug");
-        assert_eq!(body["name"].as_str().unwrap(), "My Project");
+        assert_eq!(body["name"].as_str().unwrap(), "My Bench");
     }
 
     #[tokio::test]
-    async fn post_projects_empty_name_returns_422() {
+    async fn post_benches_empty_name_returns_422() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":""}"#))
                     .unwrap(),
@@ -2862,7 +2916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_projects_duplicate_name_returns_409() {
+    async fn post_benches_duplicate_name_returns_409() {
         let (router, _) = make_router();
 
         // First creation succeeds.
@@ -2871,7 +2925,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -2884,7 +2938,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -2896,17 +2950,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/projects
+    // GET /api/benches
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_projects_returns_200_with_list() {
+    async fn get_benches_returns_200_with_list() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2915,16 +2969,16 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        // At least the seeded default project.
-        assert!(body["projects"].is_array());
+        // At least the seeded default bench.
+        assert!(body["benches"].is_array());
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/projects/:id
+    // GET /api/benches/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_project_by_id_returns_200() {
+    async fn get_bench_by_id_returns_200() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -2932,7 +2986,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Fetched"}"#))
                     .unwrap(),
@@ -2946,7 +3000,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{id}"))
+                    .uri(format!("/api/benches/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2959,14 +3013,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_project_nonexistent_returns_404() {
+    async fn get_bench_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{missing}"))
+                    .uri(format!("/api/benches/{missing}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2976,11 +3030,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PUT /api/projects/:id
+    // PUT /api/benches/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn put_project_returns_200_with_updated_fields() {
+    async fn put_bench_returns_200_with_updated_fields() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -2988,7 +3042,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Original"}"#))
                     .unwrap(),
@@ -3002,7 +3056,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/projects/{id}"))
+                    .uri(format!("/api/benches/{id}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Renamed"}"#))
                     .unwrap(),
@@ -3016,14 +3070,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_project_nonexistent_returns_404() {
+    async fn put_bench_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/projects/{missing}"))
+                    .uri(format!("/api/benches/{missing}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"X"}"#))
                     .unwrap(),
@@ -3034,11 +3088,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // DELETE /api/projects/:id
+    // DELETE /api/benches/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn delete_project_returns_204() {
+    async fn delete_bench_returns_204() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -3046,7 +3100,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects")
+                    .uri("/api/benches")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Deletable"}"#))
                     .unwrap(),
@@ -3060,7 +3114,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/projects/{id}"))
+                    .uri(format!("/api/benches/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3071,20 +3125,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_default_project_returns_409() {
-        use crate::service::ProjectService;
+    async fn delete_default_bench_returns_409() {
+        use crate::service::BenchService;
 
         let (router, storage) = make_router();
-        // Get the default project's ID.
-        let svc = ProjectService::new(Arc::clone(&storage) as Arc<dyn ProjectStore>);
-        let default_project = svc.project_store.get_or_create_default().await.unwrap();
-        let id = default_project.id;
+        // Get the default bench's ID.
+        let svc = BenchService::new(Arc::clone(&storage) as Arc<dyn BenchStore>);
+        let default_bench = svc.bench_store.get_or_create_default().await.unwrap();
+        let id = default_bench.id;
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/projects/{id}"))
+                    .uri(format!("/api/benches/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3095,27 +3149,26 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/projects/:project_id/sessions
+    // GET /api/benches/:bench_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_project_sessions_returns_200_with_array() {
+    async fn get_bench_sessions_returns_200_with_array() {
         let (router, storage) = make_router();
 
-        // Create a named project directly in storage.
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "my-project".into(),
-                slug: "my-project".into(),
-                workspace_path: None,
+        // Create a named bench directly in storage.
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "my-bench".into(),
+                slug: "my-bench".into(),
             })
             .await
             .unwrap();
 
-        // Add two sessions to that project.
+        // Add two sessions to that bench.
         storage
             .create_session(swage_storage::model::NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -3123,7 +3176,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -3134,7 +3187,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{}/sessions", project.id))
+                    .uri(format!("/api/benches/{}/sessions", bench.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3149,22 +3202,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_project_sessions_scopes_to_project() {
+    async fn get_bench_sessions_scopes_to_bench() {
         let (router, storage) = make_router();
 
-        let project_a = storage
-            .create(swage_storage::model::NewProject {
-                name: "project-a".into(),
-                slug: "project-a".into(),
-                workspace_path: None,
+        let bench_a = storage
+            .create(swage_storage::model::NewBench {
+                name: "bench-a".into(),
+                slug: "bench-a".into(),
             })
             .await
             .unwrap();
-        let project_b = storage
-            .create(swage_storage::model::NewProject {
-                name: "project-b".into(),
-                slug: "project-b".into(),
-                workspace_path: None,
+        let bench_b = storage
+            .create(swage_storage::model::NewBench {
+                name: "bench-b".into(),
+                slug: "bench-b".into(),
             })
             .await
             .unwrap();
@@ -3172,7 +3223,7 @@ mod tests {
         // One session in A, two in B.
         storage
             .create_session(swage_storage::model::NewSession {
-                project_id: project_a.id,
+                bench_id: bench_a.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -3180,7 +3231,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                project_id: project_b.id,
+                bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -3188,7 +3239,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                project_id: project_b.id,
+                bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -3199,7 +3250,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{}/sessions", project_a.id))
+                    .uri(format!("/api/benches/{}/sessions", bench_a.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3208,12 +3259,12 @@ mod tests {
 
         let body = body_json(resp).await;
         let list = body["conversations"].as_array().unwrap();
-        // Only sessions belonging to project A.
+        // Only sessions belonging to bench A.
         assert_eq!(list.len(), 1);
     }
 
     #[tokio::test]
-    async fn get_project_sessions_returns_404_for_unknown_project() {
+    async fn get_bench_sessions_returns_404_for_unknown_bench() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -3221,7 +3272,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{missing}/sessions"))
+                    .uri(format!("/api/benches/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3234,18 +3285,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/projects/:project_id/sessions
+    // POST /api/benches/:bench_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_project_sessions_returns_201_with_json() {
+    async fn post_bench_sessions_returns_201_with_json() {
         let (router, storage) = make_router();
 
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "my-project".into(),
-                slug: "my-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "my-bench".into(),
+                slug: "my-bench".into(),
             })
             .await
             .unwrap();
@@ -3254,7 +3304,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/sessions", project.id))
+                    .uri(format!("/api/benches/{}/sessions", bench.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3264,12 +3314,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string());
-        // Session should be associated with the specified project.
-        assert_eq!(body["project_id"].as_str().unwrap(), project.id.to_string());
+        // Session should be associated with the specified bench.
+        assert_eq!(body["bench_id"].as_str().unwrap(), bench.id.to_string());
     }
 
     #[tokio::test]
-    async fn post_project_sessions_returns_404_for_unknown_project() {
+    async fn post_bench_sessions_returns_404_for_unknown_bench() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -3277,7 +3327,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{missing}/sessions"))
+                    .uri(format!("/api/benches/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3294,13 +3344,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_project_teams_returns_201_with_json() {
+    async fn post_bench_teams_returns_201_with_json() {
         let (router, storage) = make_router();
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "team-project".into(),
-                slug: "team-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "team-bench".into(),
+                slug: "team-bench".into(),
             })
             .await
             .unwrap();
@@ -3309,10 +3358,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/teams", project.id))
+                    .uri(format!("/api/benches/{}/teams", bench.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        r#"{"name":"research","description":"Research team","entry_agent_id":"planner","members":["reviewer"]}"#,
+                        r#"{"name":"research","description":"Research team","entry_agent_id":"planner","agents":[{"id":"planner","display_name":"planner"},{"id":"reviewer","display_name":"reviewer"}],"tasks":[]}"#,
                     ))
                     .unwrap(),
             )
@@ -3330,20 +3379,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_project_teams_returns_200_with_array() {
+    async fn get_bench_teams_returns_200_with_array() {
         let (router, storage) = make_router();
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "team-list-project".into(),
-                slug: "team-list-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "team-list-bench".into(),
+                slug: "team-list-bench".into(),
             })
             .await
             .unwrap();
 
         storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "research".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -3354,7 +3402,7 @@ mod tests {
             .unwrap();
         storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "review".into(),
                 description: String::new(),
                 entry_agent_id: "reviewer".into(),
@@ -3368,7 +3416,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/projects/{}/teams", project.id))
+                    .uri(format!("/api/benches/{}/teams", bench.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3384,17 +3432,16 @@ mod tests {
     #[tokio::test]
     async fn put_team_returns_200_and_updates_members() {
         let (router, storage) = make_router();
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "team-update-project".into(),
-                slug: "team-update-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "team-update-bench".into(),
+                slug: "team-update-bench".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "research".into(),
                 description: "Initial".into(),
                 entry_agent_id: "planner".into(),
@@ -3430,17 +3477,16 @@ mod tests {
     #[tokio::test]
     async fn delete_team_returns_204() {
         let (router, storage) = make_router();
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "team-delete-project".into(),
-                slug: "team-delete-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "team-delete-bench".into(),
+                slug: "team-delete-bench".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "temporary".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -3497,17 +3543,16 @@ mod tests {
         let (router, storage) =
             make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "team-run-project".into(),
-                slug: "team-run-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "team-run-bench".into(),
+                slug: "team-run-bench".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -3607,17 +3652,16 @@ def build_topology():
         let (router, storage) =
             make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
-        let project = storage
-            .create(swage_storage::model::NewProject {
-                name: "single-run-project".into(),
-                slug: "single-run-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(swage_storage::model::NewBench {
+                name: "single-run-bench".into(),
+                slug: "single-run-bench".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "single".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -3871,7 +3915,7 @@ def build_topology():
         let shutdown_signal = CancellationToken::new();
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn BenchStore>,
             provider: provider as Arc<dyn swage_provider::LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",

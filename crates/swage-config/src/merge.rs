@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn three_level_chain_respects_priority() {
         // global: host=10.0.0.1, port=3000
-        // project: model=claude-opus
+        // bench: model=claude-opus
         // agent: port=4000
         let global = PartialConfig {
             server: Some(PartialServerConfig {
@@ -727,10 +727,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let project = partial_with_provider_model("claude-opus");
+        let bench = partial_with_provider_model("claude-opus");
         let agent = partial_with_server_port(4000);
 
-        let merged = merge_chain(vec![global, project, agent]);
+        let merged = merge_chain(vec![global, bench, agent]);
 
         // Agent overrides global's port
         let server = merged.server.expect("server should exist");
@@ -741,12 +741,12 @@ mod tests {
         );
         assert_eq!(server.port, Some(4000), "agent overrides global port");
 
-        // Project's model survives
+        // Bench's model survives
         let provider = merged.provider.expect("provider should exist");
         assert_eq!(
             provider.model.as_deref(),
             Some("claude-opus"),
-            "project model survives"
+            "bench model survives"
         );
     }
 
@@ -1107,7 +1107,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let project = PartialConfig {
+        let bench = PartialConfig {
             output: Some(PartialOutputConfig {
                 schema: None,
                 max_retries: Some(2),
@@ -1122,7 +1122,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = resolve(merge_chain(vec![global, project, agent]));
+        let resolved = resolve(merge_chain(vec![global, bench, agent]));
         // Agent's values win at every level.
         assert_eq!(
             resolved.output.schema,
@@ -1172,7 +1172,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let project = PartialConfig {
+        let bench = PartialConfig {
             hitl: Some(PartialHitlConfig {
                 timeout: Some(600),
                 timeout_policy: None,
@@ -1186,11 +1186,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resolved = resolve(merge_chain(vec![global, project, agent]));
-        assert_eq!(
-            resolved.hitl.timeout, 600,
-            "project timeout wins over global"
-        );
+        let resolved = resolve(merge_chain(vec![global, bench, agent]));
+        assert_eq!(resolved.hitl.timeout, 600, "bench timeout wins over global");
         assert_eq!(
             resolved.hitl.timeout_policy,
             ApprovalTimeoutPolicy::Interrupt,

@@ -16,7 +16,7 @@ use crate::model::HierarchyLevel;
 ///
 /// Rules are assembled in priority order: higher `priority` values appear
 /// earlier in the context (as system instruction content). Rules with equal
-/// priority are ordered by hierarchy level specificity (Agent > Project >
+/// priority are ordered by hierarchy level specificity (Agent > Bench >
 /// Global) and then by filename.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptRule {
@@ -179,9 +179,8 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
         HierarchyLevel::Agent => 0,
         HierarchyLevel::Team => 1,
-        HierarchyLevel::Project => 2,
-        HierarchyLevel::Lens => 3,
-        HierarchyLevel::Global => 4,
+        HierarchyLevel::Bench => 2,
+        HierarchyLevel::Global => 3,
     }
 }
 
@@ -193,7 +192,7 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
 ///
 /// Returned rules are sorted by:
 /// 1. **Priority descending** — higher `priority` value first
-/// 2. **Level specificity** — Agent > Team > Project > Lens > Global
+/// 2. **Level specificity** — Agent > Team > Bench > Global
 /// 3. **Filename alphabetically** — deterministic tie-break
 ///
 /// Missing directories are silently skipped. If both `prompts/` and
@@ -319,7 +318,7 @@ mod tests {
         )
         .unwrap();
 
-        let rule = parse_prompt_rule_file(&path, HierarchyLevel::Project).unwrap();
+        let rule = parse_prompt_rule_file(&path, HierarchyLevel::Bench).unwrap();
 
         assert_eq!(rule.priority, 50);
         assert_eq!(rule.content, "Content.");
@@ -502,16 +501,16 @@ mod tests {
     #[test]
     fn rules_from_multiple_levels_merged() {
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
 
         make_prompts_dir(global_dir.path());
         write_rule(&global_dir.path().join("prompts"), "g.md", "Global.");
-        make_prompts_dir(project_dir.path());
-        write_rule(&project_dir.path().join("prompts"), "p.md", "Project.");
+        make_prompts_dir(bench_dir.path());
+        write_rule(&bench_dir.path().join("prompts"), "p.md", "Bench.");
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
         ];
         let (rules, warnings) = load_prompt_rules(&levels);
 
@@ -536,7 +535,7 @@ mod tests {
         assert_eq!(rules[2].priority, 5, "lowest priority last");
     }
 
-    /// Sorting: at equal priority, Agent-level rules precede Project-level rules.
+    /// Sorting: at equal priority, Agent-level rules precede Bench-level rules.
     #[test]
     fn sorting_level_specificity_agent_before_global() {
         let global_dir = TempDir::new().unwrap();

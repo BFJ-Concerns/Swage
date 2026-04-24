@@ -23,7 +23,7 @@ use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind}
 use crate::state::AppState;
 use crate::turn::{
     GatewayDelegationHandler, build_agent_config, build_assembly_elements,
-    build_gateway_dispatcher, load_project_memory,
+    build_gateway_dispatcher, load_bench_memory,
 };
 use crate::websocket::ServerEvent;
 
@@ -39,12 +39,12 @@ pub enum TopologyEngineError {
     HookBlocked { event: String, reason: String },
     #[error("topology hook requested approval for {event}: {prompt}")]
     HookApprovalRequested { event: String, prompt: String },
-    #[error("project {project_id} for team {team_id} was not found")]
-    TeamProjectMissing { team_id: Uuid, project_id: Uuid },
+    #[error("bench {bench_id} for team {team_id} was not found")]
+    TeamBenchMissing { team_id: Uuid, bench_id: Uuid },
     #[error("session {session_id} was not found")]
     SessionMissing { session_id: Uuid },
-    #[error("session {session_id} does not belong to team project {project_id}")]
-    SessionProjectMismatch { session_id: Uuid, project_id: Uuid },
+    #[error("session {session_id} does not belong to team bench {bench_id}")]
+    SessionBenchMismatch { session_id: Uuid, bench_id: Uuid },
     #[error("topology graph is invalid at runtime: {0}")]
     InvalidGraph(String),
 }
@@ -95,14 +95,14 @@ impl TopologyExecutor {
         &self,
         request: TopologyExecutionRequest,
     ) -> Result<TopologyExecutionResult, TopologyEngineError> {
-        let project = self
+        let bench = self
             .state
-            .project_store
-            .get(request.team.project_id)
+            .bench_store
+            .get(request.team.bench_id)
             .await?
-            .ok_or(TopologyEngineError::TeamProjectMissing {
+            .ok_or(TopologyEngineError::TeamBenchMissing {
                 team_id: request.team.id,
-                project_id: request.team.project_id,
+                bench_id: request.team.bench_id,
             })?;
 
         let session_id = self
@@ -214,14 +214,14 @@ impl TopologyExecutor {
 
                 let state = self.state.clone();
                 let team = request.team.clone();
-                let project = project.clone();
+                let bench = bench.clone();
                 let topology_run_id = topology_run.id;
                 let cancel_token = run_cancel_token.child_token();
                 let hook_registry = self.hook_registry.clone();
                 active.spawn(async move {
                     execute_node(
                         state,
-                        project,
+                        bench,
                         team,
                         session_id,
                         topology_run_id,
@@ -426,10 +426,10 @@ impl TopologyExecutor {
                     .get_session(session_id)
                     .await?
                     .ok_or(TopologyEngineError::SessionMissing { session_id })?;
-                if session.project_id != team.project_id {
-                    return Err(TopologyEngineError::SessionProjectMismatch {
+                if session.bench_id != team.bench_id {
+                    return Err(TopologyEngineError::SessionBenchMismatch {
                         session_id,
-                        project_id: team.project_id,
+                        bench_id: team.bench_id,
                     });
                 }
                 Ok(session_id)
@@ -438,7 +438,7 @@ impl TopologyExecutor {
                 .state
                 .storage
                 .create_session(NewSession {
-                    project_id: team.project_id,
+                    bench_id: team.bench_id,
                     agent_id: team.entry_agent_id.clone(),
                     metadata: None,
                 })
@@ -465,7 +465,7 @@ struct NodeCompletion {
 
 async fn execute_node(
     state: AppState,
-    project: swage_storage::model::Project,
+    bench: swage_storage::model::Bench,
     team: Team,
     session_id: Uuid,
     topology_run_id: Uuid,
@@ -522,7 +522,7 @@ async fn execute_node(
                 .unwrap_or_else(|| team.entry_agent_id.clone());
             execute_agent_node(
                 &state,
-                &project,
+                &bench,
                 &team,
                 session_id,
                 &node,
@@ -644,7 +644,7 @@ struct NodeRetryRecord {
 
 async fn execute_agent_node(
     state: &AppState,
-    project: &swage_storage::model::Project,
+    bench: &swage_storage::model::Bench,
     team: &Team,
     session_id: Uuid,
     node: &TopologyNode,
@@ -652,7 +652,7 @@ async fn execute_agent_node(
     input_json: &serde_json::Value,
     cancel_token: CancellationToken,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let config = resolve_node_config(project, team, agent_id, node.task_name.as_deref())?;
+    let config = resolve_node_config(state, bench, team, agent_id, node.task_name.as_deref())?;
     let rendered_input = render_node_input(node, input_json);
 
     let thread = ThreadStore::create(
@@ -682,18 +682,18 @@ async fn execute_agent_node(
 
     let swage_root_opt: Option<PathBuf> = swage_config::discovery::resolve_root().ok();
     let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_project_memory(root, &project.slug).await,
+        Some(root) => load_bench_memory(root, &bench.slug).await,
         None => String::new(),
     };
 
     let assembly_search_paths: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
         .as_ref()
         .map(|root| {
-            let project_dir = root.join("projects").join(&project.slug);
-            let agent_dir = project_dir.join("agents").join(agent_id);
+            let bench_dir = root.join("benches").join(&bench.slug);
+            let agent_dir = bench_dir.join("agents").join(agent_id);
             let mut levels = vec![
                 (swage_config::HierarchyLevel::Global, root.clone()),
-                (swage_config::HierarchyLevel::Project, project_dir),
+                (swage_config::HierarchyLevel::Bench, bench_dir),
             ];
             if agent_dir.is_dir() {
                 levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
@@ -711,7 +711,7 @@ async fn execute_agent_node(
         vec![],
         history_messages,
         memory_content,
-        project.name.clone(),
+        bench.name.clone(),
     );
     let tokeniser = TiktokenTokeniser::new(&config.provider.model);
     let assembly_runner =
@@ -753,7 +753,7 @@ async fn execute_agent_node(
                     session_id,
                     thread_id: thread.id,
                     turn_id: Uuid::new_v4(),
-                    project_id: Some(project.id),
+                    bench_id: Some(bench.id),
                 },
                 user_message: rendered_input,
                 assembled_context: output.messages,
@@ -859,15 +859,13 @@ fn execute_deterministic_node(
 }
 
 fn resolve_node_config(
-    project: &swage_storage::model::Project,
+    state: &AppState,
+    bench: &swage_storage::model::Bench,
     team: &Team,
     agent_id: &str,
     task_name: Option<&str>,
 ) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
-    let mut config =
-        swage_config::load_resolved_config_for_team(&project.slug, &team.name, agent_id)
-            .or_else(|_| swage_config::load_resolved_config(&project.slug, agent_id))
-            .map_err(TopologyEngineError::from)?;
+    let mut config = load_topology_node_config(state, bench, team, agent_id)?;
 
     if let Some(agent) = team
         .agents
@@ -887,6 +885,37 @@ fn resolve_node_config(
     }
 
     Ok(config)
+}
+
+fn load_topology_node_config(
+    state: &AppState,
+    bench: &swage_storage::model::Bench,
+    team: &Team,
+    agent_id: &str,
+) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
+    let Ok(root) = swage_config::discovery::resolve_root() else {
+        return Ok(state.config.clone());
+    };
+
+    let bench_dir = root.join("benches").join(&bench.slug);
+    let team_dir = bench_dir.join("teams").join(&team.name);
+    let agent_dir = bench_dir.join("agents").join(agent_id);
+
+    let has_filesystem_config = bench_dir.join("config.toml").exists()
+        || team_dir.join("config.toml").exists()
+        || agent_dir.join("config.toml").exists();
+
+    if !has_filesystem_config {
+        return Ok(state.config.clone());
+    }
+
+    swage_config::load_resolved_config_from_with_team(
+        &root,
+        &bench.slug,
+        Some(&team.name),
+        agent_id,
+    )
+    .map_err(TopologyEngineError::from)
 }
 
 fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> String {
@@ -1126,8 +1155,8 @@ mod tests {
 
     use async_trait::async_trait;
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
-    use swage_storage::model::{NewProject, NewTeam};
-    use swage_storage::store::ProjectStore;
+    use swage_storage::model::{NewBench, NewTeam};
+    use swage_storage::store::BenchStore;
     use swage_storage::store::TeamStore;
 
     use super::*;
@@ -1167,7 +1196,7 @@ mod tests {
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -1293,19 +1322,18 @@ mod tests {
             ],
         ]));
         let (state, storage) = make_state(provider);
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             storage.as_ref(),
-            NewProject {
-                name: "topology-project".into(),
-                slug: "topology-project".into(),
-                workspace_path: None,
+            NewBench {
+                name: "topology-bench".into(),
+                slug: "topology-bench".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1410,19 +1438,18 @@ mod tests {
             },
         ]));
         let (state, storage) = make_state(provider);
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             storage.as_ref(),
-            NewProject {
-                name: "fanout-project".into(),
-                slug: "fanout-project".into(),
-                workspace_path: None,
+            NewBench {
+                name: "fanout-bench".into(),
+                slug: "fanout-bench".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "fanout-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1509,19 +1536,18 @@ mod tests {
             },
         ]]));
         let (state, storage) = make_state(provider);
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             storage.as_ref(),
-            NewProject {
-                name: "hook-project".into(),
-                slug: "hook-project".into(),
-                workspace_path: None,
+            NewBench {
+                name: "hook-bench".into(),
+                slug: "hook-bench".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1583,19 +1609,18 @@ mod tests {
             finish_reason: Some(swage_core::FinishReason::Stop),
         }]));
         let (state, storage) = make_state(provider);
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             storage.as_ref(),
-            NewProject {
-                name: "blocked-topology-project".into(),
-                slug: "blocked-topology-project".into(),
-                workspace_path: None,
+            NewBench {
+                name: "blocked-topology-bench".into(),
+                slug: "blocked-topology-bench".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1668,19 +1693,18 @@ mod tests {
             },
         ]));
         let (state, storage) = make_state(provider);
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             storage.as_ref(),
-            NewProject {
-                name: "approval-topology-project".into(),
-                slug: "approval-topology-project".into(),
-                workspace_path: None,
+            NewBench {
+                name: "approval-topology-bench".into(),
+                slug: "approval-topology-bench".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),

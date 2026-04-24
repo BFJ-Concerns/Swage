@@ -75,7 +75,7 @@ pub struct PreviewContextDefinitionRequest {
     pub history: Vec<PreviewContextMessageInput>,
     #[serde(default)]
     pub memory_content: String,
-    pub project_name: String,
+    pub bench_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,34 +92,34 @@ pub struct PreviewContextDefinitionResponse {
 
 pub async fn list_topology_flows(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
 ) -> Result<TopologyFlowDefinitionListResponse, GatewayError> {
-    let project = require_project(state, project_id).await?;
+    let bench = require_bench(state, bench_id).await?;
     let mut flows: Vec<TopologyFlowDefinitionRecord> =
-        read_definition_directory(&topology_flow_root(&project.slug)?)?;
+        read_definition_directory(&topology_flow_root(&bench.slug)?)?;
     flows.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(TopologyFlowDefinitionListResponse { flows })
 }
 
 pub async fn get_topology_flow(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     flow_name: &str,
 ) -> Result<TopologyFlowDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
-    read_definition_record(&topology_flow_root(&project.slug)?, flow_name)
+    let bench = require_bench(state, bench_id).await?;
+    read_definition_record(&topology_flow_root(&bench.slug)?, flow_name)
 }
 
 pub async fn create_topology_flow(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     request: CreateTopologyFlowDefinitionRequest,
 ) -> Result<TopologyFlowDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
+    let bench = require_bench(state, bench_id).await?;
     let name = validate_definition_name(&request.name)?;
     let now = Utc::now();
     write_definition_record(
-        &topology_flow_root(&project.slug)?,
+        &topology_flow_root(&bench.slug)?,
         &name,
         &TopologyFlowDefinitionRecord {
             name: name.clone(),
@@ -133,12 +133,12 @@ pub async fn create_topology_flow(
 
 pub async fn update_topology_flow(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     flow_name: &str,
     request: UpdateTopologyFlowDefinitionRequest,
 ) -> Result<TopologyFlowDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
-    let root = topology_flow_root(&project.slug)?;
+    let bench = require_bench(state, bench_id).await?;
+    let root = topology_flow_root(&bench.slug)?;
     let existing = read_definition_record::<TopologyFlowDefinitionRecord>(&root, flow_name)?;
     write_definition_record(
         &root,
@@ -155,35 +155,35 @@ pub async fn update_topology_flow(
 
 pub async fn list_context_definitions(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
 ) -> Result<ContextDefinitionListResponse, GatewayError> {
-    let project = require_project(state, project_id).await?;
+    let bench = require_bench(state, bench_id).await?;
     let mut definitions: Vec<ContextDefinitionRecord> =
-        read_definition_directory(&context_definition_root(&project.slug)?)?;
+        read_definition_directory(&context_definition_root(&bench.slug)?)?;
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(ContextDefinitionListResponse { definitions })
 }
 
 pub async fn get_context_definition(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     definition_name: &str,
 ) -> Result<ContextDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
-    read_definition_record(&context_definition_root(&project.slug)?, definition_name)
+    let bench = require_bench(state, bench_id).await?;
+    read_definition_record(&context_definition_root(&bench.slug)?, definition_name)
 }
 
 pub async fn create_context_definition(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     request: CreateContextDefinitionRequest,
 ) -> Result<ContextDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
+    let bench = require_bench(state, bench_id).await?;
     let name = validate_definition_name(&request.name)?;
     validate_context_config(&request.config)?;
     let now = Utc::now();
     write_definition_record(
-        &context_definition_root(&project.slug)?,
+        &context_definition_root(&bench.slug)?,
         &name,
         &ContextDefinitionRecord {
             name: name.clone(),
@@ -197,13 +197,13 @@ pub async fn create_context_definition(
 
 pub async fn update_context_definition(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     definition_name: &str,
     request: UpdateContextDefinitionRequest,
 ) -> Result<ContextDefinitionRecord, GatewayError> {
-    let project = require_project(state, project_id).await?;
+    let bench = require_bench(state, bench_id).await?;
     validate_context_config(&request.config)?;
-    let root = context_definition_root(&project.slug)?;
+    let root = context_definition_root(&bench.slug)?;
     let existing = read_definition_record::<ContextDefinitionRecord>(&root, definition_name)?;
     write_definition_record(
         &root,
@@ -220,13 +220,13 @@ pub async fn update_context_definition(
 
 pub async fn preview_context_definition(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     definition_name: &str,
     request: PreviewContextDefinitionRequest,
 ) -> Result<PreviewContextDefinitionResponse, GatewayError> {
-    let project = require_project(state, project_id).await?;
-    let config = read_context_definition_config_for_slug(&project.slug, definition_name)?;
-    let assembly_search_paths = build_assembly_search_paths(&project.slug);
+    let bench = require_bench(state, bench_id).await?;
+    let config = read_context_definition_config_for_slug(&bench.slug, definition_name)?;
+    let assembly_search_paths = build_assembly_search_paths(&bench.slug);
     let search_level_refs: Vec<(HierarchyLevel, &Path)> = assembly_search_paths
         .iter()
         .map(|(level, path)| (level.clone(), path.as_path()))
@@ -240,7 +240,7 @@ pub async fn preview_context_definition(
             .map(|message| ChatMessage::new(message.role, message.content))
             .collect(),
         request.memory_content,
-        request.project_name,
+        request.bench_name,
     );
     let tokeniser = TiktokenTokeniser::new(&state.config.provider.model);
     let assembly_runner =
@@ -262,60 +262,57 @@ pub async fn preview_context_definition(
 
 pub async fn load_topology_flow_graph(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     flow_name: &str,
 ) -> Result<TopologyGraph, GatewayError> {
-    Ok(get_topology_flow(state, project_id, flow_name).await?.graph)
+    Ok(get_topology_flow(state, bench_id, flow_name).await?.graph)
 }
 
 pub fn read_context_definition_config_for_slug(
-    project_slug: &str,
+    bench_slug: &str,
     definition_name: &str,
 ) -> Result<ContextConfig, GatewayError> {
     Ok(read_definition_record::<ContextDefinitionRecord>(
-        &context_definition_root(project_slug)?,
+        &context_definition_root(bench_slug)?,
         definition_name,
     )?
     .config)
 }
 
-fn build_assembly_search_paths(project_slug: &str) -> Vec<(HierarchyLevel, PathBuf)> {
+fn build_assembly_search_paths(bench_slug: &str) -> Vec<(HierarchyLevel, PathBuf)> {
     let Ok(root) = resolve_root() else {
         return Vec::new();
     };
     vec![
         (HierarchyLevel::Global, root.clone()),
-        (
-            HierarchyLevel::Project,
-            root.join("projects").join(project_slug),
-        ),
+        (HierarchyLevel::Bench, root.join("benches").join(bench_slug)),
     ]
 }
 
-async fn require_project(
+async fn require_bench(
     state: &AppState,
-    project_id: Uuid,
-) -> Result<swage_storage::Project, GatewayError> {
+    bench_id: Uuid,
+) -> Result<swage_storage::Bench, GatewayError> {
     state
-        .project_store
-        .get(project_id)
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })
 }
 
-fn topology_flow_root(project_slug: &str) -> Result<PathBuf, GatewayError> {
+fn topology_flow_root(bench_slug: &str) -> Result<PathBuf, GatewayError> {
     Ok(resolve_root()
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("projects")
-        .join(project_slug)
+        .join("benches")
+        .join(bench_slug)
         .join(TOPOLOGY_FLOW_ROOT))
 }
 
-fn context_definition_root(project_slug: &str) -> Result<PathBuf, GatewayError> {
+fn context_definition_root(bench_slug: &str) -> Result<PathBuf, GatewayError> {
     Ok(resolve_root()
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("projects")
-        .join(project_slug)
+        .join("benches")
+        .join(bench_slug)
         .join(CONTEXT_DEFINITION_ROOT))
 }
 

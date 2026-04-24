@@ -138,7 +138,7 @@ impl Tool for WebSearchTool {
             .as_ref()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: "Web search is not configured. Set [tools.search] in your project config."
+                message: "Web search is not configured. Set [tools.search] in your bench config."
                     .to_owned(),
             })?;
 

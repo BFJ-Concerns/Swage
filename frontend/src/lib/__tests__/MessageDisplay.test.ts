@@ -62,7 +62,7 @@ function makeAssistantMessage(
 function makeConversationStore(messages: MessageView[]): ConversationStore {
   const detail: ConversationDetail = {
     id: "conv-1",
-    project_id: "proj-1",
+    bench_id: "proj-1",
     created_at: "2026-03-20T10:00:00Z",
     last_activity: "2026-03-20T10:00:00Z",
     messages,

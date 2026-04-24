@@ -2,29 +2,47 @@
 // These mirror the gateway's API response shapes.
 
 // -------------------------------------------------------------------------
-// Project types
+// Bench types
 // -------------------------------------------------------------------------
 
-/** A project that groups related conversations and has a workspace directory. */
-export interface Project {
+/** A bench is the durable container users create and return to. */
+export interface Bench {
   id: string;
   name: string;
   is_default: boolean;
   slug: string;
-  workspace_path: string;
   created_at: string;
 }
 
-/** Request body for creating a new project. */
-export interface CreateProjectRequest {
+/** Request body for creating a new bench. */
+export interface CreateBenchRequest {
   name: string;
-  workspace_path: string;
 }
 
-/** Request body for updating an existing project. All fields are optional. */
-export interface UpdateProjectRequest {
+/** Request body for updating an existing bench. All fields are optional. */
+export interface UpdateBenchRequest {
   name?: string;
-  workspace_path?: string;
+}
+
+export interface WorkspaceAttachment {
+  id: string;
+  bench_id: string;
+  label: string;
+  path: string;
+  permissions: string[];
+  is_trusted: boolean;
+  created_at: string;
+}
+
+export interface CreateWorkspaceAttachmentRequest {
+  path: string;
+  label?: string;
+  permissions?: string[];
+  is_trusted?: boolean;
+}
+
+export interface UpdateWorkspaceTrustRequest {
+  is_trusted: boolean;
 }
 
 /** Compact conversation entry for the list view. */
@@ -39,7 +57,7 @@ export interface ConversationSummary {
 /** Full conversation with message history. */
 export interface ConversationDetail {
   id: string;
-  project_id: string;
+  bench_id: string;
   created_at: string;
   last_activity: string;
   messages: MessageView[];
@@ -93,7 +111,7 @@ export interface MessageView {
 /** Response from creating a conversation. */
 export interface ConversationResponse {
   id: string;
-  project_id: string;
+  bench_id: string;
   created_at: string;
   last_activity: string;
 }
@@ -117,6 +135,7 @@ export interface LensDescriptor {
 }
 
 export interface LensRuntimeResponse {
+  bench_id: string;
   active_lens: AppLens;
   updated_at: string;
   available_lenses: LensDescriptor[];
@@ -145,7 +164,7 @@ export interface UpdateLensRequest {
 
 export interface TeamSummary {
   id: string;
-  project_id: string;
+  bench_id: string;
   name: string;
   description: string;
   entry_agent_id: string;
@@ -191,20 +210,20 @@ export interface UpdateTeamRequest {
   tasks?: TeamTaskDefinition[];
 }
 
-export type ProjectExtensionStatus = "active" | "approval_required";
-export type ProjectExtensionSourceKind = "managed" | "workspace_candidate";
+export type BenchExtensionStatus = "active" | "approval_required";
+export type BenchExtensionSourceKind = "managed" | "workspace_candidate";
 
-export interface ProjectExtensionSummary {
+export interface BenchExtensionSummary {
   name: string;
   display_name: string | null;
   description: string;
   requested_tools: string[];
   instructions: string;
-  status: ProjectExtensionStatus;
-  source_kind: ProjectExtensionSourceKind;
+  status: BenchExtensionStatus;
+  source_kind: BenchExtensionSourceKind;
 }
 
-export interface CreateProjectExtensionRequest {
+export interface CreateBenchExtensionRequest {
   name: string;
   display_name?: string | null;
   description: string;
@@ -212,7 +231,7 @@ export interface CreateProjectExtensionRequest {
   instructions: string;
 }
 
-export interface UpdateProjectExtensionRequest {
+export interface UpdateBenchExtensionRequest {
   display_name?: string | null;
   description: string;
   requested_tools: string[];
@@ -223,13 +242,13 @@ export interface UpdateProjectExtensionRequest {
 // Materials and attachments
 // -------------------------------------------------------------------------
 
-export type MaterialScopeKind = "session" | "project";
+export type MaterialScopeKind = "session" | "bench";
 
 export interface MaterialRecord {
   id: string;
   scope_kind: MaterialScopeKind;
   session_id: string | null;
-  project_id: string | null;
+  bench_id: string | null;
   source_kind: string;
   source_attachment_id: string | null;
   status: string;
@@ -246,7 +265,7 @@ export interface MaterialRecord {
 export interface CreateMaterialRequest {
   scope_kind: MaterialScopeKind;
   session_id?: string;
-  project_id?: string;
+  bench_id?: string;
   title: string;
   relative_path: string;
   mime_type?: string;
@@ -293,7 +312,7 @@ export type BuilderConfigOperation =
       members?: string[];
     }
   | {
-      kind: "create_project_extension";
+      kind: "create_bench_extension";
       name: string;
       display_name?: string | null;
       description: string;
@@ -301,7 +320,7 @@ export type BuilderConfigOperation =
       instructions: string;
     }
   | {
-      kind: "update_project_extension";
+      kind: "update_bench_extension";
       extension_name: string;
       display_name?: string | null;
       description: string;
@@ -398,7 +417,7 @@ export interface SharedReferenceEdge {
 
 export interface TeamTopologySharedReferencePayload {
   team_id: string;
-  project_id: string;
+  bench_id: string;
   entry_agent_id: string;
   members: string[];
   nodes: SharedReferenceNode[];
@@ -454,8 +473,8 @@ export interface OperatorGatewaySummary {
 
 export interface OperatorSessionSummary {
   id: string;
-  project_id: string;
-  project_name: string;
+  bench_id: string;
+  bench_name: string;
   created_at: string;
   last_activity: string;
   message_preview: string | null;

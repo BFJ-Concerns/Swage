@@ -114,8 +114,8 @@ impl ExecutionHostStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewExecutionHostRegistration, NewProject, NewSession};
-    use crate::store::{ExecutionHostStore, ProjectStore, SessionStore};
+    use crate::model::{NewBench, NewExecutionHostRegistration, NewSession};
+    use crate::store::{BenchStore, ExecutionHostStore, SessionStore};
 
     use super::*;
 
@@ -161,18 +161,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn find_session_by_channel_origin_returns_matching_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "test".into(),
                 slug: "test".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {

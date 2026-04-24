@@ -31,8 +31,8 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
     sessions: [
       {
         id: "conv-1",
-        project_id: "proj-1",
-        project_name: "default",
+        bench_id: "proj-1",
+        bench_name: "default",
         created_at: "2026-04-07T12:00:00Z",
         last_activity: "2026-04-07T12:02:00Z",
         message_preview: "Busy session",

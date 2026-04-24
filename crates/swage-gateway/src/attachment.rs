@@ -19,7 +19,7 @@ const ATTACHMENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 pub struct CreateAttachmentRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub filename: String,
     pub mime_type: String,
     pub content_base64: String,
@@ -30,7 +30,7 @@ pub struct AttachmentResponse {
     pub id: Uuid,
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub kind: String,
     pub status: String,
     pub filename: String,
@@ -90,9 +90,9 @@ pub async fn create_attachment(
             let session_id = request.session_id.ok_or_else(|| {
                 GatewayError::ValidationError("session attachments require session_id".into())
             })?;
-            if request.project_id.is_some() {
+            if request.bench_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "session attachments must not set project_id".into(),
+                    "session attachments must not set bench_id".into(),
                 ));
             }
             state
@@ -101,17 +101,17 @@ pub async fn create_attachment(
                 .await?
                 .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
         }
-        AttachmentScopeKind::Project => {
-            let project_id = request.project_id.ok_or_else(|| {
-                GatewayError::ValidationError("project attachments require project_id".into())
+        AttachmentScopeKind::Bench => {
+            let bench_id = request.bench_id.ok_or_else(|| {
+                GatewayError::ValidationError("bench attachments require bench_id".into())
             })?;
             if request.session_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "project attachments must not set session_id".into(),
+                    "bench attachments must not set session_id".into(),
                 ));
             }
-            state.project_store.get(project_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("project {project_id} not found"))
+            state.bench_store.get(bench_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("bench {bench_id} not found"))
             })?;
         }
     }
@@ -135,7 +135,7 @@ pub async fn create_attachment(
                 id: attachment_id,
                 scope_kind,
                 session_id: request.session_id,
-                project_id: request.project_id,
+                bench_id: request.bench_id,
                 kind,
                 filename: request.filename,
                 mime_type: request.mime_type,
@@ -173,19 +173,16 @@ pub async fn list_session_attachments(
     })
 }
 
-pub async fn list_project_attachments(
+pub async fn list_bench_attachments(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
 ) -> Result<AttachmentListResponse, GatewayError> {
     state
-        .project_store
-        .get(project_id)
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("project {project_id} not found")))?;
-    let attachments = state
-        .storage
-        .list_attachments_by_project(project_id)
-        .await?;
+        .ok_or_else(|| GatewayError::ValidationError(format!("bench {bench_id} not found")))?;
+    let attachments = state.storage.list_attachments_by_bench(bench_id).await?;
     Ok(AttachmentListResponse {
         attachments: map_attachments(state, attachments).await?,
     })
@@ -359,7 +356,7 @@ async fn map_attachment(
         id: attachment.id,
         scope_kind: attachment.scope_kind.to_string(),
         session_id: attachment.session_id,
-        project_id: attachment.project_id,
+        bench_id: attachment.bench_id,
         kind: attachment.kind.to_string(),
         status: attachment.status.to_string(),
         filename: attachment.filename,

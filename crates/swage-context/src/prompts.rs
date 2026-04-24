@@ -53,7 +53,7 @@ impl ContextElement for PromptsElement {
     ///
     /// Rules are joined with `\n\n` to preserve paragraph separation. Returns
     /// an empty vec if no rules are present — the assembly engine then produces
-    /// no system message, matching era 0.1 behaviour for projects without
+    /// no system message, matching era 0.1 behaviour for benches without
     /// prompt configuration.
     fn content(&self) -> Vec<ChatMessage> {
         if self.rules.is_empty() {
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn multiple_rules_concatenate_in_order() {
         let element = PromptsElement::new(vec![
-            make_rule("You are a coding assistant.", 100, HierarchyLevel::Project),
+            make_rule("You are a coding assistant.", 100, HierarchyLevel::Bench),
             make_rule("Always be safe and helpful.", 50, HierarchyLevel::Global),
             make_rule("Default behaviour.", 0, HierarchyLevel::Global),
         ]);
@@ -185,7 +185,7 @@ mod tests {
                 let default_pos = text.find("Default behaviour.").unwrap();
                 assert!(
                     coding_pos < safety_pos,
-                    "project rule should appear before global"
+                    "bench rule should appear before global"
                 );
                 assert!(
                     safety_pos < default_pos,
@@ -221,7 +221,7 @@ mod tests {
     fn source_includes_level_counts() {
         let element = PromptsElement::new(vec![
             make_rule("Global rule.", 200, HierarchyLevel::Global),
-            make_rule("Project rule.", 100, HierarchyLevel::Project),
+            make_rule("Bench rule.", 100, HierarchyLevel::Bench),
             make_rule("Agent rule.", 0, HierarchyLevel::Agent),
         ]);
 
@@ -231,7 +231,7 @@ mod tests {
             "source should report 3 total rules"
         );
         assert!(source.contains("Global") || source.contains("global"));
-        assert!(source.contains("Project") || source.contains("project"));
+        assert!(source.contains("Bench") || source.contains("bench"));
     }
 
     /// source() handles no rules without panicking.

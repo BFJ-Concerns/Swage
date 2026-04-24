@@ -932,9 +932,9 @@ impl Agent {
                     }
                 };
 
-                let Some(project_id) = execution.project_id else {
+                let Some(bench_id) = execution.bench_id else {
                     return Ok((
-                        "delegation is not available — project context is missing".to_string(),
+                        "delegation is not available — bench context is missing".to_string(),
                         true,
                         "error".to_string(),
                     ));
@@ -980,7 +980,7 @@ impl Agent {
                         transferred_context,
                         &self.config.agent_id,
                         execution.turn_id,
-                        project_id,
+                        bench_id,
                         cancel_token.clone(),
                     )
                     .await;

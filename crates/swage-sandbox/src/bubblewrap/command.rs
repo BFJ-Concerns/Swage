@@ -102,7 +102,7 @@ pub(crate) fn build_bwrap_command_with_path(
         cmd.arg("--bind").arg(p).arg(p);
     }
 
-    // Additional read-only mounts (e.g. shared libraries, project source).
+    // Additional read-only mounts (e.g. shared libraries, bench source).
     for mount in &config.read_only_mounts {
         let p = mount.as_os_str();
         cmd.arg("--ro-bind").arg(p).arg(p);

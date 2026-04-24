@@ -55,12 +55,12 @@ async function request(
 // API functions
 // ---------------------------------------------------------------------------
 
-/** Fetch all conversations belonging to the given project. */
+/** Fetch all conversations belonging to the given bench. */
 export async function listConversations(
-  projectId: string,
+  benchId: string,
 ): Promise<ConversationSummary[]> {
   const response = await request(
-    `/api/projects/${projectId}/sessions`,
+    `/api/benches/${benchId}/sessions`,
     "GET",
   );
   // Gateway wraps the array in { conversations: [...] }.
@@ -70,12 +70,12 @@ export async function listConversations(
   return body.conversations;
 }
 
-/** Create a new conversation in the given project and return its metadata. */
+/** Create a new conversation in the given bench and return its metadata. */
 export async function createConversation(
-  projectId: string,
+  benchId: string,
 ): Promise<ConversationResponse> {
   const response = await request(
-    `/api/projects/${projectId}/sessions`,
+    `/api/benches/${benchId}/sessions`,
     "POST",
   );
   return response.json() as Promise<ConversationResponse>;

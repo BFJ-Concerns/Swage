@@ -2,7 +2,7 @@
 //! resolution.
 //!
 //! Skills are directories containing a `SKILL.md` file discovered at three
-//! hierarchy levels (global, project, agent). Same-name skills at more
+//! hierarchy levels (global, bench, agent). Same-name skills at more
 //! specific levels shadow less specific ones.
 
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use crate::model::HierarchyLevel;
 ///
 /// Skills are discovered as subdirectories of a `skills/` folder at each
 /// hierarchy level. The directory name is the canonical skill identifier and
-/// must match `[a-z0-9-]+`. More specific levels (Agent > Project > Global)
+/// must match `[a-z0-9-]+`. More specific levels (Agent > Bench > Global)
 /// shadow less specific ones when the same name appears at multiple levels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillDefinition {
@@ -218,9 +218,8 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
         HierarchyLevel::Agent => 0,
         HierarchyLevel::Team => 1,
-        HierarchyLevel::Project => 2,
-        HierarchyLevel::Lens => 3,
-        HierarchyLevel::Global => 4,
+        HierarchyLevel::Bench => 2,
+        HierarchyLevel::Global => 3,
     }
 }
 
@@ -233,10 +232,10 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
 /// 4. Parses found `SKILL.md` files via [`parse_skill_file`]
 ///
 /// **Override resolution:** When the same skill name appears at more than one
-/// level, only the most specific version survives (Agent > Team > Project >
-/// Lens > Global).
+/// level, only the most specific version survives (Agent > Team > Bench >
+/// Global).
 ///
-/// **Sort order:** Agent → Team → Project → Lens → Global, then alphabetically
+/// **Sort order:** Agent → Team → Bench → Global, then alphabetically
 /// by name within each level.
 ///
 /// Invalid directory names and malformed `SKILL.md` files produce
@@ -385,8 +384,8 @@ mod tests {
             description: "A skill with no display name.".to_string(),
             instructions: String::new(),
             tools: vec![],
-            level: HierarchyLevel::Project,
-            source_path: PathBuf::from("/project/skills/unnamed-skill/SKILL.md"),
+            level: HierarchyLevel::Bench,
+            source_path: PathBuf::from("/bench/skills/unnamed-skill/SKILL.md"),
         };
 
         assert!(skill.display_name.is_none());
@@ -542,7 +541,7 @@ Minimal instructions.
 ",
         );
 
-        let skill = parse_skill_file(&path, "minimal", HierarchyLevel::Project).unwrap();
+        let skill = parse_skill_file(&path, "minimal", HierarchyLevel::Bench).unwrap();
 
         assert_eq!(skill.name, "minimal");
         assert_eq!(
@@ -706,7 +705,7 @@ description: Path check.
 ",
         );
 
-        let skill = parse_skill_file(&path, "path-check", HierarchyLevel::Project).unwrap();
+        let skill = parse_skill_file(&path, "path-check", HierarchyLevel::Bench).unwrap();
 
         assert_eq!(skill.source_path, path);
     }
@@ -867,7 +866,7 @@ The actual instructions.
     #[test]
     fn unique_skills_from_multiple_levels_all_returned() {
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
 
         make_skill(
             global_dir.path(),
@@ -875,14 +874,14 @@ The actual instructions.
             &minimal_skill_md("Global skill."),
         );
         make_skill(
-            project_dir.path(),
-            "project-only",
-            &minimal_skill_md("Project skill."),
+            bench_dir.path(),
+            "bench-only",
+            &minimal_skill_md("Bench skill."),
         );
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
         ];
         let (skills, warnings) = discover_skills(&levels);
 
@@ -921,27 +920,27 @@ The actual instructions.
         assert_eq!(skills[2].name, "zebra");
     }
 
-    /// Sorting across levels: Agent skills sort before Project, Project before Global.
+    /// Sorting across levels: Agent skills sort before Bench, Bench before Global.
     #[test]
-    fn skills_sorted_agent_before_project_before_global() {
+    fn skills_sorted_agent_before_bench_before_global() {
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         make_skill(global_dir.path(), "g-skill", &minimal_skill_md("Global."));
-        make_skill(project_dir.path(), "p-skill", &minimal_skill_md("Project."));
+        make_skill(bench_dir.path(), "p-skill", &minimal_skill_md("Bench."));
         make_skill(agent_dir.path(), "a-skill", &minimal_skill_md("Agent."));
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
         let (skills, _) = discover_skills(&levels);
 
         assert_eq!(skills.len(), 3);
         assert_eq!(skills[0].level, HierarchyLevel::Agent, "agent first");
-        assert_eq!(skills[1].level, HierarchyLevel::Project, "project second");
+        assert_eq!(skills[1].level, HierarchyLevel::Bench, "bench second");
         assert_eq!(skills[2].level, HierarchyLevel::Global, "global last");
     }
 }

@@ -40,7 +40,7 @@ use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerE
 /// Constructs typed elements from the resolved turn inputs:
 /// - `PromptsElement` — from the merged instruction string
 /// - `SkillsElement`  — from the active skill set
-/// - `MemoryElement`  — from pre-loaded project memory content (may be empty)
+/// - `MemoryElement`  — from pre-loaded bench memory content (may be empty)
 /// - `HistoryElement` — from the thread's message history
 ///
 /// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
@@ -53,7 +53,7 @@ pub(crate) fn build_assembly_elements(
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
     memory_content: String,
-    project_name: String,
+    bench_name: String,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -73,32 +73,29 @@ pub(crate) fn build_assembly_elements(
     vec![
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
-        Box::new(MemoryElement::new(memory_content, project_name)),
+        Box::new(MemoryElement::new(memory_content, bench_name)),
         Box::new(HistoryElement::new(history)),
     ]
 }
 
-/// Load project memory content by reading all `.md` files from the project's
-/// memory directory (`{swage_root}/projects/{project_slug}/memory/`).
+/// Load bench memory content by reading all `.md` files from the bench's
+/// memory directory (`{swage_root}/benches/{bench_slug}/memory/`).
 ///
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) async fn load_project_memory(swage_root: &Path, project_slug: &str) -> String {
-    let memory_dir = swage_root
-        .join("projects")
-        .join(project_slug)
-        .join("memory");
+pub(crate) async fn load_bench_memory(swage_root: &Path, bench_slug: &str) -> String {
+    let memory_dir = swage_root.join("benches").join(bench_slug).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
         Ok(rd) => rd,
-        // Missing directory is the common case for new projects.
+        // Missing directory is the common case for new benches.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
         Err(error) => {
             tracing::warn!(
                 path = %memory_dir.display(),
                 %error,
-                "failed to read project memory directory"
+                "failed to read bench memory directory"
             );
             return String::new();
         }
@@ -119,7 +116,7 @@ pub(crate) async fn load_project_memory(swage_root: &Path, project_slug: &str) -
                 tracing::warn!(
                     path = %memory_dir.display(),
                     %error,
-                    "failed to enumerate project memory directory"
+                    "failed to enumerate bench memory directory"
                 );
                 return String::new();
             }
@@ -136,7 +133,7 @@ pub(crate) async fn load_project_memory(swage_root: &Path, project_slug: &str) -
                 }
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "failed to read project memory file");
+                tracing::warn!(path = %path.display(), %error, "failed to read bench memory file");
             }
         }
     }
@@ -259,26 +256,26 @@ pub(crate) fn build_agent_config(
 
 fn load_session_config(
     state: &AppState,
-    project_slug: &str,
+    bench_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let Ok(root) = swage_config::discovery::resolve_root() else {
         return Ok(state.config.clone());
     };
 
-    let project_dir = root.join("projects").join(project_slug);
-    let project_config_exists = project_dir.join("config.toml").exists();
-    let agent_config_exists = project_dir
+    let bench_dir = root.join("benches").join(bench_slug);
+    let bench_config_exists = bench_dir.join("config.toml").exists();
+    let agent_config_exists = bench_dir
         .join("agents")
         .join(agent_id)
         .join("config.toml")
         .exists();
 
-    if !project_config_exists && !agent_config_exists {
+    if !bench_config_exists && !agent_config_exists {
         return Ok(state.config.clone());
     }
 
-    swage_config::load_resolved_config_from(&root, project_slug, agent_id)
+    swage_config::load_resolved_config_from(&root, bench_slug, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
@@ -370,25 +367,18 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
-        project_id: Uuid,
+        bench_id: Uuid,
         cancel_token: CancellationToken,
     ) -> Result<serde_json::Value, AgentError> {
-        let project = self
-            .state
-            .project_store
-            .get(project_id)
-            .await?
-            .ok_or_else(|| {
-                AgentError::InvalidConfig(format!(
-                    "delegation project {project_id} no longer exists"
-                ))
-            })?;
+        let bench = self.state.bench_store.get(bench_id).await?.ok_or_else(|| {
+            AgentError::InvalidConfig(format!("delegation bench {bench_id} no longer exists"))
+        })?;
 
-        let target_resolved = swage_config::load_resolved_config(&project.slug, target_agent_id)
+        let target_resolved = swage_config::load_resolved_config(&bench.slug, target_agent_id)
             .map_err(|error| {
                 AgentError::InvalidConfig(format!(
-                    "failed to load config for delegated agent '{target_agent_id}' in project '{}': {error}",
-                    project.slug
+                    "failed to load config for delegated agent '{target_agent_id}' in bench '{}': {error}",
+                    bench.slug
                 ))
             })?;
 
@@ -441,7 +431,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             .execute_delegation(
                 &delegate_msg,
                 sender_turn_id,
-                project_id,
+                bench_id,
                 target_agent_config,
                 target_context_transfer_config,
                 Some(target_dispatcher),
@@ -468,7 +458,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 /// # Flow
 /// 1. Look up the session's default thread (created alongside the session).
 /// 2. Guard: reject if a turn is already Processing for this thread.
-/// 3. Resolve the project for the session; load per-project config and build ToolContext.
+/// 3. Resolve the bench for the session; load per-bench config and build ToolContext.
 /// 4. Create a Turn record (state=Pending), immediately advance to Processing.
 /// 5. Store the user message with thread_id and position.
 /// 6. Build message history from the thread and send a streaming request to the provider.
@@ -519,7 +509,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     output_schema_override: Option<serde_json::Value>,
     existing_turn_id: Option<Uuid>,
 ) -> Result<(), GatewayError> {
-    // Step 1: Resolve the project and target thread for this session.
+    // Step 1: Resolve the bench and target thread for this session.
     let session = state
         .storage
         .get_session(session_id)
@@ -552,45 +542,45 @@ pub(crate) async fn process_turn_with_existing_turn(
         return Err(GatewayError::TurnInProgress { session_id });
     }
 
-    // Step 3: Resolve the project for this session so we can load per-project config
+    // Step 3: Resolve the bench for this session so we can load per-bench config
     // and build the ToolContext passed to each tool invocation.
-    let project_id = session.project_id;
+    let bench_id = session.bench_id;
 
-    let project = state
-        .project_store
-        .get(project_id)
+    let bench = state
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
-    let project_slug = project.slug.clone();
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+    let bench_slug = bench.slug.clone();
 
-    // Load project-specific config. Missing project config falls back to the
+    // Load bench-specific config. Missing bench config falls back to the
     // startup config, but present invalid config fails the turn before any
     // user message is written.
-    let config = load_session_config(state, &project_slug, &session.agent_id)?;
+    let config = load_session_config(state, &bench_slug, &session.agent_id)?;
 
-    // Resolve the swage root once — skill discovery, project memory loading,
+    // Resolve the swage root once — skill discovery, bench memory loading,
     // and assembly search-path construction all depend on it.
     //
     // Fail-open: a warning is logged and each consumer falls back gracefully.
     let swage_root_opt = resolve_swage_root();
 
-    // Discover available skills for this project+agent context, then build the
+    // Discover available skills for this bench+agent context, then build the
     // active skill set by matching stored activation records against definitions.
     //
     // Missing skill definitions for recorded activations are silently skipped
     // by SkillManager::build_active_skills.
     let active_skills: Vec<ActiveSkill> = if let Some(root) = &swage_root_opt {
-        let project_dir = root.join("projects").join(&project_slug);
+        let bench_dir = root.join("benches").join(&bench_slug);
         // The session's agent_id (typically "gateway") maps to the agents
-        // subdirectory under the project.
-        let agent_dir = project_dir.join("agents").join(&session.agent_id);
+        // subdirectory under the bench.
+        let agent_dir = bench_dir.join("agents").join(&session.agent_id);
         let agent_dir_opt = if agent_dir.is_dir() {
             Some(agent_dir.as_path())
         } else {
             None
         };
         let (available, _warnings) =
-            SkillManager::discover_available(root, &project_dir, agent_dir_opt);
+            SkillManager::discover_available(root, &bench_dir, agent_dir_opt);
 
         // Ensure agent-level skills are activated for this session.
         // Idempotent — INSERT OR IGNORE in storage means repeated calls
@@ -696,7 +686,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         .await?;
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
-    // Loads thread history, project memory, and constructs typed elements.
+    // Loads thread history, bench memory, and constructs typed elements.
     // Runs fail-open assembly: custom Python configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
     let stored_history = state.storage.list_messages_by_thread(thread_id).await?;
@@ -705,10 +695,10 @@ pub(crate) async fn process_turn_with_existing_turn(
         .map(|m| ChatMessage::new(m.role, m.content))
         .collect();
 
-    // Load project memory from the filesystem. Returns an empty string when
+    // Load bench memory from the filesystem. Returns an empty string when
     // no memory directory or files exist — MemoryElement handles empty content.
     let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_project_memory(root, &project_slug).await,
+        Some(root) => load_bench_memory(root, &bench_slug).await,
         None => String::new(),
     };
 
@@ -718,11 +708,11 @@ pub(crate) async fn process_turn_with_existing_turn(
     let assembly_search_paths: Vec<(HierarchyLevel, PathBuf)> = swage_root_opt
         .as_ref()
         .map(|root| {
-            let project_dir = root.join("projects").join(&project_slug);
-            let agent_dir = project_dir.join("agents").join(&session.agent_id);
+            let bench_dir = root.join("benches").join(&bench_slug);
+            let agent_dir = bench_dir.join("agents").join(&session.agent_id);
             let mut levels = vec![
                 (HierarchyLevel::Global, root.clone()),
-                (HierarchyLevel::Project, project_dir),
+                (HierarchyLevel::Bench, bench_dir),
             ];
             // Only include the agent level when the directory exists;
             // a missing agent dir means no agent-specific assemblies.
@@ -742,7 +732,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         active_skills,
         history_messages,
         memory_content,
-        project.name.clone(),
+        bench.name.clone(),
     );
     let tokeniser = TiktokenTokeniser::new(&config.provider.model);
 
@@ -822,7 +812,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             session_id,
             thread_id,
             turn_id: prepared_turn_id,
-            project_id: Some(project_id),
+            bench_id: Some(bench_id),
         },
         user_message: before_inbound.canonical_content.clone(),
         assembled_context: assembled_messages,
@@ -1209,22 +1199,22 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink,
+            Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, Bench, ChannelLink,
             EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
             Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
-            NewBackgroundJob, NewChannelLink, NewEdgeEvaluation, NewExecutionHostRegistration,
-            NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry,
-            NewProject, NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread,
-            NewToolCall, NewTopologyRun, NewTurn, NodeExecution, NodeExecutionState, NodeRetry,
-            Project, ScheduledJob, ScheduledRun, ScheduledRunState, Session, Team, Thread,
-            ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
-            UpdateHeartbeat, UpdateScheduledJob,
+            NewBackgroundJob, NewBench, NewChannelLink, NewEdgeEvaluation,
+            NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage,
+            NewNodeExecution, NewNodeRetry, NewScheduledJob, NewScheduledRun, NewSession, NewTeam,
+            NewThread, NewToolCall, NewTopologyRun, NewTurn, NewWorkspaceAttachment, NodeExecution,
+            NodeExecutionState, NodeRetry, ScheduledJob, ScheduledRun, ScheduledRunState, Session,
+            Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+            TurnState, UpdateHeartbeat, UpdateScheduledJob, WorkspaceAttachment,
         },
         store::{
-            ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
+            ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore, ChannelLinkStore,
             ContextSnapshotStore, ExecutionHostStore, HeartbeatStore, MaterialStore, MessageStore,
-            ProjectStore, ScheduleStore, SessionStore, SkillActivationStore, TeamStore,
-            ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore,
+            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
+            ToolCallStore, TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
         },
     };
 
@@ -1471,7 +1461,7 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     pub(crate) struct InMemoryDb {
-        pub(crate) projects: HashMap<Uuid, Project>,
+        pub(crate) benches: HashMap<Uuid, Bench>,
         pub(crate) teams: HashMap<Uuid, Team>,
         pub(crate) thread_branches: Vec<swage_storage::ThreadBranch>,
         pub(crate) topology_runs: HashMap<Uuid, TopologyRun>,
@@ -1500,9 +1490,10 @@ pub(crate) mod tests {
         pub(crate) attachments: HashMap<Uuid, Attachment>,
         pub(crate) background_jobs: HashMap<Uuid, BackgroundJob>,
         pub(crate) materials: HashMap<Uuid, Material>,
+        pub(crate) workspace_attachments: HashMap<Uuid, WorkspaceAttachment>,
         pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
         pub(crate) managed_secret_values: HashMap<Uuid, String>,
-        pub(crate) active_lens: swage_storage::AppLens,
+        pub(crate) active_lenses: HashMap<Uuid, swage_storage::AppLens>,
         pub(crate) lenses: HashMap<String, swage_storage::LensRecord>,
     }
 
@@ -1532,7 +1523,6 @@ pub(crate) mod tests {
             };
             Self {
                 db: Mutex::new(InMemoryDb {
-                    active_lens: swage_storage::AppLens::assistant(),
                     lenses: HashMap::from([
                         (assistant.id.to_string(), assistant),
                         (builder.id.to_string(), builder),
@@ -1544,78 +1534,71 @@ pub(crate) mod tests {
     }
 
     #[async_trait]
-    impl ProjectStore for MockStorage {
-        async fn create(&self, project: NewProject) -> Result<Project, StorageError> {
-            let p = Project {
+    impl BenchStore for MockStorage {
+        async fn create(&self, bench: NewBench) -> Result<Bench, StorageError> {
+            let p = Bench {
                 id: Uuid::new_v4(),
-                name: project.name,
+                name: bench.name,
                 is_default: false,
-                slug: project.slug,
-                workspace_path: project.workspace_path,
+                slug: bench.slug,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            self.db.lock().await.projects.insert(p.id, p.clone());
+            self.db.lock().await.benches.insert(p.id, p.clone());
             Ok(p)
         }
 
-        async fn get(&self, id: Uuid) -> Result<Option<Project>, StorageError> {
-            Ok(self.db.lock().await.projects.get(&id).cloned())
+        async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError> {
+            Ok(self.db.lock().await.benches.get(&id).cloned())
         }
 
-        async fn get_by_name(&self, name: &str) -> Result<Option<Project>, StorageError> {
+        async fn get_by_name(&self, name: &str) -> Result<Option<Bench>, StorageError> {
             Ok(self
                 .db
                 .lock()
                 .await
-                .projects
+                .benches
                 .values()
                 .find(|p| p.name == name)
                 .cloned())
         }
 
-        async fn get_or_create_default(&self) -> Result<Project, StorageError> {
+        async fn get_or_create_default(&self) -> Result<Bench, StorageError> {
             if let Some(p) = self
                 .db
                 .lock()
                 .await
-                .projects
+                .benches
                 .values()
-                .find(|project| project.is_default)
+                .find(|bench| bench.is_default)
                 .cloned()
             {
                 return Ok(p);
             }
-            let project = Project {
+            let bench = Bench {
                 id: Uuid::new_v4(),
                 name: "default".to_string(),
                 is_default: true,
                 slug: "default".to_string(),
-                workspace_path: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            self.db
-                .lock()
-                .await
-                .projects
-                .insert(project.id, project.clone());
-            Ok(project)
+            self.db.lock().await.benches.insert(bench.id, bench.clone());
+            Ok(bench)
         }
 
-        async fn list_all(&self) -> Result<Vec<Project>, StorageError> {
-            let mut projects: Vec<Project> =
-                self.db.lock().await.projects.values().cloned().collect();
-            projects.sort_by_key(|p| p.created_at);
-            Ok(projects)
+        async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
+            let mut benches: Vec<Bench> = self.db.lock().await.benches.values().cloned().collect();
+            benches.sort_by_key(|p| p.created_at);
+            Ok(benches)
         }
 
-        async fn get_by_slug(&self, slug: &str) -> Result<Option<Project>, StorageError> {
+        async fn get_by_slug(&self, slug: &str) -> Result<Option<Bench>, StorageError> {
             Ok(self
                 .db
                 .lock()
                 .await
-                .projects
+                .benches
                 .values()
                 .find(|p| p.slug == slug)
                 .cloned())
@@ -1626,12 +1609,11 @@ pub(crate) mod tests {
             id: Uuid,
             name: Option<String>,
             slug: Option<String>,
-            workspace_path: Option<String>,
-        ) -> Result<Project, StorageError> {
+        ) -> Result<Bench, StorageError> {
             let mut db = self.db.lock().await;
-            match db.projects.get_mut(&id) {
+            match db.benches.get_mut(&id) {
                 None => Err(StorageError::NotFound {
-                    entity: "Project".into(),
+                    entity: "Bench".into(),
                     id: id.to_string(),
                 }),
                 Some(p) => {
@@ -1641,9 +1623,6 @@ pub(crate) mod tests {
                     if let Some(s) = slug {
                         p.slug = s;
                     }
-                    if let Some(wp) = workspace_path {
-                        p.workspace_path = Some(wp);
-                    }
                     p.updated_at = chrono::Utc::now();
                     Ok(p.clone())
                 }
@@ -1652,12 +1631,12 @@ pub(crate) mod tests {
 
         async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
             let mut db = self.db.lock().await;
-            match db.projects.get(&id) {
+            match db.benches.get(&id) {
                 None => Ok(false),
                 Some(p) if p.name == "default" => Err(StorageError::ConstraintViolation(
-                    "cannot delete the default project".into(),
+                    "cannot delete the default bench".into(),
                 )),
-                _ => Ok(db.projects.remove(&id).is_some()),
+                _ => Ok(db.benches.remove(&id).is_some()),
             }
         }
     }
@@ -1669,7 +1648,7 @@ pub(crate) mod tests {
             let members = Team::member_ids_from_agents(&team.agents);
             let created = Team {
                 id: Uuid::new_v4(),
-                project_id: team.project_id,
+                bench_id: team.bench_id,
                 name: team.name,
                 description: team.description,
                 entry_agent_id: team.entry_agent_id,
@@ -1693,7 +1672,7 @@ pub(crate) mod tests {
 
         async fn get_team_by_name(
             &self,
-            project_id: Uuid,
+            bench_id: Uuid,
             name: &str,
         ) -> Result<Option<Team>, StorageError> {
             Ok(self
@@ -1702,18 +1681,18 @@ pub(crate) mod tests {
                 .await
                 .teams
                 .values()
-                .find(|team| team.project_id == project_id && team.name == name)
+                .find(|team| team.bench_id == bench_id && team.name == name)
                 .cloned())
         }
 
-        async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError> {
+        async fn list_teams_by_bench(&self, bench_id: Uuid) -> Result<Vec<Team>, StorageError> {
             let mut teams: Vec<Team> = self
                 .db
                 .lock()
                 .await
                 .teams
                 .values()
-                .filter(|team| team.project_id == project_id)
+                .filter(|team| team.bench_id == bench_id)
                 .cloned()
                 .collect();
             teams.sort_by_key(|team| team.created_at);
@@ -2031,7 +2010,7 @@ pub(crate) mod tests {
         async fn create_session(&self, session: NewSession) -> Result<Session, StorageError> {
             let s = Session {
                 id: Uuid::new_v4(),
-                project_id: session.project_id,
+                bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -2045,14 +2024,14 @@ pub(crate) mod tests {
             Ok(self.db.lock().await.sessions.get(&id).cloned())
         }
 
-        async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError> {
+        async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError> {
             Ok(self
                 .db
                 .lock()
                 .await
                 .sessions
                 .values()
-                .filter(|s| s.project_id == project_id)
+                .filter(|s| s.bench_id == bench_id)
                 .cloned()
                 .collect())
         }
@@ -2111,16 +2090,107 @@ pub(crate) mod tests {
     }
 
     #[async_trait]
+    impl WorkspaceAttachmentStore for MockStorage {
+        async fn create_workspace_attachment(
+            &self,
+            workspace: NewWorkspaceAttachment,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            let now = chrono::Utc::now();
+            let record = WorkspaceAttachment {
+                id: Uuid::new_v4(),
+                bench_id: workspace.bench_id,
+                label: workspace.label,
+                path: workspace.path,
+                permissions: workspace.permissions,
+                is_trusted: workspace.is_trusted,
+                created_at: now,
+                updated_at: now,
+            };
+            self.db
+                .lock()
+                .await
+                .workspace_attachments
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn get_workspace_attachment(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<WorkspaceAttachment>, StorageError> {
+            Ok(self.db.lock().await.workspace_attachments.get(&id).cloned())
+        }
+
+        async fn list_workspace_attachments_by_bench(
+            &self,
+            bench_id: Uuid,
+        ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
+            let mut workspaces = self
+                .db
+                .lock()
+                .await
+                .workspace_attachments
+                .values()
+                .filter(|workspace| workspace.bench_id == bench_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            workspaces.sort_by_key(|workspace| workspace.created_at);
+            Ok(workspaces)
+        }
+
+        async fn set_workspace_trust(
+            &self,
+            id: Uuid,
+            is_trusted: bool,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            let mut db = self.db.lock().await;
+            let workspace =
+                db.workspace_attachments
+                    .get_mut(&id)
+                    .ok_or_else(|| StorageError::NotFound {
+                        entity: "workspace_attachment".to_string(),
+                        id: id.to_string(),
+                    })?;
+            workspace.is_trusted = is_trusted;
+            workspace.updated_at = chrono::Utc::now();
+            Ok(workspace.clone())
+        }
+
+        async fn delete_workspace_attachment(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self
+                .db
+                .lock()
+                .await
+                .workspace_attachments
+                .remove(&id)
+                .is_some())
+        }
+    }
+
+    #[async_trait]
     impl swage_storage::store::LensStore for MockStorage {
-        async fn get_active_lens(&self) -> Result<swage_storage::LensPreference, StorageError> {
+        async fn get_active_lens(
+            &self,
+            bench_id: Uuid,
+        ) -> Result<swage_storage::LensPreference, StorageError> {
+            let active_lens = self
+                .db
+                .lock()
+                .await
+                .active_lenses
+                .get(&bench_id)
+                .cloned()
+                .unwrap_or_else(swage_storage::AppLens::assistant);
             Ok(swage_storage::LensPreference {
-                active_lens: self.db.lock().await.active_lens.clone(),
+                bench_id,
+                active_lens,
                 updated_at: chrono::Utc::now(),
             })
         }
 
         async fn set_active_lens(
             &self,
+            bench_id: Uuid,
             lens: swage_storage::AppLens,
         ) -> Result<swage_storage::LensPreference, StorageError> {
             let mut db = self.db.lock().await;
@@ -2130,8 +2200,9 @@ pub(crate) mod tests {
                     id: lens.to_string(),
                 });
             }
-            db.active_lens = lens.clone();
+            db.active_lenses.insert(bench_id, lens.clone());
             Ok(swage_storage::LensPreference {
+                bench_id,
                 active_lens: lens,
                 updated_at: chrono::Utc::now(),
             })
@@ -2278,7 +2349,7 @@ pub(crate) mod tests {
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                project_id: link.project_id,
+                bench_id: link.bench_id,
                 agent_id: link.agent_id,
                 session_id: link.session_id,
                 home_target: link.home_target,
@@ -2727,7 +2798,7 @@ pub(crate) mod tests {
                 id: attachment.id,
                 scope_kind: attachment.scope_kind,
                 session_id: attachment.session_id,
-                project_id: attachment.project_id,
+                bench_id: attachment.bench_id,
                 kind: attachment.kind,
                 status: AttachmentStatus::Pending,
                 filename: attachment.filename,
@@ -2778,9 +2849,9 @@ pub(crate) mod tests {
             Ok(attachments)
         }
 
-        async fn list_attachments_by_project(
+        async fn list_attachments_by_bench(
             &self,
-            project_id: Uuid,
+            bench_id: Uuid,
         ) -> Result<Vec<Attachment>, StorageError> {
             let mut attachments: Vec<Attachment> = self
                 .db
@@ -2788,7 +2859,7 @@ pub(crate) mod tests {
                 .await
                 .attachments
                 .values()
-                .filter(|attachment| attachment.project_id == Some(project_id))
+                .filter(|attachment| attachment.bench_id == Some(bench_id))
                 .cloned()
                 .collect();
             attachments.sort_by_key(|attachment| attachment.created_at);
@@ -2948,7 +3019,7 @@ pub(crate) mod tests {
                 id: material.id,
                 scope_kind: material.scope_kind,
                 session_id: material.session_id,
-                project_id: material.project_id,
+                bench_id: material.bench_id,
                 source_kind: material.source_kind,
                 source_attachment_id: material.source_attachment_id,
                 status: MaterialStatus::Active,
@@ -3003,9 +3074,9 @@ pub(crate) mod tests {
             Ok(materials)
         }
 
-        async fn list_materials_by_project(
+        async fn list_materials_by_bench(
             &self,
-            project_id: Uuid,
+            bench_id: Uuid,
         ) -> Result<Vec<Material>, StorageError> {
             let mut materials: Vec<Material> = self
                 .db
@@ -3014,8 +3085,8 @@ pub(crate) mod tests {
                 .materials
                 .values()
                 .filter(|material| {
-                    material.project_id == Some(project_id)
-                        && material.scope_kind == AttachmentScopeKind::Project
+                    material.bench_id == Some(bench_id)
+                        && material.scope_kind == AttachmentScopeKind::Bench
                 })
                 .cloned()
                 .collect();
@@ -3071,7 +3142,7 @@ pub(crate) mod tests {
             id: Uuid,
             scope_kind: AttachmentScopeKind,
             session_id: Option<Uuid>,
-            project_id: Option<Uuid>,
+            bench_id: Option<Uuid>,
             relative_path: &str,
         ) -> Result<Material, StorageError> {
             let mut db = self.db.lock().await;
@@ -3081,7 +3152,7 @@ pub(crate) mod tests {
             })?;
             material.scope_kind = scope_kind;
             material.session_id = session_id;
-            material.project_id = project_id;
+            material.bench_id = bench_id;
             material.relative_path = relative_path.to_string();
             material.status = MaterialStatus::Active;
             material.archived_at = None;
@@ -3421,9 +3492,9 @@ pub(crate) mod tests {
                 .map(|(report_json, _)| report_json.clone()))
         }
 
-        async fn list_snapshots_by_project(
+        async fn list_snapshots_by_bench(
             &self,
-            project_id: Uuid,
+            bench_id: Uuid,
             limit: usize,
         ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
             let db = self.db.lock().await;
@@ -3438,13 +3509,13 @@ pub(crate) mod tests {
                 let Some(session) = db.sessions.get(&thread.session_id) else {
                     continue;
                 };
-                if session.project_id != project_id {
+                if session.bench_id != bench_id {
                     continue;
                 }
                 records.push(swage_storage::ContextSnapshotRecord {
                     turn_id: *turn_id,
                     session_id: session.id,
-                    project_id,
+                    bench_id,
                     created_at: *created_at,
                     report_json: report_json.clone(),
                 });
@@ -3917,7 +3988,7 @@ pub(crate) mod tests {
         ) -> Result<swage_storage::AgentMemoryRecord, StorageError> {
             let record = swage_storage::AgentMemoryRecord {
                 id: record.id,
-                project_id: record.project_id,
+                bench_id: record.bench_id,
                 session_id: record.session_id,
                 turn_id: record.turn_id,
                 topology_run_id: record.topology_run_id,
@@ -3953,7 +4024,7 @@ pub(crate) mod tests {
 
         async fn list_agent_memories(
             &self,
-            project_id: Uuid,
+            bench_id: Uuid,
             agent_id: Option<&str>,
             session_id: Option<Uuid>,
             query: Option<&str>,
@@ -3966,7 +4037,7 @@ pub(crate) mod tests {
                 .await
                 .agent_memories
                 .iter()
-                .filter(|record| record.project_id == project_id)
+                .filter(|record| record.bench_id == bench_id)
                 .filter(|record| agent_id.is_none_or(|id| record.agent_id == id))
                 .filter(|record| session_id.is_none_or(|id| record.session_id == id))
                 .filter(|record| {
@@ -3996,7 +4067,7 @@ pub(crate) mod tests {
         ) -> Result<swage_storage::ConfigurationVersion, StorageError> {
             let record = swage_storage::ConfigurationVersion {
                 id: version.id,
-                project_id: version.project_id,
+                bench_id: version.bench_id,
                 session_id: version.session_id,
                 entity_kind: version.entity_kind,
                 entity_id: version.entity_id,
@@ -4034,11 +4105,11 @@ pub(crate) mod tests {
 
         async fn list_configuration_versions(
             &self,
-            project_id: Option<Uuid>,
+            bench_id: Option<Uuid>,
         ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
             let mut versions = self.db.lock().await.configuration_versions.clone();
-            if let Some(project_id) = project_id {
-                versions.retain(|version| version.project_id == Some(project_id));
+            if let Some(bench_id) = bench_id {
+                versions.retain(|version| version.bench_id == Some(bench_id));
             }
             versions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
             Ok(versions)
@@ -4326,16 +4397,16 @@ pub(crate) mod tests {
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
-        // Create the default project via ProjectStore.
-        let project = storage
+        // Create the default bench via BenchStore.
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         // Create a session.
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -4357,7 +4428,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MockProvider::new(provider_chunks));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4398,14 +4469,14 @@ pub(crate) mod tests {
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -4426,7 +4497,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MockProvider::new(provider_chunks));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4538,14 +4609,14 @@ pub(crate) mod tests {
     async fn cancelled_turn_stores_partial_and_marks_interrupted() {
         let storage = Arc::new(MockStorage::new());
 
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -4565,7 +4636,7 @@ pub(crate) mod tests {
 
         let state = Arc::new(AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4861,14 +4932,14 @@ pub(crate) mod tests {
     async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -4890,7 +4961,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -4934,14 +5005,14 @@ pub(crate) mod tests {
     ) {
         let storage = Arc::new(MockStorage::new());
 
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -4963,7 +5034,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -5199,13 +5270,13 @@ pub(crate) mod tests {
         ];
 
         let storage = Arc::new(MockStorage::new());
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -5228,7 +5299,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -5545,13 +5616,13 @@ pub(crate) mod tests {
     async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("default project");
+            .expect("default bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -5605,7 +5676,7 @@ pub(crate) mod tests {
         ]));
 
         let swage_home = tempfile::TempDir::new().expect("temp swage home");
-        std::fs::create_dir_all(swage_home.path().join("projects/default/agents/agent-b"))
+        std::fs::create_dir_all(swage_home.path().join("benches/default/agents/agent-b"))
             .expect("create delegated agent directory");
         let _guard = SwageHomeGuard::set_to(swage_home.path());
 
@@ -5616,7 +5687,7 @@ pub(crate) mod tests {
 
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             dispatcher,
@@ -5699,7 +5770,7 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Project context and config resolution tests
+    // Bench context and config resolution tests
     // -----------------------------------------------------------------------
 
     struct CapturingProvider {
@@ -5780,10 +5851,10 @@ pub(crate) mod tests {
     /// Create a storage with a session + thread and return (storage, session_id).
     async fn make_storage_with_session() -> (Arc<MockStorage>, Uuid) {
         let storage = Arc::new(MockStorage::new());
-        let project = storage.get_or_create_default().await.expect("project");
+        let bench = storage.get_or_create_default().await.expect("bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -5834,7 +5905,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -5892,7 +5963,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn process_turn_resolves_config_per_project_and_completes_turn() {
+    async fn process_turn_resolves_config_per_bench_and_completes_turn() {
         let chunks = vec![
             StreamChunk::Delta {
                 content: "Hello".into(),
@@ -5904,19 +5975,18 @@ pub(crate) mod tests {
         let (provider, captured_request) = CapturingProvider::new(chunks);
 
         let storage = Arc::new(MockStorage::new());
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             &*storage,
-            swage_storage::model::NewProject {
-                name: "Test Config Project".to_string(),
-                slug: "test-config-resolution-no-project-toml".to_string(),
-                workspace_path: None,
+            swage_storage::model::NewBench {
+                name: "Test Config Bench".to_string(),
+                slug: "test-config-resolution-no-bench-toml".to_string(),
             },
         )
         .await
-        .expect("create test project");
+        .expect("create test bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -5935,7 +6005,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -6002,7 +6072,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(provider) as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -6131,20 +6201,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn tool_context_working_directory_is_passed_during_tool_execution() {
         let storage = Arc::new(MockStorage::new());
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             &*storage,
-            NewProject {
-                name: "my-project".to_string(),
-                slug: "my-project".to_string(),
-                workspace_path: None,
+            NewBench {
+                name: "my-bench".to_string(),
+                slug: "my-bench".to_string(),
             },
         )
         .await
-        .expect("create project");
+        .expect("create bench");
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -6185,7 +6254,7 @@ pub(crate) mod tests {
 
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -6343,10 +6412,10 @@ pub(crate) mod tests {
     ) -> (AppState, Uuid) {
         let storage = Arc::new(MockStorage::new());
 
-        let project = storage.get_or_create_default().await.expect("project");
+        let bench = storage.get_or_create_default().await.expect("bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -6367,7 +6436,7 @@ pub(crate) mod tests {
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
         let state = AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: provider as Arc<dyn LlmProvider>,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -6939,7 +7008,7 @@ pub(crate) mod tests {
             vec![],
             history,
             String::new(),
-            "My Project".to_string(),
+            "My Bench".to_string(),
         );
 
         // Should produce four elements: prompts, skills (empty), memory, and history.
@@ -6962,7 +7031,7 @@ pub(crate) mod tests {
             vec![],
             vec![ChatMessage::new(Role::User, "Hello")],
             String::new(),
-            "My Project".to_string(),
+            "My Bench".to_string(),
         );
 
         assert_eq!(elements.len(), 4);
@@ -6979,8 +7048,8 @@ pub(crate) mod tests {
             "Be helpful.",
             vec![],
             vec![],
-            "Important project context".to_string(),
-            "My Project".to_string(),
+            "Important bench context".to_string(),
+            "My Bench".to_string(),
         );
 
         let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -6999,34 +7068,30 @@ pub(crate) mod tests {
             }
         });
         assert!(
-            text.is_some_and(|t| t.contains("Important project context")),
+            text.is_some_and(|t| t.contains("Important bench context")),
             "memory message should contain the provided content"
         );
     }
 
-    /// load_project_memory returns an empty string when the project has no
+    /// load_bench_memory returns an empty string when the bench has no
     /// memory directory.
     #[tokio::test]
-    async fn load_project_memory_returns_empty_when_dir_absent() {
+    async fn load_bench_memory_returns_empty_when_dir_absent() {
         let dir = tempfile::tempdir().unwrap();
         // No memory directory created — the helper should not panic.
-        let result = load_project_memory(dir.path(), "no-such-project").await;
+        let result = load_bench_memory(dir.path(), "no-such-bench").await;
         assert!(
             result.is_empty(),
             "should return empty string when memory dir is absent"
         );
     }
 
-    /// load_project_memory reads all .md files from the memory directory and
+    /// load_bench_memory reads all .md files from the memory directory and
     /// joins them in alphabetical filename order.
     #[tokio::test]
-    async fn load_project_memory_concatenates_md_files_alphabetically() {
+    async fn load_bench_memory_concatenates_md_files_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir
-            .path()
-            .join("projects")
-            .join("my-project")
-            .join("memory");
+        let memory_dir = dir.path().join("benches").join("my-bench").join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
 
         // b_notes sorts after a_context.
@@ -7035,7 +7100,7 @@ pub(crate) mod tests {
         // Non-.md file must not be included.
         std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
 
-        let result = load_project_memory(dir.path(), "my-project").await;
+        let result = load_bench_memory(dir.path(), "my-bench").await;
 
         assert!(
             result.contains("First file content"),
@@ -7059,21 +7124,17 @@ pub(crate) mod tests {
         );
     }
 
-    /// load_project_memory skips files with only whitespace content.
+    /// load_bench_memory skips files with only whitespace content.
     #[tokio::test]
-    async fn load_project_memory_skips_empty_files() {
+    async fn load_bench_memory_skips_empty_files() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir
-            .path()
-            .join("projects")
-            .join("my-project")
-            .join("memory");
+        let memory_dir = dir.path().join("benches").join("my-bench").join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
 
         std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
         std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
 
-        let result = load_project_memory(dir.path(), "my-project").await;
+        let result = load_bench_memory(dir.path(), "my-bench").await;
 
         assert!(result.contains("Real content"));
         assert!(

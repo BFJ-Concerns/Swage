@@ -37,7 +37,7 @@ use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
 use swage_storage::model::{ApprovalState, TurnState};
-use swage_storage::store::{ProjectStore, Storage};
+use swage_storage::store::{BenchStore, Storage};
 
 use crate::state::AppState;
 
@@ -182,12 +182,12 @@ pub async fn shutdown_active_turns(state: &AppState) {
 /// Returns the number of turns recovered.
 pub async fn recover_orphaned_turns(
     storage: &dyn Storage,
-    project_store: &dyn ProjectStore,
+    bench_store: &dyn BenchStore,
 ) -> Result<usize, StorageError> {
     let mut recovered_turn_ids = HashSet::new();
 
-    for project in project_store.list_all().await? {
-        for session in storage.list_by_project(project.id).await? {
+    for bench in bench_store.list_all().await? {
+        for session in storage.list_by_bench(bench.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
                     if !matches!(
@@ -345,7 +345,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
-    use swage_storage::store::{ProjectStore, SessionStore, ThreadStore, TurnStore};
+    use swage_storage::store::{BenchStore, SessionStore, ThreadStore, TurnStore};
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -363,11 +363,11 @@ mod tests {
     ) -> Arc<MockStorage> {
         let storage = Arc::new(MockStorage::new());
 
-        // Create the project → session → thread hierarchy required for FK integrity.
-        let project = storage.get_or_create_default().await.unwrap();
+        // Create the bench → session → thread hierarchy required for FK integrity.
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -511,10 +511,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_orphaned_turns_for_non_gateway_agents() {
         let storage = Arc::new(MockStorage::new());
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "reviewer".to_string(),
                 metadata: None,
             })
@@ -560,13 +560,13 @@ mod tests {
     /// thread, returning `(storage, thread_id)`.
     async fn make_sqlite_with_thread() -> (Arc<swage_storage::SqliteStorage>, uuid::Uuid) {
         use swage_storage::model::{NewSession, NewThread};
-        use swage_storage::store::{ProjectStore, SessionStore};
+        use swage_storage::store::{BenchStore, SessionStore};
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })

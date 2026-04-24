@@ -30,16 +30,16 @@ pub struct ResolvedAssembly {
     pub level: HierarchyLevel,
 }
 
-/// A project discovered by scanning the Swage directory skeleton.
+/// A bench discovered by scanning the Swage directory skeleton.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DiscoveredProject {
-    /// Directory name used as the project identifier.
+pub struct DiscoveredBench {
+    /// Directory name used as the bench identifier.
     pub name: String,
-    /// Absolute path to the project directory.
+    /// Absolute path to the bench directory.
     pub path: PathBuf,
-    /// Names of agents discovered under the project's `agents/` sub-directory.
+    /// Names of agents discovered under the bench's `agents/` sub-directory.
     pub agents: Vec<String>,
-    /// Names of teams discovered under the project's `teams/` sub-directory.
+    /// Names of teams discovered under the bench's `teams/` sub-directory.
     pub teams: Vec<String>,
 }
 
@@ -108,35 +108,35 @@ fn subdirectory_names(dir: &Path) -> Vec<String> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Scan `{project_dir}/agents/` for subdirectories.
+/// Scan `{bench_dir}/agents/` for subdirectories.
 /// Returns agent names (directory names), sorted alphabetically.
 /// Returns an empty list if the `agents/` directory does not exist.
-pub fn discover_agents(project_dir: &Path) -> Vec<String> {
-    subdirectory_names(&project_dir.join("agents"))
+pub fn discover_agents(bench_dir: &Path) -> Vec<String> {
+    subdirectory_names(&bench_dir.join("agents"))
 }
 
-/// Scan `{project_dir}/teams/` for subdirectories.
+/// Scan `{bench_dir}/teams/` for subdirectories.
 /// Returns team names (directory names), sorted alphabetically.
 /// Returns an empty list if the `teams/` directory does not exist.
-pub fn discover_teams(project_dir: &Path) -> Vec<String> {
-    subdirectory_names(&project_dir.join("teams"))
+pub fn discover_teams(bench_dir: &Path) -> Vec<String> {
+    subdirectory_names(&bench_dir.join("teams"))
 }
 
-/// Scan `{root}/projects/` for subdirectories.
-/// Each subdirectory is treated as a project regardless of whether it has
-/// a `config.toml` — a project without one simply inherits global config.
-/// Returns an empty list if the `projects/` directory does not exist.
-pub fn discover_projects(root: &Path) -> Vec<DiscoveredProject> {
-    let projects_dir = root.join("projects");
-    let names = subdirectory_names(&projects_dir);
+/// Scan `{root}/benches/` for subdirectories.
+/// Each subdirectory is treated as a bench regardless of whether it has
+/// a `config.toml` — a bench without one simply inherits global config.
+/// Returns an empty list if the `benches/` directory does not exist.
+pub fn discover_benches(root: &Path) -> Vec<DiscoveredBench> {
+    let benches_dir = root.join("benches");
+    let names = subdirectory_names(&benches_dir);
 
     names
         .into_iter()
         .map(|name| {
-            let path = projects_dir.join(&name);
+            let path = benches_dir.join(&name);
             let agents = discover_agents(&path);
             let teams = discover_teams(&path);
-            DiscoveredProject {
+            DiscoveredBench {
                 name,
                 path,
                 agents,
@@ -146,12 +146,12 @@ pub fn discover_projects(root: &Path) -> Vec<DiscoveredProject> {
         .collect()
 }
 
-/// Full discovery: returns all projects and their agents under `root`.
+/// Full discovery: returns all benches and their agents under `root`.
 ///
-/// Convenience wrapper around `discover_projects` that also populates each
-/// project's agent list.
-pub fn discover(root: &Path) -> Vec<DiscoveredProject> {
-    discover_projects(root)
+/// Convenience wrapper around `discover_benches` that also populates each
+/// bench's agent list.
+pub fn discover(root: &Path) -> Vec<DiscoveredBench> {
+    discover_benches(root)
 }
 
 /// Returns `true` if `{root}/lenses/default/` exists on disk.
@@ -200,7 +200,7 @@ pub fn discover_assemblies(dir: &Path) -> Vec<AssemblyFile> {
 /// subdirectory.
 ///
 /// `levels` should be ordered from highest to lowest priority (e.g. Agent →
-/// Project → Global). The first match is returned with its provenance level.
+/// Bench → Global). The first match is returned with its provenance level.
 /// Returns `None` if the assembly is not present at any level.
 pub fn resolve_assembly(
     name: &str,
@@ -256,35 +256,35 @@ mod tests {
         assert!(matches!(err.kind, ConfigProblemKind::DiscoveryError { .. }));
     }
 
-    // --- discover_projects ---
+    // --- discover_benches ---
 
     #[test]
-    fn discover_projects_finds_subdirectories() {
+    fn discover_benches_finds_subdirectories() {
         let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("projects/alpha")).unwrap();
-        fs::create_dir_all(tmp.path().join("projects/beta")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/alpha")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/beta")).unwrap();
 
-        let projects = discover_projects(tmp.path());
-        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        let benches = discover_benches(tmp.path());
+        let names: Vec<&str> = benches.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"alpha"), "should discover alpha");
         assert!(names.contains(&"beta"), "should discover beta");
     }
 
     #[test]
-    fn discover_projects_returns_empty_when_projects_dir_missing() {
+    fn discover_benches_returns_empty_when_benches_dir_missing() {
         let tmp = TempDir::new().unwrap();
-        let projects = discover_projects(tmp.path());
-        assert!(projects.is_empty());
+        let benches = discover_benches(tmp.path());
+        assert!(benches.is_empty());
     }
 
     #[test]
-    fn discover_projects_includes_path() {
+    fn discover_benches_includes_path() {
         let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("projects/myproject")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/mybench")).unwrap();
 
-        let projects = discover_projects(tmp.path());
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].path, tmp.path().join("projects/myproject"));
+        let benches = discover_benches(tmp.path());
+        assert_eq!(benches.len(), 1);
+        assert_eq!(benches[0].path, tmp.path().join("benches/mybench"));
     }
 
     // --- discover_agents ---
@@ -336,21 +336,21 @@ mod tests {
     // --- discover ---
 
     #[test]
-    fn discover_combines_projects_and_agents() {
+    fn discover_combines_benches_and_agents() {
         let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("projects/alpha/agents/assistant")).unwrap();
-        fs::create_dir_all(tmp.path().join("projects/alpha/agents/reviewer")).unwrap();
-        fs::create_dir_all(tmp.path().join("projects/beta")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/alpha/agents/assistant")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/alpha/agents/reviewer")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/beta")).unwrap();
 
-        let projects = discover(tmp.path());
-        let alpha = projects
+        let benches = discover(tmp.path());
+        let alpha = benches
             .iter()
             .find(|p| p.name == "alpha")
             .expect("alpha should be discovered");
         assert!(alpha.agents.contains(&"assistant".to_string()));
         assert!(alpha.agents.contains(&"reviewer".to_string()));
 
-        let beta = projects
+        let beta = benches
             .iter()
             .find(|p| p.name == "beta")
             .expect("beta should be discovered");
@@ -358,13 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn discover_project_without_config_toml_still_found() {
+    fn discover_bench_without_config_toml_still_found() {
         let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("projects/bare")).unwrap();
+        fs::create_dir_all(tmp.path().join("benches/bare")).unwrap();
 
-        let projects = discover(tmp.path());
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].name, "bare");
+        let benches = discover(tmp.path());
+        assert_eq!(benches.len(), 1);
+        assert_eq!(benches[0].name, "bare");
     }
 
     // --- has_default_lens ---
@@ -427,52 +427,49 @@ mod tests {
     // --- resolve_assembly ---
 
     #[test]
-    fn resolve_assembly_finds_at_project_level() {
+    fn resolve_assembly_finds_at_bench_level() {
         use crate::model::HierarchyLevel;
 
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
-        // Place custom.py only at the project level.
-        fs::create_dir_all(project_dir.path().join("assemblies")).unwrap();
-        fs::write(project_dir.path().join("assemblies/custom.py"), b"").unwrap();
+        // Place custom.py only at the bench level.
+        fs::create_dir_all(bench_dir.path().join("assemblies")).unwrap();
+        fs::write(bench_dir.path().join("assemblies/custom.py"), b"").unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
             (HierarchyLevel::Agent, agent_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Global, global_dir.path()),
         ];
 
         let result = resolve_assembly("custom", &levels);
-        assert!(
-            result.is_some(),
-            "custom.py at project level should be found"
-        );
+        assert!(result.is_some(), "custom.py at bench level should be found");
 
         let resolved = result.unwrap();
         assert_eq!(resolved.name, "custom");
-        assert_eq!(resolved.level, HierarchyLevel::Project);
+        assert_eq!(resolved.level, HierarchyLevel::Bench);
         assert!(resolved.path.ends_with("custom.py"));
     }
 
     #[test]
-    fn resolve_assembly_prefers_agent_over_project() {
+    fn resolve_assembly_prefers_agent_over_bench() {
         use crate::model::HierarchyLevel;
 
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
-        // Place custom.py at both agent and project levels.
+        // Place custom.py at both agent and bench levels.
         fs::create_dir_all(agent_dir.path().join("assemblies")).unwrap();
         fs::write(agent_dir.path().join("assemblies/custom.py"), b"").unwrap();
-        fs::create_dir_all(project_dir.path().join("assemblies")).unwrap();
-        fs::write(project_dir.path().join("assemblies/custom.py"), b"").unwrap();
+        fs::create_dir_all(bench_dir.path().join("assemblies")).unwrap();
+        fs::write(bench_dir.path().join("assemblies/custom.py"), b"").unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
             (HierarchyLevel::Agent, agent_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Global, global_dir.path()),
         ];
 
@@ -480,7 +477,7 @@ mod tests {
         assert_eq!(
             resolved.level,
             HierarchyLevel::Agent,
-            "agent level should win over project when both have the file"
+            "agent level should win over bench when both have the file"
         );
     }
 
@@ -489,12 +486,12 @@ mod tests {
         use crate::model::HierarchyLevel;
 
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         let levels: Vec<(HierarchyLevel, &std::path::Path)> = vec![
             (HierarchyLevel::Agent, agent_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Global, global_dir.path()),
         ];
 

@@ -125,7 +125,7 @@ async fn start_test_server(
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         config,
         dispatcher,
@@ -156,7 +156,7 @@ async fn start_file_backed_test_server(
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         config,
         dispatcher,

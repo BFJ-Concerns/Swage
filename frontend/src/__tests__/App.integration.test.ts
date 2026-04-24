@@ -20,7 +20,7 @@ import * as conversationsApi from "../lib/api/conversations";
 import * as lensApi from "../lib/api/lens";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
-import * as projectsApi from "../lib/api/projects";
+import * as benchesApi from "../lib/api/benches";
 import type {
   AppLens,
   ClientEvent,
@@ -30,7 +30,7 @@ import type {
   ConversationSummary,
   LensRuntimeResponse,
   OperatorOverview,
-  Project,
+  Bench,
   ServerEvent,
 } from "../lib/types";
 
@@ -74,10 +74,10 @@ const websocketHarness = vi.hoisted(() => {
   };
 });
 
-vi.mock("../lib/api/projects", () => ({
-  listProjects: vi.fn(),
-  createProject: vi.fn(),
-  deleteProject: vi.fn(),
+vi.mock("../lib/api/benches", () => ({
+  listBenches: vi.fn(),
+  createBench: vi.fn(),
+  deleteBench: vi.fn(),
 }));
 
 vi.mock("../lib/api/conversations", () => ({
@@ -96,15 +96,15 @@ vi.mock("../lib/api/builder", () => ({
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
-  listProjectExtensions: vi.fn(),
-  createProjectExtension: vi.fn(),
-  updateProjectExtension: vi.fn(),
+  listBenchExtensions: vi.fn(),
+  createBenchExtension: vi.fn(),
+  updateBenchExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
   listSharedReferences: vi.fn(),
 }));
 
 vi.mock("../lib/api/materials", () => ({
-  listProjectMaterials: vi.fn(),
+  listBenchMaterials: vi.fn(),
   listSessionMaterials: vi.fn(),
   createMaterial: vi.fn(),
 }));
@@ -123,13 +123,12 @@ vi.mock("../lib/api/websocket", () => ({
   createWebSocketClient: websocketHarness.factory,
 }));
 
-function makeProject(overrides: Partial<Project> = {}): Project {
+function makeBench(overrides: Partial<Bench> = {}): Bench {
   return {
     id: "proj-default",
     name: "default",
     slug: "default",
     is_default: true,
-    workspace_path: "/tmp/default",
     created_at: "2026-04-07T12:00:00Z",
     ...overrides,
   };
@@ -153,7 +152,7 @@ function makeConversationDetail(
 ): ConversationDetail {
   return {
     id: "conv-1",
-    project_id: "proj-default",
+    bench_id: "proj-default",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],
@@ -176,8 +175,8 @@ function makeOperatorOverview(
     sessions: [
       {
         id: "conv-ops",
-        project_id: "proj-default",
-        project_name: "default",
+        bench_id: "proj-default",
+        bench_name: "default",
         created_at: "2026-04-07T12:00:00Z",
         last_activity: "2026-04-07T12:04:00Z",
         message_preview: "Operator view",
@@ -222,6 +221,7 @@ function makeLensRuntime(
   activeLens: AppLens = "assistant",
 ): LensRuntimeResponse {
   return {
+    bench_id: "proj-default",
     active_lens: activeLens,
     updated_at: "2026-04-07T12:00:00Z",
     available_lenses: [
@@ -278,9 +278,9 @@ describe("App", () => {
     vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
     vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
     vi.mocked(builderApi.listTeams).mockResolvedValue([]);
-    vi.mocked(builderApi.listProjectExtensions).mockResolvedValue([]);
+    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([]);
     vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
-    vi.mocked(materialsApi.listProjectMaterials).mockResolvedValue([]);
+    vi.mocked(materialsApi.listBenchMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
   });
@@ -299,13 +299,13 @@ describe("App", () => {
   });
 
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
-    const defaultProject = makeProject();
+    const defaultBench = makeBench();
     const linkedConversation = makeConversationSummary({
       id: "conv-linked",
       message_preview: "Deep-linked conversation",
     });
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
@@ -328,9 +328,9 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(projectsApi.listProjects).toHaveBeenCalledTimes(1);
+    expect(benchesApi.listBenches).toHaveBeenCalledTimes(1);
     expect(lensApi.fetchLensRuntime).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultProject.id);
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultBench.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
@@ -353,7 +353,7 @@ describe("App", () => {
       },
     };
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([makeProject()]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([makeBench()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
 
     component = mount(App, { target: document.body });
@@ -364,15 +364,15 @@ describe("App", () => {
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
-    const defaultProject = makeProject();
+    const defaultBench = makeBench();
     const created: ConversationResponse = {
       id: "conv-new",
-      project_id: defaultProject.id,
+      bench_id: defaultBench.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
 
@@ -385,7 +385,7 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultProject.id);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultBench.id);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
@@ -394,9 +394,9 @@ describe("App", () => {
   });
 
   it("sends a message and finalises a streamed reply through the full app stack", async () => {
-    const defaultProject = makeProject();
+    const defaultBench = makeBench();
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({
         id: "conv-stream",
@@ -451,9 +451,9 @@ describe("App", () => {
   });
 
   it("switches to the operator deck and renders the overview", async () => {
-    const defaultProject = makeProject();
+    const defaultBench = makeBench();
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
       makeOperatorOverview(),
@@ -482,9 +482,9 @@ describe("App", () => {
   });
 
   it("loads the builder lens and renders the builder deck by default", async () => {
-    const defaultProject = makeProject({ name: "Workbench" });
+    const defaultBench = makeBench({ name: "Workbench" });
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
       makeOperatorOverview(),
@@ -504,18 +504,18 @@ describe("App", () => {
   });
 
   it("keeps materials, shared references, and operator pulse visible in the workbench rail", async () => {
-    const defaultProject = makeProject({ name: "Workbench" });
+    const defaultBench = makeBench({ name: "Workbench" });
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-rail", message_preview: "Live thread" }),
     ]);
-    vi.mocked(materialsApi.listProjectMaterials).mockResolvedValueOnce([
+    vi.mocked(materialsApi.listBenchMaterials).mockResolvedValueOnce([
       {
         id: "mat-1",
-        scope_kind: "project",
+        scope_kind: "bench",
         session_id: null,
-        project_id: defaultProject.id,
+        bench_id: defaultBench.id,
         source_kind: "manual",
         source_attachment_id: null,
         status: "active",
@@ -550,9 +550,9 @@ describe("App", () => {
   });
 
   it("persists a lens switch and changes the available primary surface", async () => {
-    const defaultProject = makeProject();
+    const defaultBench = makeBench();
 
-    vi.mocked(projectsApi.listProjects).mockResolvedValueOnce([defaultProject]);
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
 
     component = mount(App, { target: document.body });
@@ -569,7 +569,7 @@ describe("App", () => {
     flushSync(() => builderButton!.click());
     await waitForText("Author the workspace, then let the agent live in it.");
 
-    expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("builder");
+    expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
     expect(document.body.textContent).toContain("Builder deck");
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",

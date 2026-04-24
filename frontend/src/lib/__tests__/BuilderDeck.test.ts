@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 import BuilderDeck from "../components/BuilderDeck.svelte";
-import type { ProjectStore } from "../stores/projects";
+import type { BenchStore } from "../stores/benches";
 
 import * as builderApi from "../api/builder";
 import * as operatorApi from "../api/operator";
@@ -14,9 +14,9 @@ vi.mock("../api/builder", () => ({
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
-  listProjectExtensions: vi.fn(),
-  createProjectExtension: vi.fn(),
-  updateProjectExtension: vi.fn(),
+  listBenchExtensions: vi.fn(),
+  createBenchExtension: vi.fn(),
+  updateBenchExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
   listSharedReferences: vi.fn(),
   getSharedReference: vi.fn(),
@@ -49,37 +49,36 @@ async function flushUi(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function mockProjectStore(): ProjectStore {
+function mockBenchStore(): BenchStore {
   return {
-    get projects() {
+    get benches() {
       return [
         {
-          id: "project-1",
-          name: "Builder Project",
+          id: "bench-1",
+          name: "Builder Bench",
           is_default: false,
-          slug: "builder-project",
-          workspace_path: "/tmp/workspace",
+          slug: "builder-bench",
           created_at: "2026-01-01T00:00:00Z",
         },
       ];
     },
-    get currentProject() {
-      return this.projects[0];
+    get currentBench() {
+      return this.benches[0];
     },
     get isLoading() {
       return false;
     },
-    loadProjects: async () => {},
-    selectProject: async () => {},
-    createProject: async () => {},
-    deleteProject: async () => {},
+    loadBenches: async () => {},
+    selectBench: async () => {},
+    createBench: async () => {},
+    deleteBench: async () => {},
   };
 }
 
 function buildTeam(id: string, name: string) {
   return {
     id,
-    project_id: "project-1",
+    bench_id: "bench-1",
     name,
     description: `${name} team`,
     entry_agent_id: "default",
@@ -106,7 +105,7 @@ describe("BuilderDeck", () => {
     vi.mocked(builderApi.listTeams).mockResolvedValue([
       buildTeam("team-1", "core"),
     ]);
-    vi.mocked(builderApi.listProjectExtensions).mockResolvedValue([
+    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([
       {
         name: "builder-guardrails",
         display_name: "Builder Guardrails",
@@ -141,7 +140,7 @@ describe("BuilderDeck", () => {
       tasks: [],
       members: ["default", "reviewer"],
     });
-    vi.mocked(builderApi.createProjectExtension).mockResolvedValue({
+    vi.mocked(builderApi.createBenchExtension).mockResolvedValue({
       name: "delivery-brief",
       display_name: "Delivery Brief",
       description: "Managed extension",
@@ -222,11 +221,11 @@ describe("BuilderDeck", () => {
     document.body.innerHTML = "";
   });
 
-  it("loads existing teams and extensions for the current project", async () => {
+  it("loads existing teams and extensions for the current bench", async () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        projectStore: mockProjectStore(),
+        benchStore: mockBenchStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -264,7 +263,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        projectStore: mockProjectStore(),
+        benchStore: mockBenchStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -311,7 +310,7 @@ describe("BuilderDeck", () => {
     ).click();
     await flushUi();
 
-    expect(builderApi.createTeam).toHaveBeenCalledWith("project-1", {
+    expect(builderApi.createTeam).toHaveBeenCalledWith("bench-1", {
       name: "delivery",
       description: "Delivery team",
       entry_agent_id: "default",
@@ -347,7 +346,7 @@ describe("BuilderDeck", () => {
     ).click();
     await flushUi();
 
-    expect(builderApi.createProjectExtension).toHaveBeenCalledWith("project-1", {
+    expect(builderApi.createBenchExtension).toHaveBeenCalledWith("bench-1", {
       name: "delivery-brief",
       display_name: null,
       description: "Managed extension",
@@ -361,7 +360,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        projectStore: mockProjectStore(),
+        benchStore: mockBenchStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -397,7 +396,7 @@ describe("BuilderDeck", () => {
     await flushUi();
 
     expect(builderApi.approveWorkspaceExtension).toHaveBeenCalledWith(
-      "project-1",
+      "bench-1",
       "workspace-skill",
     );
   });
@@ -407,7 +406,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        projectStore: mockProjectStore(),
+        benchStore: mockBenchStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -451,7 +450,7 @@ describe("BuilderDeck", () => {
     await flushUi();
 
     expect(builderApi.createBuilderProposal).toHaveBeenCalledWith(
-      "project-1",
+      "bench-1",
       "Create a delivery workspace.",
     );
     expect(document.body.textContent).toContain("Create team delivery-core.");

@@ -17,7 +17,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ProjectStore, Storage},
+    store::{BenchStore, Storage},
 };
 
 struct MockProvider;
@@ -56,7 +56,7 @@ fn test_state(db_path: &Path) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -127,6 +127,11 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
     let db_path = temp.path().join("lens-catalog.db");
 
     let router = build_router(test_state(&db_path));
+    let (benches_status, benches_body) = get_json(&router, "/api/benches").await;
+    assert_eq!(benches_status, StatusCode::OK);
+    let bench_id = benches_body["benches"][0]["id"]
+        .as_str()
+        .expect("default bench id");
 
     let (before_status, before_caps) = get_json(&router, "/api/capabilities").await;
     assert_eq!(before_status, StatusCode::OK);
@@ -180,8 +185,12 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
     assert_eq!(list_status, StatusCode::OK);
     assert_eq!(list_body["lenses"].as_array().unwrap().len(), 4);
 
-    let (activate_status, runtime_body) =
-        put_json(&router, "/api/lens-runtime", json!({ "lens": "focus" })).await;
+    let (activate_status, runtime_body) = put_json(
+        &router,
+        &format!("/api/benches/{bench_id}/lens-runtime"),
+        json!({ "lens": "focus" }),
+    )
+    .await;
     assert_eq!(activate_status, StatusCode::OK);
     assert_eq!(runtime_body["active_lens"], "focus");
     let focus = runtime_body["available_lenses"]
@@ -199,7 +208,11 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
     assert_eq!(before_caps, after_caps);
 
     let restarted_router = build_router(test_state(&db_path));
-    let (restart_status, restart_runtime) = get_json(&restarted_router, "/api/lens-runtime").await;
+    let (restart_status, restart_runtime) = get_json(
+        &restarted_router,
+        &format!("/api/benches/{bench_id}/lens-runtime"),
+    )
+    .await;
     assert_eq!(restart_status, StatusCode::OK);
     assert_eq!(restart_runtime["active_lens"], "focus");
     assert!(

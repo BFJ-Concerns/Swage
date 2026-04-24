@@ -38,8 +38,8 @@ pub struct ConnectionManager {
     ws: Option<GatewayWebSocket>,
     conversation_id: Option<Uuid>,
     state: ConnectionState,
-    /// Project context used when creating project-scoped conversations.
-    project_id: Option<Uuid>,
+    /// Bench context used when creating bench-scoped conversations.
+    bench_id: Option<Uuid>,
 }
 
 impl ConnectionManager {
@@ -54,7 +54,7 @@ impl ConnectionManager {
             ws: None,
             conversation_id: None,
             state: ConnectionState::Disconnected,
-            project_id: None,
+            bench_id: None,
         }
     }
 
@@ -102,23 +102,23 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Like `connect()`, but creates the conversation inside a specific project.
+    /// Like `connect()`, but creates the conversation inside a specific bench.
     ///
-    /// Always creates a new conversation in the given project — the existing
-    /// `conversation_id` is replaced. Use when the user selects a project from
-    /// the project selector overlay.
-    pub async fn connect_for_project(&mut self, project_id: Uuid) -> Result<(), ClientError> {
+    /// Always creates a new conversation in the given bench — the existing
+    /// `conversation_id` is replaced. Use when the user selects a bench from
+    /// the bench selector overlay.
+    pub async fn connect_for_bench(&mut self, bench_id: Uuid) -> Result<(), ClientError> {
         self.client.health().await?;
 
-        let conv = self.client.create_project_conversation(project_id).await?;
+        let conv = self.client.create_bench_conversation(bench_id).await?;
         let ws = GatewayWebSocket::connect(&self.url, conv.id).await?;
         self.finish_connect(ws).await?;
-        self.project_id = Some(project_id);
+        self.bench_id = Some(bench_id);
         self.conversation_id = Some(conv.id);
         Ok(())
     }
 
-    /// Starts a fresh conversation while preserving the current project scope.
+    /// Starts a fresh conversation while preserving the current bench scope.
     ///
     /// This replaces the active WebSocket only after the new conversation is
     /// successfully created and subscribed, so a failure does not discard the
@@ -126,8 +126,8 @@ impl ConnectionManager {
     pub async fn start_new_conversation(&mut self) -> Result<(), ClientError> {
         self.client.health().await?;
 
-        let conv = if let Some(project_id) = self.project_id {
-            self.client.create_project_conversation(project_id).await?
+        let conv = if let Some(bench_id) = self.bench_id {
+            self.client.create_bench_conversation(bench_id).await?
         } else {
             self.client.create_conversation().await?
         };
@@ -141,7 +141,7 @@ impl ConnectionManager {
     /// Subscribes the WebSocket to observability channels, stores it, and marks
     /// the connection as `Connected`.
     ///
-    /// Shared tail of `connect()` and `connect_for_project()` — both obtain a
+    /// Shared tail of `connect()` and `connect_for_bench()` — both obtain a
     /// fresh `GatewayWebSocket` and then need identical subscription + state
     /// bookkeeping.
     async fn finish_connect(&mut self, mut ws: GatewayWebSocket) -> Result<(), ClientError> {
@@ -283,8 +283,8 @@ mod tests {
     #[derive(Clone)]
     struct TestGatewayState {
         health_status: StatusCode,
-        project_session_status: StatusCode,
-        project_requests: Arc<Mutex<Vec<Uuid>>>,
+        bench_session_status: StatusCode,
+        bench_requests: Arc<Mutex<Vec<Uuid>>>,
         created_conversations: Arc<Mutex<Vec<Uuid>>>,
         websocket_conversations: Arc<Mutex<Vec<Uuid>>>,
     }
@@ -293,8 +293,8 @@ mod tests {
         fn ok() -> Self {
             Self {
                 health_status: StatusCode::OK,
-                project_session_status: StatusCode::CREATED,
-                project_requests: Arc::new(Mutex::new(Vec::new())),
+                bench_session_status: StatusCode::CREATED,
+                bench_requests: Arc::new(Mutex::new(Vec::new())),
                 created_conversations: Arc::new(Mutex::new(Vec::new())),
                 websocket_conversations: Arc::new(Mutex::new(Vec::new())),
             }
@@ -313,20 +313,20 @@ mod tests {
         }
     }
 
-    async fn create_project_conversation(
+    async fn create_bench_conversation(
         State(state): State<TestGatewayState>,
-        Path(project_id): Path<Uuid>,
+        Path(bench_id): Path<Uuid>,
     ) -> impl IntoResponse {
-        if state.project_session_status != StatusCode::CREATED {
+        if state.bench_session_status != StatusCode::CREATED {
             return (
-                state.project_session_status,
+                state.bench_session_status,
                 Json(serde_json::json!({ "error": "cannot create conversation" })),
             )
                 .into_response();
         }
 
         let conversation_id = Uuid::new_v4();
-        state.project_requests.lock().unwrap().push(project_id);
+        state.bench_requests.lock().unwrap().push(bench_id);
         state
             .created_conversations
             .lock()
@@ -337,7 +337,7 @@ mod tests {
             StatusCode::CREATED,
             Json(serde_json::json!({
                 "id": conversation_id,
-                "project_id": project_id,
+                "bench_id": bench_id,
                 "created_at": Utc::now(),
                 "last_activity": Utc::now(),
             })),
@@ -366,8 +366,8 @@ mod tests {
         let router = Router::new()
             .route("/api/health", get(health))
             .route(
-                "/api/projects/:project_id/sessions",
-                post(create_project_conversation),
+                "/api/benches/:bench_id/sessions",
+                post(create_bench_conversation),
             )
             .route(
                 "/api/conversations/:conversation_id/ws",
@@ -454,22 +454,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_for_project_creates_project_scoped_conversation() {
+    async fn connect_for_bench_creates_bench_scoped_conversation() {
         let (base_url, server, state) = spawn_test_gateway(TestGatewayState::ok()).await;
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let mut mgr = ConnectionManager::new(base_url);
 
-        mgr.connect_for_project(project_id)
+        mgr.connect_for_bench(bench_id)
             .await
-            .expect("connect_for_project should succeed");
+            .expect("connect_for_bench should succeed");
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         assert_eq!(mgr.connection_state(), ConnectionState::Connected);
-        assert_eq!(
-            state.project_requests.lock().unwrap().as_slice(),
-            &[project_id]
-        );
+        assert_eq!(state.bench_requests.lock().unwrap().as_slice(), &[bench_id]);
         let created = state.created_conversations.lock().unwrap().clone();
         assert_eq!(created.len(), 1);
         assert_eq!(mgr.conversation_id(), Some(created[0]));
@@ -482,14 +479,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_for_project_propagates_health_check_failure() {
+    async fn connect_for_bench_propagates_health_check_failure() {
         let mut state = TestGatewayState::ok();
         state.health_status = StatusCode::SERVICE_UNAVAILABLE;
         let (base_url, server, _) = spawn_test_gateway(state).await;
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let mut mgr = ConnectionManager::new(base_url);
 
-        let result = mgr.connect_for_project(project_id).await;
+        let result = mgr.connect_for_bench(bench_id).await;
 
         assert!(result.is_err());
         assert_eq!(mgr.connection_state(), ConnectionState::Disconnected);
@@ -499,14 +496,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_for_project_propagates_conversation_creation_failure() {
+    async fn connect_for_bench_propagates_conversation_creation_failure() {
         let mut state = TestGatewayState::ok();
-        state.project_session_status = StatusCode::INTERNAL_SERVER_ERROR;
+        state.bench_session_status = StatusCode::INTERNAL_SERVER_ERROR;
         let (base_url, server, state) = spawn_test_gateway(state).await;
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let mut mgr = ConnectionManager::new(base_url);
 
-        let result = mgr.connect_for_project(project_id).await;
+        let result = mgr.connect_for_bench(bench_id).await;
 
         assert!(result.is_err());
         assert_eq!(mgr.connection_state(), ConnectionState::Disconnected);
@@ -517,14 +514,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_new_conversation_replaces_existing_project_conversation() {
+    async fn start_new_conversation_replaces_existing_bench_conversation() {
         let (base_url, server, state) = spawn_test_gateway(TestGatewayState::ok()).await;
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let mut mgr = ConnectionManager::new(base_url);
 
-        mgr.connect_for_project(project_id)
+        mgr.connect_for_bench(bench_id)
             .await
-            .expect("initial project connection should succeed");
+            .expect("initial bench connection should succeed");
         let first_conversation_id = mgr.conversation_id().expect("first conversation id");
 
         mgr.start_new_conversation()

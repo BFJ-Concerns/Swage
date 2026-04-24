@@ -62,19 +62,19 @@ impl LlmProvider for StubProvider {
 // Cross-task: discovery [jcrf] → context [m8iw] → elements [iu50] →
 //             execution [s7xz] → dispatch [mgoi]
 //
-// A Python assembly config in the project's assemblies directory reorders
+// A Python assembly config in the bench's assemblies directory reorders
 // elements (memory before prompts). The assembly report should show the
 // custom order with actual content in each section — not the default
 // assembly's priority-based order.
 //
-// Public surface: Python file in project assemblies dir, selected via config.
+// Public surface: Python file in bench assemblies dir, selected via config.
 
 #[tokio::test]
 async fn custom_assembly_reorders_elements_via_python() {
     let root = TempDir::new().unwrap();
 
-    // Create project assemblies directory with a custom assembly config.
-    let assemblies_dir = root.path().join("projects/test/assemblies");
+    // Create bench assemblies directory with a custom assembly config.
+    let assemblies_dir = root.path().join("benches/test/assemblies");
     fs::create_dir_all(&assemblies_dir).unwrap();
 
     // This assembly puts memory first, then history, then prompts —
@@ -111,7 +111,7 @@ def assemble(ctx):
         ])),
         Box::new(swage_context::memory::MemoryElement::new(
             "The user prefers Rust.".to_string(),
-            "test-project".to_string(),
+            "test-bench".to_string(),
         )),
         Box::new(swage_context::history::HistoryElement::new(vec![
             swage_core::ChatMessage::new(swage_core::Role::User, "Hello"),
@@ -119,10 +119,10 @@ def assemble(ctx):
         ])),
     ];
 
-    // Search hierarchy: project level at the temp dir root.
-    let project_dir = root.path().join("projects/test");
+    // Search hierarchy: bench level at the temp dir root.
+    let bench_dir = root.path().join("benches/test");
     let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
-        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
+        vec![(swage_config::HierarchyLevel::Bench, bench_dir.as_path())];
 
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
@@ -186,7 +186,7 @@ async fn structured_extraction_produces_categorised_records() {
     let root = TempDir::new().unwrap();
 
     // Assembly that applies structured extraction to older history.
-    let assemblies_dir = root.path().join("projects/test/assemblies");
+    let assemblies_dir = root.path().join("benches/test/assemblies");
     fs::create_dir_all(&assemblies_dir).unwrap();
     fs::write(
         assemblies_dir.join("extract.py"),
@@ -244,7 +244,7 @@ def assemble(ctx):
         Box::new(swage_context::prompts::PromptsElement::new(vec![
             swage_config::prompt_rule::PromptRule {
                 priority: 100,
-                content: "You are a project manager.".to_string(),
+                content: "You are a bench manager.".to_string(),
                 source_level: swage_config::HierarchyLevel::Global,
                 file_path: std::path::PathBuf::from("test"),
             },
@@ -252,9 +252,9 @@ def assemble(ctx):
         Box::new(swage_context::history::HistoryElement::new(history)),
     ];
 
-    let project_dir = root.path().join("projects/test");
+    let bench_dir = root.path().join("benches/test");
     let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
-        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
+        vec![(swage_config::HierarchyLevel::Bench, bench_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,
@@ -315,10 +315,10 @@ def assemble(ctx):
 // Journey: Sustained Conversation Quality — reusable assembly fragments.
 // Cross-task: discovery [jcrf] → include [ht4k] → report-extensions [qfve]
 //
-// A global-level named assembly "intro" is included from a project-level
+// A global-level named assembly "intro" is included from a bench-level
 // assembly via ctx.include("intro"). The report should show the included
 // content as a distinct nested element with provenance tracing to the global
-// level. A second project-level "intro" overrides the global version.
+// level. A second bench-level "intro" overrides the global version.
 //
 // Public surface: ctx.include("name") in assembly Python code.
 
@@ -338,11 +338,11 @@ def assemble(ctx):
     )
     .unwrap();
 
-    // Project-level main assembly includes "intro" then adds history.
-    let project_assemblies = root.path().join("projects/test/assemblies");
-    fs::create_dir_all(&project_assemblies).unwrap();
+    // Bench-level main assembly includes "intro" then adds history.
+    let bench_assemblies = root.path().join("benches/test/assemblies");
+    fs::create_dir_all(&bench_assemblies).unwrap();
     fs::write(
-        project_assemblies.join("main.py"),
+        bench_assemblies.join("main.py"),
         r#"
 def assemble(ctx):
     ctx.include("intro")
@@ -374,11 +374,11 @@ def assemble(ctx):
         ])),
     ];
 
-    // Two hierarchy levels: project (high priority) and global (fallback).
-    let project_dir = root.path().join("projects/test");
+    // Two hierarchy levels: bench (high priority) and global (fallback).
+    let bench_dir = root.path().join("benches/test");
     let global_dir = root.path();
     let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> = vec![
-        (swage_config::HierarchyLevel::Project, project_dir.as_path()),
+        (swage_config::HierarchyLevel::Bench, bench_dir.as_path()),
         (swage_config::HierarchyLevel::Global, global_dir),
     ];
     let runner = swage_python::ConcreteAssemblyRunner;
@@ -431,7 +431,7 @@ async fn broken_python_assembly_triggers_failopen_with_error() {
     let root = TempDir::new().unwrap();
 
     // Write a broken assembly with a syntax error.
-    let assemblies_dir = root.path().join("projects/test/assemblies");
+    let assemblies_dir = root.path().join("benches/test/assemblies");
     fs::create_dir_all(&assemblies_dir).unwrap();
     fs::write(
         assemblies_dir.join("broken.py"),
@@ -454,9 +454,9 @@ async fn broken_python_assembly_triggers_failopen_with_error() {
             swage_core::ChatMessage::new(swage_core::Role::Assistant, "Hi!"),
         ]))];
 
-    let project_dir = root.path().join("projects/test");
+    let bench_dir = root.path().join("benches/test");
     let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
-        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
+        vec![(swage_config::HierarchyLevel::Bench, bench_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,
@@ -515,7 +515,7 @@ async fn circular_named_assembly_reference_detected() {
     let root = TempDir::new().unwrap();
 
     // Assembly A includes B.
-    let assemblies_dir = root.path().join("projects/test/assemblies");
+    let assemblies_dir = root.path().join("benches/test/assemblies");
     fs::create_dir_all(&assemblies_dir).unwrap();
     fs::write(
         assemblies_dir.join("alpha.py"),
@@ -561,9 +561,9 @@ def assemble(ctx):
         ])),
     ];
 
-    let project_dir = root.path().join("projects/test");
+    let bench_dir = root.path().join("benches/test");
     let search_levels: Vec<(swage_config::HierarchyLevel, &Path)> =
-        vec![(swage_config::HierarchyLevel::Project, project_dir.as_path())];
+        vec![(swage_config::HierarchyLevel::Bench, bench_dir.as_path())];
     let runner = swage_python::ConcreteAssemblyRunner;
     let output = swage_context::assembly::assemble(
         &elements,

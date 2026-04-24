@@ -68,7 +68,7 @@ fn test_state(db_path: &Path, provider: impl LlmProvider + 'static) -> AppState 
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

@@ -32,7 +32,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
-        ("015_project_default_flag", ADD_PROJECT_DEFAULT_FLAG),
+        ("015_bench_default_flag", ADD_BENCH_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
         ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
@@ -59,6 +59,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_CONFIGURATION_VERSION_TABLE,
         ),
         ("032_agent_memory", CREATE_AGENT_MEMORY_TABLE),
+        (
+            "033_workspace_attachments",
+            CREATE_WORKSPACE_ATTACHMENT_TABLE,
+        ),
     ]
 }
 
@@ -90,7 +94,7 @@ const CREATE_CHANNEL_LINK_TABLE: &str = "
         integration      TEXT NOT NULL,
         account          TEXT NOT NULL,
         conversation     TEXT NOT NULL,
-        project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id       TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
         agent_id         TEXT NOT NULL,
         session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         home_target_json TEXT,
@@ -99,21 +103,36 @@ const CREATE_CHANNEL_LINK_TABLE: &str = "
         PRIMARY KEY (integration, account, conversation)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_channel_links_project_id
-        ON channel_links(project_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
+        ON channel_links(bench_id);
     CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
         ON channel_links(session_id);
 ";
 
 const CREATE_LENS_PREFERENCES_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS lens_preferences (
-        singleton_key INTEGER NOT NULL PRIMARY KEY CHECK (singleton_key = 1),
-        active_lens   TEXT NOT NULL,
-        updated_at    TEXT NOT NULL
+        bench_id    TEXT NOT NULL PRIMARY KEY REFERENCES benches(id) ON DELETE CASCADE,
+        active_lens TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+";
+
+const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS workspace_attachments (
+        id               TEXT NOT NULL PRIMARY KEY,
+        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        label            TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        permissions_json TEXT NOT NULL,
+        is_trusted       INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
     );
 
-    INSERT OR IGNORE INTO lens_preferences (singleton_key, active_lens, updated_at)
-    VALUES (1, 'assistant', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_bench_id
+        ON workspace_attachments(bench_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_path
+        ON workspace_attachments(bench_id, path);
 ";
 
 const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
@@ -404,7 +423,7 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
 const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS configuration_versions (
         id                     TEXT NOT NULL PRIMARY KEY,
-        project_id             TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id             TEXT REFERENCES benches(id) ON DELETE CASCADE,
         session_id             TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         entity_kind            TEXT NOT NULL,
         entity_id              TEXT NOT NULL,
@@ -419,8 +438,8 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
         created_at             TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_configuration_versions_project
-        ON configuration_versions(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_configuration_versions_bench
+        ON configuration_versions(bench_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_configuration_versions_entity
         ON configuration_versions(entity_kind, entity_id, version_number DESC);
     CREATE INDEX IF NOT EXISTS idx_configuration_versions_session
@@ -430,7 +449,7 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
 const CREATE_AGENT_MEMORY_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_memories (
         id                TEXT NOT NULL PRIMARY KEY,
-        project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id        TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
         session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
         topology_run_id   TEXT REFERENCES topology_runs(id) ON DELETE SET NULL,
@@ -447,8 +466,8 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         updated_at        TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_project_agent
-        ON agent_memories(project_id, agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_memories_bench_agent
+        ON agent_memories(bench_id, agent_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_session
         ON agent_memories(session_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
@@ -471,7 +490,7 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
             'memory_recorded',
             'agent memory recorded',
             json_object(
-                'project_id', NEW.project_id,
+                'bench_id', NEW.bench_id,
                 'turn_id', NEW.turn_id,
                 'topology_run_id', COALESCE(NEW.topology_run_id, ''),
                 'node_execution_id', COALESCE(NEW.node_execution_id, ''),
@@ -527,7 +546,7 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
         id                TEXT NOT NULL PRIMARY KEY,
         scope_kind        TEXT NOT NULL,
         session_id        TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        project_id        TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id        TEXT REFERENCES benches(id) ON DELETE CASCADE,
         kind              TEXT NOT NULL,
         status            TEXT NOT NULL,
         filename          TEXT NOT NULL,
@@ -541,8 +560,8 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_attachments_session_id
         ON attachments(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_attachments_project_id
-        ON attachments(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_attachments_bench_id
+        ON attachments(bench_id, created_at);
 
     CREATE TABLE IF NOT EXISTS background_jobs (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -570,7 +589,7 @@ const CREATE_MATERIAL_TABLES: &str = "
         id                   TEXT NOT NULL PRIMARY KEY,
         scope_kind           TEXT NOT NULL,
         session_id           TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        project_id           TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id           TEXT REFERENCES benches(id) ON DELETE CASCADE,
         source_kind          TEXT NOT NULL,
         source_attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
         status               TEXT NOT NULL,
@@ -585,8 +604,8 @@ const CREATE_MATERIAL_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_materials_session_id
         ON materials(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_materials_project_id
-        ON materials(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_materials_bench_id
+        ON materials(bench_id, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_source_attachment_id
         ON materials(source_attachment_id)
         WHERE source_attachment_id IS NOT NULL;
@@ -618,28 +637,44 @@ const CREATE_ACTIVE_SKILLS: &str = "
 /// created with their final columns and constraints; there is no incremental
 /// ALTER TABLE patching required on a fresh database.
 const COMPLETE_SCHEMA: &str = "
-    -- Projects: name + slug uniqueness, optional workspace path.
-    CREATE TABLE IF NOT EXISTS projects (
+    -- Benches: name + slug uniqueness. External resources attach through
+    -- workspace_attachments so benches can exist without any workspace.
+    CREATE TABLE IF NOT EXISTS benches (
         id             TEXT NOT NULL PRIMARY KEY,
         name           TEXT NOT NULL UNIQUE,
         slug           TEXT NOT NULL DEFAULT '',
-        workspace_path TEXT,
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_benches_slug ON benches(slug);
 
-    -- Sessions: belong to a project, track which agent owns the session.
+    CREATE TABLE IF NOT EXISTS workspace_attachments (
+        id               TEXT NOT NULL PRIMARY KEY,
+        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        label            TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        permissions_json TEXT NOT NULL,
+        is_trusted       INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_bench_id
+        ON workspace_attachments(bench_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_path
+        ON workspace_attachments(bench_id, path);
+
+    -- Sessions: belong to a bench, track which agent owns the session.
     CREATE TABLE IF NOT EXISTS sessions (
         id         TEXT NOT NULL PRIMARY KEY,
-        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
         agent_id   TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_bench_id ON sessions(bench_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
     CREATE TABLE IF NOT EXISTS scheduled_jobs (
@@ -946,22 +981,22 @@ const ADD_TURN_INBOUND_AUDIT: &str = "
     ALTER TABLE turns ADD COLUMN inbound_audit TEXT;
 ";
 
-/// Structural default-project identity.
+/// Structural default-bench identity.
 ///
-/// The default project is no longer identified by the mutable display name.
-const ADD_PROJECT_DEFAULT_FLAG: &str = "
-    ALTER TABLE projects ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
-    UPDATE projects
+/// The default bench is no longer identified by the mutable display name.
+const ADD_BENCH_DEFAULT_FLAG: &str = "
+    ALTER TABLE benches ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+    UPDATE benches
     SET is_default = 1
     WHERE id = (
         SELECT id
-        FROM projects
+        FROM benches
         WHERE name = 'default'
         ORDER BY created_at ASC
         LIMIT 1
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_single_default
-        ON projects(is_default) WHERE is_default = 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_benches_single_default
+        ON benches(is_default) WHERE is_default = 1;
 ";
 
 /// Delegation chain tracking — nullable parent reference on turns.
@@ -974,23 +1009,23 @@ const ADD_TURN_PARENT_TURN_ID: &str = "
 
 /// Teams: the organisational unit for multi-agent orchestration.
 ///
-/// A team belongs to a project and defines an entry agent (receives user
+/// A team belongs to a bench and defines an entry agent (receives user
 /// messages) plus a member list. Teams link to topology definitions and
 /// are the scope boundary for budget controls.
 const CREATE_TEAMS: &str = "
     CREATE TABLE IF NOT EXISTS teams (
         id             TEXT NOT NULL PRIMARY KEY,
-        project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bench_id     TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
         name           TEXT NOT NULL,
         description    TEXT NOT NULL DEFAULT '',
         entry_agent_id TEXT NOT NULL,
         members        TEXT NOT NULL DEFAULT '[]',
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
-        UNIQUE(project_id, name)
+        UNIQUE(bench_id, name)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_teams_project_id ON teams(project_id);
+    CREATE INDEX IF NOT EXISTS idx_teams_bench_id ON teams(bench_id);
 ";
 
 /// Topology runs and execution traces for multi-agent team orchestration.
@@ -1127,18 +1162,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
     }
 
-    // Seed the default project if it does not already exist.
-    seed_default_project(conn)
+    // Seed the default bench if it does not already exist.
+    seed_default_bench(conn)
 }
 
-/// Insert the default project on first run. Idempotent via INSERT OR IGNORE.
-fn seed_default_project(conn: &Connection) -> Result<(), StorageError> {
+/// Insert the default bench on first run. Idempotent via INSERT OR IGNORE.
+fn seed_default_bench(conn: &Connection) -> Result<(), StorageError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO projects (id, name, is_default, slug, workspace_path, created_at, updated_at)
-         VALUES (?1, 'default', 1, 'default', NULL, ?2, ?2)",
+        "INSERT OR IGNORE INTO benches (id, name, is_default, slug, created_at, updated_at)
+         VALUES (?1, 'default', 1, 'default', ?2, ?2)",
         params![id, now],
     )
     .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
@@ -1162,12 +1197,12 @@ mod tests {
     }
 
     // Convenience: insert a session using the new schema (requires agent_id).
-    fn insert_session(conn: &Connection, project_id: &str, now: &str) -> String {
+    fn insert_session(conn: &Connection, bench_id: &str, now: &str) -> String {
         let session_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO sessions (id, project_id, agent_id, created_at, updated_at)
+            "INSERT INTO sessions (id, bench_id, agent_id, created_at, updated_at)
              VALUES (?1,?2,'agent-test',?3,?3)",
-            rusqlite::params![session_id, project_id, now],
+            rusqlite::params![session_id, bench_id, now],
         )
         .expect("insert session");
         session_id
@@ -1197,11 +1232,11 @@ mod tests {
         turn_id
     }
 
-    fn default_project_id(conn: &Connection) -> String {
-        conn.query_row("SELECT id FROM projects WHERE name='default'", [], |r| {
+    fn default_bench_id(conn: &Connection) -> String {
+        conn.query_row("SELECT id FROM benches WHERE name='default'", [], |r| {
             r.get(0)
         })
-        .expect("default project")
+        .expect("default bench")
     }
 
     // ---------------------------------------------------------------------------
@@ -1233,10 +1268,10 @@ mod tests {
     fn existing_data_unaffected_after_migration() {
         // Insert data into the tables, then re-run migrations; data must survive.
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1305,10 +1340,10 @@ mod tests {
     fn tool_calls_parent_call_id_nullable() {
         // Existing rows should have NULL parent_call_id when not set.
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1336,7 +1371,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Projects: slug column
+    // Benches: slug column
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1344,7 +1379,7 @@ mod tests {
         let conn = open_migrated();
         let col_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('benches') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -1353,16 +1388,14 @@ mod tests {
     }
 
     #[test]
-    fn default_project_has_slug_default() {
+    fn default_bench_has_slug_default() {
         let conn = open_migrated();
         let slug: String = conn
-            .query_row(
-                "SELECT slug FROM projects WHERE name = 'default'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("default project should exist with slug");
-        assert_eq!(slug, "default", "default project slug should be 'default'");
+            .query_row("SELECT slug FROM benches WHERE name = 'default'", [], |r| {
+                r.get(0)
+            })
+            .expect("default bench should exist with slug");
+        assert_eq!(slug, "default", "default bench slug should be 'default'");
     }
 
     #[test]
@@ -1371,15 +1404,15 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO projects (id, name, slug, workspace_path, created_at, updated_at)
-             VALUES (?1, 'alpha', 'alpha', NULL, ?2, ?2)",
+            "INSERT INTO benches (id, name, slug, created_at, updated_at)
+             VALUES (?1, 'alpha', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         )
         .expect("first insert should succeed");
 
         let result = conn.execute(
-            "INSERT INTO projects (id, name, slug, workspace_path, created_at, updated_at)
-             VALUES (?1, 'beta', 'alpha', NULL, ?2, ?2)",
+            "INSERT INTO benches (id, name, slug, created_at, updated_at)
+             VALUES (?1, 'beta', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         );
         assert!(
@@ -1394,7 +1427,7 @@ mod tests {
         super::run_migrations(&conn).expect("second migration run should be idempotent");
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('benches') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -1470,9 +1503,9 @@ mod tests {
             .expect("pragma_table_info query");
         assert_eq!(col_count, 1, "threads.state column should exist");
 
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
 
         // Insert a thread without specifying state — should default to 'idle'.
         let thread_id = uuid::Uuid::new_v4().to_string();
@@ -1522,9 +1555,9 @@ mod tests {
     #[test]
     fn turns_state_defaults_to_pending() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without specifying state — should default to 'pending'.
@@ -1633,9 +1666,9 @@ mod tests {
     #[test]
     fn cascade_session_delete_removes_threads() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let _thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -1656,9 +1689,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_turns() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1680,9 +1713,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_messages() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -1723,9 +1756,9 @@ mod tests {
     #[test]
     fn context_snapshots_cascade_delete_with_turn() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1773,9 +1806,9 @@ mod tests {
     #[test]
     fn turns_cost_microcents_is_nullable() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without cost — should default to NULL.
@@ -1814,9 +1847,9 @@ mod tests {
     #[test]
     fn approval_requests_cascade_delete_on_turn_delete() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1864,10 +1897,10 @@ mod tests {
     #[test]
     fn tool_calls_foreign_key_cascade_on_turn_delete() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1939,15 +1972,15 @@ mod tests {
     #[test]
     fn topology_run_cascade_delete_removes_trace_rows() {
         let conn = open_migrated();
-        let project_id = default_project_id(&conn);
+        let bench_id = default_bench_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &project_id, &now);
+        let session_id = insert_session(&conn, &bench_id, &now);
         let team_id = uuid::Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO teams (id, project_id, name, description, entry_agent_id, members, created_at, updated_at)
+            "INSERT INTO teams (id, bench_id, name, description, entry_agent_id, members, created_at, updated_at)
              VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, project_id, now],
+            rusqlite::params![team_id, bench_id, now],
         )
         .expect("insert team");
 

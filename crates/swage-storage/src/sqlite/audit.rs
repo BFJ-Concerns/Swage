@@ -124,7 +124,7 @@ mod tests {
 
     use crate::sqlite::SqliteStorage;
     use crate::store::{
-        ApprovalStore, AuditStore, ProjectStore, SessionStore, ThreadStore, TurnStore,
+        ApprovalStore, AuditStore, BenchStore, SessionStore, ThreadStore, TurnStore,
     };
     use crate::{ApprovalKind, ApprovalState, NewAuditEvent};
     use crate::{NewApprovalRequest, NewSession, NewThread, NewTurn, TurnState};
@@ -133,10 +133,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn audit_event_records_approval_state_transition() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })

@@ -3,6 +3,7 @@ pub mod agent_message;
 pub mod approval;
 pub mod attachment;
 pub mod audit;
+pub mod bench;
 pub mod channel_link;
 pub mod config_version;
 pub mod context_snapshot;
@@ -13,7 +14,6 @@ pub mod lens;
 pub mod material;
 pub mod message;
 pub mod migrations;
-pub mod project;
 pub mod schedule;
 pub mod secret;
 pub mod session;
@@ -24,6 +24,7 @@ pub mod thread;
 pub mod tool_call;
 pub mod topology;
 pub mod turn;
+pub mod workspace_attachment;
 
 use std::path::Path;
 
@@ -107,13 +108,13 @@ mod tests {
     async fn in_memory_opens_and_migrates() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
-        // Schema should be present — query the projects table.
+        // Schema should be present — query the benches table.
         storage
             .with_conn(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get::<_, i64>(0))
+                conn.query_row("SELECT COUNT(*) FROM benches", [], |r| r.get::<_, i64>(0))
             })
             .await
-            .expect("projects table should exist after migration");
+            .expect("benches table should exist after migration");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -136,13 +137,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn default_project_seeded() {
+    async fn default_bench_seeded() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         let count: i64 = storage
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM projects WHERE name = 'default'",
+                    "SELECT COUNT(*) FROM benches WHERE name = 'default'",
                     [],
                     |r| r.get(0),
                 )
@@ -150,7 +151,7 @@ mod tests {
             .await
             .expect("query should succeed");
 
-        assert_eq!(count, 1, "exactly one default project should be seeded");
+        assert_eq!(count, 1, "exactly one default bench should be seeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]

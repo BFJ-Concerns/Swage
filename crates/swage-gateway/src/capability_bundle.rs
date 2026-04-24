@@ -356,7 +356,7 @@ pub fn write_capability_bundle(
         ))
     })?;
 
-    let _ = read_capability_bundle(bundle_dir, capability_name, HierarchyLevel::Project)?;
+    let _ = read_capability_bundle(bundle_dir, capability_name, HierarchyLevel::Bench)?;
     Ok(())
 }
 
@@ -421,7 +421,7 @@ mod tests {
             "delivery-brief",
             &CapabilityWriteRequest {
                 display_name: Some("Delivery Brief".into()),
-                description: "Project delivery capability.".into(),
+                description: "Bench delivery capability.".into(),
                 requested_tools: vec!["shell".into()],
                 instructions: "Keep delivery work concise.".into(),
                 provided_ui_modules: vec!["brief-board".into()],
@@ -440,7 +440,7 @@ mod tests {
         .unwrap();
 
         let bundle =
-            read_capability_bundle(&capability_dir, "delivery-brief", HierarchyLevel::Project)
+            read_capability_bundle(&capability_dir, "delivery-brief", HierarchyLevel::Bench)
                 .unwrap();
 
         assert_eq!(bundle.display_name.as_deref(), Some("Delivery Brief"));

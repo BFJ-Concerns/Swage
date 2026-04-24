@@ -4,8 +4,8 @@
   Startup sequence:
     1. Create stores (synchronous, no IO).
     2. Wire cross-store events: connection → streaming, reconnect → refresh.
-    3. onMount: load projects (auto-selects default), load conversations for
-       the selected project, then initialise router (reads URL, selects any
+    3. onMount: load benches (auto-selects default), load conversations for
+       the selected bench, then initialise router (reads URL, selects any
        conversation referenced by the path).
     4. Render: loading splash → layout, or error screen if the gateway is unreachable.
 -->
@@ -17,7 +17,7 @@
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
   import { createStreamingStore } from "./lib/stores/streaming";
-  import { createProjectStore } from "./lib/stores/projects";
+  import { createBenchStore } from "./lib/stores/benches";
   import { createRouter } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
@@ -26,7 +26,7 @@
   // Store creation
   // ---------------------------------------------------------------------------
 
-  const projectStore = createProjectStore();
+  const benchStore = createBenchStore();
   const conversationStore = createConversationStore();
 
   // onReconnect re-fetches the active conversation over HTTP after a dropped
@@ -70,9 +70,9 @@
   async function createAndNavigate(): Promise<void> {
     try {
       activeSurface = "conversation";
-      // Use the currently selected project — should always be set after startup.
-      const projectId = projectStore.currentProject?.id ?? "";
-      await conversationStore.createConversation(projectId);
+      // Use the currently selected bench — should always be set after startup.
+      const benchId = benchStore.currentBench?.id ?? "";
+      await conversationStore.createConversation(benchId);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
@@ -95,11 +95,11 @@
     get isLoading() {
       return conversationStore.isLoading;
     },
-    loadConversations: (projectId) =>
-      conversationStore.loadConversations(projectId),
+    loadConversations: (benchId) =>
+      conversationStore.loadConversations(benchId),
     selectConversation: selectAndNavigate,
-    // No-arg wrapper: the proxy captures projectId from projectStore at
-    // call time so ConversationList doesn't need to know about projects.
+    // No-arg wrapper: the proxy captures benchId from benchStore at
+    // call time so ConversationList doesn't need to know about benches.
     createConversation: createAndNavigate,
     deleteConversation: (id) => conversationStore.deleteConversation(id),
     appendOptimisticUserMessage: (msg) =>
@@ -176,7 +176,9 @@
   }
 
   async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
-    const runtime = await fetchLensRuntime();
+    const benchId = benchStore.currentBench?.id;
+    if (!benchId) return;
+    const runtime = await fetchLensRuntime(benchId);
     availableLenses = runtime.available_lenses;
     activeLens = runtime.active_lens;
 
@@ -189,7 +191,9 @@
   }
 
   async function handleSelectLens(next: AppLens): Promise<void> {
-    const runtime = await updateLensRuntime(next);
+    const benchId = benchStore.currentBench?.id;
+    if (!benchId) return;
+    const runtime = await updateLensRuntime(benchId, next);
     availableLenses = runtime.available_lenses;
     activeLens = runtime.active_lens;
     handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
@@ -199,35 +203,36 @@
   // Startup
   // ---------------------------------------------------------------------------
 
-  // Called by ProjectSelector when the user switches projects.
-  // Reloads the conversation list for the newly active project and clears
-  // any cross-project UI state (active conversation, WebSocket connection).
-  async function handleProjectChange(): Promise<void> {
+  // Called by BenchSelector when the user switches benches.
+  // Reloads the conversation list for the newly active bench and clears
+  // any cross-bench UI state (active conversation, WebSocket connection).
+  async function handleBenchChange(): Promise<void> {
     try {
-      const projectId = projectStore.currentProject?.id;
-      if (!projectId) return;
+      const benchId = benchStore.currentBench?.id;
+      if (!benchId) return;
 
-      // Drop the WebSocket — it was bound to the previous project's session.
+      // Drop the WebSocket — it was bound to the previous bench's session.
       connectionStore.disconnect();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
-      // Load the new project's conversations.
-      await conversationStore.loadConversations(projectId);
+      // Load the new bench's conversations.
+      await conversationStore.loadConversations(benchId);
+      await refreshLensRuntime("conversation");
     } catch (err) {
-      console.error("Failed to switch project:", err);
+      console.error("Failed to switch bench:", err);
     }
   }
 
   onMount(async () => {
     try {
-      // 1. Load projects — auto-selects the default project.
-      await projectStore.loadProjects();
+      // 1. Load benches — auto-selects the default bench.
+      await benchStore.loadBenches();
 
-      // 2. Load conversations for the selected project. router.init() may call
+      // 2. Load conversations for the selected bench. router.init() may call
       //    selectAndNavigate, which relies on the list being populated.
-      const projectId = projectStore.currentProject?.id;
-      if (projectId) {
-        await conversationStore.loadConversations(projectId);
+      const benchId = benchStore.currentBench?.id;
+      if (benchId) {
+        await conversationStore.loadConversations(benchId);
       }
 
       await refreshLensRuntime();
@@ -264,8 +269,8 @@
     conversationStore={routerAwareStore}
     {connectionStore}
     {streamingStore}
-    {projectStore}
-    onProjectChange={handleProjectChange}
+    {benchStore}
+    onBenchChange={handleBenchChange}
     onRetry={handleRetry}
     {activeLens}
     {availableLenses}

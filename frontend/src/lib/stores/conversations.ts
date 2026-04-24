@@ -12,12 +12,12 @@ export interface ConversationStore {
   readonly conversations: ConversationSummary[];
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
-  loadConversations(projectId: string): Promise<void>;
+  loadConversations(benchId: string): Promise<void>;
   selectConversation(id: string): Promise<void>;
-  // projectId is required by the underlying store but optional here so that
+  // benchId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
-  // threading projectId through every intermediate component.
-  createConversation(projectId?: string): Promise<void>;
+  // threading benchId through every intermediate component.
+  createConversation(benchId?: string): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   appendOptimisticUserMessage(message: {
     content: string;
@@ -128,10 +128,10 @@ export function createConversationStore(): ConversationStore {
     // Actions
     // ---------------------------------------------------------------------------
 
-    async loadConversations(projectId) {
+    async loadConversations(benchId) {
       isLoadingStore.set(true);
       try {
-        const list = await api.listConversations(projectId);
+        const list = await api.listConversations(benchId);
         conversationsStore.set(sortByRecency(list));
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
@@ -148,17 +148,17 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(projectId) {
-      if (!projectId) {
-        throw new Error("projectId is required to create a conversation");
+    async createConversation(benchId) {
+      if (!benchId) {
+        throw new Error("benchId is required to create a conversation");
       }
 
-      const resp = await api.createConversation(projectId);
+      const resp = await api.createConversation(benchId);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
-        project_id: resp.project_id,
+        bench_id: resp.bench_id,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
         messages: [],

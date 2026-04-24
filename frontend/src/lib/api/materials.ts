@@ -28,8 +28,8 @@ async function request(
   return response;
 }
 
-export async function listProjectMaterials(projectId: string): Promise<MaterialRecord[]> {
-  const response = await request(`/api/projects/${projectId}/materials`, "GET");
+export async function listBenchMaterials(benchId: string): Promise<MaterialRecord[]> {
+  const response = await request(`/api/benches/${benchId}/materials`, "GET");
   const body = (await response.json()) as { materials: MaterialRecord[] };
   return body.materials;
 }

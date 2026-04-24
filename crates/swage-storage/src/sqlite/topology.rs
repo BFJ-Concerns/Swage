@@ -541,8 +541,8 @@ impl TopologyTraceStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NewProject, NewSession, NewTeam};
-    use crate::store::{ProjectStore, SessionStore, TeamStore};
+    use crate::model::{NewBench, NewSession, NewTeam};
+    use crate::store::{BenchStore, SessionStore, TeamStore};
 
     fn json(value: serde_json::Value) -> Option<serde_json::Value> {
         Some(value)
@@ -561,17 +561,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_topology_run() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
-                name: "trace-project".into(),
-                slug: "trace-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(NewBench {
+                name: "trace-bench".into(),
+                slug: "trace-bench".into(),
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -579,7 +578,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -614,17 +613,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn topology_run_persists_node_edge_and_retry_trace() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
-                name: "trace-query-project".into(),
-                slug: "trace-query-project".into(),
-                workspace_path: None,
+        let bench = storage
+            .create(NewBench {
+                name: "trace-query-bench".into(),
+                slug: "trace-query-bench".into(),
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -632,7 +630,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "research".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -705,10 +703,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn update_topology_run_and_node_execution_persist_outputs() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -716,7 +714,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "delivery".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -798,10 +796,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn deleting_team_cascades_topology_trace_records() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -809,7 +807,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "cascade-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -882,10 +880,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn invalid_stored_node_kind_returns_explicit_error() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })
@@ -893,7 +891,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                project_id: project.id,
+                bench_id: bench.id,
                 name: "invalid-kind".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),

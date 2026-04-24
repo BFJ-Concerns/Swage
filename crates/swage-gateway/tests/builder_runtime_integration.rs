@@ -18,7 +18,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{AuditStore, ProjectStore, Storage},
+    store::{AuditStore, BenchStore, Storage},
 };
 
 static SWAGE_HOME_LOCK: Mutex<()> = Mutex::new(());
@@ -81,7 +81,7 @@ fn test_state(db_path: &Path, provider: Arc<dyn LlmProvider>) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -126,6 +126,21 @@ async fn request_json(
     (response.status(), json_response(response).await)
 }
 
+async fn attach_workspace(router: &Router, bench_id: &str, workspace: &Path) {
+    let (status, _) = request_json(
+        router,
+        "POST",
+        &format!("/api/benches/{bench_id}/workspaces"),
+        Some(json!({
+            "path": workspace.to_string_lossy(),
+            "label": "Workspace",
+            "permissions": ["read", "write"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn conversational_builder_proposes_applies_and_survives_restart() {
     let _guard = SWAGE_HOME_LOCK
@@ -140,7 +155,7 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
     unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![json!({
-        "summary": "Create a review workspace with a new lens, delivery team, and project brief bundle.",
+        "summary": "Create a review workspace with a new lens, delivery team, and bench brief bundle.",
         "operations": [
             {
                 "kind": "create_team",
@@ -159,12 +174,12 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
                 "prominent_team_ids": ["delivery-core"]
             },
             {
-                "kind": "create_project_extension",
+                "kind": "create_bench_extension",
                 "name": "delivery-brief",
                 "display_name": "Delivery Brief",
                 "description": "Keeps delivery constraints explicit.",
                 "requested_tools": ["file_read"],
-                "instructions": "Always restate the brief before editing the project."
+                "instructions": "Always restate the brief before editing the bench."
             }
         ]
     })
@@ -172,24 +187,24 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
 
     let router = build_router(test_state(&db_path, provider));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Builder Runtime Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Builder Runtime Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
-    let project_slug = project_body["slug"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
+    let bench_slug = bench_body["slug"].as_str().unwrap();
+    attach_workspace(&router, bench_id, &workspace).await;
 
     let (proposal_status, proposal_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/proposals"),
+        &format!("/api/benches/{bench_id}/builder/proposals"),
         Some(json!({
             "prompt": "Create a delivery workspace with a dedicated lens, team, and brief extension."
         })),
@@ -202,7 +217,7 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
     let (apply_status, apply_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Create a delivery workspace with a dedicated lens, team, and brief extension.",
             "operations": proposal_body["operations"]
@@ -235,7 +250,7 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
     let (teams_status, teams_body) = request_json(
         &restarted_router,
         "GET",
-        &format!("/api/projects/{project_id}/teams"),
+        &format!("/api/benches/{bench_id}/teams"),
         None,
     )
     .await;
@@ -252,7 +267,7 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
     let (extensions_status, extensions_body) = request_json(
         &restarted_router,
         "GET",
-        &format!("/api/projects/{project_id}/extensions"),
+        &format!("/api/benches/{bench_id}/extensions"),
         None,
     )
     .await;
@@ -267,8 +282,8 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
     );
 
     let skill_path = swage_home
-        .join("projects")
-        .join(project_slug)
+        .join("benches")
+        .join(bench_slug)
         .join("skills")
         .join("delivery-brief")
         .join("SKILL.md");
@@ -307,23 +322,23 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
     ]));
     let router = build_router(test_state(&db_path, provider));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Builder Audit Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Builder Audit Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
+    attach_workspace(&router, bench_id, &workspace).await;
 
     let (create_team_status, team_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/teams"),
+        &format!("/api/benches/{bench_id}/teams"),
         Some(json!({
             "name": "workspace-core",
             "description": "Owns the builder workflow.",
@@ -354,7 +369,7 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
     let (proposal_status, proposal_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/proposals"),
+        &format!("/api/benches/{bench_id}/builder/proposals"),
         Some(json!({
             "prompt": "Update the workspace-core team so it owns the conversational builder runtime."
         })),
@@ -366,7 +381,7 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
     let (apply_status, apply_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Update the workspace-core team so it owns the conversational builder runtime.",
             "operations": proposal_body["operations"]
@@ -451,23 +466,23 @@ async fn conversational_builder_can_author_agents_and_tasks() {
     ]));
     let router = build_router(test_state(&db_path, provider));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Agent Builder Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Agent Builder Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
+    attach_workspace(&router, bench_id, &workspace).await;
 
     let (team_status, team_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/teams"),
+        &format!("/api/benches/{bench_id}/teams"),
         Some(json!({
             "name": "delivery-core",
             "description": "Owns delivery work.",
@@ -491,7 +506,7 @@ async fn conversational_builder_can_author_agents_and_tasks() {
     let (proposal_status, proposal_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/proposals"),
+        &format!("/api/benches/{bench_id}/builder/proposals"),
         Some(json!({
             "prompt": "Add a reviewer agent and a review task to the delivery team."
         })),
@@ -503,7 +518,7 @@ async fn conversational_builder_can_author_agents_and_tasks() {
     let (apply_status, apply_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Add a reviewer agent and a review task to the delivery team.",
             "operations": proposal_body["operations"]
@@ -549,23 +564,23 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
 
     let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Builder Version Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Builder Version Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
+    attach_workspace(&router, bench_id, &workspace).await;
 
     let (apply_status, apply_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Create the first delivery workspace shape.",
             "operations": [
@@ -586,7 +601,7 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
                     "prominent_team_ids": ["delivery-core"]
                 },
                 {
-                    "kind": "create_project_extension",
+                    "kind": "create_bench_extension",
                     "name": "delivery-brief",
                     "display_name": "Delivery Brief",
                     "description": "Keep delivery constraints visible.",
@@ -603,7 +618,7 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
     let (agent_status, agent_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Add a reviewer agent.",
             "operations": [
@@ -626,7 +641,7 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
     let (versions_status, versions_body) = request_json(
         &router,
         "GET",
-        &format!("/api/projects/{project_id}/config-versions"),
+        &format!("/api/benches/{bench_id}/config-versions"),
         None,
     )
     .await;
@@ -653,8 +668,8 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
     assert!(
         versions
             .iter()
-            .any(|version| version["entity_kind"] == "project_extension"),
-        "expected project_extension version history: {versions_body:#}"
+            .any(|version| version["entity_kind"] == "bench_extension"),
+        "expected bench_extension version history: {versions_body:#}"
     );
     assert!(
         versions.iter().all(|version| version["diff"].is_array()),
@@ -677,23 +692,23 @@ async fn configuration_version_rollback_restores_state_and_survives_restart() {
 
     let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Builder Rollback Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Builder Rollback Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
+    attach_workspace(&router, bench_id, &workspace).await;
 
     let (create_status, team_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/teams"),
+        &format!("/api/benches/{bench_id}/teams"),
         Some(json!({
             "name": "workspace-core",
             "description": "Initial description.",
@@ -717,7 +732,7 @@ async fn configuration_version_rollback_restores_state_and_survives_restart() {
     let (update_status, update_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/builder/apply"),
+        &format!("/api/benches/{bench_id}/builder/apply"),
         Some(json!({
             "request_text": "Tighten the team description.",
             "operations": [
@@ -736,7 +751,7 @@ async fn configuration_version_rollback_restores_state_and_survives_restart() {
     let (versions_status, versions_body) = request_json(
         &router,
         "GET",
-        &format!("/api/projects/{project_id}/config-versions?entity_kind=team&entity_id={team_id}"),
+        &format!("/api/benches/{bench_id}/config-versions?entity_kind=team&entity_id={team_id}"),
         None,
     )
     .await;

@@ -228,7 +228,7 @@ mod tests {
     use swage_storage::SqliteStorage;
     use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
     use swage_storage::store::{
-        AgentMessageStore, ProjectStore, SessionStore, ThreadStore, TurnStore,
+        AgentMessageStore, BenchStore, SessionStore, ThreadStore, TurnStore,
     };
     use uuid::Uuid;
 
@@ -424,23 +424,15 @@ mod tests {
         }
     }
 
-    async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let project = ProjectStore::get_or_create_default(storage.as_ref())
-            .await
-            .unwrap();
-        let session = storage
-            .create_session(NewSession {
-                project_id: project.id,
-                agent_id: agent_id.to_string(),
-                metadata: None,
-            })
-            .await
-            .unwrap();
+    async fn create_processing_turn(
+        storage: &SqliteStorage,
+        session_id: Uuid,
+        agent_id: &str,
+    ) -> (swage_storage::Thread, swage_storage::Turn) {
         let thread = ThreadStore::create(
-            storage.as_ref(),
+            storage,
             NewThread {
-                session_id: session.id,
+                session_id,
                 agent_id: agent_id.to_string(),
             },
         )
@@ -450,12 +442,39 @@ mod tests {
             .create_turn(NewTurn {
                 thread_id: thread.id,
                 agent_id: agent_id.to_string(),
-                state: TurnState::Processing,
+                state: TurnState::Pending,
                 user_input: None,
                 parent_turn_id: None,
             })
             .await
             .unwrap();
+
+        storage
+            .update_turn_state(turn.id, TurnState::Processing)
+            .await
+            .unwrap();
+        storage
+            .update_state(thread.id, ThreadState::Processing)
+            .await
+            .unwrap();
+        let turn = storage.get_turn(turn.id).await.unwrap().unwrap();
+        (thread, turn)
+    }
+
+    async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let bench = BenchStore::get_or_create_default(storage.as_ref())
+            .await
+            .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: agent_id.to_string(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let (_thread, turn) = create_processing_turn(storage.as_ref(), session.id, agent_id).await;
         (storage, turn.id)
     }
 
@@ -547,13 +566,13 @@ mod tests {
         // Set up two threads for agent-b — the annotation should scope
         // interruption to only the annotated thread.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let project = ProjectStore::get_or_create_default(storage.as_ref())
+        let bench = BenchStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
 
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
             })
@@ -561,46 +580,12 @@ mod tests {
             .unwrap();
 
         // Thread A — the annotated target.
-        let thread_a = ThreadStore::create(
-            storage.as_ref(),
-            NewThread {
-                session_id: session.id,
-                agent_id: "agent-b".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let turn_a = storage
-            .create_turn(NewTurn {
-                thread_id: thread_a.id,
-                agent_id: "agent-b".into(),
-                state: TurnState::Processing,
-                user_input: None,
-                parent_turn_id: None,
-            })
-            .await
-            .unwrap();
+        let (thread_a, turn_a) =
+            create_processing_turn(storage.as_ref(), session.id, "agent-b").await;
 
         // Thread B — should NOT be interrupted.
-        let thread_b = ThreadStore::create(
-            storage.as_ref(),
-            NewThread {
-                session_id: session.id,
-                agent_id: "agent-b".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let turn_b = storage
-            .create_turn(NewTurn {
-                thread_id: thread_b.id,
-                agent_id: "agent-b".into(),
-                state: TurnState::Processing,
-                user_input: None,
-                parent_turn_id: None,
-            })
-            .await
-            .unwrap();
+        let (_thread_b, turn_b) =
+            create_processing_turn(storage.as_ref(), session.id, "agent-b").await;
 
         // Create a delegate with _thread_id annotation pointing to thread_a.
         let delegate = storage
@@ -721,67 +706,33 @@ mod tests {
         // Set up TWO agents with the same ID in different sessions/threads
         // to verify that scoped cancel only interrupts the targeted delegation.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let project = ProjectStore::get_or_create_default(storage.as_ref())
+        let bench = BenchStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
 
         // First delegation — the one we'll cancel.
         let session_a = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
             })
             .await
             .unwrap();
-        let thread_a = ThreadStore::create(
-            storage.as_ref(),
-            NewThread {
-                session_id: session_a.id,
-                agent_id: "agent-b".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let turn_a = storage
-            .create_turn(NewTurn {
-                thread_id: thread_a.id,
-                agent_id: "agent-b".into(),
-                state: TurnState::Processing,
-                user_input: None,
-                parent_turn_id: None,
-            })
-            .await
-            .unwrap();
+        let (thread_a, turn_a) =
+            create_processing_turn(storage.as_ref(), session_a.id, "agent-b").await;
 
         // Second delegation — should NOT be interrupted.
         let session_b = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
             })
             .await
             .unwrap();
-        let thread_b = ThreadStore::create(
-            storage.as_ref(),
-            NewThread {
-                session_id: session_b.id,
-                agent_id: "agent-b".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let turn_b = storage
-            .create_turn(NewTurn {
-                thread_id: thread_b.id,
-                agent_id: "agent-b".into(),
-                state: TurnState::Processing,
-                user_input: None,
-                parent_turn_id: None,
-            })
-            .await
-            .unwrap();
+        let (_thread_b, turn_b) =
+            create_processing_turn(storage.as_ref(), session_b.id, "agent-b").await;
 
         // Create the delegate message for the first delegation.
         let delegate = storage

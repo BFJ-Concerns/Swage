@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
+use uuid::Uuid;
 
 use swage_core::StorageError;
 
@@ -53,11 +54,19 @@ fn parse_source_kind(column: usize, value: String) -> rusqlite::Result<LensSourc
 }
 
 fn row_to_lens_preference(row: &rusqlite::Row<'_>) -> rusqlite::Result<LensPreference> {
-    let active_lens: String = row.get(0)?;
-    let updated_at: String = row.get(1)?;
+    let bench_id: String = row.get(0)?;
+    let active_lens: String = row.get(1)?;
+    let updated_at: String = row.get(2)?;
 
     Ok(LensPreference {
-        active_lens: parse_lens(0, active_lens)?,
+        bench_id: bench_id.parse::<Uuid>().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        active_lens: parse_lens(1, active_lens)?,
         updated_at: parse_dt(&updated_at)?,
     })
 }
@@ -88,20 +97,30 @@ fn row_to_lens_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LensRecord> {
 
 #[async_trait]
 impl LensStore for SqliteStorage {
-    async fn get_active_lens(&self) -> Result<LensPreference, StorageError> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT active_lens, updated_at
-                 FROM lens_preferences
-                 WHERE singleton_key = 1",
-                [],
-                row_to_lens_preference,
-            )
-        })
-        .await
+    async fn get_active_lens(&self, bench_id: Uuid) -> Result<LensPreference, StorageError> {
+        let existing = self
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT bench_id, active_lens, updated_at
+                     FROM lens_preferences
+                     WHERE bench_id = ?1",
+                    params![bench_id.to_string()],
+                    row_to_lens_preference,
+                )
+                .optional()
+            })
+            .await?;
+        match existing {
+            Some(preference) => Ok(preference),
+            None => self.set_active_lens(bench_id, AppLens::assistant()).await,
+        }
     }
 
-    async fn set_active_lens(&self, lens: AppLens) -> Result<LensPreference, StorageError> {
+    async fn set_active_lens(
+        &self,
+        bench_id: Uuid,
+        lens: AppLens,
+    ) -> Result<LensPreference, StorageError> {
         if self.get_lens(&lens).await?.is_none() {
             return Err(StorageError::NotFound {
                 entity: "lens".to_string(),
@@ -112,15 +131,16 @@ impl LensStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO lens_preferences (singleton_key, active_lens, updated_at)
-                 VALUES (1, ?1, ?2)
-                 ON CONFLICT(singleton_key) DO UPDATE
+                "INSERT INTO lens_preferences (bench_id, active_lens, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(bench_id) DO UPDATE
                  SET active_lens = excluded.active_lens,
                      updated_at = excluded.updated_at",
-                params![lens.to_string(), now_str],
+                params![bench_id.to_string(), lens.to_string(), now_str],
             )?;
 
             Ok(LensPreference {
+                bench_id,
                 active_lens: lens,
                 updated_at: now,
             })
@@ -256,15 +276,23 @@ impl LensStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::store::LensStore;
+    use crate::store::{BenchStore, LensStore};
 
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn lens_preference_defaults_to_assistant() {
         let storage = SqliteStorage::in_memory().expect("in-memory db");
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
 
-        let preference = storage.get_active_lens().await.expect("default lens");
+        let preference = storage
+            .get_active_lens(bench.id)
+            .await
+            .expect("default lens");
+        assert_eq!(preference.bench_id, bench.id);
         assert_eq!(preference.active_lens, AppLens::assistant());
     }
 
@@ -280,14 +308,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn lens_preference_round_trips_updates() {
         let storage = SqliteStorage::in_memory().expect("in-memory db");
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
 
         let updated = storage
-            .set_active_lens(AppLens::builder())
+            .set_active_lens(bench.id, AppLens::builder())
             .await
             .expect("set builder lens");
         assert_eq!(updated.active_lens, AppLens::builder());
 
-        let reloaded = storage.get_active_lens().await.expect("reload lens");
+        let reloaded = storage
+            .get_active_lens(bench.id)
+            .await
+            .expect("reload lens");
         assert_eq!(reloaded.active_lens, AppLens::builder());
     }
 
@@ -327,14 +362,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn invalid_stored_lens_returns_explicit_error() {
         let storage = SqliteStorage::in_memory().expect("in-memory db");
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench");
+        storage
+            .get_active_lens(bench.id)
+            .await
+            .expect("create preference");
 
         storage
             .with_conn(|conn| {
                 conn.execute(
                     "UPDATE lens_preferences
                      SET active_lens = 'unknown_lens!'
-                     WHERE singleton_key = 1",
-                    [],
+                     WHERE bench_id = ?1",
+                    params![bench.id.to_string()],
                 )?;
                 Ok(())
             })
@@ -342,7 +385,7 @@ mod tests {
             .expect("corrupt row");
 
         let error = storage
-            .get_active_lens()
+            .get_active_lens(bench.id)
             .await
             .expect_err("invalid stored lens should fail");
         let message = error.to_string();

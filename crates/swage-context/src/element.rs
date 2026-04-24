@@ -56,7 +56,7 @@ pub trait ContextElement: Send + Sync {
 
     /// Human-readable provenance for the assembly report.
     ///
-    /// Examples: `"thread history"`, `"project: my-project"`, `"global prompts"`.
+    /// Examples: `"thread history"`, `"bench: my-bench"`, `"global prompts"`.
     fn source(&self) -> String;
 }
 

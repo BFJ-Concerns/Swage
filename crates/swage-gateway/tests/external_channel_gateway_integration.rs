@@ -68,7 +68,7 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -92,7 +92,7 @@ async fn start_file_backed_test_server(
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -299,8 +299,9 @@ async fn external_channel_origin_reuses_session_after_restart() {
     )
     .await;
     let deliveries = log["deliveries"].as_array().unwrap();
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(deliveries[0]["content"], "after restart");
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries[0]["content"], "before restart");
+    assert_eq!(deliveries[1]["content"], "after restart");
 }
 
 #[tokio::test(flavor = "multi_thread")]

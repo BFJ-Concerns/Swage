@@ -532,8 +532,7 @@ pub struct ResolvedConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HierarchyLevel {
     Global,
-    Lens,
-    Project,
+    Bench,
     Team,
     Agent,
 }
@@ -542,8 +541,7 @@ impl std::fmt::Display for HierarchyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Global => "Global",
-            Self::Lens => "Lens",
-            Self::Project => "Project",
+            Self::Bench => "Bench",
             Self::Team => "Team",
             Self::Agent => "Agent",
         };

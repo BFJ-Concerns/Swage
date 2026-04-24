@@ -603,7 +603,7 @@ fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> boo
 
 /// Discover skills available to a session.
 ///
-/// Resolves the Swage root, looks up the session's project slug and agent id,
+/// Resolves the Swage root, looks up the session's bench slug and agent id,
 /// builds the config hierarchy, and delegates to [`crate::skill::SkillManager`].
 /// Infrastructure failures are returned to the caller so slash-command and
 /// explicit activation flows can surface the real problem instead of treating
@@ -612,7 +612,7 @@ async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {
-    // Fetch session to get project_id and agent_id.
+    // Fetch session to get bench_id and agent_id.
     let session = match state.storage.get_session(session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -627,19 +627,19 @@ async fn discover_available_for_session(
         }
     };
 
-    // Fetch project to get the slug used in path construction.
-    let project = match state.project_store.get(session.project_id).await {
+    // Fetch bench to get the slug used in path construction.
+    let bench = match state.bench_store.get(session.bench_id).await {
         Ok(Some(p)) => p,
         Err(e) => {
             return Err(format!(
-                "skill discovery failed while loading project {} for session {session_id}: {e}",
-                session.project_id
+                "skill discovery failed while loading bench {} for session {session_id}: {e}",
+                session.bench_id
             ));
         }
         _ => {
             return Err(format!(
-                "skill discovery failed: project {} for session {session_id} was not found",
-                session.project_id
+                "skill discovery failed: bench {} for session {session_id} was not found",
+                session.bench_id
             ));
         }
     };
@@ -649,11 +649,11 @@ async fn discover_available_for_session(
         .map_err(|e| format!("skill discovery failed for session {session_id}: {e}"))?;
 
     // Build hierarchy paths that mirror load_resolved_config_from.
-    let project_dir = root.join("projects").join(&project.slug);
-    let agent_dir = project_dir.join("agents").join(&session.agent_id);
+    let bench_dir = root.join("benches").join(&bench.slug);
+    let agent_dir = bench_dir.join("agents").join(&session.agent_id);
 
     let (skills, _warnings) =
-        crate::skill::SkillManager::discover_available(&root, &project_dir, Some(&agent_dir));
+        crate::skill::SkillManager::discover_available(&root, &bench_dir, Some(&agent_dir));
     Ok(skills)
 }
 
@@ -1654,12 +1654,12 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let storage_arc: Arc<dyn swage_storage::store::Storage> =
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-        let project_store: Arc<dyn swage_storage::store::ProjectStore> =
-            storage as Arc<dyn swage_storage::store::ProjectStore>;
+        let bench_store: Arc<dyn swage_storage::store::BenchStore> =
+            storage as Arc<dyn swage_storage::store::BenchStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: storage_arc.clone(),
-            project_store,
+            bench_store,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",
@@ -1687,21 +1687,21 @@ mod tests {
 
     /// Build an AppState with a pre-inserted session.
     async fn make_state_with_session() -> (AppState, Uuid) {
-        use swage_storage::store::ProjectStore;
+        use swage_storage::store::BenchStore;
 
         let storage = Arc::new(MockStorage::new());
         let session_id = Uuid::new_v4();
 
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("create default project");
+            .expect("create default bench");
 
         storage.db.lock().await.sessions.insert(
             session_id,
             Session {
                 id: session_id,
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -1712,12 +1712,12 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let storage_arc: Arc<dyn swage_storage::store::Storage> =
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-        let project_store: Arc<dyn swage_storage::store::ProjectStore> =
-            storage as Arc<dyn swage_storage::store::ProjectStore>;
+        let bench_store: Arc<dyn swage_storage::store::BenchStore> =
+            storage as Arc<dyn swage_storage::store::BenchStore>;
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             storage: storage_arc.clone(),
-            project_store,
+            bench_store,
             provider,
             voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
                 "voice is unavailable for tests",

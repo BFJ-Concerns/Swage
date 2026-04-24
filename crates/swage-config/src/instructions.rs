@@ -166,16 +166,16 @@ mod tests {
     #[test]
     fn assemble_includes_content_from_all_levels() {
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_file(global_dir.path(), "base.md", "global content");
-        write_file(project_dir.path(), "context.md", "project content");
+        write_file(bench_dir.path(), "context.md", "bench content");
         write_file(agent_dir.path(), "persona.md", "agent content");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
@@ -185,8 +185,8 @@ mod tests {
             "should include global content"
         );
         assert!(
-            result.contains("project content"),
-            "should include project content"
+            result.contains("bench content"),
+            "should include bench content"
         );
         assert!(
             result.contains("agent content"),
@@ -210,30 +210,27 @@ mod tests {
     }
 
     #[test]
-    fn assemble_orders_global_before_project_before_agent() {
+    fn assemble_orders_global_before_bench_before_agent() {
         let global_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_file(global_dir.path(), "a.md", "GLOBAL");
-        write_file(project_dir.path(), "a.md", "PROJECT");
+        write_file(bench_dir.path(), "a.md", "BENCH");
         write_file(agent_dir.path(), "a.md", "AGENT");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Project, project_dir.path()),
+            (HierarchyLevel::Bench, bench_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
         let result = assemble_instructions(&levels).unwrap();
         let global_pos = result.find("GLOBAL").unwrap();
-        let project_pos = result.find("PROJECT").unwrap();
+        let bench_pos = result.find("BENCH").unwrap();
         let agent_pos = result.find("AGENT").unwrap();
-        assert!(
-            global_pos < project_pos,
-            "Global should come before Project"
-        );
-        assert!(project_pos < agent_pos, "Project should come before Agent");
+        assert!(global_pos < bench_pos, "Global should come before Bench");
+        assert!(bench_pos < agent_pos, "Bench should come before Agent");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! HTTP client for the Swage gateway REST API.
 //!
 //! Wraps reqwest with typed methods covering the full gateway surface:
-//! health checks, graceful shutdown, conversation CRUD, and project CRUD.
+//! health checks, graceful shutdown, conversation CRUD, and bench CRUD.
 //! Constructed from a gateway address; also supports discovery from runtime
 //! metadata so consumers don't need to know where the metadata lives.
 
@@ -12,43 +12,70 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Project request / response types
+// Bench request / response types
 // ---------------------------------------------------------------------------
 
-/// Client-side view of a project returned by the gateway.
+/// Client-side view of a bench returned by the gateway.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ProjectResponse {
+pub struct BenchResponse {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub workspace_path: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
-/// Response from the list-projects endpoint.
+/// Response from the list-benches endpoint.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ProjectListResponse {
-    pub projects: Vec<ProjectResponse>,
+pub struct BenchListResponse {
+    pub benches: Vec<BenchResponse>,
 }
 
-/// Request body for creating a new project.
+/// Request body for creating a new bench.
 #[derive(Debug, Serialize)]
-pub struct CreateProjectRequest {
+pub struct CreateBenchRequest {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_path: Option<String>,
 }
 
-/// Request body for partially updating a project.
+/// Request body for partially updating a bench.
 ///
 /// `None` fields are omitted from the JSON body — the gateway interprets an
 /// absent field as "no change" rather than "clear this field".
 #[derive(Debug, Serialize)]
-pub struct UpdateProjectRequest {
+pub struct UpdateBenchRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceAttachmentResponse {
+    pub id: Uuid,
+    pub bench_id: Uuid,
+    pub label: String,
+    pub path: String,
+    pub permissions: Vec<String>,
+    pub is_trusted: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceAttachmentListResponse {
+    pub workspaces: Vec<WorkspaceAttachmentResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateWorkspaceAttachmentRequest {
+    pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_path: Option<String>,
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_trusted: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateWorkspaceTrustRequest {
+    pub is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -307,21 +334,16 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    // --- Project CRUD ---
+    // --- Bench CRUD ---
 
-    /// Creates a new project.
+    /// Creates a new bench.
     ///
-    /// Calls `POST /api/projects` with a JSON body containing the project name
-    /// and optional workspace path. Returns the created project on success.
-    pub async fn create_project(
-        &self,
-        name: &str,
-        workspace_path: Option<&str>,
-    ) -> Result<ProjectResponse, ClientError> {
-        let url = format!("{}/api/projects", self.base_url);
-        let body = CreateProjectRequest {
+    /// Calls `POST /api/benches` with a JSON body containing the bench name.
+    /// Returns the created bench on success.
+    pub async fn create_bench(&self, name: &str) -> Result<BenchResponse, ClientError> {
+        let url = format!("{}/api/benches", self.base_url);
+        let body = CreateBenchRequest {
             name: name.to_string(),
-            workspace_path: workspace_path.map(str::to_string),
         };
         let response = self
             .client
@@ -333,12 +355,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Lists all projects.
+    /// Lists all benches.
     ///
-    /// Calls `GET /api/projects`. Returns a list response wrapping all known
-    /// projects.
-    pub async fn list_projects(&self) -> Result<ProjectListResponse, ClientError> {
-        let url = format!("{}/api/projects", self.base_url);
+    /// Calls `GET /api/benches`. Returns a list response wrapping all known
+    /// benches.
+    pub async fn list_benches(&self) -> Result<BenchListResponse, ClientError> {
+        let url = format!("{}/api/benches", self.base_url);
         let response = self
             .client
             .get(&url)
@@ -348,12 +370,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Fetches a single project by ID.
+    /// Fetches a single bench by ID.
     ///
-    /// Calls `GET /api/projects/{id}`. Returns `UnexpectedResponse` with HTTP 404
-    /// if the project does not exist.
-    pub async fn get_project(&self, id: Uuid) -> Result<ProjectResponse, ClientError> {
-        let url = format!("{}/api/projects/{}", self.base_url, id);
+    /// Calls `GET /api/benches/{id}`. Returns `UnexpectedResponse` with HTTP 404
+    /// if the bench does not exist.
+    pub async fn get_bench(&self, id: Uuid) -> Result<BenchResponse, ClientError> {
+        let url = format!("{}/api/benches/{}", self.base_url, id);
         let response = self
             .client
             .get(&url)
@@ -363,20 +385,18 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Updates a project's name and/or workspace path.
+    /// Updates a bench's metadata.
     ///
-    /// Calls `PUT /api/projects/{id}`. Fields set to `None` are omitted from the
+    /// Calls `PUT /api/benches/{id}`. Fields set to `None` are omitted from the
     /// request body and left unchanged by the gateway.
-    pub async fn update_project(
+    pub async fn update_bench(
         &self,
         id: Uuid,
         name: Option<&str>,
-        workspace_path: Option<&str>,
-    ) -> Result<ProjectResponse, ClientError> {
-        let url = format!("{}/api/projects/{}", self.base_url, id);
-        let body = UpdateProjectRequest {
+    ) -> Result<BenchResponse, ClientError> {
+        let url = format!("{}/api/benches/{}", self.base_url, id);
+        let body = UpdateBenchRequest {
             name: name.map(str::to_string),
-            workspace_path: workspace_path.map(str::to_string),
         };
         let response = self
             .client
@@ -388,11 +408,80 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Deletes a project by ID.
+    pub async fn list_bench_workspaces(
+        &self,
+        bench_id: Uuid,
+    ) -> Result<WorkspaceAttachmentListResponse, ClientError> {
+        let url = format!("{}/api/benches/{}/workspaces", self.base_url, bench_id);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    pub async fn attach_bench_workspace(
+        &self,
+        bench_id: Uuid,
+        request: CreateWorkspaceAttachmentRequest,
+    ) -> Result<WorkspaceAttachmentResponse, ClientError> {
+        let url = format!("{}/api/benches/{}/workspaces", self.base_url, bench_id);
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    pub async fn update_bench_workspace_trust(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Uuid,
+        is_trusted: bool,
+    ) -> Result<WorkspaceAttachmentResponse, ClientError> {
+        let url = format!(
+            "{}/api/benches/{}/workspaces/{}/trust",
+            self.base_url, bench_id, workspace_id
+        );
+        let response = self
+            .client
+            .put(&url)
+            .json(&UpdateWorkspaceTrustRequest { is_trusted })
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    pub async fn detach_bench_workspace(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<(), ClientError> {
+        let url = format!(
+            "{}/api/benches/{}/workspaces/{}",
+            self.base_url, bench_id, workspace_id
+        );
+        let response = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.check_success(response, &url).await?;
+        Ok(())
+    }
+
+    /// Deletes a bench by ID.
     ///
-    /// Calls `DELETE /api/projects/{id}`. Returns `Ok(())` on success.
-    pub async fn delete_project(&self, id: Uuid) -> Result<(), ClientError> {
-        let url = format!("{}/api/projects/{}", self.base_url, id);
+    /// Calls `DELETE /api/benches/{id}`. Returns `Ok(())` on success.
+    pub async fn delete_bench(&self, id: Uuid) -> Result<(), ClientError> {
+        let url = format!("{}/api/benches/{}", self.base_url, id);
 
         let response = self
             .client
@@ -484,7 +573,7 @@ impl GatewayClient {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
 }
@@ -505,7 +594,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub messages: Vec<MessageView>,
@@ -549,15 +638,15 @@ struct ConversationListEnvelope {
 // ---------------------------------------------------------------------------
 
 impl GatewayClient {
-    /// Creates a new conversation inside a specific project, returning its metadata.
+    /// Creates a new conversation inside a specific bench, returning its metadata.
     ///
-    /// Calls `POST /api/projects/{project_id}/sessions`. Returns 404 if the
-    /// project does not exist.
-    pub async fn create_project_conversation(
+    /// Calls `POST /api/benches/{bench_id}/sessions`. Returns 404 if the
+    /// bench does not exist.
+    pub async fn create_bench_conversation(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
     ) -> Result<ConversationResponse, ClientError> {
-        let url = format!("{}/api/projects/{project_id}/sessions", self.base_url);
+        let url = format!("{}/api/benches/{bench_id}/sessions", self.base_url);
 
         let response = self
             .client
@@ -875,97 +964,74 @@ impl GatewayClient {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod project_type_tests {
+mod bench_type_tests {
     use super::*;
 
-    const SAMPLE_PROJECT_JSON: &str = r#"{
+    const SAMPLE_BENCH_JSON: &str = r#"{
         "id": "550e8400-e29b-41d4-a716-446655440000",
-        "name": "My Project",
-        "slug": "my-project",
-        "workspace_path": "/home/user/projects",
+        "name": "My Bench",
+        "slug": "my-bench",
         "created_at": "2024-01-01T00:00:00Z"
     }"#;
 
     #[test]
-    fn project_response_deserialises_from_json() {
-        let resp: ProjectResponse = serde_json::from_str(SAMPLE_PROJECT_JSON).unwrap();
-        assert_eq!(resp.name, "My Project");
-        assert_eq!(resp.slug, "my-project");
-        assert_eq!(resp.workspace_path.as_deref(), Some("/home/user/projects"));
+    fn bench_response_deserialises_from_json() {
+        let resp: BenchResponse = serde_json::from_str(SAMPLE_BENCH_JSON).unwrap();
+        assert_eq!(resp.name, "My Bench");
+        assert_eq!(resp.slug, "my-bench");
     }
 
     #[test]
-    fn project_response_handles_null_workspace_path() {
-        let json = r#"{
-            "id": "550e8400-e29b-41d4-a716-446655440000",
-            "name": "No Workspace",
-            "slug": "no-workspace",
-            "workspace_path": null,
-            "created_at": "2024-01-01T00:00:00Z"
-        }"#;
-        let resp: ProjectResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.workspace_path.is_none());
+    fn bench_list_response_deserialises_empty() {
+        let json = r#"{"benches": []}"#;
+        let resp: BenchListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.benches.is_empty());
     }
 
     #[test]
-    fn project_list_response_deserialises_empty() {
-        let json = r#"{"projects": []}"#;
-        let resp: ProjectListResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.projects.is_empty());
+    fn bench_list_response_deserialises_with_entries() {
+        let json = format!(r#"{{"benches": [{SAMPLE_BENCH_JSON}]}}"#);
+        let resp: BenchListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.benches.len(), 1);
+        assert_eq!(resp.benches[0].slug, "my-bench");
     }
 
     #[test]
-    fn project_list_response_deserialises_with_entries() {
-        let json = format!(r#"{{"projects": [{SAMPLE_PROJECT_JSON}]}}"#);
-        let resp: ProjectListResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(resp.projects.len(), 1);
-        assert_eq!(resp.projects[0].slug, "my-project");
-    }
-
-    #[test]
-    fn create_project_request_serialises_with_workspace() {
-        let req = CreateProjectRequest {
-            name: "My Project".to_string(),
-            workspace_path: Some("/home/user/projects".to_string()),
+    fn create_bench_request_serialises_name_only() {
+        let req = CreateBenchRequest {
+            name: "My Bench".to_string(),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["name"], "My Project");
-        assert_eq!(json["workspace_path"], "/home/user/projects");
+        assert_eq!(json["name"], "My Bench");
     }
 
     #[test]
-    fn create_project_request_serialises_without_workspace() {
-        let req = CreateProjectRequest {
-            name: "Bare Project".to_string(),
-            workspace_path: None,
-        };
-        let json: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["name"], "Bare Project");
-        // None workspace should be absent from the serialised JSON, not null.
-        assert!(json.get("workspace_path").is_none_or(|v| v.is_null()));
-    }
-
-    #[test]
-    fn update_project_request_serialises_partial() {
-        let req = UpdateProjectRequest {
+    fn update_bench_request_serialises_partial() {
+        let req = UpdateBenchRequest {
             name: Some("New Name".to_string()),
-            workspace_path: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "New Name");
-        // workspace_path is None — skip_serializing_if = "Option::is_none" omits it.
-        assert!(json.get("workspace_path").is_none_or(|v| v.is_null()));
     }
 
     #[test]
-    fn update_project_request_serialises_both_fields() {
-        let req = UpdateProjectRequest {
+    fn workspace_attachment_request_serialises_scope() {
+        let req = UpdateBenchRequest {
             name: Some("Renamed".to_string()),
-            workspace_path: Some("/new/path".to_string()),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "Renamed");
-        assert_eq!(json["workspace_path"], "/new/path");
+
+        let workspace = CreateWorkspaceAttachmentRequest {
+            path: "/new/path".to_string(),
+            label: Some("Notes".to_string()),
+            permissions: Some(vec!["read".to_string()]),
+            is_trusted: Some(false),
+        };
+        let json: serde_json::Value = serde_json::to_value(&workspace).unwrap();
+        assert_eq!(json["path"], "/new/path");
+        assert_eq!(json["label"], "Notes");
+        assert_eq!(json["permissions"][0], "read");
     }
 }
 
@@ -1054,17 +1120,17 @@ mod tests {
     #[test]
     fn conversation_response_deserialises_from_gateway_json() {
         let id = Uuid::new_v4();
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "project_id": project_id,
+            "bench_id": bench_id,
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
         });
 
         let conv: ConversationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(conv.id, id);
-        assert_eq!(conv.project_id, project_id);
+        assert_eq!(conv.bench_id, bench_id);
     }
 
     #[test]
@@ -1120,7 +1186,7 @@ mod tests {
         let id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "project_id": Uuid::new_v4(),
+            "bench_id": Uuid::new_v4(),
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "messages": [

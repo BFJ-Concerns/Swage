@@ -30,8 +30,8 @@ pub use error::{ConfigError, ConfigProblem, ConfigProblemKind};
 
 // Discovery
 pub use discovery::{
-    AssemblyFile, DiscoveredProject, ResolvedAssembly, discover, discover_assemblies,
-    discover_teams, has_default_lens, resolve_assembly, resolve_root,
+    AssemblyFile, DiscoveredBench, ResolvedAssembly, discover, discover_assemblies, discover_teams,
+    has_default_lens, resolve_assembly, resolve_root,
 };
 
 // Merge types — PartialConfig for programmatic overlays (task definitions)

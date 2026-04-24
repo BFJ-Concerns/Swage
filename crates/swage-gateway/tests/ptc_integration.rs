@@ -121,7 +121,7 @@ async fn start_ptc_test_server(
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,

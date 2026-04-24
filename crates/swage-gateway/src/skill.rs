@@ -156,13 +156,13 @@ pub struct SkillManager;
 impl SkillManager {
     /// Discover skills available to a conversation.
     ///
-    /// Builds a three-level hierarchy from `root` (Global), `project_dir`
-    /// (Project), and optionally `agent_dir` (Agent), then delegates to
+    /// Builds a three-level hierarchy from `root` (Global), `bench_dir`
+    /// (Bench), and optionally `agent_dir` (Agent), then delegates to
     /// [`swage_config::skill::discover_skills`] for scanning and override
     /// resolution.
     pub fn discover_available(
         root: &Path,
-        project_dir: &Path,
+        bench_dir: &Path,
         agent_dir: Option<&Path>,
     ) -> (
         Vec<swage_config::skill::SkillDefinition>,
@@ -170,7 +170,7 @@ impl SkillManager {
     ) {
         let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, root),
-            (HierarchyLevel::Project, project_dir),
+            (HierarchyLevel::Bench, bench_dir),
         ];
         if let Some(agent) = agent_dir {
             levels.push((HierarchyLevel::Agent, agent));
@@ -318,7 +318,7 @@ mod tests {
     use swage_config::model::HierarchyLevel as CfgLevel;
     use swage_config::skill::SkillDefinition;
     use swage_context::tokeniser::TiktokenTokeniser;
-    use swage_storage::{NewSession, ProjectStore, SessionStore, SqliteStorage};
+    use swage_storage::{BenchStore, NewSession, SessionStore, SqliteStorage};
     use tempfile::TempDir;
 
     // ── Test helpers ─────────────────────────────────────────────────────────
@@ -326,13 +326,13 @@ mod tests {
     /// Create an in-memory storage instance with a session, returning `(storage, session_id)`.
     async fn make_storage_with_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().expect("in-memory storage");
-        let project = storage
+        let bench = storage
             .get_or_create_default()
             .await
-            .expect("default project");
+            .expect("default bench");
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn activate_new_skill_returns_activated_with_token_count() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("my-skill", CfgLevel::Project)];
+        let available = vec![make_skill("my-skill", CfgLevel::Bench)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         let result = SkillManager::activate(session_id, "my-skill", &available, &storage, &tok)
@@ -398,7 +398,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn activate_already_active_skill_returns_already_active() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("my-skill", CfgLevel::Project)];
+        let available = vec![make_skill("my-skill", CfgLevel::Bench)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         // First activation
@@ -468,7 +468,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn deactivate_user_skill_removes_from_storage() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("user-skill", CfgLevel::Project)];
+        let available = vec![make_skill("user-skill", CfgLevel::Bench)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         // Activate first
@@ -494,7 +494,7 @@ mod tests {
         let available = vec![
             make_skill("agent-a", CfgLevel::Agent),
             make_skill("agent-b", CfgLevel::Agent),
-            make_skill("user-only", CfgLevel::Project),
+            make_skill("user-only", CfgLevel::Bench),
         ];
 
         SkillManager::auto_activate_agent_skills(session_id, &available, &storage)
@@ -514,7 +514,7 @@ mod tests {
         );
         assert!(
             !active_names.contains(&"user-only"),
-            "project skill should not be auto-activated"
+            "bench skill should not be auto-activated"
         );
     }
 
@@ -542,7 +542,7 @@ mod tests {
     async fn build_active_skills_agent_level_sorts_first() {
         let (storage, session_id) = make_storage_with_session().await;
         let available = vec![
-            make_skill("user-skill", CfgLevel::Project),
+            make_skill("user-skill", CfgLevel::Bench),
             make_skill("agent-skill", CfgLevel::Agent),
         ];
         let tok = TiktokenTokeniser::new("gpt-4o");
@@ -570,7 +570,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_active_skills_empty_when_none_active() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("dormant", CfgLevel::Project)];
+        let available = vec![make_skill("dormant", CfgLevel::Bench)];
 
         let infos = SkillManager::build_active_skills(session_id, &available, &storage)
             .await
@@ -585,16 +585,16 @@ mod tests {
     #[test]
     fn discover_available_finds_skills_across_levels() {
         let root_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_skill_md(root_dir.path(), "global-skill", "Global.");
-        write_skill_md(project_dir.path(), "project-skill", "Project.");
+        write_skill_md(bench_dir.path(), "bench-skill", "Bench.");
         write_skill_md(agent_dir.path(), "agent-skill", "Agent.");
 
         let (skills, warnings) = SkillManager::discover_available(
             root_dir.path(),
-            project_dir.path(),
+            bench_dir.path(),
             Some(agent_dir.path()),
         );
 
@@ -606,13 +606,12 @@ mod tests {
     #[test]
     fn discover_available_without_agent_dir_omits_agent_level() {
         let root_dir = TempDir::new().unwrap();
-        let project_dir = TempDir::new().unwrap();
+        let bench_dir = TempDir::new().unwrap();
 
         write_skill_md(root_dir.path(), "global-skill", "Global.");
-        write_skill_md(project_dir.path(), "project-skill", "Project.");
+        write_skill_md(bench_dir.path(), "bench-skill", "Bench.");
 
-        let (skills, _) =
-            SkillManager::discover_available(root_dir.path(), project_dir.path(), None);
+        let (skills, _) = SkillManager::discover_available(root_dir.path(), bench_dir.path(), None);
 
         assert_eq!(skills.len(), 2);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));

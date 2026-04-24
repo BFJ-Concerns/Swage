@@ -1,19 +1,19 @@
-<!-- Project selector — interactive dropdown with project management. -->
+<!-- Bench selector — interactive dropdown with bench management. -->
 <script lang="ts">
-  import type { ProjectStore } from "../stores/projects";
+  import type { BenchStore } from "../stores/benches";
   import { onMount, onDestroy } from "svelte";
 
   interface Props {
     // Injected by App.svelte once all stores are wired. Optional so AppLayout
     // can render without crashing before the wiring is complete (same pattern
     // as ConversationList).
-    projectStore?: ProjectStore;
-    // Callback invoked after the active project changes, so App.svelte can
-    // reload conversations for the newly selected project.
-    onProjectChange?: () => void;
+    benchStore?: BenchStore;
+    // Callback invoked after the active bench changes, so App.svelte can
+    // reload conversations for the newly selected bench.
+    onBenchChange?: () => void;
   }
 
-  let { projectStore, onProjectChange }: Props = $props();
+  let { benchStore, onBenchChange }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Local state
@@ -24,11 +24,10 @@
 
   // Create-form input state.
   let newName = $state("");
-  let newPath = $state("");
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
 
-  // Track which project is awaiting inline delete confirmation.
+  // Track which bench is awaiting inline delete confirmation.
   let pendingDelete = $state<string | null>(null);
 
   // ---------------------------------------------------------------------------
@@ -66,61 +65,58 @@
     showCreateForm = false;
     pendingDelete = null;
     newName = "";
-    newPath = "";
     createError = null;
   }
 
   // ---------------------------------------------------------------------------
-  // Project selection
+  // Bench selection
   // ---------------------------------------------------------------------------
 
-  async function selectProject(id: string) {
-    if (!projectStore) return;
-    // Close the dropdown and notify the parent immediately for responsiveness.
-    // The store update (a local lookup) is run after so the UI doesn't lag.
+  async function selectBench(id: string) {
+    if (!benchStore) return;
     closeDropdown();
-    onProjectChange?.();
-    await projectStore.selectProject(id);
+    await benchStore.selectBench(id);
+    onBenchChange?.();
   }
 
   // ---------------------------------------------------------------------------
-  // Project creation
+  // Bench creation
   // ---------------------------------------------------------------------------
 
   async function submitCreate(event: Event) {
     event.preventDefault();
-    if (!projectStore || !newName.trim() || !newPath.trim()) return;
+    if (!benchStore || !newName.trim()) return;
 
     isCreating = true;
     createError = null;
 
     try {
-      await projectStore.createProject(newName.trim(), newPath.trim());
-      onProjectChange?.();
+      await benchStore.createBench(newName.trim());
+      onBenchChange?.();
       closeDropdown();
     } catch (err) {
-      // Surface API error messages (e.g. duplicate name, invalid path).
-      createError = err instanceof Error ? err.message : "Failed to create project";
+      // Surface API error messages, such as duplicate names.
+      createError = err instanceof Error ? err.message : "Failed to create bench";
     } finally {
       isCreating = false;
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Project deletion
+  // Bench deletion
   // ---------------------------------------------------------------------------
 
   function requestDelete(id: string, event: MouseEvent) {
-    // Prevent the click from bubbling up to the project-item and selecting it.
+    // Prevent the click from bubbling up to the bench-item and selecting it.
     event.stopPropagation();
     pendingDelete = id;
   }
 
   async function confirmDelete(id: string, event: MouseEvent) {
     event.stopPropagation();
-    if (!projectStore) return;
-    await projectStore.deleteProject(id);
-    onProjectChange?.();
+    if (!benchStore) return;
+    await benchStore.deleteBench(id);
+    onBenchChange?.();
     pendingDelete = null;
   }
 
@@ -134,34 +130,34 @@
   // ---------------------------------------------------------------------------
 
   // The label to show on the selector button.
-  const currentName = $derived(projectStore?.currentProject?.name ?? "default");
+  const currentName = $derived(benchStore?.currentBench?.name ?? "default");
 </script>
 
-<div class="project-selector">
-  <span class="label">Project</span>
+<div class="bench-selector">
+  <span class="label">Bench</span>
   <button class="toggle-btn" onclick={toggleDropdown}>
     <span class="value">{currentName}</span>
     <span class="caret" class:open={isOpen}>▾</span>
   </button>
 
-  {#if isOpen && projectStore}
-    <div class="project-dropdown">
-      <!-- Project list -->
-      <ul class="project-list">
-        {#each projectStore.projects as project (project.id)}
-          {@const isActive = projectStore.currentProject?.id === project.id}
-          {@const isDefault = project.name === "default"}
-          {@const isPendingDelete = pendingDelete === project.id}
+  {#if isOpen && benchStore}
+    <div class="bench-dropdown">
+      <!-- Bench list -->
+      <ul class="bench-list">
+        {#each benchStore.benches as bench (bench.id)}
+          {@const isActive = benchStore.currentBench?.id === bench.id}
+          {@const isDefault = bench.name === "default"}
+          {@const isPendingDelete = pendingDelete === bench.id}
 
           <li
-            class="project-item"
+            class="bench-item"
             class:active={isActive}
           >
             <button
-              class="project-select-btn"
-              onclick={() => selectProject(project.id)}
+              class="bench-select-btn"
+              onclick={() => selectBench(bench.id)}
             >
-              <span class="project-name">{project.name}</span>
+              <span class="bench-name">{bench.name}</span>
             </button>
 
             {#if isPendingDelete}
@@ -169,18 +165,18 @@
               <span class="delete-confirm">
                 <button
                   class="confirm-delete-btn"
-                  onclick={(e) => confirmDelete(project.id, e)}
+                  onclick={(e) => confirmDelete(bench.id, e)}
                 >Delete</button>
                 <button class="cancel-delete-btn" onclick={cancelDelete}>
                   Cancel
                 </button>
               </span>
             {:else if !isDefault}
-              <!-- Default project cannot be deleted. -->
+              <!-- Default bench cannot be deleted. -->
               <button
-                class="delete-project-btn"
-                title="Delete project"
-                onclick={(e) => requestDelete(project.id, e)}
+                class="delete-bench-btn"
+                title="Delete bench"
+                onclick={(e) => requestDelete(bench.id, e)}
               >×</button>
             {/if}
           </li>
@@ -193,21 +189,14 @@
       {#if showCreateForm}
         <!-- Inline create form -->
         <form
-          class="create-project-form"
+          class="create-bench-form"
           onsubmit={submitCreate}
         >
           <input
             type="text"
             name="name"
-            placeholder="Project name"
+            placeholder="Bench name"
             bind:value={newName}
-            required
-          />
-          <input
-            type="text"
-            name="workspace_path"
-            placeholder="Workspace path"
-            bind:value={newPath}
             required
           />
           {#if createError}
@@ -228,10 +217,10 @@
         </form>
       {:else}
         <button
-          class="create-project-btn"
+          class="create-bench-btn"
           onclick={() => { showCreateForm = true; }}
         >
-          + New project
+          + New bench
         </button>
       {/if}
     </div>
@@ -243,7 +232,7 @@
      Selector bar
   ------------------------------------------------------------------------- */
 
-  .project-selector {
+  .bench-selector {
     padding: 12px 16px;
     border-bottom: 1px solid #e0e0e0;
     display: flex;
@@ -298,7 +287,7 @@
      Dropdown
   ------------------------------------------------------------------------- */
 
-  .project-dropdown {
+  .bench-dropdown {
     position: absolute;
     top: 100%;
     left: 0;
@@ -311,16 +300,16 @@
   }
 
   /* -------------------------------------------------------------------------
-     Project list
+     Bench list
   ------------------------------------------------------------------------- */
 
-  .project-list {
+  .bench-list {
     list-style: none;
     margin: 0;
     padding: 4px 0;
   }
 
-  .project-item {
+  .bench-item {
     display: flex;
     align-items: center;
     padding: 8px 12px;
@@ -328,16 +317,16 @@
     gap: 4px;
   }
 
-  .project-item:hover {
+  .bench-item:hover {
     background: #f5f5f5;
   }
 
-  .project-item.active {
+  .bench-item.active {
     background: #eef2ff;
     font-weight: 500;
   }
 
-  .project-select-btn {
+  .bench-select-btn {
     flex: 1;
     min-width: 0;
     background: none;
@@ -349,7 +338,7 @@
     color: inherit;
   }
 
-  .project-name {
+  .bench-name {
     flex: 1;
     overflow: hidden;
     white-space: nowrap;
@@ -360,7 +349,7 @@
      Delete controls
   ------------------------------------------------------------------------- */
 
-  .delete-project-btn {
+  .delete-bench-btn {
     background: none;
     border: none;
     color: #ccc;
@@ -372,11 +361,11 @@
     flex-shrink: 0;
   }
 
-  .project-item:hover .delete-project-btn {
+  .bench-item:hover .delete-bench-btn {
     visibility: visible;
   }
 
-  .delete-project-btn:hover {
+  .delete-bench-btn:hover {
     color: #e53e3e;
   }
 
@@ -423,7 +412,7 @@
     margin: 4px 0;
   }
 
-  .create-project-btn {
+  .create-bench-btn {
     width: 100%;
     padding: 8px 12px;
     background: none;
@@ -434,23 +423,23 @@
     cursor: pointer;
   }
 
-  .create-project-btn:hover {
+  .create-bench-btn:hover {
     background: #f5f5f5;
     color: #333;
   }
 
   /* -------------------------------------------------------------------------
-     Create project form
+     Create bench form
   ------------------------------------------------------------------------- */
 
-  .create-project-form {
+  .create-bench-form {
     padding: 8px 12px;
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
-  .create-project-form input {
+  .create-bench-form input {
     width: 100%;
     padding: 6px 8px;
     border: 1px solid #d0d0d0;
@@ -459,7 +448,7 @@
     box-sizing: border-box;
   }
 
-  .create-project-form input:focus {
+  .create-bench-form input:focus {
     outline: none;
     border-color: #6366f1;
     box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);

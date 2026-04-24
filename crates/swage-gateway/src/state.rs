@@ -14,7 +14,7 @@ use swage_config::ResolvedConfig;
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_sandbox::Sandbox;
-use swage_storage::store::{ProjectStore, Storage};
+use swage_storage::store::{BenchStore, Storage};
 
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
@@ -32,10 +32,10 @@ use crate::{
 pub struct AppState {
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
-    /// Project storage backend. Separate from `storage` because `ProjectStore` is
-    /// not included in the `Storage` supertrait — consumers that need project
+    /// Bench storage backend. Separate from `storage` because `BenchStore` is
+    /// not included in the `Storage` supertrait — consumers that need bench
     /// operations import it independently.
-    pub project_store: Arc<dyn ProjectStore>,
+    pub bench_store: Arc<dyn BenchStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
     /// Voice provider for speech-to-text and text-to-speech.
@@ -110,7 +110,7 @@ pub struct PairingCodeRecord {
 impl AppState {
     pub fn new(
         storage: Arc<dyn Storage>,
-        project_store: Arc<dyn ProjectStore>,
+        bench_store: Arc<dyn BenchStore>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
@@ -122,7 +122,7 @@ impl AppState {
             WorkflowCapabilities::for_protocol(config.provider.protocol.clone());
         Self {
             storage: storage.clone(),
-            project_store,
+            bench_store,
             provider,
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
@@ -192,7 +192,7 @@ mod tests {
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
             storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            project_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
@@ -287,7 +287,7 @@ mod tests {
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

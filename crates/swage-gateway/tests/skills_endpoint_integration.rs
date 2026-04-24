@@ -10,8 +10,8 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::store::ProjectStore;
-use swage_storage::{SqliteStorage, model::NewProject};
+use swage_storage::store::BenchStore;
+use swage_storage::{SqliteStorage, model::NewBench};
 
 // Setting SWAGE_HOME is process-level; concurrent tests that mutate it will
 // race. Serialise all env-var-dependent tests with this mutex.
@@ -60,7 +60,7 @@ fn make_router() -> (Router, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -117,34 +117,33 @@ fn create_skill(base_dir: &std::path::Path, name: &str, description: &str, tools
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Unknown project_id returns 404.
+/// Unknown bench_id returns 404.
 ///
 /// No file-system setup needed — this tests only the storage lookup path.
 #[tokio::test(flavor = "multi_thread")]
-async fn unknown_project_returns_404() {
+async fn unknown_bench_returns_404() {
     let (router, _storage) = make_router();
     let unknown_id = uuid::Uuid::new_v4();
 
-    let (status, body) = get(&router, &format!("/api/skills?project_id={unknown_id}")).await;
+    let (status, body) = get(&router, &format!("/api/skills?bench_id={unknown_id}")).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
 }
 
-/// Known project but no config root set → returns 200 with empty skills list.
+/// Known bench but no config root set → returns 200 with empty skills list.
 ///
 /// When `SWAGE_HOME` is unset or points to a non-existent directory,
 /// the handler degrades gracefully rather than returning an error.
 #[tokio::test(flavor = "multi_thread")]
-async fn known_project_no_config_root_returns_empty() {
+async fn known_bench_no_config_root_returns_empty() {
     let (router, storage) = make_router();
 
-    // Create a project in storage — it exists but has no config directory.
-    let project = storage
-        .create(NewProject {
+    // Create a bench in storage — it exists but has no config directory.
+    let bench = storage
+        .create(NewBench {
             name: "no-config".into(),
             slug: "no-config".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
@@ -156,7 +155,7 @@ async fn known_project_no_config_root_returns_empty() {
     let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Safety: test-only env mutation; scoped by this test's execution.
     unsafe { std::env::set_var("SWAGE_HOME", &non_existent) };
-    let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK);
@@ -180,18 +179,17 @@ async fn global_skills_appear_in_listing() {
     // Global skill: {root}/skills/formatter/SKILL.md
     create_skill(root, "formatter", "Format code according to standards", &[]);
 
-    let project = storage
-        .create(NewProject {
+    let bench = storage
+        .create(NewBench {
             name: "test-global".into(),
             slug: "test-global".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("SWAGE_HOME", root) };
-    let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -208,27 +206,26 @@ async fn global_skills_appear_in_listing() {
     assert!(!formatter["always_active"].as_bool().unwrap());
 }
 
-/// Project-level skills appear with level="project".
+/// Bench-level skills appear with level="bench".
 #[tokio::test(flavor = "multi_thread")]
-async fn project_skills_appear_in_listing() {
+async fn bench_skills_appear_in_listing() {
     let (router, storage) = make_router();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let project = storage
-        .create(NewProject {
+    let bench = storage
+        .create(NewBench {
             name: "my-proj".into(),
             slug: "my-proj".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
 
-    // Project skill: {root}/projects/my-proj/skills/reviewer/SKILL.md
-    let project_dir = root.join("projects").join("my-proj");
+    // Bench skill: {root}/benches/my-proj/skills/reviewer/SKILL.md
+    let bench_dir = root.join("benches").join("my-proj");
     create_skill(
-        &project_dir,
+        &bench_dir,
         "reviewer",
         "Structured code review",
         &["read_file"],
@@ -236,7 +233,7 @@ async fn project_skills_appear_in_listing() {
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::set_var("SWAGE_HOME", root) };
-    let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -245,7 +242,7 @@ async fn project_skills_appear_in_listing() {
         .iter()
         .find(|s| s["name"] == "reviewer")
         .expect("reviewer skill should appear");
-    assert_eq!(reviewer["level"], "project");
+    assert_eq!(reviewer["level"], "bench");
     assert!(!reviewer["always_active"].as_bool().unwrap());
     let tools = reviewer["tools"].as_array().unwrap();
     assert!(
@@ -262,18 +259,17 @@ async fn agent_skills_have_always_active_true() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let project = storage
-        .create(NewProject {
+    let bench = storage
+        .create(NewBench {
             name: "agent-proj".into(),
             slug: "agent-proj".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
 
-    // Agent skill: {root}/projects/agent-proj/agents/gateway/skills/persona/SKILL.md
+    // Agent skill: {root}/benches/agent-proj/agents/gateway/skills/persona/SKILL.md
     let agent_dir = root
-        .join("projects")
+        .join("benches")
         .join("agent-proj")
         .join("agents")
         .join("gateway");
@@ -283,7 +279,7 @@ async fn agent_skills_have_always_active_true() {
     unsafe { std::env::set_var("SWAGE_HOME", root) };
     let (status, body) = get(
         &router,
-        &format!("/api/skills?project_id={}&agent_id=gateway", project.id),
+        &format!("/api/skills?bench_id={}&agent_id=gateway", bench.id),
     )
     .await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
@@ -301,21 +297,20 @@ async fn agent_skills_have_always_active_true() {
     );
 }
 
-/// Same-name skill at project level shadows global.
+/// Same-name skill at bench level shadows global.
 ///
-/// Only the project version should appear; the listing must not contain duplicates.
+/// Only the bench version should appear; the listing must not contain duplicates.
 #[tokio::test(flavor = "multi_thread")]
-async fn project_skill_shadows_global() {
+async fn bench_skill_shadows_global() {
     let (router, storage) = make_router();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let project = storage
-        .create(NewProject {
+    let bench = storage
+        .create(NewBench {
             name: "override-proj".into(),
             slug: "override-proj".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
@@ -323,18 +318,18 @@ async fn project_skill_shadows_global() {
     // Global skill named "code-review".
     create_skill(root, "code-review", "Global code review", &["read_file"]);
 
-    // Project skill with the same name — should shadow the global.
-    let project_dir = root.join("projects").join("override-proj");
+    // Bench skill with the same name — should shadow the global.
+    let bench_dir = root.join("benches").join("override-proj");
     create_skill(
-        &project_dir,
+        &bench_dir,
         "code-review",
-        "Project code review",
+        "Bench code review",
         &["read_file", "search"],
     );
 
     let _guard = SWAGE_HOME_LOCK.lock().unwrap();
     unsafe { std::env::set_var("SWAGE_HOME", root) };
-    let (status, body) = get(&router, &format!("/api/skills?project_id={}", project.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -350,13 +345,13 @@ async fn project_skill_shadows_global() {
         "same-name skill should appear once after override"
     );
     assert_eq!(
-        code_reviews[0]["level"], "project",
-        "project should shadow global"
+        code_reviews[0]["level"], "bench",
+        "bench should shadow global"
     );
-    assert_eq!(code_reviews[0]["description"], "Project code review");
+    assert_eq!(code_reviews[0]["description"], "Bench code review");
 }
 
-/// Sorting: agent skills appear first, then project, then global; within each level alphabetically.
+/// Sorting: agent skills appear first, then bench, then global; within each level alphabetically.
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_are_sorted_by_level_then_alphabetically() {
     let (router, storage) = make_router();
@@ -364,11 +359,10 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let project = storage
-        .create(NewProject {
+    let bench = storage
+        .create(NewBench {
             name: "sorted-proj".into(),
             slug: "sorted-proj".into(),
-            workspace_path: None,
         })
         .await
         .unwrap();
@@ -377,13 +371,13 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     create_skill(root, "zebra", "Global zebra skill", &[]);
     create_skill(root, "alpha", "Global alpha skill", &[]);
 
-    // Project skills.
-    let project_dir = root.join("projects").join("sorted-proj");
-    create_skill(&project_dir, "middle", "Project middle skill", &[]);
+    // Bench skills.
+    let bench_dir = root.join("benches").join("sorted-proj");
+    create_skill(&bench_dir, "middle", "Bench middle skill", &[]);
 
     // Agent skills.
     let agent_dir = root
-        .join("projects")
+        .join("benches")
         .join("sorted-proj")
         .join("agents")
         .join("gw");
@@ -393,7 +387,7 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     unsafe { std::env::set_var("SWAGE_HOME", root) };
     let (status, body) = get(
         &router,
-        &format!("/api/skills?project_id={}&agent_id=gw", project.id),
+        &format!("/api/skills?bench_id={}&agent_id=gw", bench.id),
     )
     .await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
@@ -406,10 +400,10 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     assert_eq!(skills[0]["level"], "agent", "agent skill should sort first");
     assert_eq!(skills[0]["name"], "persona");
 
-    // Then project.
+    // Then bench.
     assert_eq!(
-        skills[1]["level"], "project",
-        "project skill should sort second"
+        skills[1]["level"], "bench",
+        "bench skill should sort second"
     );
     assert_eq!(skills[1]["name"], "middle");
 

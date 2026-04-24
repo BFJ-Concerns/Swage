@@ -1,8 +1,8 @@
-//! Project selector overlay — modal list of projects fetched from the gateway.
+//! Bench selector overlay — modal list of benches fetched from the gateway.
 //!
 //! Renders as a centred popup over the conversation area with keyboard
-//! navigation for selecting a project. Selecting a project updates the active
-//! project context.
+//! navigation for selecting a bench. Selecting a bench updates the active
+//! bench context.
 
 use ratatui::{
     Frame,
@@ -12,18 +12,18 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::state::ProjectInfo;
+use crate::state::BenchInfo;
 
-/// State for the project selector modal overlay.
+/// State for the bench selector modal overlay.
 ///
 /// Navigation wraps around at both ends — selecting past the last item
 /// returns to the first, and selecting before the first goes to the last.
 #[derive(Debug, Default)]
-pub struct ProjectSelectorState {
-    pub projects: Vec<ProjectInfo>,
-    /// Index of the currently highlighted project.
+pub struct BenchSelectorState {
+    pub benches: Vec<BenchInfo>,
+    /// Index of the currently highlighted bench.
     pub selected_index: usize,
-    /// True while the project list is being fetched from the gateway.
+    /// True while the bench list is being fetched from the gateway.
     pub is_loading: bool,
     /// Error message to display instead of the list when a fetch fails.
     pub error: Option<String>,
@@ -31,40 +31,40 @@ pub struct ProjectSelectorState {
     pub is_visible: bool,
 }
 
-impl ProjectSelectorState {
-    /// Create a new, hidden `ProjectSelectorState`.
+impl BenchSelectorState {
+    /// Create a new, hidden `BenchSelectorState`.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Move the selection one item down, wrapping to the first item after the last.
     pub fn select_next(&mut self) {
-        if self.projects.is_empty() {
+        if self.benches.is_empty() {
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.projects.len();
+        self.selected_index = (self.selected_index + 1) % self.benches.len();
     }
 
     /// Move the selection one item up, wrapping to the last item before the first.
     pub fn select_previous(&mut self) {
-        if self.projects.is_empty() {
+        if self.benches.is_empty() {
             return;
         }
         self.selected_index = if self.selected_index == 0 {
-            self.projects.len() - 1
+            self.benches.len() - 1
         } else {
             self.selected_index - 1
         };
     }
 
-    /// Return the currently selected `ProjectInfo`, or `None` if the list is empty.
-    pub fn confirm(&self) -> Option<ProjectInfo> {
-        self.projects.get(self.selected_index).cloned()
+    /// Return the currently selected `BenchInfo`, or `None` if the list is empty.
+    pub fn confirm(&self) -> Option<BenchInfo> {
+        self.benches.get(self.selected_index).cloned()
     }
 
-    /// Replace the project list and reset the selection to the first item.
-    pub fn set_projects(&mut self, projects: Vec<ProjectInfo>) {
-        self.projects = projects;
+    /// Replace the bench list and reset the selection to the first item.
+    pub fn set_benches(&mut self, benches: Vec<BenchInfo>) {
+        self.benches = benches;
         self.selected_index = 0;
         self.is_loading = false;
         self.error = None;
@@ -95,14 +95,14 @@ impl ProjectSelectorState {
 
 // ---- Rendering -----------------------------------------------------------
 
-/// Render the project selector overlay centred within `area`.
+/// Render the bench selector overlay centred within `area`.
 ///
 /// If `state.is_visible` is false the function returns without rendering
 /// anything, so callers can always invoke it unconditionally.
 ///
 /// The popup clears the background beneath it (via `Clear`) before drawing,
 /// so underlying widgets do not bleed through.
-pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSelectorState) {
+pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelectorState) {
     if !state.is_visible {
         return;
     }
@@ -114,7 +114,7 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Select Project ");
+        .title(" Select Bench ");
 
     let inner = block.inner(popup);
 
@@ -128,7 +128,7 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
 
     // ---- Content ----
     if state.is_loading {
-        let loading = Paragraph::new("Loading projects...")
+        let loading = Paragraph::new("Loading benches...")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(loading, content_area);
@@ -139,7 +139,7 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
         frame.render_widget(error_text, content_area);
     } else {
         let items: Vec<ListItem> = state
-            .projects
+            .benches
             .iter()
             .map(|p| ListItem::new(p.name.as_str()))
             .collect();
@@ -149,7 +149,7 @@ pub fn render_project_selector(frame: &mut Frame, area: Rect, state: &ProjectSel
 
         // Feed our tracked index into ratatui's ListState for rendering.
         let mut list_state = ListState::default();
-        if !state.projects.is_empty() {
+        if !state.benches.is_empty() {
             list_state.select(Some(state.selected_index));
         }
 
@@ -183,35 +183,31 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn make_project(name: &str) -> ProjectInfo {
-        ProjectInfo {
+    fn make_bench(name: &str) -> BenchInfo {
+        BenchInfo {
             id: Uuid::new_v4(),
             name: name.to_string(),
         }
     }
 
-    fn three_projects() -> Vec<ProjectInfo> {
-        vec![
-            make_project("Alpha"),
-            make_project("Beta"),
-            make_project("Gamma"),
-        ]
+    fn three_benches() -> Vec<BenchInfo> {
+        vec![make_bench("Alpha"), make_bench("Beta"), make_bench("Gamma")]
     }
 
     // ---- select_next ----------------------------------------------------
 
     #[test]
     fn select_next_advances_index() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.select_next();
         assert_eq!(state.selected_index, 1);
     }
 
     #[test]
     fn select_next_wraps_from_last_to_first() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.selected_index = 2; // last item
         state.select_next();
         assert_eq!(state.selected_index, 0, "should wrap to first");
@@ -219,7 +215,7 @@ mod tests {
 
     #[test]
     fn select_next_on_empty_list_is_noop() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.select_next();
         assert_eq!(state.selected_index, 0);
     }
@@ -228,8 +224,8 @@ mod tests {
 
     #[test]
     fn select_previous_decrements_index() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.selected_index = 2;
         state.select_previous();
         assert_eq!(state.selected_index, 1);
@@ -237,8 +233,8 @@ mod tests {
 
     #[test]
     fn select_previous_wraps_from_first_to_last() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.selected_index = 0; // first item
         state.select_previous();
         assert_eq!(state.selected_index, 2, "should wrap to last");
@@ -246,7 +242,7 @@ mod tests {
 
     #[test]
     fn select_previous_on_empty_list_is_noop() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.select_previous();
         assert_eq!(state.selected_index, 0);
     }
@@ -254,9 +250,9 @@ mod tests {
     // ---- confirm --------------------------------------------------------
 
     #[test]
-    fn confirm_returns_selected_project() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+    fn confirm_returns_selected_bench() {
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.selected_index = 1;
         let confirmed = state.confirm().unwrap();
         assert_eq!(confirmed.name, "Beta");
@@ -264,36 +260,36 @@ mod tests {
 
     #[test]
     fn confirm_on_empty_list_returns_none() {
-        let state = ProjectSelectorState::new();
+        let state = BenchSelectorState::new();
         assert!(state.confirm().is_none());
     }
 
     #[test]
     fn confirm_does_not_mutate_state() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         let _ = state.confirm();
         assert_eq!(state.selected_index, 0, "confirm must not change selection");
     }
 
-    // ---- set_projects ---------------------------------------------------
+    // ---- set_benches ---------------------------------------------------
 
     #[test]
-    fn set_projects_replaces_list_and_resets_selection() {
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+    fn set_benches_replaces_list_and_resets_selection() {
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.selected_index = 2;
-        state.set_projects(vec![make_project("New")]);
-        assert_eq!(state.projects.len(), 1);
+        state.set_benches(vec![make_bench("New")]);
+        assert_eq!(state.benches.len(), 1);
         assert_eq!(state.selected_index, 0, "selection should reset to 0");
     }
 
     #[test]
-    fn set_projects_clears_loading_and_error() {
-        let mut state = ProjectSelectorState::new();
+    fn set_benches_clears_loading_and_error() {
+        let mut state = BenchSelectorState::new();
         state.is_loading = true;
         state.error = Some("previous error".to_string());
-        state.set_projects(three_projects());
+        state.set_benches(three_benches());
         assert!(!state.is_loading);
         assert!(state.error.is_none());
     }
@@ -302,7 +298,7 @@ mod tests {
 
     #[test]
     fn set_error_stores_message_and_clears_loading() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.is_loading = true;
         state.set_error("fetch failed".to_string());
         assert_eq!(state.error.as_deref(), Some("fetch failed"));
@@ -313,14 +309,14 @@ mod tests {
 
     #[test]
     fn show_makes_overlay_visible() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.show();
         assert!(state.is_visible());
     }
 
     #[test]
     fn hide_makes_overlay_invisible() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.show();
         state.hide();
         assert!(!state.is_visible());
@@ -328,7 +324,7 @@ mod tests {
 
     #[test]
     fn show_clears_previous_error() {
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.set_error("old error".to_string());
         state.show();
         assert!(state.error.is_none());
@@ -372,9 +368,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = ProjectSelectorState::new(); // is_visible = false
+        let state = BenchSelectorState::new(); // is_visible = false
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         // Buffer should be entirely blank (no popup was rendered).
         let content: String = terminal
@@ -396,11 +392,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.show();
         state.is_loading = true;
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -420,11 +416,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = ProjectSelectorState::new();
+        let mut state = BenchSelectorState::new();
         state.show();
         state.set_error("gateway unreachable".to_string());
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -440,15 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_project_list() {
+    fn render_shows_bench_list() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.show();
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -459,15 +455,15 @@ mod tests {
             .collect();
         assert!(
             content.contains("Alpha"),
-            "project list must show 'Alpha'; got: {content:?}"
+            "bench list must show 'Alpha'; got: {content:?}"
         );
         assert!(
             content.contains("Beta"),
-            "project list must show 'Beta'; got: {content:?}"
+            "bench list must show 'Beta'; got: {content:?}"
         );
         assert!(
             content.contains("Gamma"),
-            "project list must show 'Gamma'; got: {content:?}"
+            "bench list must show 'Gamma'; got: {content:?}"
         );
     }
 
@@ -476,11 +472,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.show();
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -496,15 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_select_project_title() {
+    fn render_shows_select_bench_title() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = ProjectSelectorState::new();
-        state.set_projects(three_projects());
+        let mut state = BenchSelectorState::new();
+        state.set_benches(three_benches());
         state.show();
         terminal
-            .draw(|frame| render_project_selector(frame, frame.area(), &state))
+            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -514,8 +510,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("Select Project"),
-            "popup must show 'Select Project' title; got: {content:?}"
+            content.contains("Select Bench"),
+            "popup must show 'Select Bench' title; got: {content:?}"
         );
     }
 }

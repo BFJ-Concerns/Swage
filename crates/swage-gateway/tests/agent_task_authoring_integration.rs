@@ -18,7 +18,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ProjectStore, Storage},
+    store::{BenchStore, Storage},
 };
 
 static SWAGE_HOME_LOCK: Mutex<()> = Mutex::new(());
@@ -73,7 +73,7 @@ fn test_state(db_path: &Path, provider: Arc<dyn LlmProvider>) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -125,10 +125,8 @@ async fn team_authoring_persists_agents_and_tasks_and_drives_topology_runs() {
         .unwrap_or_else(|error| error.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
-    let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("agent-task-authoring.db");
     std::fs::create_dir_all(&swage_home).unwrap();
-    std::fs::create_dir_all(&workspace).unwrap();
     unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockStreamingProvider::new(vec![vec![
@@ -145,23 +143,22 @@ async fn team_authoring_persists_agents_and_tasks_and_drives_topology_runs() {
     ]]));
     let router = build_router(test_state(&db_path, provider));
 
-    let (project_status, project_body) = request_json(
+    let (bench_status, bench_body) = request_json(
         &router,
         "POST",
-        "/api/projects",
+        "/api/benches",
         Some(json!({
-            "name": "Authoring Project",
-            "workspace_path": workspace.to_string_lossy()
+            "name": "Authoring Bench"
         })),
     )
     .await;
-    assert_eq!(project_status, StatusCode::CREATED);
-    let project_id = project_body["id"].as_str().unwrap();
+    assert_eq!(bench_status, StatusCode::CREATED);
+    let bench_id = bench_body["id"].as_str().unwrap();
 
     let (team_status, team_body) = request_json(
         &router,
         "POST",
-        &format!("/api/projects/{project_id}/teams"),
+        &format!("/api/benches/{bench_id}/teams"),
         Some(json!({
             "name": "delivery-core",
             "description": "Owns delivery work.",

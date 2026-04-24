@@ -273,11 +273,15 @@ mod tests {
         let mut sender = IpcTransport::new(b);
         let oversized = "x".repeat(MAX_IPC_MESSAGE_BYTES + 1);
 
-        sender.writer.write_all(oversized.as_bytes()).await.unwrap();
-        sender.writer.write_all(b"\n").await.unwrap();
-        sender.writer.flush().await.unwrap();
+        // Write concurrently with receive so the Unix socket buffer cannot
+        // deadlock before the receiver has a chance to enforce the frame limit.
+        let writer = tokio::spawn(async move {
+            sender.writer.write_all(oversized.as_bytes()).await.unwrap();
+            sender.writer.flush().await.unwrap();
+        });
 
         let err = receiver.receive().await.unwrap_err();
+        writer.await.unwrap();
         match err {
             SandboxError::IpcError { message } => {
                 assert!(message.contains("byte limit"), "got: {message}");

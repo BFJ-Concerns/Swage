@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createMaterial, listProjectMaterials, listSessionMaterials } from "../api/materials";
+  import { createMaterial, listBenchMaterials, listSessionMaterials } from "../api/materials";
   import { listSharedReferences } from "../api/builder";
   import { fetchOperatorOverview } from "../api/operator";
   import type { DesktopRuntimeInfo } from "../runtime";
@@ -12,22 +12,22 @@
   import { relativeTime } from "../utils/relative-time";
 
   interface Props {
-    projectId: string | null;
-    projectName?: string | null;
+    benchId: string | null;
+    benchName?: string | null;
     sessionId: string | null;
     activeSurface: LensSurface;
     desktopRuntime?: DesktopRuntimeInfo | null;
   }
 
   let {
-    projectId,
-    projectName = null,
+    benchId,
+    benchName = null,
     sessionId,
     activeSurface,
     desktopRuntime = null,
   }: Props = $props();
 
-  let projectMaterials = $state<MaterialRecord[]>([]);
+  let benchMaterials = $state<MaterialRecord[]>([]);
   let sessionMaterials = $state<MaterialRecord[]>([]);
   let sharedReferences = $state<SharedReferenceSummary[]>([]);
   let operatorOverview = $state<OperatorOverview | null>(null);
@@ -36,15 +36,15 @@
 
   let noteTitle = $state("");
   let noteContent = $state("");
-  let noteScope = $state<"session" | "project">("session");
+  let noteScope = $state<"session" | "bench">("session");
   let saveError = $state<string | null>(null);
   let saveNotice = $state<string | null>(null);
   let isSaving = $state(false);
   let lastLoadKey = "";
 
-  const materialCount = $derived(projectMaterials.length + sessionMaterials.length);
+  const materialCount = $derived(benchMaterials.length + sessionMaterials.length);
   const effectiveNoteScope = $derived(
-    noteScope === "session" && sessionId ? "session" : "project",
+    noteScope === "session" && sessionId ? "session" : "bench",
   );
   const surfaceLabel = $derived(
     activeSurface === "builder"
@@ -55,7 +55,7 @@
   );
 
   $effect(() => {
-    const nextKey = `${projectId ?? ""}:${sessionId ?? ""}:${activeSurface}`;
+    const nextKey = `${benchId ?? ""}:${sessionId ?? ""}:${activeSurface}`;
     if (nextKey === lastLoadKey) {
       return;
     }
@@ -70,7 +70,7 @@
       .replace(/^-+|-+$/g, "");
   }
 
-  function buildRelativePath(title: string, scope: "session" | "project"): string {
+  function buildRelativePath(title: string, scope: "session" | "bench"): string {
     const base = slugify(title) || "note";
     const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
     return scope === "session"
@@ -79,8 +79,8 @@
   }
 
   async function refreshRail(): Promise<void> {
-    if (!projectId) {
-      projectMaterials = [];
+    if (!benchId) {
+      benchMaterials = [];
       sessionMaterials = [];
       sharedReferences = [];
       operatorOverview = null;
@@ -92,15 +92,15 @@
     loadError = null;
 
     try {
-      const [nextProjectMaterials, nextSessionMaterials, nextSharedReferences, nextOverview] =
+      const [nextBenchMaterials, nextSessionMaterials, nextSharedReferences, nextOverview] =
         await Promise.all([
-          listProjectMaterials(projectId),
+          listBenchMaterials(benchId),
           sessionId ? listSessionMaterials(sessionId) : Promise.resolve([]),
-          listSharedReferences(projectId),
+          listSharedReferences(benchId),
           fetchOperatorOverview(),
         ]);
 
-      projectMaterials = nextProjectMaterials;
+      benchMaterials = nextBenchMaterials;
       sessionMaterials = nextSessionMaterials;
       sharedReferences = nextSharedReferences;
       operatorOverview = nextOverview;
@@ -113,7 +113,7 @@
   }
 
   async function saveMaterialNote(): Promise<void> {
-    if (!projectId) return;
+    if (!benchId) return;
 
     const title = noteTitle.trim();
     const content = noteContent.trim();
@@ -130,7 +130,7 @@
       await createMaterial({
         scope_kind: effectiveNoteScope,
         session_id: effectiveNoteScope === "session" && sessionId ? sessionId : undefined,
-        project_id: effectiveNoteScope === "project" ? projectId : undefined,
+        bench_id: effectiveNoteScope === "bench" ? benchId : undefined,
         title,
         relative_path: buildRelativePath(title, effectiveNoteScope),
         mime_type: "text/markdown",
@@ -142,7 +142,7 @@
       saveNotice =
         effectiveNoteScope === "session"
           ? "Saved a session material beside the active conversation."
-          : "Saved a project material for the wider workspace.";
+          : "Saved a bench material for the wider workspace.";
       await refreshRail();
     } catch (error) {
       saveError =
@@ -157,7 +157,7 @@
   <div class="rail-header">
     <div>
       <p class="rail-kicker">{surfaceLabel}</p>
-      <h2>{projectName ?? "Workspace context"}</h2>
+      <h2>{benchName ?? "Workspace context"}</h2>
       <p class="rail-copy">
         Materials, shared objects, and runtime signal stay visible while the
         main stage changes.
@@ -213,7 +213,7 @@
     </div>
     <p class="panel-copy">
       Drop a note into the active conversation or promote it straight to the
-      wider project workspace.
+      wider bench workspace.
     </p>
     <div class="scope-toggle" role="tablist" aria-label="Material scope">
       <button
@@ -224,10 +224,10 @@
         Session
       </button>
       <button
-        class:active={effectiveNoteScope === "project"}
-        onclick={() => (noteScope = "project")}
+        class:active={effectiveNoteScope === "bench"}
+        onclick={() => (noteScope = "bench")}
       >
-        Project
+        Bench
       </button>
     </div>
     <label>
@@ -236,9 +236,9 @@
     </label>
     <label>
       <span>Content</span>
-      <textarea bind:value={noteContent} rows="5" placeholder="Capture a constraint, checklist, or project note."></textarea>
+      <textarea bind:value={noteContent} rows="5" placeholder="Capture a constraint, checklist, or bench note."></textarea>
     </label>
-    <button class="primary" onclick={saveMaterialNote} disabled={isSaving || !projectId}>
+    <button class="primary" onclick={saveMaterialNote} disabled={isSaving || !benchId}>
       {isSaving ? "Saving note…" : "Save material"}
     </button>
   </section>
@@ -268,12 +268,12 @@
       {/if}
 
       <div class="subpanel">
-        <strong>Project workspace</strong>
-        {#if projectMaterials.length === 0}
-          <p class="muted-note">No project materials yet.</p>
+        <strong>Bench workspace</strong>
+        {#if benchMaterials.length === 0}
+          <p class="muted-note">No bench materials yet.</p>
         {:else}
           <div class="item-list">
-            {#each projectMaterials as material (material.id)}
+            {#each benchMaterials as material (material.id)}
               <article class="item-card">
                 <div class="item-title-row">
                   <strong>{material.title}</strong>

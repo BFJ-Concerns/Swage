@@ -13,11 +13,11 @@ const repoRoot = path.resolve(desktopRoot, "..");
 const frontendDist = path.resolve(repoRoot, "frontend", "dist");
 const desktopMain = path.resolve(desktopRoot, "src", "main.mjs");
 
-function createConversationState(id, projectId) {
+function createConversationState(id, benchId) {
   const now = new Date().toISOString();
   return {
     id,
-    project_id: projectId,
+    bench_id: benchId,
     created_at: now,
     last_activity: now,
     messages: [],
@@ -25,12 +25,11 @@ function createConversationState(id, projectId) {
 }
 
 function createMockGateway() {
-  const project = {
-    id: "proj-default",
+  const bench = {
+    id: "bench-default",
     name: "Default",
     slug: "default",
     is_default: true,
-    workspace_path: "/tmp/swage-desktop-smoke",
     created_at: "2026-04-17T12:00:00Z",
   };
 
@@ -79,6 +78,7 @@ function createMockGateway() {
 
   function buildLensRuntime() {
     return {
+      bench_id: bench.id,
       active_lens: activeLens,
       updated_at: new Date().toISOString(),
       available_lenses: availableLenses,
@@ -125,17 +125,17 @@ function createMockGateway() {
       return;
     }
 
-    if (request.method === "GET" && pathname === "/api/projects") {
-      writeJson(response, 200, { projects: [project] });
+    if (request.method === "GET" && pathname === "/api/benches") {
+      writeJson(response, 200, { benches: [bench] });
       return;
     }
 
-    if (request.method === "GET" && pathname === "/api/lens-runtime") {
+    if (request.method === "GET" && pathname === `/api/benches/${bench.id}/lens-runtime`) {
       writeJson(response, 200, buildLensRuntime());
       return;
     }
 
-    if (request.method === "PUT" && pathname === "/api/lens-runtime") {
+    if (request.method === "PUT" && pathname === `/api/benches/${bench.id}/lens-runtime`) {
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => {
@@ -156,7 +156,7 @@ function createMockGateway() {
 
     if (
       request.method === "GET"
-      && pathname === `/api/projects/${project.id}/sessions`
+      && pathname === `/api/benches/${bench.id}/sessions`
     ) {
       writeJson(response, 200, { conversations: listConversationSummaries() });
       return;
@@ -164,15 +164,15 @@ function createMockGateway() {
 
     if (
       request.method === "POST"
-      && pathname === `/api/projects/${project.id}/sessions`
+      && pathname === `/api/benches/${bench.id}/sessions`
     ) {
       conversationCounter += 1;
       const id = `conv-${conversationCounter}`;
-      const conversation = createConversationState(id, project.id);
+      const conversation = createConversationState(id, bench.id);
       conversations.set(id, conversation);
       writeJson(response, 200, {
         id,
-        project_id: project.id,
+        bench_id: bench.id,
         created_at: conversation.created_at,
         last_activity: conversation.last_activity,
       });

@@ -1,4 +1,4 @@
-//! Status bar widget — persistent top row showing connection state, project
+//! Status bar widget — persistent top row showing connection state, bench
 //! name, model name, and token counts.
 //!
 //! Renders as a single-line ratatui widget with colour-coded connection state
@@ -17,21 +17,21 @@ use crate::gateway::ConnectionState;
 /// Render the status bar into `area` (expected to be exactly one row tall).
 ///
 /// Left section: colour-coded connection indicator ("●") followed by the
-/// project name. Right section: model name and token counts, right-aligned
+/// bench name. Right section: model name and token counts, right-aligned
 /// by padding between the two sections. The right section degrades
 /// gracefully when `area.width` is too small to fit it.
 pub fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
     connection_state: ConnectionState,
-    project_name: &str,
+    bench_name: &str,
     model_name: Option<&str>,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
 ) {
     let line = build_status_line(
         connection_state,
-        project_name,
+        bench_name,
         model_name,
         input_tokens,
         output_tokens,
@@ -46,7 +46,7 @@ pub fn render_status_bar(
 /// content and colours without a terminal backend.
 pub(crate) fn build_status_line(
     connection_state: ConnectionState,
-    project_name: &str,
+    bench_name: &str,
     model_name: Option<&str>,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
@@ -59,10 +59,10 @@ pub(crate) fn build_status_line(
         ConnectionState::Reconnecting => Style::default().fg(Color::Yellow),
     };
 
-    // Left section is always shown: " ● project_name ".
+    // Left section is always shown: " ● bench_name ".
     // Display width: 1 (leading space) + 1 (●) + 1 (space) + name + 1 (space).
-    let left_suffix = format!(" {} ", project_name);
-    let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " project_name "
+    let left_suffix = format!(" {} ", bench_name);
+    let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " bench_name "
 
     // Build right-side candidates, most detailed first.
     // Graceful truncation: drop token counts, then model, always keep left.
@@ -169,21 +169,14 @@ mod tests {
         );
     }
 
-    // ---- Project name ---------------------------------------------------
+    // ---- Bench name ---------------------------------------------------
 
     #[test]
-    fn project_name_always_appears() {
-        let line = build_status_line(
-            ConnectionState::Connected,
-            "myproject",
-            None,
-            None,
-            None,
-            80,
-        );
+    fn bench_name_always_appears() {
+        let line = build_status_line(ConnectionState::Connected, "mybench", None, None, None, 80);
         assert!(
-            line_text(&line).contains("myproject"),
-            "project name must always be visible"
+            line_text(&line).contains("mybench"),
+            "bench name must always be visible"
         );
     }
 
@@ -336,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn render_status_bar_shows_project_name_in_buffer() {
+    fn render_status_bar_shows_bench_name_in_buffer() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -346,7 +339,7 @@ mod tests {
                     frame,
                     frame.area(),
                     ConnectionState::Connected,
-                    "testproject",
+                    "testbench",
                     None,
                     None,
                     None,
@@ -361,8 +354,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("testproject"),
-            "rendered buffer should contain project name; got: {content:?}"
+            content.contains("testbench"),
+            "rendered buffer should contain bench name; got: {content:?}"
         );
     }
 

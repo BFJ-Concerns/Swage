@@ -13,7 +13,7 @@
 //! use std::sync::Arc;
 //! use swage::{SwageBuilder, sqlite_storage, standard_leak_detector};
 //! use swage::agent::TurnRequest;
-//! use swage::storage::{ProjectStore, SessionStore, ThreadStore};
+//! use swage::storage::{BenchStore, SessionStore, ThreadStore};
 //! use swage::storage::{NewSession, NewThread};
 //! use tokio::sync::mpsc;
 //! use tokio_util::sync::CancellationToken;
@@ -29,10 +29,10 @@
 //!     .leak_detector(standard_leak_detector())
 //!     .build()?;
 //!
-//! // 3. Create a project, session, and thread, then submit a streaming turn.
-//! let project = ProjectStore::get_or_create_default(&*storage).await?;
+//! // 3. Create a bench, session, and thread, then submit a streaming turn.
+//! let bench = BenchStore::get_or_create_default(&*storage).await?;
 //! let session = SessionStore::create_session(&*storage, NewSession {
-//!     project_id: project.id,
+//!     bench_id: bench.id,
 //!     agent_id: "my-agent".into(),
 //! }).await?;
 //! let thread = ThreadStore::create(&*storage, NewThread {
@@ -46,7 +46,7 @@
 //!         session_id: session.id,
 //!         thread_id: thread.id,
 //!         turn_id: uuid::Uuid::new_v4(),
-//!         project_id: Some(project.id),
+//!         bench_id: Some(bench.id),
 //!     },
 //!     user_message: "Hello, what can you do?".into(),
 //!     assembled_context: vec![swage::ChatMessage::new(swage::Role::User, "Hello, what can you do?")],
@@ -71,7 +71,7 @@
 //! | [`storage`] | Persistence traits and SQLite backend; conversation, thread, and message models |
 //! | [`agent`] | [`agent::Agent`] execution loop and [`agent::AgentBuilder`] |
 //! | [`sandbox`] | Process-level isolation via bubblewrap + Landlock (Linux) or in-process fallback |
-//! | [`config`] | Hierarchical TOML configuration (global → project → agent) |
+//! | [`config`] | Hierarchical TOML configuration (global → bench → agent) |
 //! | [`prelude`] | `use swage::prelude::*` — common imports for a minimal agent |
 //!
 //! ## High-level builder

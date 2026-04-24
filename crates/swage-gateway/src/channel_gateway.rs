@@ -367,7 +367,7 @@ async fn ensure_session_for_origin(
         let session = state
             .storage
             .create_session(NewSession {
-                project_id: link.project_id,
+                bench_id: link.bench_id,
                 agent_id: link.agent_id.clone(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
@@ -391,7 +391,7 @@ async fn ensure_session_for_origin(
                 integration: origin.integration.as_metadata_value().to_string(),
                 account: origin.account.clone(),
                 conversation: origin.conversation.clone(),
-                project_id: link.project_id,
+                bench_id: link.bench_id,
                 agent_id: link.agent_id,
                 session_id: Some(session.id),
                 home_target: link.home_target,
@@ -405,11 +405,11 @@ async fn ensure_session_for_origin(
         return Ok(session.id);
     }
 
-    let project = state.project_store.get_or_create_default().await?;
+    let bench = state.bench_store.get_or_create_default().await?;
     let session = state
         .storage
         .create_session(NewSession {
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id: "gateway".to_string(),
             metadata: Some(serde_json::json!({
                 "channel_origin": {

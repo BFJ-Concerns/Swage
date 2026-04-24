@@ -5,19 +5,19 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelLink,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, ChannelLink,
     ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
     ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit,
     LensPreference, LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelLink,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelLink,
     NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
     NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewProject, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
+    NewNodeRetry, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
     NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NodeExecution, NodeExecutionState, NodeRetry, Project, ScheduledJob, ScheduledRun,
-    ScheduledRunState, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Team,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-    TurnState, UpdateHeartbeat, UpdateScheduledJob,
+    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, ScheduledJob,
+    ScheduledRun, ScheduledRunState, SecretRecord, Session, SharedReferenceEvent,
+    SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
+    TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -25,39 +25,64 @@ use crate::model::{
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-pub trait ProjectStore: Send + Sync {
-    async fn create(&self, project: NewProject) -> Result<Project, StorageError>;
-    async fn get(&self, id: Uuid) -> Result<Option<Project>, StorageError>;
-    async fn get_by_name(&self, name: &str) -> Result<Option<Project>, StorageError>;
-    /// Get the default project, creating it if it does not exist.
-    async fn get_or_create_default(&self) -> Result<Project, StorageError>;
-    /// Return all projects ordered by created_at ascending.
-    async fn list_all(&self) -> Result<Vec<Project>, StorageError>;
-    /// Look up a project by its slug.
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Project>, StorageError>;
-    /// Partially update a project. Only `Some` fields are changed.
+pub trait BenchStore: Send + Sync {
+    async fn create(&self, bench: NewBench) -> Result<Bench, StorageError>;
+    async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError>;
+    async fn get_by_name(&self, name: &str) -> Result<Option<Bench>, StorageError>;
+    /// Get the default bench, creating it if it does not exist.
+    async fn get_or_create_default(&self) -> Result<Bench, StorageError>;
+    /// Return all benches ordered by created_at ascending.
+    async fn list_all(&self) -> Result<Vec<Bench>, StorageError>;
+    /// Look up a bench by its slug.
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Bench>, StorageError>;
+    /// Partially update a bench. Only `Some` fields are changed.
     ///
-    /// Returns the updated project, or `StorageError::NotFound` if `id` is unknown.
+    /// Returns the updated bench, or `StorageError::NotFound` if `id` is unknown.
     async fn update(
         &self,
         id: Uuid,
         name: Option<String>,
         slug: Option<String>,
-        workspace_path: Option<String>,
-    ) -> Result<Project, StorageError>;
-    /// Delete a project and cascade its sessions.
+    ) -> Result<Bench, StorageError>;
+    /// Delete a bench and cascade its sessions.
     ///
-    /// Returns `true` if the project existed and was removed, `false` if not found.
-    /// Returns `StorageError::ConstraintViolation` if called on the default project.
+    /// Returns `true` if the bench existed and was removed, `false` if not found.
+    /// Returns `StorageError::ConstraintViolation` if called on the default bench.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait WorkspaceAttachmentStore: Send + Sync {
+    async fn create_workspace_attachment(
+        &self,
+        workspace: NewWorkspaceAttachment,
+    ) -> Result<WorkspaceAttachment, StorageError>;
+
+    async fn get_workspace_attachment(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkspaceAttachment>, StorageError>;
+
+    async fn list_workspace_attachments_by_bench(
+        &self,
+        bench_id: Uuid,
+    ) -> Result<Vec<WorkspaceAttachment>, StorageError>;
+
+    async fn set_workspace_trust(
+        &self,
+        id: Uuid,
+        is_trusted: bool,
+    ) -> Result<WorkspaceAttachment, StorageError>;
+
+    async fn delete_workspace_attachment(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError>;
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
-    /// List sessions in the project ordered by updated_at DESC.
-    async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError>;
+    /// List sessions in the bench ordered by updated_at DESC.
+    async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError>;
     /// List sessions belonging to an agent, ordered by updated_at DESC.
     async fn list_sessions_by_agent_id(&self, agent_id: &str)
     -> Result<Vec<Session>, StorageError>;
@@ -76,8 +101,12 @@ pub trait SessionStore: Send + Sync {
 
 #[async_trait]
 pub trait LensStore: Send + Sync {
-    async fn get_active_lens(&self) -> Result<LensPreference, StorageError>;
-    async fn set_active_lens(&self, lens: AppLens) -> Result<LensPreference, StorageError>;
+    async fn get_active_lens(&self, bench_id: Uuid) -> Result<LensPreference, StorageError>;
+    async fn set_active_lens(
+        &self,
+        bench_id: Uuid,
+        lens: AppLens,
+    ) -> Result<LensPreference, StorageError>;
     async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError>;
     async fn get_lens(&self, lens: &AppLens) -> Result<Option<LensRecord>, StorageError>;
     async fn create_lens(&self, lens: NewLensRecord) -> Result<LensRecord, StorageError>;
@@ -152,7 +181,7 @@ pub trait AgentMemoryStore: Send + Sync {
     async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError>;
     async fn list_agent_memories(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
@@ -172,7 +201,7 @@ pub trait ConfigurationVersionStore: Send + Sync {
     ) -> Result<Option<ConfigurationVersion>, StorageError>;
     async fn list_configuration_versions(
         &self,
-        project_id: Option<Uuid>,
+        bench_id: Option<Uuid>,
     ) -> Result<Vec<ConfigurationVersion>, StorageError>;
     async fn list_configuration_versions_for_entity(
         &self,
@@ -215,9 +244,9 @@ pub trait AttachmentStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
-    async fn list_attachments_by_project(
+    async fn list_attachments_by_bench(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
     async fn update_attachment_ingestion(
         &self,
@@ -260,10 +289,7 @@ pub trait MaterialStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Material>, StorageError>;
-    async fn list_materials_by_project(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Vec<Material>, StorageError>;
+    async fn list_materials_by_bench(&self, bench_id: Uuid) -> Result<Vec<Material>, StorageError>;
     async fn update_material_content(
         &self,
         id: Uuid,
@@ -277,7 +303,7 @@ pub trait MaterialStore: Send + Sync {
         id: Uuid,
         scope_kind: crate::model::AttachmentScopeKind,
         session_id: Option<Uuid>,
-        project_id: Option<Uuid>,
+        bench_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError>;
 }
@@ -288,11 +314,11 @@ pub trait TeamStore: Send + Sync {
     async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
     async fn get_team_by_name(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
         name: &str,
     ) -> Result<Option<Team>, StorageError>;
-    /// List teams in a project ordered by created_at ascending.
-    async fn list_teams_by_project(&self, project_id: Uuid) -> Result<Vec<Team>, StorageError>;
+    /// List teams in a bench ordered by created_at ascending.
+    async fn list_teams_by_bench(&self, bench_id: Uuid) -> Result<Vec<Team>, StorageError>;
     /// Partially update a team. Only `Some` fields are changed.
     async fn update_team(
         &self,
@@ -485,10 +511,10 @@ pub trait ContextSnapshotStore: Send + Sync {
     /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
     /// was stored for that turn.
     async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
-    /// List recent context snapshots for a project, newest first.
-    async fn list_snapshots_by_project(
+    /// List recent context snapshots for a bench, newest first.
+    async fn list_snapshots_by_bench(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
 }
@@ -822,12 +848,13 @@ pub trait HeartbeatStore: Send + Sync {
 
 /// Combined storage interface implemented by `SqliteStorage`.
 ///
-/// `ProjectStore` is not included — it is independently available and consumers
-/// that need project operations import it separately.
+/// `BenchStore` is not included — it is independently available and consumers
+/// that need bench operations import it separately.
 pub trait Storage:
     TeamStore
     + SessionStore
     + LensStore
+    + WorkspaceAttachmentStore
     + AttachmentStore
     + BackgroundJobStore
     + MaterialStore
@@ -860,6 +887,7 @@ impl<T> Storage for T where
     T: TeamStore
         + SessionStore
         + LensStore
+        + WorkspaceAttachmentStore
         + AttachmentStore
         + BackgroundJobStore
         + MaterialStore
@@ -904,23 +932,23 @@ mod tests {
     struct StubStorage;
 
     #[async_trait]
-    impl ProjectStore for StubStorage {
-        async fn create(&self, _: NewProject) -> Result<Project, StorageError> {
+    impl BenchStore for StubStorage {
+        async fn create(&self, _: NewBench) -> Result<Bench, StorageError> {
             unimplemented!()
         }
-        async fn get(&self, _: Uuid) -> Result<Option<Project>, StorageError> {
+        async fn get(&self, _: Uuid) -> Result<Option<Bench>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_name(&self, _: &str) -> Result<Option<Project>, StorageError> {
+        async fn get_by_name(&self, _: &str) -> Result<Option<Bench>, StorageError> {
             unimplemented!()
         }
-        async fn get_or_create_default(&self) -> Result<Project, StorageError> {
+        async fn get_or_create_default(&self) -> Result<Bench, StorageError> {
             unimplemented!()
         }
-        async fn list_all(&self) -> Result<Vec<Project>, StorageError> {
+        async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_slug(&self, _: &str) -> Result<Option<Project>, StorageError> {
+        async fn get_by_slug(&self, _: &str) -> Result<Option<Bench>, StorageError> {
             unimplemented!()
         }
         async fn update(
@@ -928,8 +956,7 @@ mod tests {
             _: Uuid,
             _: Option<String>,
             _: Option<String>,
-            _: Option<String>,
-        ) -> Result<Project, StorageError> {
+        ) -> Result<Bench, StorageError> {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -945,7 +972,7 @@ mod tests {
         async fn get_session(&self, _: Uuid) -> Result<Option<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_by_project(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
+        async fn list_by_bench(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
@@ -969,11 +996,15 @@ mod tests {
 
     #[async_trait]
     impl LensStore for StubStorage {
-        async fn get_active_lens(&self) -> Result<LensPreference, StorageError> {
+        async fn get_active_lens(&self, _: Uuid) -> Result<LensPreference, StorageError> {
             unimplemented!()
         }
 
-        async fn set_active_lens(&self, _: AppLens) -> Result<LensPreference, StorageError> {
+        async fn set_active_lens(
+            &self,
+            _: Uuid,
+            _: AppLens,
+        ) -> Result<LensPreference, StorageError> {
             unimplemented!()
         }
 
@@ -1184,6 +1215,42 @@ mod tests {
     }
 
     #[async_trait]
+    impl WorkspaceAttachmentStore for StubStorage {
+        async fn create_workspace_attachment(
+            &self,
+            _: NewWorkspaceAttachment,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_workspace_attachment(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkspaceAttachment>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_workspace_attachments_by_bench(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn set_workspace_trust(
+            &self,
+            _: Uuid,
+            _: bool,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            unimplemented!()
+        }
+
+        async fn delete_workspace_attachment(&self, _: Uuid) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
     impl AttachmentStore for StubStorage {
         async fn queue_attachment_ingestion(
             &self,
@@ -1204,7 +1271,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_attachments_by_project(
+        async fn list_attachments_by_bench(
             &self,
             _: Uuid,
         ) -> Result<Vec<Attachment>, StorageError> {
@@ -1286,7 +1353,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_materials_by_project(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
+        async fn list_materials_by_bench(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
             unimplemented!()
         }
 
@@ -1330,7 +1397,7 @@ mod tests {
         async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
             unimplemented!()
         }
-        async fn list_teams_by_project(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
+        async fn list_teams_by_bench(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
             unimplemented!()
         }
         async fn update_team(
@@ -1487,9 +1554,9 @@ mod tests {
         async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
-        async fn list_snapshots_by_project(
+        async fn list_snapshots_by_bench(
             &self,
-            _project_id: Uuid,
+            _bench_id: Uuid,
             _limit: usize,
         ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
             unimplemented!()
@@ -2033,7 +2100,7 @@ mod tests {
             let id = Uuid::new_v4();
             let _ = t.create_agent_memory(NewAgentMemoryRecord {
                 id,
-                project_id: Uuid::new_v4(),
+                bench_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
                 turn_id: Uuid::new_v4(),
                 topology_run_id: None,
@@ -2060,7 +2127,7 @@ mod tests {
             let id = Uuid::new_v4();
             let _ = t.create_configuration_version(NewConfigurationVersion {
                 id,
-                project_id: Some(Uuid::new_v4()),
+                bench_id: Some(Uuid::new_v4()),
                 session_id: None,
                 entity_kind: "team".into(),
                 entity_id: "team-1".into(),

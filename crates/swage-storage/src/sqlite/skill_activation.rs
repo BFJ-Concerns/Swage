@@ -123,23 +123,22 @@ impl SkillActivationStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewProject, NewSession};
+    use crate::model::{NewBench, NewSession};
     use crate::sqlite::SqliteStorage;
-    use crate::store::{ProjectStore, SessionStore, SkillActivationStore};
+    use crate::store::{BenchStore, SessionStore, SkillActivationStore};
 
     async fn make_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent".to_string(),
                 metadata: None,
             })
@@ -242,17 +241,16 @@ mod tests {
         let (storage, session_a) = make_session().await;
 
         // Create a second session in the same storage instance.
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "q".into(),
                 slug: "q".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session_b = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent2".to_string(),
                 metadata: None,
             })

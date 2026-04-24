@@ -1,6 +1,6 @@
-//! Memory element — project memory content for the assembly engine.
+//! Memory element — bench memory content for the assembly engine.
 //!
-//! The memory element wraps the project's persistent memory string and exposes
+//! The memory element wraps the bench's persistent memory string and exposes
 //! it as a system message. It is available to the assembly engine but the
 //! default assembly does NOT include it in assembled output — this preserves
 //! era 0.1 equivalence where memory is tool-accessible rather than prepended.
@@ -11,7 +11,7 @@ use swage_core::{ChatMessage, Role};
 use crate::element::ContextElement;
 use crate::tokeniser::Tokeniser;
 
-/// A context element carrying the project's persistent memory content.
+/// A context element carrying the bench's persistent memory content.
 ///
 /// Produces a single `Role::System` message containing the memory text, or
 /// no messages if the memory is empty. Priority 50 places it between
@@ -19,19 +19,19 @@ use crate::tokeniser::Tokeniser;
 pub struct MemoryElement {
     // The raw memory content — empty string means no memory is available.
     content: String,
-    // Project name, reported as the element's provenance.
-    project_name: String,
+    // Bench name, reported as the element's provenance.
+    bench_name: String,
 }
 
 impl MemoryElement {
     /// Create a new memory element.
     ///
-    /// - `content` — the project's memory text (may be empty)
-    /// - `project_name` — used in the assembly report's `source` field
-    pub fn new(content: String, project_name: String) -> Self {
+    /// - `content` — the bench's memory text (may be empty)
+    /// - `bench_name` — used in the assembly report's `source` field
+    pub fn new(content: String, bench_name: String) -> Self {
         Self {
             content,
-            project_name,
+            bench_name,
         }
     }
 }
@@ -68,7 +68,7 @@ impl ContextElement for MemoryElement {
     }
 
     fn source(&self) -> String {
-        format!("project memory: {}", self.project_name)
+        format!("bench memory: {}", self.bench_name)
     }
 }
 
@@ -99,7 +99,7 @@ mod tests {
     fn non_empty_memory_produces_system_message() {
         let element = MemoryElement::new(
             "The user prefers concise answers.".to_string(),
-            "my-project".to_string(),
+            "my-bench".to_string(),
         );
 
         let messages = element.content();
@@ -114,7 +114,7 @@ mod tests {
     /// Empty memory produces no messages — the element is a no-op in assembly.
     #[test]
     fn empty_memory_produces_no_messages() {
-        let element = MemoryElement::new("".to_string(), "empty-project".to_string());
+        let element = MemoryElement::new("".to_string(), "empty-bench".to_string());
 
         assert!(
             element.content().is_empty(),
@@ -125,10 +125,8 @@ mod tests {
     /// token_count() returns a positive estimate for non-empty memory.
     #[test]
     fn token_count_reflects_memory_content() {
-        let element = MemoryElement::new(
-            "Some memory content.".to_string(),
-            "test-project".to_string(),
-        );
+        let element =
+            MemoryElement::new("Some memory content.".to_string(), "test-bench".to_string());
 
         let tokeniser = MockTokeniser;
         let count = element.token_count(&tokeniser);
@@ -139,7 +137,7 @@ mod tests {
     /// Empty memory returns zero tokens — no messages to count.
     #[test]
     fn empty_memory_returns_zero_tokens() {
-        let element = MemoryElement::new("".to_string(), "test-project".to_string());
+        let element = MemoryElement::new("".to_string(), "test-bench".to_string());
 
         let tokeniser = MockTokeniser;
         assert_eq!(element.token_count(&tokeniser), 0);
@@ -152,13 +150,13 @@ mod tests {
         assert_eq!(element.priority(), 50);
     }
 
-    /// source() includes the project name for provenance in the assembly report.
+    /// source() includes the bench name for provenance in the assembly report.
     #[test]
-    fn source_includes_project_name() {
-        let element = MemoryElement::new("content".to_string(), "swage-project".to_string());
+    fn source_includes_bench_name() {
+        let element = MemoryElement::new("content".to_string(), "swage-bench".to_string());
         assert!(
-            element.source().contains("swage-project"),
-            "source should include the project name"
+            element.source().contains("swage-bench"),
+            "source should include the bench name"
         );
     }
 

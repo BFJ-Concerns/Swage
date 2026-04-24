@@ -431,25 +431,24 @@ impl ScheduleStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::{
-        NewProject, ScheduledJobKind, ScheduledJobStatus, ScheduledRunState, ScheduledRunTrigger,
+        NewBench, ScheduledJobKind, ScheduledJobStatus, ScheduledRunState, ScheduledRunTrigger,
     };
-    use crate::store::{ProjectStore, SessionStore};
+    use crate::store::{BenchStore, SessionStore};
 
     use super::*;
 
     async fn make_storage_with_session() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "sched".into(),
                 slug: "sched".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })

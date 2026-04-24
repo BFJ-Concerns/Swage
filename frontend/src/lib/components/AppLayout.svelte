@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import ConversationList from "./ConversationList.svelte";
-  import ProjectSelector from "./ProjectSelector.svelte";
+  import BenchSelector from "./BenchSelector.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
@@ -14,7 +14,7 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
-  import type { ProjectStore } from "../stores/projects";
+  import type { BenchStore } from "../stores/benches";
 
   type BuilderDeckModule = typeof import("./BuilderDeck.svelte");
   type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
@@ -23,8 +23,8 @@
     conversationStore: ConversationStore;
     connectionStore: ConnectionStore;
     streamingStore: StreamingStore;
-    projectStore?: ProjectStore;
-    onProjectChange?: () => void;
+    benchStore?: BenchStore;
+    onBenchChange?: () => void;
     onRetry: () => void;
     activeLens: AppLens;
     availableLenses: LensDescriptor[];
@@ -39,8 +39,8 @@
     conversationStore,
     connectionStore,
     streamingStore,
-    projectStore,
-    onProjectChange,
+    benchStore,
+    onBenchChange,
     onRetry,
     activeLens,
     availableLenses,
@@ -59,7 +59,7 @@
   const surfaceTabs = $derived(
     (activeLensDescriptor?.ui_modules ?? ["conversation"]) as LensSurface[],
   );
-  const currentProject = $derived(projectStore?.currentProject ?? null);
+  const currentBench = $derived(benchStore?.currentBench ?? null);
   const activeConversationId = $derived(conversationStore.activeConversation?.id ?? null);
 
   $effect(() => {
@@ -75,8 +75,8 @@
 
 <div class="layout">
   <aside class="sidebar">
-    <!-- Project context at the top, conversation list fills the rest. -->
-    <ProjectSelector {projectStore} {onProjectChange} />
+    <!-- Bench context at the top, conversation list fills the rest. -->
+    <BenchSelector {benchStore} {onBenchChange} />
     <div class="lens-switch" role="tablist" aria-label="Product lenses">
       {#each availableLenses as lens (lens.id)}
         <button
@@ -151,7 +151,7 @@
           {#await builderDeckModule then module}
             {@const BuilderDeck = module.default}
             <BuilderDeck
-              {projectStore}
+              {benchStore}
               {desktopRuntime}
               {activeLens}
               {availableLenses}
@@ -180,8 +180,8 @@
     </main>
 
     <WorkbenchRail
-      projectId={currentProject?.id ?? null}
-      projectName={currentProject?.name ?? null}
+      benchId={currentBench?.id ?? null}
+      benchName={currentBench?.name ?? null}
       sessionId={activeConversationId}
       {activeSurface}
       {desktopRuntime}

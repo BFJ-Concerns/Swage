@@ -132,10 +132,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 9: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
-    let project_store: Arc<dyn swage_storage::store::ProjectStore> = raw_storage;
+    let bench_store: Arc<dyn swage_storage::store::BenchStore> = raw_storage;
     let mut state = crate::state::AppState::new(
         storage,
-        project_store,
+        bench_store,
         provider,
         config.clone(),
         tool_dispatcher,
@@ -356,7 +356,7 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
 /// Open the persistent SQLite storage backend.
 ///
 /// Returns `Arc<SqliteStorage>` rather than an erased trait object so the caller
-/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn ProjectStore>`
+/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn BenchStore>`
 /// from the same underlying connection pool.
 fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
     Arc::new(

@@ -32,7 +32,7 @@ pub struct RunSummary {
     pub status: String,
     pub title: String,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -78,14 +78,14 @@ pub async fn get_run_detail(
 
 async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> {
     let now = Utc::now();
-    let mut project_names = HashMap::new();
-    let mut session_projects = HashMap::new();
+    let mut bench_names = HashMap::new();
+    let mut session_benches = HashMap::new();
     let mut runs = Vec::new();
 
-    for project in state.project_store.list_all().await? {
-        project_names.insert(project.id, project.name.clone());
-        for session in state.storage.list_by_project(project.id).await? {
-            session_projects.insert(session.id, project.id);
+    for bench in state.bench_store.list_all().await? {
+        bench_names.insert(bench.id, bench.name.clone());
+        for session in state.storage.list_by_bench(bench.id).await? {
+            session_benches.insert(session.id, bench.id);
 
             for thread in state.storage.list_by_session(session.id).await? {
                 for turn in state.storage.list_turns_by_thread(thread.id).await? {
@@ -104,7 +104,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                             .or(turn.assistant_response.clone())
                             .unwrap_or_else(|| "turn".to_string()),
                         session_id: Some(session.id),
-                        project_id: Some(project.id),
+                        bench_id: Some(bench.id),
                         started_at: turn.created_at,
                         updated_at: turn.completed_at.unwrap_or(turn.created_at),
                         completed_at: turn.completed_at,
@@ -123,7 +123,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 status: classify_scheduled_run_status(run.state.clone(), run.created_at, now),
                 title: job.message.clone(),
                 session_id: Some(job.session_id),
-                project_id: session_projects.get(&job.session_id).copied(),
+                bench_id: session_benches.get(&job.session_id).copied(),
                 started_at: run.created_at,
                 updated_at: run
                     .completed_at
@@ -147,7 +147,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 status: classify_heartbeat_run_status(run.state.clone(), run.created_at, now),
                 title: heartbeat.message.clone(),
                 session_id: Some(heartbeat.session_id),
-                project_id: session_projects.get(&heartbeat.session_id).copied(),
+                bench_id: session_benches.get(&heartbeat.session_id).copied(),
                 started_at: run.created_at,
                 updated_at: run
                     .completed_at
@@ -158,7 +158,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
         }
     }
 
-    for session_id in session_projects.keys().copied() {
+    for session_id in session_benches.keys().copied() {
         for run in state
             .storage
             .list_topology_runs_by_session(session_id)
@@ -168,12 +168,12 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 kind: "topology_run".to_string(),
                 id: run.id,
                 status: classify_topology_run_status(run.state.clone(), run.created_at, now),
-                title: project_names
-                    .get(&session_projects[&session_id])
+                title: bench_names
+                    .get(&session_benches[&session_id])
                     .map(|name| format!("topology for {name}"))
                     .unwrap_or_else(|| "topology run".to_string()),
                 session_id: Some(run.session_id),
-                project_id: session_projects.get(&run.session_id).copied(),
+                bench_id: session_benches.get(&run.session_id).copied(),
                 started_at: run.created_at,
                 updated_at: run.completed_at.unwrap_or(run.created_at),
                 completed_at: run.completed_at,
@@ -193,7 +193,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                         .clone()
                         .unwrap_or_else(|| node.node_id.clone()),
                     session_id: Some(run.session_id),
-                    project_id: session_projects.get(&run.session_id).copied(),
+                    bench_id: session_benches.get(&run.session_id).copied(),
                     started_at: node.created_at,
                     updated_at: node.completed_at.unwrap_or(node.created_at),
                     completed_at: node.completed_at,
@@ -235,7 +235,7 @@ async fn get_turn_detail(state: &AppState, id: Uuid) -> Result<RunDetailResponse
             .or(turn.assistant_response.clone())
             .unwrap_or_else(|| "turn".to_string()),
         session_id: Some(session.id),
-        project_id: Some(session.project_id),
+        bench_id: Some(session.bench_id),
         started_at: turn.created_at,
         updated_at: turn.completed_at.unwrap_or(turn.created_at),
         completed_at: turn.completed_at,
@@ -277,13 +277,13 @@ async fn get_scheduled_run_detail(
         status: classify_scheduled_run_status(run.state.clone(), run.created_at, Utc::now()),
         title: job.message.clone(),
         session_id: Some(job.session_id),
-        project_id: Some(
+        bench_id: Some(
             state
                 .storage
                 .get_session(job.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", job.session_id))?
-                .project_id,
+                .bench_id,
         ),
         started_at: run.created_at,
         updated_at: run
@@ -327,13 +327,13 @@ async fn get_heartbeat_run_detail(
         status: classify_heartbeat_run_status(run.state.clone(), run.created_at, Utc::now()),
         title: heartbeat.message.clone(),
         session_id: Some(heartbeat.session_id),
-        project_id: Some(
+        bench_id: Some(
             state
                 .storage
                 .get_session(heartbeat.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", heartbeat.session_id))?
-                .project_id,
+                .bench_id,
         ),
         started_at: run.created_at,
         updated_at: run
@@ -376,13 +376,13 @@ async fn get_topology_run_detail(
         status: classify_topology_run_status(run.state.clone(), run.created_at, Utc::now()),
         title: "topology run".to_string(),
         session_id: Some(run.session_id),
-        project_id: Some(
+        bench_id: Some(
             state
                 .storage
                 .get_session(run.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", run.session_id))?
-                .project_id,
+                .bench_id,
         ),
         started_at: run.created_at,
         updated_at: run.completed_at.unwrap_or(run.created_at),
@@ -426,13 +426,13 @@ async fn get_node_execution_detail(
             .clone()
             .unwrap_or_else(|| node.node_id.clone()),
         session_id: Some(run.session_id),
-        project_id: Some(
+        bench_id: Some(
             state
                 .storage
                 .get_session(run.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", run.session_id))?
-                .project_id,
+                .bench_id,
         ),
         started_at: node.created_at,
         updated_at: node.completed_at.unwrap_or(node.created_at),

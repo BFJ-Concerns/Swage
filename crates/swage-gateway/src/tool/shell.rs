@@ -1,4 +1,4 @@
-//! Shell execution tool — runs commands in the project's workspace directory.
+//! Shell execution tool — runs commands in the bench's workspace directory.
 
 use std::io;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use super::workspace::truncate_output;
 // ShellTool
 // ---------------------------------------------------------------------------
 
-/// Executes shell commands in the project workspace.
+/// Executes shell commands in the bench workspace.
 ///
 /// Commands run via `sh -c` with CWD set to `workspace_root`.
 /// Output is capped at `max_output_bytes` and killed after `timeout`.

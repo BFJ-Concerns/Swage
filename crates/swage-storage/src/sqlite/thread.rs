@@ -354,35 +354,34 @@ impl ThreadStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::NewMessage;
-    use crate::model::{NewProject, NewSession};
-    use crate::store::{MessageStore, ProjectStore, SessionStore};
+    use crate::model::{NewBench, NewSession};
+    use crate::store::{BenchStore, MessageStore, SessionStore};
     use swage_core::Role;
 
     use super::*;
 
-    // Create a storage instance and return a valid (project_id, session_id) pair.
+    // Create a storage instance and return a valid (bench_id, session_id) pair.
     async fn make_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        // Explicit trait qualification: both ProjectStore and ThreadStore define `create`.
-        let project = ProjectStore::create(
+        // Explicit trait qualification: both BenchStore and ThreadStore define `create`.
+        let bench = BenchStore::create(
             &storage,
-            NewProject {
+            NewBench {
                 name: "proj".into(),
                 slug: "proj".into(),
-                workspace_path: None,
             },
         )
         .await
         .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent-1".into(),
                 metadata: None,
             })
             .await
             .unwrap();
-        (storage, project.id, session.id)
+        (storage, bench.id, session.id)
     }
 
     fn new_thread(session_id: Uuid) -> NewThread {
@@ -514,19 +513,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_by_session_excludes_other_sessions() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             &storage,
-            NewProject {
+            NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             },
         )
         .await
         .unwrap();
         let s1 = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "a".into(),
                 metadata: None,
             })
@@ -534,7 +532,7 @@ mod tests {
             .unwrap();
         let s2 = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "a".into(),
                 metadata: None,
             })

@@ -145,7 +145,7 @@ pub struct ElementReport {
     /// Element type name, e.g. `"history"`, `"prompts"`, `"memory"`.
     pub name: String,
 
-    /// Provenance string from the element, e.g. `"project: my-project"`.
+    /// Provenance string from the element, e.g. `"bench: my-bench"`.
     pub source: String,
 
     /// Estimated token cost of this element's contribution.
@@ -177,7 +177,7 @@ pub struct NamedAssemblyReport {
     pub assembly_name: String,
 
     /// Hierarchy level where the assembly was resolved, serialised as a
-    /// string (e.g. `"project"`, `"agent"`, `"global"`).
+    /// string (e.g. `"bench"`, `"agent"`, `"global"`).
     pub resolved_level: String,
 
     /// Per-element reports from the child assembly's execution.
@@ -446,7 +446,7 @@ mod tests {
             priority: 50,
             named_assembly: Some(NamedAssemblyReport {
                 assembly_name: "summarise".to_string(),
-                resolved_level: "project".to_string(),
+                resolved_level: "bench".to_string(),
                 child_elements: vec![
                     ElementReport {
                         name: "history".to_string(),
@@ -474,7 +474,7 @@ mod tests {
             .named_assembly
             .expect("named_assembly should be Some");
         assert_eq!(named.assembly_name, "summarise");
-        assert_eq!(named.resolved_level, "project");
+        assert_eq!(named.resolved_level, "bench");
         assert_eq!(named.child_elements.len(), 2);
         assert_eq!(named.child_elements[0].name, "history");
         assert_eq!(named.child_elements[1].name, "prompts");

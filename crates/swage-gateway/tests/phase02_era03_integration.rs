@@ -35,7 +35,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, store::ProjectStore};
+use swage_storage::{SqliteStorage, store::BenchStore};
 
 // Serialise tests that mutate SWAGE_HOME — it's process-wide state.
 static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -128,7 +128,7 @@ async fn start_test_server_with_config(
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(provider),
         config,
         dispatcher,

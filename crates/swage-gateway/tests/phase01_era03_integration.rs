@@ -35,7 +35,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, store::ProjectStore};
+use swage_storage::{SqliteStorage, store::BenchStore};
 
 // ---------------------------------------------------------------------------
 // Mock provider — streams a fixed sequence of chunks
@@ -136,7 +136,7 @@ async fn start_test_server_with_config(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(provider),
         config,
         dispatcher,

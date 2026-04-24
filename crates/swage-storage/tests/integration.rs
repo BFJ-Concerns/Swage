@@ -7,9 +7,9 @@
 use uuid::Uuid;
 
 use swage_core::Role;
-use swage_storage::model::NewProject;
+use swage_storage::model::NewBench;
 use swage_storage::store::{
-    MessageStore, ProjectStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
+    BenchStore, MessageStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
 };
 use swage_storage::{
     NewMessage, NewSession, NewThread, NewToolCall, NewTurn, SqliteStorage, ThreadState, TurnState,
@@ -22,32 +22,31 @@ use swage_storage::{
 const AGENT_A: &str = "agent_alpha";
 const AGENT_B: &str = "agent_beta";
 
-/// Create an in-memory SqliteStorage with a project and return (storage, project_id).
+/// Create an in-memory SqliteStorage with a bench and return (storage, bench_id).
 async fn setup() -> (SqliteStorage, Uuid) {
     let storage = SqliteStorage::in_memory().expect("in-memory should succeed");
-    let project = ProjectStore::create(
+    let bench = BenchStore::create(
         &storage,
-        NewProject {
+        NewBench {
             name: "integration-test".into(),
             slug: "integration-test".into(),
-            workspace_path: None,
         },
     )
     .await
-    .expect("create project");
-    (storage, project.id)
+    .expect("create bench");
+    (storage, bench.id)
 }
 
-/// Build a full entity hierarchy: project → session → thread → turn → message + tool call.
+/// Build a full entity hierarchy: bench → session → thread → turn → message + tool call.
 /// Returns all IDs for verification.
 async fn create_full_hierarchy(
     storage: &SqliteStorage,
-    project_id: Uuid,
+    bench_id: Uuid,
     agent_id: &str,
 ) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
     let session = storage
         .create_session(NewSession {
-            project_id,
+            bench_id,
             agent_id: agent_id.to_string(),
             metadata: None,
         })
@@ -127,18 +126,17 @@ async fn full_hierarchy_survives_reconnection() {
     // Phase 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
-        let project = ProjectStore::create(
+        let bench = BenchStore::create(
             &storage,
-            NewProject {
+            NewBench {
                 name: "roundtrip".into(),
                 slug: "roundtrip".into(),
-                workspace_path: None,
             },
         )
         .await
-        .expect("create project");
+        .expect("create bench");
 
-        let ids = create_full_hierarchy(&storage, project.id, AGENT_A).await;
+        let ids = create_full_hierarchy(&storage, bench.id, AGENT_A).await;
         // Storage dropped here — connection closed.
         ids
     };
@@ -187,11 +185,11 @@ async fn full_hierarchy_survives_reconnection() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_id_isolation_across_entity_types() {
-    let (storage, project_id) = setup().await;
+    let (storage, bench_id) = setup().await;
 
     // Create hierarchies for two different agents.
-    create_full_hierarchy(&storage, project_id, AGENT_A).await;
-    create_full_hierarchy(&storage, project_id, AGENT_B).await;
+    create_full_hierarchy(&storage, bench_id, AGENT_A).await;
+    create_full_hierarchy(&storage, bench_id, AGENT_B).await;
 
     // Sessions: each agent should see only their own.
     let sessions_a = storage
@@ -233,25 +231,25 @@ async fn agent_id_isolation_across_entity_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Cascade deletion from project level
+// Test 3: Cascade deletion from bench level
 //
 // Spans: ikjg (migrations with FK cascades), all store impls
 //
-// Proves: "Data model" — deleting a project cascades through
+// Proves: "Data model" — deleting a bench cascades through
 //         sessions → threads → turns → messages and tool calls.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cascade_deletion_from_project() {
-    let (storage, project_id) = setup().await;
+async fn cascade_deletion_from_bench() {
+    let (storage, bench_id) = setup().await;
     let (session_id, thread_id, turn_id, message_id, tool_call_id) =
-        create_full_hierarchy(&storage, project_id, AGENT_A).await;
+        create_full_hierarchy(&storage, bench_id, AGENT_A).await;
 
-    // Delete the project — everything underneath should cascade.
-    let deleted = ProjectStore::delete(&storage, project_id)
+    // Delete the bench — everything underneath should cascade.
+    let deleted = BenchStore::delete(&storage, bench_id)
         .await
-        .expect("delete project");
-    assert!(deleted, "project should exist and be deleted");
+        .expect("delete bench");
+    assert!(deleted, "bench should exist and be deleted");
 
     // Verify all children are gone.
     assert!(
@@ -303,10 +301,10 @@ async fn cascade_deletion_from_project() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_state_machine_enforced() {
-    let (storage, project_id) = setup().await;
+    let (storage, bench_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            project_id,
+            bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
         })
@@ -397,10 +395,10 @@ async fn thread_state_machine_enforced() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn turn_recovery_finds_pending_and_processing() {
-    let (storage, project_id) = setup().await;
+    let (storage, bench_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            project_id,
+            bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
         })
@@ -480,24 +478,22 @@ async fn turn_recovery_finds_pending_and_processing() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Default project cannot be deleted
+// Test 6: Default bench cannot be deleted
 //
-// Spans: ikjg (migrations/seeding), project SQL impl
+// Spans: ikjg (migrations/seeding), bench SQL impl
 //
-// Proves: "Data model" — deleting the default project is rejected.
+// Proves: "Data model" — deleting the default bench is rejected.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_project_cannot_be_deleted() {
+async fn default_bench_cannot_be_deleted() {
     let storage = SqliteStorage::in_memory().expect("in-memory");
     let default = storage.get_or_create_default().await.expect("get default");
 
-    let err = ProjectStore::delete(&storage, default.id)
-        .await
-        .unwrap_err();
+    let err = BenchStore::delete(&storage, default.id).await.unwrap_err();
     assert!(
         matches!(err, swage_core::StorageError::ConstraintViolation(_)),
-        "deleting default project should return ConstraintViolation, got: {err:?}"
+        "deleting default bench should return ConstraintViolation, got: {err:?}"
     );
 }
 
@@ -512,10 +508,10 @@ async fn default_project_cannot_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn messages_ordered_within_thread() {
-    let (storage, project_id) = setup().await;
+    let (storage, bench_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            project_id,
+            bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
         })

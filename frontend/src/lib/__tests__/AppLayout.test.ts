@@ -222,12 +222,12 @@ describe("AppLayout: workbench shell", () => {
     expect(document.querySelector(".workbench-rail")).not.toBeNull();
   });
 
-  it("renders ProjectSelector inside the sidebar", () => {
+  it("renders BenchSelector inside the sidebar", () => {
     component = mountLayout();
 
     const sidebar = document.querySelector(".sidebar");
     expect(sidebar).not.toBeNull();
-    expect(sidebar!.querySelector(".project-selector")).not.toBeNull();
+    expect(sidebar!.querySelector(".bench-selector")).not.toBeNull();
   });
 
   it("renders ConversationList inside the sidebar", () => {

@@ -27,7 +27,7 @@ pub struct OperatorSearchResult {
     pub kind: String,
     pub id: String,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub title: String,
     pub excerpt: Option<String>,
     pub occurred_at: DateTime<Utc>,
@@ -70,7 +70,7 @@ pub struct OperatorUsageResponse {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AgentMemoryListQuery {
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub q: Option<String>,
@@ -91,18 +91,18 @@ pub async fn operator_search(
     let session_filter = query.session_id;
     let limit = query.limit.unwrap_or(50);
 
-    let projects = state.project_store.list_all().await?;
-    let project_names: HashMap<Uuid, String> = projects
+    let benches = state.bench_store.list_all().await?;
+    let bench_names: HashMap<Uuid, String> = benches
         .iter()
-        .map(|project| (project.id, project.name.clone()))
+        .map(|bench| (bench.id, bench.name.clone()))
         .collect();
     let mut sessions = Vec::new();
-    for project in &projects {
-        sessions.extend(state.storage.list_by_project(project.id).await?);
+    for bench in &benches {
+        sessions.extend(state.storage.list_by_bench(bench.id).await?);
     }
-    let session_projects: HashMap<Uuid, Uuid> = sessions
+    let session_benches: HashMap<Uuid, Uuid> = sessions
         .iter()
-        .map(|session| (session.id, session.project_id))
+        .map(|session| (session.id, session.bench_id))
         .collect();
 
     let mut results = Vec::new();
@@ -112,8 +112,8 @@ pub async fn operator_search(
             if !matches_session(session_filter, session.id) {
                 continue;
             }
-            let title = project_names
-                .get(&session.project_id)
+            let title = bench_names
+                .get(&session.bench_id)
                 .map(|name| format!("session in {name}"))
                 .unwrap_or_else(|| "session".to_string());
             let excerpt = session.metadata.as_ref().map(|value| value.to_string());
@@ -126,7 +126,7 @@ pub async fn operator_search(
                     kind: "session".into(),
                     id: session.id.to_string(),
                     session_id: Some(session.id),
-                    project_id: Some(session.project_id),
+                    bench_id: Some(session.bench_id),
                     title,
                     excerpt,
                     occurred_at: session.updated_at,
@@ -155,7 +155,7 @@ pub async fn operator_search(
                             kind: "message".into(),
                             id: message.id.to_string(),
                             session_id: Some(session.id),
-                            project_id: Some(session.project_id),
+                            bench_id: Some(session.bench_id),
                             title: format!("{} message", message.role),
                             excerpt: Some(message.content),
                             occurred_at: message.created_at,
@@ -168,8 +168,8 @@ pub async fn operator_search(
 
     if matches_kind(kind_filter, "approval") {
         for approval in state.storage.list_approvals().await? {
-            let (session_id, project_id) =
-                session_and_project_for_turn(state, approval.turn_id).await?;
+            let (session_id, bench_id) =
+                session_and_bench_for_turn(state, approval.turn_id).await?;
             if !matches_optional_session(session_filter, session_id) {
                 continue;
             }
@@ -195,7 +195,7 @@ pub async fn operator_search(
                     kind: "approval".into(),
                     id: approval.id.to_string(),
                     session_id,
-                    project_id,
+                    bench_id,
                     title,
                     excerpt,
                     occurred_at: approval.decided_at.unwrap_or(approval.created_at),
@@ -229,7 +229,7 @@ pub async fn operator_search(
                         kind: "scheduled_run".into(),
                         id: run.id.to_string(),
                         session_id: Some(job.session_id),
-                        project_id: session_projects.get(&job.session_id).copied(),
+                        bench_id: session_benches.get(&job.session_id).copied(),
                         title: job.message.clone(),
                         excerpt,
                         occurred_at: run
@@ -258,7 +258,7 @@ pub async fn operator_search(
                     kind: "delivery".into(),
                     id: delivery.id.to_string(),
                     session_id: Some(delivery.session_id),
-                    project_id: session_projects.get(&delivery.session_id).copied(),
+                    bench_id: session_benches.get(&delivery.session_id).copied(),
                     title: "delivery record".into(),
                     excerpt,
                     occurred_at: delivery.delivered_at,
@@ -287,9 +287,9 @@ pub async fn operator_search(
                     kind: "audit_event".into(),
                     id: event.id,
                     session_id: event.session_id,
-                    project_id: event
+                    bench_id: event
                         .session_id
-                        .and_then(|id| session_projects.get(&id).copied()),
+                        .and_then(|id| session_benches.get(&id).copied()),
                     title: event.summary,
                     excerpt: Some(event.metadata.to_string()),
                     occurred_at: event.created_at,
@@ -307,7 +307,7 @@ pub async fn operator_search(
                     state
                         .storage
                         .list_agent_memories(
-                            session.project_id,
+                            session.bench_id,
                             None,
                             Some(session.id),
                             search_query,
@@ -317,11 +317,11 @@ pub async fn operator_search(
                 );
             }
         } else {
-            for project in &projects {
+            for bench in &benches {
                 memories.extend(
                     state
                         .storage
-                        .list_agent_memories(project.id, None, None, search_query, limit)
+                        .list_agent_memories(bench.id, None, None, search_query, limit)
                         .await?,
                 );
             }
@@ -342,7 +342,7 @@ pub async fn operator_search(
                     kind: "agent_memory".into(),
                     id: memory.id.to_string(),
                     session_id: Some(memory.session_id),
-                    project_id: Some(memory.project_id),
+                    bench_id: Some(memory.bench_id),
                     title: memory.title,
                     excerpt: Some(memory.source_summary),
                     occurred_at: memory.updated_at,
@@ -364,12 +364,12 @@ pub async fn list_agent_memories(
     let search = query.q.as_deref();
     let mut memories = Vec::new();
 
-    if let Some(project_id) = query.project_id {
+    if let Some(bench_id) = query.bench_id {
         memories.extend(
             state
                 .storage
                 .list_agent_memories(
-                    project_id,
+                    bench_id,
                     query.agent_id.as_deref(),
                     query.session_id,
                     search,
@@ -383,7 +383,7 @@ pub async fn list_agent_memories(
                 state
                     .storage
                     .list_agent_memories(
-                        session.project_id,
+                        session.bench_id,
                         query.agent_id.as_deref(),
                         Some(session_id),
                         search,
@@ -393,11 +393,11 @@ pub async fn list_agent_memories(
             );
         }
     } else {
-        for project in state.project_store.list_all().await? {
+        for bench in state.bench_store.list_all().await? {
             memories.extend(
                 state
                     .storage
-                    .list_agent_memories(project.id, query.agent_id.as_deref(), None, search, limit)
+                    .list_agent_memories(bench.id, query.agent_id.as_deref(), None, search, limit)
                     .await?,
             );
         }
@@ -543,7 +543,7 @@ async fn turn_usage(
     )))
 }
 
-async fn session_and_project_for_turn(
+async fn session_and_bench_for_turn(
     state: &AppState,
     turn_id: Uuid,
 ) -> Result<(Option<Uuid>, Option<Uuid>), GatewayError> {
@@ -554,12 +554,12 @@ async fn session_and_project_for_turn(
         return Ok((None, None));
     };
     let session_id = Some(thread.session_id);
-    let project_id = state
+    let bench_id = state
         .storage
         .get_session(thread.session_id)
         .await?
-        .map(|session| session.project_id);
-    Ok((session_id, project_id))
+        .map(|session| session.bench_id);
+    Ok((session_id, bench_id))
 }
 
 fn matches_kind(filter: Option<&str>, kind: &str) -> bool {

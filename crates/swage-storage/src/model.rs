@@ -65,6 +65,7 @@ fn is_valid_lens_id(value: &str) -> bool {
 /// Persisted runtime preference for the active product lens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensPreference {
+    pub bench_id: Uuid,
     pub active_lens: AppLens,
     pub updated_at: DateTime<Utc>,
 }
@@ -183,12 +184,12 @@ pub struct NewSharedReferenceEvent {
     pub payload: serde_json::Value,
 }
 
-/// Persisted context snapshot metadata for project-scoped listing.
+/// Persisted context snapshot metadata for bench-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {
     pub turn_id: Uuid,
     pub session_id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub report_json: String,
 }
@@ -272,29 +273,41 @@ impl FromStr for TurnState {
     }
 }
 
-/// A project groups conversations and provides configuration scope.
+/// A bench groups conversations and provides configuration scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Project {
+pub struct Bench {
     pub id: Uuid,
     pub name: String,
-    /// True for the single built-in fallback project.
+    /// True for the single built-in fallback bench.
     ///
-    /// This is structural identity, not presentation. The project may be
-    /// renamed without ceasing to be the default project.
+    /// This is structural identity, not presentation. The bench may be
+    /// renamed without ceasing to be the default bench.
     pub is_default: bool,
-    /// Filesystem-safe identifier used for the project's directory under
-    /// `~/.swage/projects/{slug}/`.
+    /// Filesystem-safe identifier used for the bench's directory under
+    /// `~/.swage/benches/{slug}/`.
     pub slug: String,
-    pub workspace_path: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// A session (conversation) within a project, scoped to a single agent.
+/// External resource attached to a bench.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceAttachment {
+    pub id: Uuid,
+    pub bench_id: Uuid,
+    pub label: String,
+    pub path: String,
+    pub permissions: Vec<String>,
+    pub is_trusted: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A session (conversation) within a bench, scoped to a single agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     /// The agent that owns this session. Used to scope queries in multi-agent
     /// deployments so each agent sees only its own sessions.
     pub agent_id: String,
@@ -326,7 +339,7 @@ pub struct ChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -361,7 +374,7 @@ pub struct AuditEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMemoryRecord {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub topology_run_id: Option<Uuid>,
@@ -382,7 +395,7 @@ pub struct AgentMemoryRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAgentMemoryRecord {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub topology_run_id: Option<Uuid>,
@@ -401,7 +414,7 @@ pub struct NewAgentMemoryRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationVersion {
     pub id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub entity_kind: String,
     pub entity_id: String,
@@ -420,7 +433,7 @@ pub struct ConfigurationVersion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConfigurationVersion {
     pub id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub entity_kind: String,
     pub entity_id: String,
@@ -473,14 +486,14 @@ pub struct NewSecretRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentScopeKind {
     Session,
-    Project,
+    Bench,
 }
 
 impl std::fmt::Display for AttachmentScopeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             AttachmentScopeKind::Session => "session",
-            AttachmentScopeKind::Project => "project",
+            AttachmentScopeKind::Bench => "bench",
         };
         write!(f, "{s}")
     }
@@ -492,7 +505,7 @@ impl FromStr for AttachmentScopeKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "session" => Ok(AttachmentScopeKind::Session),
-            "project" => Ok(AttachmentScopeKind::Project),
+            "bench" => Ok(AttachmentScopeKind::Bench),
             other => Err(format!("unknown attachment scope: {other}")),
         }
     }
@@ -561,13 +574,13 @@ impl FromStr for AttachmentStatus {
     }
 }
 
-/// A durable attachment for session or project context.
+/// A durable attachment for session or bench context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub status: AttachmentStatus,
     pub filename: String,
@@ -583,7 +596,7 @@ pub struct NewAttachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub filename: String,
     pub mime_type: String,
@@ -747,7 +760,7 @@ pub struct Material {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub status: MaterialStatus,
@@ -765,7 +778,7 @@ pub struct NewMaterial {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub title: String,
@@ -1525,7 +1538,7 @@ impl NewAgentMessage {
 
 /// A team — the organisational unit for multi-agent orchestration.
 ///
-/// Teams belong to a project and define durable agent and task definitions plus
+/// Teams belong to a bench and define durable agent and task definitions plus
 /// an entry agent (the agent that receives user messages). The legacy
 /// `members` list remains as a derived convenience surface backed by `agents`
 /// so older runtime paths can keep using stable agent IDs while the canonical
@@ -1565,8 +1578,8 @@ pub struct TeamTaskDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Team {
     pub id: Uuid,
-    pub project_id: Uuid,
-    /// Unique name within the project.
+    pub bench_id: Uuid,
+    /// Unique name within the bench.
     pub name: String,
     pub description: String,
     /// The agent that receives user messages for this team.
@@ -1596,7 +1609,7 @@ impl Team {
 /// Input for creating a new team.
 #[derive(Debug, Clone)]
 pub struct NewTeam {
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub name: String,
     pub description: String,
     pub entry_agent_id: String,
@@ -1823,19 +1836,28 @@ pub struct NewNodeRetry {
     pub recovery_guidance: Option<String>,
 }
 
-/// Input for creating a new project.
+/// Input for creating a new bench.
 #[derive(Debug, Clone)]
-pub struct NewProject {
+pub struct NewBench {
     pub name: String,
-    /// Filesystem-safe identifier for the project directory.
+    /// Filesystem-safe identifier for the bench directory.
     pub slug: String,
-    pub workspace_path: Option<String>,
+}
+
+/// Input for attaching a workspace to a bench.
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceAttachment {
+    pub bench_id: Uuid,
+    pub label: String,
+    pub path: String,
+    pub permissions: Vec<String>,
+    pub is_trusted: bool,
 }
 
 /// Input for creating a new session.
 #[derive(Debug, Clone)]
 pub struct NewSession {
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     /// The agent that owns this session.
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
@@ -1860,7 +1882,7 @@ pub struct NewChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -2158,34 +2180,32 @@ mod tests {
         assert!(top.parent_call_id.is_none());
     }
 
-    // --- Project slug field ---
+    // --- Bench slug field ---
 
     #[test]
-    fn project_slug_field_present_and_serialises() {
+    fn bench_slug_field_present_and_serialises() {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let project = Project {
+        let bench = Bench {
             id,
-            name: "my-project".to_string(),
+            name: "my-bench".to_string(),
             is_default: false,
-            slug: "my-project".to_string(),
-            workspace_path: None,
+            slug: "my-bench".to_string(),
             created_at: now,
             updated_at: now,
         };
-        let json = serde_json::to_string(&project).expect("serialisation should succeed");
+        let json = serde_json::to_string(&bench).expect("serialisation should succeed");
         assert!(
-            json.contains("\"slug\":\"my-project\""),
+            json.contains("\"slug\":\"my-bench\""),
             "slug should appear in JSON"
         );
     }
 
     #[test]
-    fn new_project_slug_field_present() {
-        let np = NewProject {
+    fn new_bench_slug_field_present() {
+        let np = NewBench {
             name: "test".to_string(),
             slug: "test".to_string(),
-            workspace_path: None,
         };
         assert_eq!(np.slug, "test");
     }
@@ -2632,11 +2652,11 @@ mod tests {
     #[test]
     fn session_includes_agent_id() {
         let id = Uuid::new_v4();
-        let project_id = Uuid::new_v4();
+        let bench_id = Uuid::new_v4();
         let now = Utc::now();
         let session = Session {
             id,
-            project_id,
+            bench_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
             created_at: now,
@@ -2653,7 +2673,7 @@ mod tests {
     #[test]
     fn new_session_includes_agent_id() {
         let ns = NewSession {
-            project_id: Uuid::new_v4(),
+            bench_id: Uuid::new_v4(),
             agent_id: "builder-agent".to_string(),
             metadata: None,
         };

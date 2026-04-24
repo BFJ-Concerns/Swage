@@ -7,7 +7,7 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_storage::{
     ChannelLink, HeartbeatStatus, NewChannelLink, NewHeartbeat, NewScheduledJob, NewSession,
-    NewThread, ScheduledJobKind, ScheduledJobStatus, model::Project,
+    NewThread, NewWorkspaceAttachment, ScheduledJobKind, ScheduledJobStatus, model::Bench,
 };
 
 use crate::{
@@ -23,7 +23,7 @@ pub struct CreateChannelLinkRequest {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub project_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
 }
@@ -33,7 +33,7 @@ pub struct ChannelLinkResponse {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -74,7 +74,9 @@ pub struct RedeemNodePairingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayRecoveryBundle {
     pub version: u32,
-    pub projects: Vec<RecoveryProjectRecord>,
+    pub benches: Vec<RecoveryBenchRecord>,
+    #[serde(default)]
+    pub workspaces: Vec<RecoveryWorkspaceRecord>,
     pub sessions: Vec<RecoverySessionRecord>,
     pub secrets: Vec<RecoverySecretRecord>,
     pub channel_links: Vec<RecoveryChannelLinkRecord>,
@@ -89,18 +91,27 @@ pub struct ImportGatewayRecoveryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryProjectRecord {
+pub struct RecoveryBenchRecord {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub workspace_path: Option<String>,
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryWorkspaceRecord {
+    pub id: Uuid,
+    pub bench_id: Uuid,
+    pub label: String,
+    pub path: String,
+    pub permissions: Vec<String>,
+    pub is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoverySessionRecord {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub agent_id: String,
     pub metadata: Option<serde_json::Value>,
 }
@@ -125,7 +136,7 @@ pub struct RecoveryChannelLinkRecord {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -175,7 +186,7 @@ fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
         integration: link.integration,
         account: link.account,
         conversation: link.conversation,
-        project_id: link.project_id,
+        bench_id: link.bench_id,
         agent_id: link.agent_id,
         session_id: link.session_id,
         home_target: link.home_target,
@@ -209,12 +220,13 @@ pub async fn create_channel_link(
         ));
     }
 
-    let project = match request.project_id {
-        Some(project_id) => state.project_store.get(project_id).await?.ok_or_else(|| {
-            GatewayError::ValidationError(format!("project {project_id} not found"))
-        })?,
-        None => state.project_store.get_or_create_default().await?,
-    };
+    let bench =
+        match request.bench_id {
+            Some(bench_id) => state.bench_store.get(bench_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("bench {bench_id} not found"))
+            })?,
+            None => state.bench_store.get_or_create_default().await?,
+        };
     let agent_id = request.agent_id.unwrap_or_else(|| "gateway".to_string());
     let metadata = serde_json::json!({
         "channel_origin": {
@@ -226,7 +238,7 @@ pub async fn create_channel_link(
     let session = state
         .storage
         .create_session(NewSession {
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id: agent_id.clone(),
             metadata: Some(metadata),
         })
@@ -245,7 +257,7 @@ pub async fn create_channel_link(
             integration: integration.as_metadata_value().to_string(),
             account: request.account,
             conversation: request.conversation,
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id,
             session_id: Some(session.id),
             home_target: request
@@ -333,10 +345,17 @@ pub async fn redeem_node_pairing_code(
 pub async fn export_gateway_recovery_bundle(
     state: &AppState,
 ) -> Result<GatewayRecoveryBundle, GatewayError> {
-    let projects = state.project_store.list_all().await?;
+    let benches = state.bench_store.list_all().await?;
+    let mut workspaces = Vec::new();
     let mut sessions = Vec::new();
-    for project in &projects {
-        sessions.extend(state.storage.list_by_project(project.id).await?);
+    for bench in &benches {
+        workspaces.extend(
+            state
+                .storage
+                .list_workspace_attachments_by_bench(bench.id)
+                .await?,
+        );
+        sessions.extend(state.storage.list_by_bench(bench.id).await?);
     }
 
     let channel_links = state.storage.list_channel_links().await?;
@@ -347,21 +366,31 @@ pub async fn export_gateway_recovery_bundle(
 
     Ok(GatewayRecoveryBundle {
         version: 1,
-        projects: projects
+        benches: benches
             .into_iter()
-            .map(|project| RecoveryProjectRecord {
-                id: project.id,
-                name: project.name,
-                slug: project.slug,
-                workspace_path: project.workspace_path,
-                is_default: project.is_default,
+            .map(|bench| RecoveryBenchRecord {
+                id: bench.id,
+                name: bench.name,
+                slug: bench.slug,
+                is_default: bench.is_default,
+            })
+            .collect(),
+        workspaces: workspaces
+            .into_iter()
+            .map(|workspace| RecoveryWorkspaceRecord {
+                id: workspace.id,
+                bench_id: workspace.bench_id,
+                label: workspace.label,
+                path: workspace.path,
+                permissions: workspace.permissions,
+                is_trusted: workspace.is_trusted,
             })
             .collect(),
         sessions: sessions
             .into_iter()
             .map(|session| RecoverySessionRecord {
                 id: session.id,
-                project_id: session.project_id,
+                bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
             })
@@ -396,7 +425,7 @@ pub async fn export_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                project_id: link.project_id,
+                bench_id: link.bench_id,
                 agent_id: link.agent_id,
                 session_id: link.session_id,
                 home_target: link.home_target,
@@ -449,11 +478,29 @@ pub async fn import_gateway_recovery_bundle(
 ) -> Result<(), GatewayError> {
     ensure_fresh_import_target(state).await?;
 
-    let mut project_map = HashMap::new();
-    for project in bundle.projects {
-        let project_id = project.id;
-        let imported = import_project(state, project).await?;
-        project_map.insert(project_id, imported.id);
+    let mut bench_map = HashMap::new();
+    for bench in bundle.benches {
+        let bench_id = bench.id;
+        let imported = import_bench(state, bench).await?;
+        bench_map.insert(bench_id, imported.id);
+    }
+
+    for workspace in bundle.workspaces {
+        state
+            .storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id: *bench_map.get(&workspace.bench_id).ok_or_else(|| {
+                    GatewayError::ValidationError(format!(
+                        "workspace referenced unknown bench {}",
+                        workspace.bench_id
+                    ))
+                })?,
+                label: workspace.label,
+                path: workspace.path,
+                permissions: workspace.permissions,
+                is_trusted: workspace.is_trusted,
+            })
+            .await?;
     }
 
     let mut session_map = HashMap::new();
@@ -461,10 +508,10 @@ pub async fn import_gateway_recovery_bundle(
         let imported = state
             .storage
             .create_session(NewSession {
-                project_id: *project_map.get(&session.project_id).ok_or_else(|| {
+                bench_id: *bench_map.get(&session.bench_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "session referenced unknown project {}",
-                        session.project_id
+                        "session referenced unknown bench {}",
+                        session.bench_id
                     ))
                 })?,
                 agent_id: session.agent_id.clone(),
@@ -509,10 +556,10 @@ pub async fn import_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                project_id: *project_map.get(&link.project_id).ok_or_else(|| {
+                bench_id: *bench_map.get(&link.bench_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "channel link referenced unknown project {}",
-                        link.project_id
+                        "channel link referenced unknown bench {}",
+                        link.bench_id
                     ))
                 })?,
                 agent_id: link.agent_id,
@@ -586,19 +633,19 @@ pub async fn import_gateway_recovery_bundle(
 }
 
 async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError> {
-    let projects = state.project_store.list_all().await?;
-    let has_non_default_projects = projects.iter().any(|project| !project.is_default);
-    let default_project = projects
+    let benches = state.bench_store.list_all().await?;
+    let has_non_default_benches = benches.iter().any(|bench| !bench.is_default);
+    let default_bench = benches
         .iter()
-        .find(|project| project.is_default)
+        .find(|bench| bench.is_default)
         .cloned()
-        .or_else(|| projects.first().cloned());
-    let has_sessions = if let Some(project) = default_project {
-        !state.storage.list_by_project(project.id).await?.is_empty()
+        .or_else(|| benches.first().cloned());
+    let has_sessions = if let Some(bench) = default_bench {
+        !state.storage.list_by_bench(bench.id).await?.is_empty()
     } else {
         false
     };
-    if has_non_default_projects
+    if has_non_default_benches
         || has_sessions
         || !state.storage.list_channel_links().await?.is_empty()
         || !state.storage.list_execution_hosts().await?.is_empty()
@@ -612,29 +659,20 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
     Ok(())
 }
 
-async fn import_project(
-    state: &AppState,
-    project: RecoveryProjectRecord,
-) -> Result<Project, GatewayError> {
-    if project.is_default {
-        let default_project = state.project_store.get_or_create_default().await?;
+async fn import_bench(state: &AppState, bench: RecoveryBenchRecord) -> Result<Bench, GatewayError> {
+    if bench.is_default {
+        let default_bench = state.bench_store.get_or_create_default().await?;
         state
-            .project_store
-            .update(
-                default_project.id,
-                Some(project.name),
-                Some(project.slug),
-                project.workspace_path,
-            )
+            .bench_store
+            .update(default_bench.id, Some(bench.name), Some(bench.slug))
             .await
             .map_err(Into::into)
     } else {
         state
-            .project_store
-            .create(swage_storage::NewProject {
-                name: project.name,
-                slug: project.slug,
-                workspace_path: project.workspace_path,
+            .bench_store
+            .create(swage_storage::NewBench {
+                name: bench.name,
+                slug: bench.slug,
             })
             .await
             .map_err(Into::into)

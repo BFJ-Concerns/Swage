@@ -30,7 +30,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{
     ApprovalKind, MANAGED_SECRET_KEY_ENV, NewApprovalRequest, NewDeliveryRecord, NewTurn,
     SqliteStorage, TurnState,
-    store::{ProjectStore, Storage},
+    store::{BenchStore, Storage},
 };
 
 static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -79,7 +79,7 @@ fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

@@ -51,23 +51,23 @@ impl ContextSnapshotStore for SqliteStorage {
         .await
     }
 
-    async fn list_snapshots_by_project(
+    async fn list_snapshots_by_bench(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT cs.turn_id, th.session_id, s.project_id, cs.created_at, cs.report_json
+                "SELECT cs.turn_id, th.session_id, s.bench_id, cs.created_at, cs.report_json
                  FROM context_snapshots cs
                  INNER JOIN turns t ON t.id = cs.turn_id
                  INNER JOIN threads th ON th.id = t.thread_id
                  INNER JOIN sessions s ON s.id = th.session_id
-                 WHERE s.project_id = ?1
+                 WHERE s.bench_id = ?1
                  ORDER BY cs.created_at DESC
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![project_id.to_string(), limit as i64], |row| {
+            let rows = stmt.query_map(params![bench_id.to_string(), limit as i64], |row| {
                 Ok(ContextSnapshotRecord {
                     turn_id: row.get::<_, String>(0)?.parse().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -83,7 +83,7 @@ impl ContextSnapshotStore for SqliteStorage {
                             Box::new(error),
                         )
                     })?,
-                    project_id: row.get::<_, String>(2)?.parse().map_err(|error| {
+                    bench_id: row.get::<_, String>(2)?.parse().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
@@ -108,24 +108,23 @@ impl ContextSnapshotStore for SqliteStorage {
 mod tests {
     use uuid::Uuid;
 
-    use crate::model::{NewProject, NewSession, NewTurn, TurnState};
+    use crate::model::{NewBench, NewSession, NewTurn, TurnState};
     use crate::sqlite::SqliteStorage;
-    use crate::store::{ContextSnapshotStore, ProjectStore, SessionStore, TurnStore};
+    use crate::store::{BenchStore, ContextSnapshotStore, SessionStore, TurnStore};
 
-    /// Create a project → session → thread → turn chain, returning storage + turn_id.
+    /// Create a bench → session → thread → turn chain, returning storage + turn_id.
     async fn make_turn() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "p".into(),
                 slug: "p".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "agent".to_string(),
                 metadata: None,
             })

@@ -88,7 +88,7 @@ impl DeliveryStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, target_json, content, delivered_at
                  FROM delivery_records
-                 ORDER BY delivered_at DESC",
+                 ORDER BY delivered_at ASC, rowid ASC",
             )?;
             let rows = stmt.query_map([], row_to_delivery)?;
             rows.collect()
@@ -105,7 +105,7 @@ impl DeliveryStore for SqliteStorage {
                 "SELECT id, session_id, target_json, content, delivered_at
                  FROM delivery_records
                  WHERE session_id = ?1
-                 ORDER BY delivered_at DESC",
+                 ORDER BY delivered_at ASC, rowid ASC",
             )?;
             let rows = stmt.query_map(params![session_id.to_string()], row_to_delivery)?;
             rows.collect()
@@ -119,16 +119,16 @@ mod tests {
     use serde_json::json;
 
     use crate::sqlite::SqliteStorage;
-    use crate::store::{DeliveryStore, ProjectStore, SessionStore};
+    use crate::store::{BenchStore, DeliveryStore, SessionStore};
     use crate::{NewDeliveryRecord, NewSession};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_and_lists_by_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage.get_or_create_default().await.unwrap();
+        let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })

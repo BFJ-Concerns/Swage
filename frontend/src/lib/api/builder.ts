@@ -3,15 +3,15 @@ import type {
   BuilderConfigOperation,
   BuilderProposalResponse,
   ContextSnapshotSharedReferencePayload,
-  CreateProjectExtensionRequest,
+  CreateBenchExtensionRequest,
   SharedReferenceDetailResponse,
   SharedReferenceKind,
   SharedReferenceSummary,
   TeamTopologySharedReferencePayload,
   CreateTeamRequest,
-  ProjectExtensionSummary,
+  BenchExtensionSummary,
   TeamSummary,
-  UpdateProjectExtensionRequest,
+  UpdateBenchExtensionRequest,
   UpdateTeamRequest,
 } from "../types";
 
@@ -40,17 +40,17 @@ async function request(
   return response;
 }
 
-export async function listTeams(projectId: string): Promise<TeamSummary[]> {
-  const response = await request(`/api/projects/${projectId}/teams`, "GET");
+export async function listTeams(benchId: string): Promise<TeamSummary[]> {
+  const response = await request(`/api/benches/${benchId}/teams`, "GET");
   const body = (await response.json()) as { teams: TeamSummary[] };
   return body.teams;
 }
 
 export async function createTeam(
-  projectId: string,
+  benchId: string,
   req: CreateTeamRequest,
 ): Promise<TeamSummary> {
-  const response = await request(`/api/projects/${projectId}/teams`, "POST", req);
+  const response = await request(`/api/benches/${benchId}/teams`, "POST", req);
   return response.json() as Promise<TeamSummary>;
 }
 
@@ -62,68 +62,68 @@ export async function updateTeam(
   return response.json() as Promise<TeamSummary>;
 }
 
-export async function listProjectExtensions(
-  projectId: string,
-): Promise<ProjectExtensionSummary[]> {
-  const response = await request(`/api/projects/${projectId}/extensions`, "GET");
+export async function listBenchExtensions(
+  benchId: string,
+): Promise<BenchExtensionSummary[]> {
+  const response = await request(`/api/benches/${benchId}/extensions`, "GET");
   const body = (await response.json()) as {
-    extensions: ProjectExtensionSummary[];
+    extensions: BenchExtensionSummary[];
   };
   return body.extensions;
 }
 
-export async function createProjectExtension(
-  projectId: string,
-  req: CreateProjectExtensionRequest,
-): Promise<ProjectExtensionSummary> {
+export async function createBenchExtension(
+  benchId: string,
+  req: CreateBenchExtensionRequest,
+): Promise<BenchExtensionSummary> {
   const response = await request(
-    `/api/projects/${projectId}/extensions`,
+    `/api/benches/${benchId}/extensions`,
     "POST",
     req,
   );
-  return response.json() as Promise<ProjectExtensionSummary>;
+  return response.json() as Promise<BenchExtensionSummary>;
 }
 
-export async function updateProjectExtension(
-  projectId: string,
+export async function updateBenchExtension(
+  benchId: string,
   extensionName: string,
-  req: UpdateProjectExtensionRequest,
-): Promise<ProjectExtensionSummary> {
+  req: UpdateBenchExtensionRequest,
+): Promise<BenchExtensionSummary> {
   const response = await request(
-    `/api/projects/${projectId}/extensions/${extensionName}`,
+    `/api/benches/${benchId}/extensions/${extensionName}`,
     "PUT",
     req,
   );
-  return response.json() as Promise<ProjectExtensionSummary>;
+  return response.json() as Promise<BenchExtensionSummary>;
 }
 
 export async function approveWorkspaceExtension(
-  projectId: string,
+  benchId: string,
   extensionName: string,
-): Promise<ProjectExtensionSummary> {
+): Promise<BenchExtensionSummary> {
   const response = await request(
-    `/api/projects/${projectId}/extensions/${extensionName}/approve-workspace`,
+    `/api/benches/${benchId}/extensions/${extensionName}/approve-workspace`,
     "POST",
   );
-  return response.json() as Promise<ProjectExtensionSummary>;
+  return response.json() as Promise<BenchExtensionSummary>;
 }
 
 export async function createBuilderProposal(
-  projectId: string,
+  benchId: string,
   prompt: string,
 ): Promise<BuilderProposalResponse> {
-  const response = await request(`/api/projects/${projectId}/builder/proposals`, "POST", {
+  const response = await request(`/api/benches/${benchId}/builder/proposals`, "POST", {
     prompt,
   });
   return response.json() as Promise<BuilderProposalResponse>;
 }
 
 export async function applyBuilderProposal(
-  projectId: string,
+  benchId: string,
   operations: BuilderConfigOperation[],
   requestText?: string,
 ): Promise<{ status: number; body: BuilderApplyResponse }> {
-  const response = await fetch(`${baseUrl}/api/projects/${projectId}/builder/apply`, {
+  const response = await fetch(`${baseUrl}/api/benches/${benchId}/builder/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -137,9 +137,9 @@ export async function applyBuilderProposal(
 }
 
 export async function listSharedReferences(
-  projectId: string,
+  benchId: string,
 ): Promise<SharedReferenceSummary[]> {
-  const response = await request(`/api/shared-objects?project_id=${projectId}`, "GET");
+  const response = await request(`/api/shared-objects?bench_id=${benchId}`, "GET");
   const body = (await response.json()) as { objects: SharedReferenceSummary[] };
   return body.objects;
 }

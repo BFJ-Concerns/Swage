@@ -46,26 +46,26 @@ fn try_load_file(path: &Path, problems: &mut Vec<ConfigProblem>) -> Option<Parti
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Fully resolve configuration for a given project and agent.
+/// Fully resolve configuration for a given bench and agent.
 ///
 /// Resolves the Swage root via `$SWAGE_HOME` / `~/.swage/`, then delegates
 /// to [`load_resolved_config_from`].
-pub fn load_resolved_config(project: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
+pub fn load_resolved_config(bench: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from(&root, project, agent)
+    load_resolved_config_from(&root, bench, agent)
 }
 
-/// Fully resolve configuration for a given project, team, and agent.
+/// Fully resolve configuration for a given bench, team, and agent.
 ///
 /// Same as [`load_resolved_config`] but inserts the team level between
-/// project and agent in the merge chain: Global → Project → Team → Agent.
+/// bench and agent in the merge chain: Global → Bench → Team → Agent.
 pub fn load_resolved_config_for_team(
-    project: &str,
+    bench: &str,
     team: &str,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from_with_team(&root, project, Some(team), agent)
+    load_resolved_config_from_with_team(&root, bench, Some(team), agent)
 }
 
 /// Fully resolve configuration given an explicit root directory.
@@ -73,19 +73,18 @@ pub fn load_resolved_config_for_team(
 /// Shorthand for [`load_resolved_config_from_with_team`] with no team level.
 pub fn load_resolved_config_from(
     root: &Path,
-    project: &str,
+    bench: &str,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
-    load_resolved_config_from_with_team(root, project, None, agent)
+    load_resolved_config_from_with_team(root, bench, None, agent)
 }
 
 /// Fully resolve configuration given an explicit root directory, with an
 /// optional team level in the cascade.
 ///
 /// Pipeline:
-/// 1. Build hierarchy paths (Global → Lens → Project → [Team] → Agent).
-/// 2. Load and validate each config.toml that exists. Lens config is validated
-///    but its values are **not** merged (0.1 constraint).
+/// 1. Build hierarchy paths (Global → Bench → [Team] → Agent).
+/// 2. Load and validate each config.toml that exists.
 /// 3. If any validation errors were found, return them all as `ConfigError`.
 /// 4. Merge the active levels via `merge_chain` + `resolve` to produce the
 ///    typed `ResolvedConfig`.
@@ -96,37 +95,33 @@ pub fn load_resolved_config_from(
 /// simply inherits values from above.
 pub fn load_resolved_config_from_with_team(
     root: &Path,
-    project: &str,
+    bench: &str,
     team: Option<&str>,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Build paths for each hierarchy level.
     let global_config = root.join("config.toml");
-    let lens_config = root.join("lenses").join("default").join("config.toml");
-    let project_dir = root.join("projects").join(project);
-    let project_config = project_dir.join("config.toml");
-    let agent_dir = project_dir.join("agents").join(agent);
+    let bench_dir = root.join("benches").join(bench);
+    let bench_config = bench_dir.join("config.toml");
+    let agent_dir = bench_dir.join("agents").join(agent);
     let agent_config = agent_dir.join("config.toml");
 
     let global_instrs = root.join("instructions");
-    let project_instrs = project_dir.join("instructions");
+    let bench_instrs = bench_dir.join("instructions");
     let agent_instrs = agent_dir.join("instructions");
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
-    // Lens: validate but discard — its values are not part of the merge chain.
-    let _ = try_load_file(&lens_config, &mut all_problems);
-
-    // Active merge levels: Global → Project → [Team] → Agent.
+    // Active merge levels: Global → Bench → [Team] → Agent.
     let mut config_chain: Vec<PartialConfig> = Vec::new();
-    for path in &[&global_config, &project_config] {
+    for path in &[&global_config, &bench_config] {
         if let Some(partial) = try_load_file(path, &mut all_problems) {
             config_chain.push(partial);
         }
     }
 
-    // Team level sits between project and agent — only present when specified.
-    let team_dir = team.map(|t| project_dir.join("teams").join(t));
+    // Team level sits between bench and agent — only present when specified.
+    let team_dir = team.map(|t| bench_dir.join("teams").join(t));
     if let Some(ref td) = team_dir {
         let team_config = td.join("config.toml");
         if let Some(partial) = try_load_file(&team_config, &mut all_problems) {
@@ -152,7 +147,7 @@ pub fn load_resolved_config_from_with_team(
     let team_instrs = team_dir.as_ref().map(|td| td.join("instructions"));
     let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
         (HierarchyLevel::Global, global_instrs.as_path()),
-        (HierarchyLevel::Project, project_instrs.as_path()),
+        (HierarchyLevel::Bench, bench_instrs.as_path()),
     ];
     if let Some(ref ti) = team_instrs {
         levels.push((HierarchyLevel::Team, ti.as_path()));
@@ -228,8 +223,8 @@ mod tests {
     fn build_fixture(
         root: &Path,
         global_toml: Option<&str>,
-        project: &str,
-        project_toml: Option<&str>,
+        bench: &str,
+        bench_toml: Option<&str>,
         agent: &str,
         agent_toml: Option<&str>,
     ) {
@@ -237,12 +232,12 @@ mod tests {
             fs::write(root.join("config.toml"), content).unwrap();
         }
         fs::create_dir_all(root.join("lenses/default")).unwrap();
-        let project_dir = root.join("projects").join(project);
-        let agent_dir = project_dir.join("agents").join(agent);
+        let bench_dir = root.join("benches").join(bench);
+        let agent_dir = bench_dir.join("agents").join(agent);
         fs::create_dir_all(&agent_dir).unwrap();
-        fs::create_dir_all(project_dir.join("teams")).unwrap();
-        if let Some(content) = project_toml {
-            fs::write(project_dir.join("config.toml"), content).unwrap();
+        fs::create_dir_all(bench_dir.join("teams")).unwrap();
+        if let Some(content) = bench_toml {
+            fs::write(bench_dir.join("config.toml"), content).unwrap();
         }
         if let Some(content) = agent_toml {
             fs::write(agent_dir.join("config.toml"), content).unwrap();
@@ -266,7 +261,7 @@ mod tests {
         assert_eq!(cfg.server.port, 4000, "agent overrides global port");
         assert_eq!(
             cfg.provider.model, "claude-opus",
-            "project model should apply"
+            "bench model should apply"
         );
     }
 
@@ -276,13 +271,13 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 5000\n"),
-            "bare-project",
+            "bare-bench",
             None,
             "default",
             None,
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "bare-project", "default")
+        let cfg = load_resolved_config_from(tmp.path(), "bare-bench", "default")
             .expect("should succeed even with missing intermediate configs");
         assert_eq!(cfg.server.port, 5000);
     }
@@ -319,7 +314,7 @@ mod tests {
     // --- Team config cascade ---
 
     #[test]
-    fn team_config_merges_between_project_and_agent() {
+    fn team_config_merges_between_bench_and_agent() {
         let tmp = TempDir::new().unwrap();
         build_fixture(
             tmp.path(),
@@ -330,7 +325,7 @@ mod tests {
             Some("[server]\nport = 4000\n"),
         );
         // Add team config that overrides provider model.
-        let team_dir = tmp.path().join("projects/proj/teams/review-team");
+        let team_dir = tmp.path().join("benches/proj/teams/review-team");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
@@ -342,12 +337,12 @@ mod tests {
             load_resolved_config_from_with_team(tmp.path(), "proj", Some("review-team"), "bot")
                 .expect("should succeed");
 
-        // Agent overrides port (agent > team > project > global)
+        // Agent overrides port (agent > team > bench > global)
         assert_eq!(cfg.server.port, 4000, "agent should win on port");
-        // Team overrides project model, agent doesn't set model so team wins
+        // Team overrides bench model, agent doesn't set model so team wins
         assert_eq!(
             cfg.provider.model, "claude-haiku",
-            "team should override project model"
+            "team should override bench model"
         );
         // Global host survives (no override)
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
@@ -364,7 +359,7 @@ mod tests {
             "bot",
             Some("[provider]\nmodel = \"agent-model\"\n"),
         );
-        let team_dir = tmp.path().join("projects/proj/teams/myteam");
+        let team_dir = tmp.path().join("benches/proj/teams/myteam");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
@@ -394,7 +389,7 @@ mod tests {
         );
 
         // Team directory exists but has no config.toml.
-        let team_dir = tmp.path().join("projects/proj/teams/empty-team");
+        let team_dir = tmp.path().join("benches/proj/teams/empty-team");
         fs::create_dir_all(&team_dir).unwrap();
 
         let cfg =

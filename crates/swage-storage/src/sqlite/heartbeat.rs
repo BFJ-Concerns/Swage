@@ -377,22 +377,21 @@ impl HeartbeatStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HeartbeatRunState, HeartbeatStatus, NewProject};
-    use crate::store::{ProjectStore, SessionStore};
+    use crate::model::{HeartbeatRunState, HeartbeatStatus, NewBench};
+    use crate::store::{BenchStore, SessionStore};
 
     async fn make_storage_with_session() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "heartbeat".into(),
                 slug: "heartbeat".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".into(),
                 metadata: None,
             })

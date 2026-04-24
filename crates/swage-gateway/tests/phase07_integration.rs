@@ -86,7 +86,7 @@ async fn start_test_server_with_config(config: ResolvedConfig) -> (Router, Socke
     let idle_timeout = config.lifecycle.idle_timeout;
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -123,7 +123,7 @@ async fn start_test_server_with_state(config: ResolvedConfig) -> (Router, Socket
     let idle_timeout = config.lifecycle.idle_timeout;
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

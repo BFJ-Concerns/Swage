@@ -143,7 +143,7 @@
                   {/if}
                 </div>
                 <div class="secondary-line">
-                  {session.project_name} ·
+                  {session.bench_name} ·
                   {session.message_preview ?? "No messages yet"}
                 </div>
               </div>

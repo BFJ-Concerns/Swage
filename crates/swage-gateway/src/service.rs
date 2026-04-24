@@ -8,10 +8,11 @@ use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
     model::{
-        EdgeEvaluation, NewProject, NewSession, NewTeam, NewThread, NodeExecution, NodeRetry, Team,
-        TeamAgentDefinition, TeamTaskDefinition, ThreadBranch, TopologyRun, TurnState,
+        EdgeEvaluation, NewBench, NewSession, NewTeam, NewThread, NewWorkspaceAttachment,
+        NodeExecution, NodeRetry, Team, TeamAgentDefinition, TeamTaskDefinition, ThreadBranch,
+        TopologyRun, TurnState, WorkspaceAttachment,
     },
-    store::{ProjectStore, Storage},
+    store::{BenchStore, Storage},
 };
 
 use crate::{
@@ -27,7 +28,7 @@ use crate::{
 #[derive(Debug, Serialize)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
 }
@@ -48,7 +49,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Serialize)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub messages: Vec<MessageView>,
@@ -130,27 +131,27 @@ pub struct MessageView {
 #[derive(Clone)]
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) project_store: Arc<dyn ProjectStore>,
+    pub(crate) bench_store: Arc<dyn BenchStore>,
 }
 
 impl ConversationService {
-    pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
         Self {
             storage,
-            project_store,
+            bench_store,
         }
     }
 
-    /// Create a new conversation in the default project.
+    /// Create a new conversation in the default bench.
     ///
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, GatewayError> {
-        let project = self.project_store.get_or_create_default().await?;
+        let bench = self.bench_store.get_or_create_default().await?;
         let session = self
             .storage
             .create_session(NewSession {
-                project_id: project.id,
+                bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -167,16 +168,16 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            project_id: session.project_id,
+            bench_id: session.bench_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
     }
 
-    /// List all conversations in the default project, ordered by most-recent activity.
+    /// List all conversations in the default bench, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
-        let project = self.project_store.get_or_create_default().await?;
-        let sessions = self.storage.list_by_project(project.id).await?;
+        let bench = self.bench_store.get_or_create_default().await?;
+        let sessions = self.storage.list_by_bench(bench.id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
 
@@ -270,28 +271,28 @@ impl ConversationService {
 
         Ok(ConversationDetail {
             id: session.id,
-            project_id: session.project_id,
+            bench_id: session.bench_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
             messages: message_views,
         })
     }
 
-    /// List sessions belonging to a specific project.
+    /// List sessions belonging to a specific bench.
     ///
-    /// Returns `ProjectNotFound` if no project with the given ID exists.
-    pub async fn list_sessions_by_project(
+    /// Returns `BenchNotFound` if no bench with the given ID exists.
+    pub async fn list_sessions_by_bench(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
     ) -> Result<Vec<ConversationSummary>, GatewayError> {
-        // Verify the project exists before listing — gives a clean 404 rather
-        // than silently returning an empty list for a non-existent project.
-        self.project_store
-            .get(project_id)
+        // Verify the bench exists before listing — gives a clean 404 rather
+        // than silently returning an empty list for a non-existent bench.
+        self.bench_store
+            .get(bench_id)
             .await?
-            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
 
-        let sessions = self.storage.list_by_project(project_id).await?;
+        let sessions = self.storage.list_by_bench(bench_id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
         for session in sessions {
@@ -315,23 +316,23 @@ impl ConversationService {
         Ok(summaries)
     }
 
-    /// Create a new session in the specified project.
+    /// Create a new session in the specified bench.
     ///
-    /// Returns `ProjectNotFound` if no project with the given ID exists.
-    pub async fn create_session_in_project(
+    /// Returns `BenchNotFound` if no bench with the given ID exists.
+    pub async fn create_session_in_bench(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
     ) -> Result<ConversationResponse, GatewayError> {
-        // Verify the project exists — return 404 rather than a FK constraint error.
-        self.project_store
-            .get(project_id)
+        // Verify the bench exists — return 404 rather than a FK constraint error.
+        self.bench_store
+            .get(bench_id)
             .await?
-            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
 
         let session = self
             .storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
             })
@@ -347,7 +348,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            project_id: session.project_id,
+            bench_id: session.bench_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
@@ -519,42 +520,73 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
 }
 
 // ---------------------------------------------------------------------------
-// Project service — request/response types and service logic
+// Bench service — request/response types and service logic
 // ---------------------------------------------------------------------------
 
-/// Request body for creating a project.
+/// Request body for creating a bench.
 #[derive(Debug, Deserialize)]
-pub struct CreateProjectRequest {
+pub struct CreateBenchRequest {
     pub name: String,
-    /// Optional workspace path. If provided, must exist on disk.
-    pub workspace_path: Option<String>,
 }
 
-/// Request body for partially updating a project.
+/// Request body for partially updating a bench.
 #[derive(Debug, Deserialize)]
-pub struct UpdateProjectRequest {
+pub struct UpdateBenchRequest {
     pub name: Option<String>,
-    pub workspace_path: Option<String>,
 }
 
-/// API response for a single project.
+/// API response for a single bench.
 #[derive(Debug, Serialize)]
-pub struct ProjectResponse {
+pub struct BenchResponse {
     pub id: Uuid,
     pub name: String,
     pub is_default: bool,
     pub slug: String,
-    pub workspace_path: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
-/// API response for the list-projects endpoint.
+/// API response for the list-benches endpoint.
 #[derive(Debug, Serialize)]
-pub struct ProjectListResponse {
-    pub projects: Vec<ProjectResponse>,
+pub struct BenchListResponse {
+    pub benches: Vec<BenchResponse>,
 }
 
-/// Derives a URL-safe slug from a project name.
+#[derive(Debug, Deserialize)]
+pub struct CreateWorkspaceAttachmentRequest {
+    pub path: String,
+    pub label: Option<String>,
+    #[serde(default = "default_workspace_permissions")]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub is_trusted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceTrustRequest {
+    pub is_trusted: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceAttachmentResponse {
+    pub id: Uuid,
+    pub bench_id: Uuid,
+    pub label: String,
+    pub path: String,
+    pub permissions: Vec<String>,
+    pub is_trusted: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceAttachmentListResponse {
+    pub workspaces: Vec<WorkspaceAttachmentResponse>,
+}
+
+fn default_workspace_permissions() -> Vec<String> {
+    vec!["read".to_string()]
+}
+
+/// Derives a URL-safe slug from a bench name.
 ///
 /// - Lowercases the name
 /// - Replaces spaces with hyphens
@@ -567,7 +599,7 @@ pub fn slugify(name: &str) -> String {
         .collect()
 }
 
-fn validate_project_slug(slug: &str) -> Result<(), GatewayError> {
+fn validate_bench_slug(slug: &str) -> Result<(), GatewayError> {
     if slug.is_empty() || !slug.chars().any(|c| c.is_ascii_alphanumeric()) {
         return Err(GatewayError::ValidationError(
             "name must contain at least one ASCII letter or digit".into(),
@@ -576,33 +608,32 @@ fn validate_project_slug(slug: &str) -> Result<(), GatewayError> {
     Ok(())
 }
 
-/// Returns the base directory for all project data: `~/.swage/projects/`.
-fn projects_base_dir() -> Option<PathBuf> {
+/// Returns the base directory for all bench data: `~/.swage/benches/`.
+fn benches_base_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
-        .map(|h| PathBuf::from(h).join(".swage").join("projects"))
+        .map(|h| PathBuf::from(h).join(".swage").join("benches"))
 }
 
-/// Mediates between HTTP project handlers and storage.
+/// Mediates between HTTP bench handlers and storage.
 #[derive(Clone)]
-pub struct ProjectService {
-    pub(crate) project_store: Arc<dyn ProjectStore>,
+pub struct BenchService {
+    pub(crate) bench_store: Arc<dyn BenchStore>,
 }
 
-impl ProjectService {
-    pub fn new(project_store: Arc<dyn ProjectStore>) -> Self {
-        Self { project_store }
+impl BenchService {
+    pub fn new(bench_store: Arc<dyn BenchStore>) -> Self {
+        Self { bench_store }
     }
 
-    /// Create a new project.
+    /// Create a new bench.
     ///
     /// Validates the name is non-empty, generates a slug, checks name
-    /// uniqueness, optionally validates the workspace path exists on disk,
-    /// creates the project directory structure, and stores the project.
-    pub async fn create_project(
+    /// uniqueness, creates the bench directory structure, and stores the bench.
+    pub async fn create_bench(
         &self,
-        req: CreateProjectRequest,
-    ) -> Result<ProjectResponse, GatewayError> {
+        req: CreateBenchRequest,
+    ) -> Result<BenchResponse, GatewayError> {
         // Validate non-empty name.
         if req.name.trim().is_empty() {
             return Err(GatewayError::ValidationError(
@@ -610,78 +641,68 @@ impl ProjectService {
             ));
         }
 
-        // Check workspace_path exists on disk if provided.
-        if let Some(ref wp) = req.workspace_path {
-            if !std::path::Path::new(wp).exists() {
-                return Err(GatewayError::ValidationError(format!(
-                    "workspace_path '{wp}' does not exist on disk"
-                )));
-            }
-        }
-
         // Check name uniqueness.
-        if self.project_store.get_by_name(&req.name).await?.is_some() {
-            return Err(GatewayError::ProjectConflict(format!(
-                "a project named '{}' already exists",
+        if self.bench_store.get_by_name(&req.name).await?.is_some() {
+            return Err(GatewayError::BenchConflict(format!(
+                "a bench named '{}' already exists",
                 req.name
             )));
         }
 
         let slug = slugify(&req.name);
-        validate_project_slug(&slug)?;
+        validate_bench_slug(&slug)?;
 
-        // Create the project directory: ~/.swage/projects/{slug}/memory/
-        if let Some(base) = projects_base_dir() {
-            let project_dir = base.join(&slug);
-            let memory_dir = project_dir.join("memory");
+        // Create the bench directory: ~/.swage/benches/{slug}/memory/
+        if let Some(base) = benches_base_dir() {
+            let bench_dir = base.join(&slug);
+            let memory_dir = bench_dir.join("memory");
             // Non-fatal: best-effort directory creation.
             if let Err(error) = std::fs::create_dir_all(&memory_dir) {
                 tracing::warn!(
                     slug,
                     path = %memory_dir.display(),
                     %error,
-                    "failed to create project memory directory"
+                    "failed to create bench memory directory"
                 );
             }
         }
 
-        let project = self
-            .project_store
-            .create(NewProject {
+        let bench = self
+            .bench_store
+            .create(NewBench {
                 name: req.name,
                 slug,
-                workspace_path: req.workspace_path,
             })
             .await?;
 
-        Ok(project_to_response(project))
+        Ok(bench_to_response(bench))
     }
 
-    /// List all projects.
-    pub async fn list_projects(&self) -> Result<ProjectListResponse, GatewayError> {
-        let projects = self.project_store.list_all().await?;
-        Ok(ProjectListResponse {
-            projects: projects.into_iter().map(project_to_response).collect(),
+    /// List all benches.
+    pub async fn list_benches(&self) -> Result<BenchListResponse, GatewayError> {
+        let benches = self.bench_store.list_all().await?;
+        Ok(BenchListResponse {
+            benches: benches.into_iter().map(bench_to_response).collect(),
         })
     }
 
-    /// Get a project by ID.
-    pub async fn get_project(&self, id: Uuid) -> Result<ProjectResponse, GatewayError> {
-        self.project_store
+    /// Get a bench by ID.
+    pub async fn get_bench(&self, id: Uuid) -> Result<BenchResponse, GatewayError> {
+        self.bench_store
             .get(id)
             .await?
-            .map(project_to_response)
-            .ok_or(GatewayError::ProjectNotFound { id })
+            .map(bench_to_response)
+            .ok_or(GatewayError::BenchNotFound { id })
     }
 
-    /// Partially update a project.
+    /// Partially update a bench.
     ///
-    /// Validates workspace_path if provided. Regenerates slug when name changes.
-    pub async fn update_project(
+    /// Regenerates slug when name changes.
+    pub async fn update_bench(
         &self,
         id: Uuid,
-        req: UpdateProjectRequest,
-    ) -> Result<ProjectResponse, GatewayError> {
+        req: UpdateBenchRequest,
+    ) -> Result<BenchResponse, GatewayError> {
         // Validate name if provided.
         if let Some(ref name) = req.name {
             if name.trim().is_empty() {
@@ -691,78 +712,210 @@ impl ProjectService {
             }
         }
 
-        // Validate workspace_path if provided.
-        if let Some(ref wp) = req.workspace_path {
-            if !std::path::Path::new(wp).exists() {
-                return Err(GatewayError::ValidationError(format!(
-                    "workspace_path '{wp}' does not exist on disk"
-                )));
-            }
-        }
-
         // Derive the new slug from the new name, if name is being updated.
         let new_slug = match req.name.as_deref() {
             Some(name) => {
                 let slug = slugify(name);
-                validate_project_slug(&slug)?;
+                validate_bench_slug(&slug)?;
                 Some(slug)
             }
             None => None,
         };
 
-        let project = self
-            .project_store
-            .update(id, req.name, new_slug, req.workspace_path)
+        let bench = self
+            .bench_store
+            .update(id, req.name, new_slug)
             .await
             .map_err(|e| match e {
                 swage_core::StorageError::NotFound { id: ref eid, .. } => {
                     let parsed_id = eid.parse::<Uuid>().unwrap_or(id);
-                    GatewayError::ProjectNotFound { id: parsed_id }
+                    GatewayError::BenchNotFound { id: parsed_id }
                 }
                 other => GatewayError::Storage(other),
             })?;
 
-        Ok(project_to_response(project))
+        Ok(bench_to_response(bench))
     }
 
-    /// Delete a project.
+    /// Delete a bench.
     ///
     /// Returns 404 if not found. Returns a conflict error if called on the
-    /// default project. The project directory on disk is preserved.
-    pub async fn delete_project(&self, id: Uuid) -> Result<(), GatewayError> {
-        let found = self.project_store.delete(id).await.map_err(|e| match e {
-            swage_core::StorageError::ConstraintViolation(msg) => {
-                GatewayError::ProjectConflict(msg)
-            }
+    /// default bench. The bench directory on disk is preserved.
+    pub async fn delete_bench(&self, id: Uuid) -> Result<(), GatewayError> {
+        let found = self.bench_store.delete(id).await.map_err(|e| match e {
+            swage_core::StorageError::ConstraintViolation(msg) => GatewayError::BenchConflict(msg),
             other => GatewayError::Storage(other),
         })?;
 
         if !found {
-            return Err(GatewayError::ProjectNotFound { id });
+            return Err(GatewayError::BenchNotFound { id });
         }
 
         Ok(())
     }
 }
 
-fn project_to_response(p: swage_storage::model::Project) -> ProjectResponse {
-    ProjectResponse {
+fn bench_to_response(p: swage_storage::model::Bench) -> BenchResponse {
+    BenchResponse {
         id: p.id,
         name: p.name,
         is_default: p.is_default,
         slug: p.slug,
-        workspace_path: p.workspace_path,
         created_at: p.created_at,
     }
 }
 
+#[derive(Clone)]
+pub struct WorkspaceAttachmentService {
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) bench_store: Arc<dyn BenchStore>,
+}
+
+impl WorkspaceAttachmentService {
+    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
+        Self {
+            storage,
+            bench_store,
+        }
+    }
+
+    pub async fn list_workspaces(
+        &self,
+        bench_id: Uuid,
+    ) -> Result<WorkspaceAttachmentListResponse, GatewayError> {
+        self.ensure_bench_exists(bench_id).await?;
+        let workspaces = self
+            .storage
+            .list_workspace_attachments_by_bench(bench_id)
+            .await?;
+        Ok(WorkspaceAttachmentListResponse {
+            workspaces: workspaces.into_iter().map(workspace_to_response).collect(),
+        })
+    }
+
+    pub async fn attach_workspace(
+        &self,
+        bench_id: Uuid,
+        req: CreateWorkspaceAttachmentRequest,
+    ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
+        self.ensure_bench_exists(bench_id).await?;
+        let path = req.path.trim();
+        if path.is_empty() {
+            return Err(GatewayError::ValidationError(
+                "workspace path must not be empty".into(),
+            ));
+        }
+        if !std::path::Path::new(path).exists() {
+            return Err(GatewayError::ValidationError(format!(
+                "workspace path '{path}' does not exist on disk"
+            )));
+        }
+
+        let label = req
+            .label
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("workspace")
+                    .to_string()
+            });
+        let permissions = if req.permissions.is_empty() {
+            default_workspace_permissions()
+        } else {
+            req.permissions
+        };
+
+        let workspace = self
+            .storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id,
+                label,
+                path: path.to_string(),
+                permissions,
+                is_trusted: req.is_trusted,
+            })
+            .await?;
+        Ok(workspace_to_response(workspace))
+    }
+
+    pub async fn set_trust(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Uuid,
+        req: UpdateWorkspaceTrustRequest,
+    ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
+        self.ensure_workspace_belongs_to_bench(bench_id, workspace_id)
+            .await?;
+        let workspace = self
+            .storage
+            .set_workspace_trust(workspace_id, req.is_trusted)
+            .await?;
+        Ok(workspace_to_response(workspace))
+    }
+
+    pub async fn detach_workspace(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<(), GatewayError> {
+        self.ensure_workspace_belongs_to_bench(bench_id, workspace_id)
+            .await?;
+        self.storage
+            .delete_workspace_attachment(workspace_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_bench_exists(&self, bench_id: Uuid) -> Result<(), GatewayError> {
+        self.bench_store
+            .get(bench_id)
+            .await?
+            .map(|_| ())
+            .ok_or(GatewayError::BenchNotFound { id: bench_id })
+    }
+
+    async fn ensure_workspace_belongs_to_bench(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<(), GatewayError> {
+        let workspace = self
+            .storage
+            .get_workspace_attachment(workspace_id)
+            .await?
+            .ok_or(GatewayError::ValidationError(format!(
+                "workspace attachment {workspace_id} not found"
+            )))?;
+        if workspace.bench_id != bench_id {
+            return Err(GatewayError::ValidationError(format!(
+                "workspace attachment {workspace_id} does not belong to bench {bench_id}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {
+    WorkspaceAttachmentResponse {
+        id: workspace.id,
+        bench_id: workspace.bench_id,
+        label: workspace.label,
+        path: workspace.path,
+        permissions: workspace.permissions,
+        is_trusted: workspace.is_trusted,
+        created_at: workspace.created_at,
+    }
+}
+
 #[cfg(test)]
-mod project_slug_tests {
-    use super::{GatewayError, slugify, validate_project_slug};
+mod bench_slug_tests {
+    use super::{GatewayError, slugify, validate_bench_slug};
 
     #[test]
     fn punctuation_only_name_is_rejected_after_slugify() {
-        let err = validate_project_slug(&slugify("!!! /// ___"))
+        let err = validate_bench_slug(&slugify("!!! /// ___"))
             .expect_err("punctuation-only names should be rejected");
         assert!(matches!(err, GatewayError::ValidationError(_)));
         assert!(
@@ -776,7 +929,7 @@ mod project_slug_tests {
 // Team service — request/response types and service logic
 // ---------------------------------------------------------------------------
 
-/// Request body for creating a team within a project.
+/// Request body for creating a team within a bench.
 #[derive(Debug, Deserialize)]
 pub struct CreateTeamRequest {
     pub name: String,
@@ -837,7 +990,7 @@ pub struct TeamTaskPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TeamResponse {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub bench_id: Uuid,
     pub name: String,
     pub description: String,
     pub entry_agent_id: String,
@@ -858,35 +1011,35 @@ pub struct TeamListResponse {
 #[derive(Clone)]
 pub struct TeamService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) project_store: Arc<dyn ProjectStore>,
+    pub(crate) bench_store: Arc<dyn BenchStore>,
 }
 
 impl TeamService {
-    pub fn new(storage: Arc<dyn Storage>, project_store: Arc<dyn ProjectStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
         Self {
             storage,
-            project_store,
+            bench_store,
         }
     }
 
     pub async fn create_team(
         &self,
-        project_id: Uuid,
+        bench_id: Uuid,
         req: CreateTeamRequest,
     ) -> Result<TeamResponse, GatewayError> {
-        self.ensure_project_exists(project_id).await?;
+        self.ensure_bench_exists(bench_id).await?;
         validate_team_name(&req.name)?;
         validate_agent_id(&req.entry_agent_id, "entry_agent_id")?;
 
         if self
             .storage
-            .get_team_by_name(project_id, &req.name)
+            .get_team_by_name(bench_id, &req.name)
             .await?
             .is_some()
         {
             return Err(GatewayError::Storage(StorageError::ConstraintViolation(
                 format!(
-                    "a team named '{}' already exists in project {project_id}",
+                    "a team named '{}' already exists in bench {bench_id}",
                     req.name
                 ),
             )));
@@ -897,7 +1050,7 @@ impl TeamService {
         let team = self
             .storage
             .create_team(NewTeam {
-                project_id,
+                bench_id,
                 name: req.name,
                 description: req.description,
                 entry_agent_id: req.entry_agent_id,
@@ -909,9 +1062,9 @@ impl TeamService {
         Ok(team_to_response(team))
     }
 
-    pub async fn list_teams(&self, project_id: Uuid) -> Result<TeamListResponse, GatewayError> {
-        self.ensure_project_exists(project_id).await?;
-        let teams = self.storage.list_teams_by_project(project_id).await?;
+    pub async fn list_teams(&self, bench_id: Uuid) -> Result<TeamListResponse, GatewayError> {
+        self.ensure_bench_exists(bench_id).await?;
+        let teams = self.storage.list_teams_by_bench(bench_id).await?;
         Ok(TeamListResponse {
             teams: teams.into_iter().map(team_to_response).collect(),
         })
@@ -949,14 +1102,14 @@ impl TeamService {
             validate_team_name(name)?;
             if let Some(conflict) = self
                 .storage
-                .get_team_by_name(existing.project_id, name)
+                .get_team_by_name(existing.bench_id, name)
                 .await?
             {
                 if conflict.id != id {
                     return Err(GatewayError::Storage(StorageError::ConstraintViolation(
                         format!(
-                            "a team named '{}' already exists in project {}",
-                            name, existing.project_id
+                            "a team named '{}' already exists in bench {}",
+                            name, existing.bench_id
                         ),
                     )));
                 }
@@ -1005,11 +1158,11 @@ impl TeamService {
         Ok(())
     }
 
-    async fn ensure_project_exists(&self, project_id: Uuid) -> Result<(), GatewayError> {
-        self.project_store
-            .get(project_id)
+    async fn ensure_bench_exists(&self, bench_id: Uuid) -> Result<(), GatewayError> {
+        self.bench_store
+            .get(bench_id)
             .await?
-            .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
         Ok(())
     }
 }
@@ -1180,7 +1333,7 @@ fn team_not_found(id: Uuid) -> GatewayError {
 fn team_to_response(team: Team) -> TeamResponse {
     TeamResponse {
         id: team.id,
-        project_id: team.project_id,
+        bench_id: team.bench_id,
         name: team.name,
         description: team.description,
         entry_agent_id: team.entry_agent_id,
@@ -1337,7 +1490,7 @@ impl TopologyRunService {
         let graph = if let Some(flow_name) = req.flow_name.as_deref() {
             crate::authoring_definition::load_topology_flow_graph(
                 &self.state,
-                team.project_id,
+                team.bench_id,
                 flow_name,
             )
             .await?
@@ -1374,8 +1527,8 @@ impl TopologyRunService {
                 crate::topology::TopologyEngineError::Storage(storage_error) => {
                     GatewayError::Storage(storage_error)
                 }
-                crate::topology::TopologyEngineError::TeamProjectMissing { project_id, .. } => {
-                    GatewayError::ProjectNotFound { id: project_id }
+                crate::topology::TopologyEngineError::TeamBenchMissing { bench_id, .. } => {
+                    GatewayError::BenchNotFound { id: bench_id }
                 }
                 crate::topology::TopologyEngineError::SessionMissing { session_id } => {
                     GatewayError::ConversationNotFound { id: session_id }
@@ -1518,7 +1671,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         ConversationService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn ProjectStore>,
+            storage as Arc<dyn BenchStore>,
         )
     }
 
@@ -1537,7 +1690,7 @@ mod tests {
 
         // Non-nil UUID expected.
         assert_ne!(resp.id, Uuid::nil());
-        assert_ne!(resp.project_id, Uuid::nil());
+        assert_ne!(resp.bench_id, Uuid::nil());
     }
 
     #[tokio::test]
@@ -1547,8 +1700,8 @@ mod tests {
         let a = svc.create_conversation().await.unwrap();
         let b = svc.create_conversation().await.unwrap();
 
-        // Both conversations should belong to the same default project.
-        assert_eq!(a.project_id, b.project_id);
+        // Both conversations should belong to the same default bench.
+        assert_eq!(a.bench_id, b.bench_id);
         // But have distinct session IDs.
         assert_ne!(a.id, b.id);
     }

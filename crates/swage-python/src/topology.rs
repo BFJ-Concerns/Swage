@@ -132,26 +132,7 @@ pub fn execute_topology_source_with_config(
         ))
     })?;
 
-    let effective_catalog = TopologyEntityCatalog {
-        known_agents: catalog.known_agents,
-        // Task names are authored inline in topology definitions today, so the
-        // validation boundary is "present and non-empty", not membership in a
-        // separate registry that does not exist yet. Seed the validation set
-        // from the decoded graph so execution still rejects malformed nodes
-        // without spuriously rejecting valid authored task names.
-        known_tasks: catalog
-            .known_tasks
-            .into_iter()
-            .chain(
-                graph
-                    .nodes
-                    .iter()
-                    .filter_map(|node| node.task_name.as_ref().cloned()),
-            )
-            .collect(),
-        known_handlers: catalog.known_handlers,
-    };
-    validate_graph(&graph, &effective_catalog).map_err(TopologyDefinitionError::Validation)?;
+    validate_graph(&graph, &catalog).map_err(TopologyDefinitionError::Validation)?;
     Ok(graph)
 }
 

@@ -74,7 +74,7 @@ async fn start_test_gateway() -> (Router, SocketAddr) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -179,26 +179,26 @@ async fn client_library_conversation_crud_against_live_gateway() {
     );
 }
 
-/// Client library project CRUD against a live gateway.
+/// Client library bench CRUD against a live gateway.
 ///
-/// Proves: the typed project methods [mkqq] correctly call the gateway's
+/// Proves: the typed bench methods [mkqq] correctly call the gateway's
 /// REST endpoints and the client response types deserialise cleanly.
 ///
-/// Motes: mkqq (project CRUD) + e32t (GatewayClient base)
+/// Motes: mkqq (bench CRUD) + e32t (GatewayClient base)
 #[tokio::test(flavor = "multi_thread")]
-async fn client_library_project_crud_against_live_gateway() {
+async fn client_library_bench_crud_against_live_gateway() {
     let (_router, addr) = start_test_gateway().await;
     let address = format!("http://{addr}");
     let client = swage_client::http::GatewayClient::new(&address);
 
-    // List projects — should contain at least the default project.
-    let projects = client
-        .list_projects()
+    // List benches — should contain at least the default bench.
+    let benches = client
+        .list_benches()
         .await
-        .expect("list_projects should succeed");
+        .expect("list_benches should succeed");
     assert!(
-        !projects.projects.is_empty(),
-        "should have at least the default project"
+        !benches.benches.is_empty(),
+        "should have at least the default bench"
     );
 }
 

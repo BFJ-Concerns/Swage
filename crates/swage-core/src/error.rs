@@ -552,13 +552,13 @@ pub enum GatewayError {
     #[error("conversation {id} not found")]
     ConversationNotFound { id: Uuid },
 
-    /// Project does not exist (permanent).
-    #[error("project {id} not found")]
-    ProjectNotFound { id: Uuid },
+    /// Bench does not exist (permanent).
+    #[error("bench {id} not found")]
+    BenchNotFound { id: Uuid },
 
-    /// Project name or slug conflicts with an existing project (permanent).
-    #[error("project conflict: {0}")]
-    ProjectConflict(String),
+    /// Bench name or slug conflicts with an existing bench (permanent).
+    #[error("bench conflict: {0}")]
+    BenchConflict(String),
 
     /// Request body or parameters failed validation (permanent).
     #[error("validation error: {0}")]
@@ -578,8 +578,8 @@ impl GatewayError {
             GatewayError::ShutdownError(_) => false,
             GatewayError::TurnInProgress { .. } => true,
             GatewayError::ConversationNotFound { .. } => false,
-            GatewayError::ProjectNotFound { .. } => false,
-            GatewayError::ProjectConflict(_) => false,
+            GatewayError::BenchNotFound { .. } => false,
+            GatewayError::BenchConflict(_) => false,
             GatewayError::ValidationError(_) => false,
         }
     }

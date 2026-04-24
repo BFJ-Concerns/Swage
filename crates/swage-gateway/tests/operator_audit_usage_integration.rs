@@ -27,7 +27,7 @@ use swage_storage::{
     ScheduledRunState, ScheduledRunTrigger, SqliteStorage, TopologyRunState, TurnState,
     model::{AppendMessage, TopologyNodeRecordKind},
     store::{
-        AgentMemoryStore, ApprovalStore, HeartbeatStore, MessageStore, ProjectStore, ScheduleStore,
+        AgentMemoryStore, ApprovalStore, BenchStore, HeartbeatStore, MessageStore, ScheduleStore,
         SessionStore, Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
     },
 };
@@ -67,7 +67,7 @@ impl LlmProvider for MockProvider {
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -117,10 +117,10 @@ async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Valu
 }
 
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
-    let project = storage.get_or_create_default().await.unwrap();
+    let bench = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id: "gateway".into(),
             metadata: Some(json!({"label": "Ops session"})),
         })
@@ -135,7 +135,7 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    (project.id, session.id, thread.id)
+    (bench.id, session.id, thread.id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -143,7 +143,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state.clone());
-    let (_project_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -264,7 +264,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (project_id, session_id, thread_id) = seed_session(&storage).await;
+    let (bench_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -278,7 +278,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
         .unwrap();
     let team = storage
         .create_team(NewTeam {
-            project_id,
+            bench_id,
             name: "ops".into(),
             description: "ops".into(),
             entry_agent_id: "gateway".into(),
@@ -321,7 +321,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
     let memory = storage
         .create_agent_memory(NewAgentMemoryRecord {
             id: Uuid::new_v4(),
-            project_id,
+            bench_id,
             session_id,
             turn_id: turn.id,
             topology_run_id: Some(topology_run.id),
@@ -376,7 +376,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state.clone());
-    let (_project_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -478,7 +478,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
 
     let team = storage
         .create_team(NewTeam {
-            project_id: storage.get_or_create_default().await.unwrap().id,
+            bench_id: storage.get_or_create_default().await.unwrap().id,
             name: "ops".into(),
             description: "ops".into(),
             entry_agent_id: "gateway".into(),
@@ -602,7 +602,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_project_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {

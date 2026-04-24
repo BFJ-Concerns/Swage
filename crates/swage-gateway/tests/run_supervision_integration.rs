@@ -24,7 +24,7 @@ use swage_storage::{
     ScheduledRunTrigger, SqliteStorage, TopologyRunState, TurnState,
     model::TopologyNodeRecordKind,
     store::{
-        HeartbeatStore, ProjectStore, ScheduleStore, SessionStore, Storage, TeamStore, ThreadStore,
+        BenchStore, HeartbeatStore, ScheduleStore, SessionStore, Storage, TeamStore, ThreadStore,
         TopologyTraceStore, TurnStore,
     },
 };
@@ -64,7 +64,7 @@ impl LlmProvider for MockProvider {
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -98,10 +98,10 @@ async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
 }
 
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
-    let project = storage.get_or_create_default().await.unwrap();
+    let bench = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id: "gateway".into(),
             metadata: None,
         })
@@ -116,7 +116,7 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    (project.id, session.id, thread.id)
+    (bench.id, session.id, thread.id)
 }
 
 async fn age_turn(storage: &Arc<SqliteStorage>, turn_id: Uuid, age: Duration) {
@@ -156,7 +156,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_project_id, _session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, _session_id, thread_id) = seed_session(&storage).await;
 
     let running_turn = storage
         .create_turn(NewTurn {
@@ -253,7 +253,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
 
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
     let state = test_state(Arc::clone(&storage));
-    let (_project_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, session_id, thread_id) = seed_session(&storage).await;
 
     let completed_turn = storage
         .create_turn(NewTurn {
@@ -370,7 +370,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
 
     let team = storage
         .create_team(NewTeam {
-            project_id: storage.get_or_create_default().await.unwrap().id,
+            bench_id: storage.get_or_create_default().await.unwrap().id,
             name: "ops".into(),
             description: "ops".into(),
             entry_agent_id: "gateway".into(),
@@ -466,7 +466,7 @@ async fn operator_run_detail_tracks_live_execution_into_history() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_project_id, _session_id, thread_id) = seed_session(&storage).await;
+    let (_bench_id, _session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {

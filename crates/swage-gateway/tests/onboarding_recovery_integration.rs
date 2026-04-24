@@ -24,7 +24,7 @@ use swage_gateway::{
 use swage_provider::LlmProvider;
 use swage_storage::{
     MANAGED_SECRET_KEY_ENV, SqliteStorage,
-    store::{ProjectStore, Storage},
+    store::{BenchStore, Storage},
 };
 use swage_tool::context::MockToolContext;
 use swage_tool::tool::Tool;
@@ -130,7 +130,7 @@ async fn start_test_server(
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(provider),
         config,
         dispatcher,

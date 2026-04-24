@@ -15,7 +15,7 @@ use crate::store::SessionStore;
 
 pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let id: String = row.get(0)?;
-    let project_id: String = row.get(1)?;
+    let bench_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
     let metadata_json: Option<String> = row.get(3)?;
     let created: String = row.get(4)?;
@@ -23,7 +23,7 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
 
     Ok(Session {
         id: parse_uuid(&id)?,
-        project_id: parse_uuid(&project_id)?,
+        bench_id: parse_uuid(&bench_id)?,
         agent_id,
         metadata: parse_metadata(metadata_json.as_deref())?,
         created_at: parse_dt(&created)?,
@@ -86,11 +86,11 @@ impl SessionStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO sessions (id, project_id, agent_id, metadata_json, created_at, updated_at)
+                "INSERT INTO sessions (id, bench_id, agent_id, metadata_json, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
                 params![
                     id.to_string(),
-                    session.project_id.to_string(),
+                    session.bench_id.to_string(),
                     &session.agent_id,
                     &metadata_json,
                     &now_str
@@ -99,7 +99,7 @@ impl SessionStore for SqliteStorage {
 
             Ok(Session {
                 id,
-                project_id: session.project_id,
+                bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
                 created_at: now,
@@ -112,7 +112,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 row_to_session,
@@ -122,14 +122,14 @@ impl SessionStore for SqliteStorage {
         .await
     }
 
-    async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Session>, StorageError> {
+    async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
-                 FROM sessions WHERE project_id = ?1
+                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
+                 FROM sessions WHERE bench_id = ?1
                  ORDER BY updated_at DESC",
             )?;
-            let rows = stmt.query_map(params![project_id.to_string()], row_to_session)?;
+            let rows = stmt.query_map(params![bench_id.to_string()], row_to_session)?;
             rows.collect()
         })
         .await
@@ -142,7 +142,7 @@ impl SessionStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions WHERE agent_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -186,7 +186,7 @@ impl SessionStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, project_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
                  FROM sessions
                  WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
                    AND json_extract(metadata_json, '$.channel_origin.account') = ?2
@@ -204,37 +204,36 @@ impl SessionStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::NewProject;
-    use crate::store::ProjectStore;
+    use crate::model::NewBench;
+    use crate::store::BenchStore;
 
     use super::*;
 
-    async fn make_storage_with_project() -> (SqliteStorage, Uuid) {
+    async fn make_storage_with_bench() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let project = storage
-            .create(NewProject {
+        let bench = storage
+            .create(NewBench {
                 name: "test".into(),
                 slug: "test".into(),
-                workspace_path: None,
             })
             .await
             .unwrap();
-        (storage, project.id)
+        (storage, bench.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_session() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
         let session = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
             .await
             .unwrap();
 
-        assert_eq!(session.project_id, project_id);
+        assert_eq!(session.bench_id, bench_id);
 
         let fetched = storage.get_session(session.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, session.id);
@@ -242,11 +241,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_sessions_ordered_by_updated_at_desc() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
 
         let s1 = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
@@ -256,7 +255,7 @@ mod tests {
         storage.update_activity(s1.id).await.unwrap();
         let s2 = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
@@ -264,7 +263,7 @@ mod tests {
             .unwrap();
         storage.update_activity(s2.id).await.unwrap();
 
-        let sessions = storage.list_by_project(project_id).await.unwrap();
+        let sessions = storage.list_by_bench(bench_id).await.unwrap();
         assert_eq!(sessions.len(), 2);
         // Most-recently-updated appears first.
         assert!(sessions[0].updated_at >= sessions[1].updated_at);
@@ -272,10 +271,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_session_returns_true_then_false() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
         let session = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })
@@ -288,10 +287,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_session_stores_agent_id() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
         let session = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "my-agent".to_string(),
                 metadata: None,
             })
@@ -306,7 +305,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_session_round_trips_metadata() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
         let metadata = serde_json::json!({
             "host": "embedder",
             "labels": ["demo", "cli"]
@@ -314,7 +313,7 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "my-agent".to_string(),
                 metadata: Some(metadata.clone()),
             })
@@ -329,12 +328,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_by_agent_id_filters_and_orders() {
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
 
         // Create sessions for two different agents.
         let s1 = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
             })
@@ -342,7 +341,7 @@ mod tests {
             .unwrap();
         let _s2 = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "beta".to_string(),
                 metadata: None,
             })
@@ -350,7 +349,7 @@ mod tests {
             .unwrap();
         let s3 = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
             })
@@ -380,10 +379,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cascade_delete_removes_sessions() {
         // Deleting a session should also remove its turns via ON DELETE CASCADE.
-        let (storage, project_id) = make_storage_with_project().await;
+        let (storage, bench_id) = make_storage_with_bench().await;
         let session = storage
             .create_session(NewSession {
-                project_id,
+                bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
             })

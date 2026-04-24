@@ -20,7 +20,7 @@ use swage_gateway::{attachment, server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ProjectStore, SessionStore, Storage},
+    store::{BenchStore, SessionStore, Storage},
 };
 
 struct MockProvider;
@@ -61,7 +61,7 @@ fn test_state(db_path: &Path, workspace_root: &Path) -> (AppState, Arc<SqliteSto
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn ProjectStore>,
+        Arc::clone(&storage) as Arc<dyn BenchStore>,
         Arc::new(MockProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -128,7 +128,7 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let project_id = session.project_id;
+    let bench_id = session.bench_id;
 
     let (create_status, create_body) = post_json(
         &router,
@@ -190,16 +190,16 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
         &router,
         &format!("/api/materials/{material_id}/promote"),
         json!({
-            "scope_kind": "project",
-            "project_id": project_id,
+            "scope_kind": "bench",
+            "bench_id": bench_id,
             "relative_path": "shared/draft.md"
         }),
     )
     .await;
     assert_eq!(promote_status, StatusCode::OK);
-    assert_eq!(promote_body["scope_kind"], "project");
+    assert_eq!(promote_body["scope_kind"], "bench");
     assert!(promote_body["session_id"].is_null());
-    assert_eq!(promote_body["project_id"], project_id.to_string());
+    assert_eq!(promote_body["bench_id"], bench_id.to_string());
     let promoted_path = promote_body["absolute_path"].as_str().unwrap();
     assert!(!Path::new(restored_path).exists());
     assert_eq!(
@@ -217,13 +217,13 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
             .is_empty()
     );
 
-    let (project_list_status, project_list_body) =
-        get_json(&router, &format!("/api/projects/{project_id}/materials")).await;
-    assert_eq!(project_list_status, StatusCode::OK);
-    let project_materials = project_list_body["materials"].as_array().unwrap();
-    assert_eq!(project_materials.len(), 1);
-    assert_eq!(project_materials[0]["id"], material_id);
-    assert_eq!(project_materials[0]["relative_path"], "shared/draft.md");
+    let (bench_list_status, bench_list_body) =
+        get_json(&router, &format!("/api/benches/{bench_id}/materials")).await;
+    assert_eq!(bench_list_status, StatusCode::OK);
+    let bench_materials = bench_list_body["materials"].as_array().unwrap();
+    assert_eq!(bench_materials.len(), 1);
+    assert_eq!(bench_materials[0]["id"], material_id);
+    assert_eq!(bench_materials[0]["relative_path"], "shared/draft.md");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -285,7 +285,7 @@ async fn attachment_ingested_and_manual_materials_share_one_surface() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let project_id = session.project_id;
+    let bench_id = session.bench_id;
 
     let (manual_status, manual_body) = post_json(
         &router,
@@ -336,13 +336,8 @@ async fn attachment_ingested_and_manual_materials_share_one_surface() {
                 .starts_with("attachments/")
     }));
 
-    let (project_list_status, project_list_body) =
-        get_json(&router, &format!("/api/projects/{project_id}/materials")).await;
-    assert_eq!(project_list_status, StatusCode::OK);
-    assert!(
-        project_list_body["materials"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    let (bench_list_status, bench_list_body) =
+        get_json(&router, &format!("/api/benches/{bench_id}/materials")).await;
+    assert_eq!(bench_list_status, StatusCode::OK);
+    assert!(bench_list_body["materials"].as_array().unwrap().is_empty());
 }

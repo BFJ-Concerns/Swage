@@ -16,7 +16,7 @@ use crate::state::AppState;
 const WORKSPACE_EXTENSION_ROOT: &str = ".swage/extensions";
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CreateProjectExtensionRequest {
+pub struct CreateBenchExtensionRequest {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
@@ -32,7 +32,7 @@ pub struct CreateProjectExtensionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct UpdateProjectExtensionRequest {
+pub struct UpdateBenchExtensionRequest {
     pub display_name: Option<String>,
     pub description: String,
     #[serde(default)]
@@ -47,7 +47,7 @@ pub struct UpdateProjectExtensionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectExtensionResponse {
+pub struct BenchExtensionResponse {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
@@ -61,22 +61,22 @@ pub struct ProjectExtensionResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ProjectExtensionListResponse {
-    pub extensions: Vec<ProjectExtensionResponse>,
+pub struct BenchExtensionListResponse {
+    pub extensions: Vec<BenchExtensionResponse>,
 }
 
-pub async fn list_project_extensions(
+pub async fn list_bench_extensions(
     state: &AppState,
-    project_id: Uuid,
-) -> Result<ProjectExtensionListResponse, GatewayError> {
-    let project = state
-        .project_store
-        .get(project_id)
+    bench_id: Uuid,
+) -> Result<BenchExtensionListResponse, GatewayError> {
+    let bench = state
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
 
-    let managed_root = managed_extension_root(&project.slug)?;
-    let workspace_root = workspace_extension_root(project.workspace_path.as_deref());
+    let managed_root = managed_extension_root(&bench.slug)?;
+    let workspace_roots = workspace_extension_roots(state, bench_id).await?;
 
     let mut extensions = Vec::new();
     extensions.extend(scan_extension_root_path(
@@ -84,26 +84,28 @@ pub async fn list_project_extensions(
         "active",
         "managed",
     )?);
-    extensions.extend(scan_extension_root(
-        &workspace_root,
-        "approval_required",
-        "workspace_candidate",
-    )?);
+    for workspace_root in workspace_roots {
+        extensions.extend(scan_extension_root_path(
+            &workspace_root,
+            "approval_required",
+            "workspace_candidate",
+        )?);
+    }
     extensions.sort_by(|left, right| left.name.cmp(&right.name));
 
-    Ok(ProjectExtensionListResponse { extensions })
+    Ok(BenchExtensionListResponse { extensions })
 }
 
-pub async fn create_project_extension(
+pub async fn create_bench_extension(
     state: &AppState,
-    project_id: Uuid,
-    request: CreateProjectExtensionRequest,
-) -> Result<ProjectExtensionResponse, GatewayError> {
-    let project = state
-        .project_store
-        .get(project_id)
+    bench_id: Uuid,
+    request: CreateBenchExtensionRequest,
+) -> Result<BenchExtensionResponse, GatewayError> {
+    let bench = state
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
     let name = validate_extension_name(&request.name)?;
     validate_extension_body(
         &request.description,
@@ -114,7 +116,7 @@ pub async fn create_project_extension(
         request.tool.as_ref(),
     )?;
 
-    let extension_dir = managed_extension_root(&project.slug)?.join(&name);
+    let extension_dir = managed_extension_root(&bench.slug)?.join(&name);
     write_capability_bundle(
         &extension_dir,
         &name,
@@ -132,17 +134,17 @@ pub async fn create_project_extension(
     read_extension_response(&extension_dir, &name, "active".into(), "managed".into())
 }
 
-pub async fn update_project_extension(
+pub async fn update_bench_extension(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     extension_name: &str,
-    request: UpdateProjectExtensionRequest,
-) -> Result<ProjectExtensionResponse, GatewayError> {
-    let project = state
-        .project_store
-        .get(project_id)
+    request: UpdateBenchExtensionRequest,
+) -> Result<BenchExtensionResponse, GatewayError> {
+    let bench = state
+        .bench_store
+        .get(bench_id)
         .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
     let name = validate_extension_name(extension_name)?;
     validate_extension_body(
         &request.description,
@@ -153,7 +155,7 @@ pub async fn update_project_extension(
         request.tool.as_ref(),
     )?;
 
-    let extension_dir = managed_extension_root(&project.slug)?.join(&name);
+    let extension_dir = managed_extension_root(&bench.slug)?.join(&name);
     write_capability_bundle(
         &extension_dir,
         &name,
@@ -173,64 +175,76 @@ pub async fn update_project_extension(
 
 pub async fn approve_workspace_extension(
     state: &AppState,
-    project_id: Uuid,
+    bench_id: Uuid,
     extension_name: &str,
-) -> Result<ProjectExtensionResponse, GatewayError> {
-    let project = state
-        .project_store
-        .get(project_id)
-        .await?
-        .ok_or(GatewayError::ProjectNotFound { id: project_id })?;
+) -> Result<BenchExtensionResponse, GatewayError> {
     let name = validate_extension_name(extension_name)?;
-    let workspace_root = workspace_extension_root(project.workspace_path.as_deref()).ok_or(
-        GatewayError::ValidationError(
-            "project has no workspace path for workspace extension approval".into(),
-        ),
-    )?;
+    let workspace_roots = workspace_extension_roots(state, bench_id).await?;
+    let matching_sources = workspace_roots
+        .into_iter()
+        .map(|root| root.join(&name))
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    let source_dir = match matching_sources.as_slice() {
+        [source] => source,
+        [] => {
+            return Err(GatewayError::ValidationError(format!(
+                "workspace extension '{name}' is not available on any attached workspace"
+            )));
+        }
+        _ => {
+            return Err(GatewayError::ValidationError(format!(
+                "workspace extension '{name}' exists in multiple attached workspaces; detach or rename one before approving"
+            )));
+        }
+    };
 
-    let source_dir = workspace_root.join(&name);
+    let bench = state
+        .bench_store
+        .get(bench_id)
+        .await?
+        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
     ensure_skill_dir_exists(&source_dir, &name).await?;
-    let target_dir = managed_extension_root(&project.slug)?.join(&name);
+    let target_dir = managed_extension_root(&bench.slug)?.join(&name);
     copy_directory_recursive(&source_dir, &target_dir).await?;
 
     read_extension_response(&target_dir, &name, "active".into(), "managed".into())
 }
 
-fn managed_extension_root(project_slug: &str) -> Result<PathBuf, GatewayError> {
+fn managed_extension_root(bench_slug: &str) -> Result<PathBuf, GatewayError> {
     Ok(resolve_root()
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("projects")
-        .join(project_slug)
+        .join("benches")
+        .join(bench_slug)
         .join("skills"))
 }
 
-fn workspace_extension_root(workspace_path: Option<&str>) -> Option<PathBuf> {
-    workspace_path.map(|path| PathBuf::from(path).join(WORKSPACE_EXTENSION_ROOT))
-}
-
-fn scan_extension_root(
-    root: &Option<PathBuf>,
-    status: &str,
-    source_kind: &str,
-) -> Result<Vec<ProjectExtensionResponse>, GatewayError> {
-    let Some(root) = root else {
-        return Ok(Vec::new());
-    };
-    scan_extension_root_path(root, status, source_kind)
+async fn workspace_extension_roots(
+    state: &AppState,
+    bench_id: Uuid,
+) -> Result<Vec<PathBuf>, GatewayError> {
+    let workspaces = state
+        .storage
+        .list_workspace_attachments_by_bench(bench_id)
+        .await?;
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| PathBuf::from(workspace.path).join(WORKSPACE_EXTENSION_ROOT))
+        .collect())
 }
 
 fn scan_extension_root_path(
     root: &Path,
     status: &str,
     source_kind: &str,
-) -> Result<Vec<ProjectExtensionResponse>, GatewayError> {
-    let (bundles, warnings) = discover_capability_bundles(root, HierarchyLevel::Project);
+) -> Result<Vec<BenchExtensionResponse>, GatewayError> {
+    let (bundles, warnings) = discover_capability_bundles(root, HierarchyLevel::Bench);
     for warning in warnings {
-        tracing::warn!(path = %warning.path.display(), reason = %warning.reason, "skipping invalid project capability bundle");
+        tracing::warn!(path = %warning.path.display(), reason = %warning.reason, "skipping invalid bench capability bundle");
     }
     Ok(bundles
         .into_iter()
-        .map(|bundle| ProjectExtensionResponse {
+        .map(|bundle| BenchExtensionResponse {
             name: bundle.name,
             display_name: bundle.display_name,
             description: bundle.description,
@@ -250,10 +264,9 @@ fn read_extension_response(
     extension_name: &str,
     status: String,
     source_kind: String,
-) -> Result<ProjectExtensionResponse, GatewayError> {
-    let capability =
-        read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Project)?;
-    Ok(ProjectExtensionResponse {
+) -> Result<BenchExtensionResponse, GatewayError> {
+    let capability = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Bench)?;
+    Ok(BenchExtensionResponse {
         name: capability.name,
         display_name: capability.display_name,
         description: capability.description,
@@ -281,7 +294,7 @@ async fn ensure_skill_dir_exists(
             "workspace extension '{extension_name}' is not a directory"
         )));
     }
-    let _ = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Project)?;
+    let _ = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Bench)?;
     Ok(())
 }
 

@@ -564,24 +564,9 @@ mod tests {
     use swage_storage::SqliteStorage;
     use swage_tool::context::MockToolContext;
 
-    async fn test_secret_manager() -> crate::secret::SecretManager {
+    fn test_secret_manager() -> crate::secret::SecretManager {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = crate::secret::SecretManager::new(storage.clone());
-        manager
-            .create_secret(crate::secret::CreateSecretRequest {
-                name: "remote token".into(),
-                material_kind: "node_credential".into(),
-                owner_kind: "service".into(),
-                backend_kind: "managed".into(),
-                scope_kind: "gateway".into(),
-                scope_id: None,
-                metadata: None,
-                value: Some("secret".into()),
-                external_reference: None,
-            })
-            .await
-            .unwrap();
-        manager
+        crate::secret::SecretManager::new(storage.clone())
     }
 
     fn registered_host(host_id: &str, kind: ExecutionHostKind) -> RegisteredExecutionHost {
@@ -668,7 +653,7 @@ mod tests {
         assert_eq!(selected.host_id, "docker-a");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn execute_on_remote_host_rejects_unadvertised_tool_before_network_call() {
         let host = RegisteredExecutionHost {
             host_id: "remote-a".to_string(),
@@ -692,7 +677,7 @@ mod tests {
             turn_id: None,
         };
 
-        let secret_manager = test_secret_manager().await;
+        let secret_manager = test_secret_manager();
         let error = execute_on_remote_host(
             &secret_manager,
             &host,
@@ -705,7 +690,7 @@ mod tests {
         assert!(error.to_string().contains("does not expose tool 'shell'"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn execute_on_remote_host_rejects_context_outside_workspace_before_network_call() {
         let host = RegisteredExecutionHost {
             host_id: "remote-a".to_string(),
@@ -729,7 +714,7 @@ mod tests {
             turn_id: None,
         };
 
-        let secret_manager = test_secret_manager().await;
+        let secret_manager = test_secret_manager();
         let error = execute_on_remote_host(
             &secret_manager,
             &host,

@@ -20,8 +20,8 @@ use swage_provider::LlmProvider;
 use swage_safety::LeakDetector;
 use swage_storage::sqlite::SqliteStorage;
 use swage_storage::{
-    MessageStore, NewSession, NewThread, NewTurn, Project, ProjectStore, Session, SessionStore,
-    Thread, ThreadState, ThreadStore, TurnState, TurnStore,
+    Bench, BenchStore, MessageStore, NewSession, NewThread, NewTurn, Session, SessionStore, Thread,
+    ThreadState, ThreadStore, TurnState, TurnStore,
 };
 
 struct StreamingProvider {
@@ -99,14 +99,14 @@ impl Hook for AppendAfterResponseHook {
     }
 }
 
-async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Project, Session, Thread) {
+async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Bench, Session, Thread) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let project = ProjectStore::get_or_create_default(storage.as_ref())
+    let bench = BenchStore::get_or_create_default(storage.as_ref())
         .await
-        .expect("default project");
+        .expect("default bench");
     let session = storage
         .create_session(NewSession {
-            project_id: project.id,
+            bench_id: bench.id,
             agent_id: agent_id.to_string(),
             metadata: None,
         })
@@ -121,11 +121,11 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Project, Ses
     )
     .await
     .expect("thread");
-    (storage, project, session, thread)
+    (storage, bench, session, thread)
 }
 
 fn test_request(
-    project_id: Uuid,
+    bench_id: Uuid,
     session_id: Uuid,
     thread_id: Uuid,
     user_message: &str,
@@ -136,7 +136,7 @@ fn test_request(
             session_id,
             thread_id,
             turn_id: Uuid::new_v4(),
-            project_id: Some(project_id),
+            bench_id: Some(bench_id),
         },
         user_message: user_message.to_string(),
         assembled_context: vec![ChatMessage::new(Role::User, user_message)],
@@ -156,7 +156,7 @@ fn drain_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_persists_completed_response_and_raw_input() {
-    let (storage, project, session, thread) = setup_conversation("agent-a").await;
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "hello ".into(),
@@ -182,7 +182,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(project.id, session.id, thread.id, "Hello agent", None),
+            test_request(bench.id, session.id, thread.id, "Hello agent", None),
             event_tx,
         )
         .await
@@ -237,7 +237,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_reuses_existing_pending_turn() {
-    let (storage, project, session, thread) = setup_conversation("agent-a").await;
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
     let pending_turn = storage
         .create_turn(NewTurn {
             thread_id: thread.id,
@@ -271,7 +271,7 @@ async fn streaming_turn_reuses_existing_pending_turn() {
     let outbound = agent
         .process_turn_streaming(
             test_request(
-                project.id,
+                bench.id,
                 session.id,
                 thread.id,
                 "Queued input",
@@ -295,7 +295,7 @@ async fn streaming_turn_reuses_existing_pending_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
-    let (storage, project, session, thread) = setup_conversation("agent-a").await;
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
     let raw_secret = "sk-proj-abc123def456ghi789jklmnopqrstuvwxyz1234567890ABCDEFGHIJ";
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
@@ -329,7 +329,7 @@ async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(project.id, session.id, thread.id, "Check output", None),
+            test_request(bench.id, session.id, thread.id, "Check output", None),
             event_tx,
         )
         .await
@@ -349,7 +349,7 @@ async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_schema_retry_reuses_streaming_runtime() {
-    let (storage, project, session, thread) = setup_conversation("agent-a").await;
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![
         vec![
             StreamChunk::Delta {
@@ -397,7 +397,7 @@ async fn output_schema_retry_reuses_streaming_runtime() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(project.id, session.id, thread.id, "Return JSON", None),
+            test_request(bench.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
