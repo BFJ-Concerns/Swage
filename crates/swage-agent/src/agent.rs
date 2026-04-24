@@ -468,9 +468,6 @@ impl Agent {
                     ..llm_request.clone()
                 };
 
-                // TODO Extract shared stream-consumption helper
-                // This retry path reimplements the same cancellation, token accounting, delta forwarding, and provider-error handling as the main streaming loop above, so a shared helper would remove duplication and keep the retry behaviour aligned with the primary path.
-                // ---
                 // Clear accumulated text and re-enter the streaming loop for a fresh response.
                 accumulated.clear();
 
