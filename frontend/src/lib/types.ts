@@ -262,6 +262,49 @@ export interface MaterialRecord {
   archived_at: string | null;
 }
 
+export interface AttachmentRecord {
+  id: string;
+  scope_kind: MaterialScopeKind;
+  session_id: string | null;
+  bench_id: string | null;
+  kind: string;
+  status: string;
+  filename: string;
+  mime_type: string;
+  byte_count: number;
+  ingested_markdown: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BackgroundJobRecord {
+  id: string;
+  kind: string;
+  state: string;
+  attachment_id: string | null;
+  result: Record<string, unknown> | null;
+  error_message: string | null;
+  attempt_count: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface CreateAttachmentRequest {
+  scope_kind: MaterialScopeKind;
+  session_id?: string;
+  bench_id?: string;
+  filename: string;
+  mime_type: string;
+  content_base64: string;
+}
+
+export interface AttachmentQueuedResponse {
+  attachment: AttachmentRecord;
+  job: BackgroundJobRecord;
+}
+
 export interface CreateMaterialRequest {
   scope_kind: MaterialScopeKind;
   session_id?: string;
@@ -504,6 +547,18 @@ export interface ScheduledJobSummary {
   last_run_at: string | null;
 }
 
+export type ScheduleSpecRequest =
+  | { kind: "one_shot"; at: string }
+  | { kind: "interval"; every: string }
+  | { kind: "cron"; cron: string };
+
+export interface CreateScheduledJobRequest {
+  session_id: string;
+  message: string;
+  schedule: ScheduleSpecRequest;
+  routing?: Record<string, unknown>;
+}
+
 export interface HeartbeatSummary {
   id: string;
   session_id: string;
@@ -512,6 +567,19 @@ export interface HeartbeatSummary {
   interval_seconds: number;
   next_beat_at: string | null;
   last_beat_at: string | null;
+}
+
+export interface CreateHeartbeatRequest {
+  session_id: string;
+  message: string;
+  interval_seconds: number;
+}
+
+export interface VoiceCapabilitiesResponse {
+  transcription: boolean;
+  synthesis: boolean;
+  default_voice: string | null;
+  supported_voices: string[];
 }
 
 export interface ChannelStatusSummary {

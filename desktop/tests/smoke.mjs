@@ -135,6 +135,67 @@ function createMockGateway() {
       return;
     }
 
+    if (request.method === "GET" && pathname === `/api/benches/${bench.id}/materials`) {
+      writeJson(response, 200, { materials: [] });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/shared-objects") {
+      writeJson(response, 200, { objects: [] });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/operator/overview") {
+      writeJson(response, 200, {
+        gateway: {
+          status: "running",
+          health: "healthy",
+          shutdown_requested: false,
+          seconds_since_activity: 0,
+          active_turn_count: 0,
+          active_connection_count: 1,
+        },
+        sessions: listConversationSummaries().map((conversation) => ({
+          ...conversation,
+          bench_id: bench.id,
+          bench_name: bench.name,
+          has_active_connection: false,
+          has_running_turn: false,
+        })),
+        approvals: [],
+        scheduled_jobs: { jobs: [] },
+        heartbeats: { heartbeats: [] },
+        channels: { channels: [] },
+        nodes: [],
+      });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/voice/capabilities") {
+      writeJson(response, 200, {
+        transcription: false,
+        synthesis: false,
+        default_voice: null,
+        supported_voices: [],
+      });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/recovery/export") {
+      writeJson(response, 200, {
+        version: 1,
+        benches: [bench],
+        workspaces: [],
+        sessions: [],
+        secrets: [],
+        channel_links: [],
+        execution_hosts: [],
+        scheduled_jobs: [],
+        heartbeats: [],
+      });
+      return;
+    }
+
     if (request.method === "PUT" && pathname === `/api/benches/${bench.id}/lens-runtime`) {
       let body = "";
       request.setEncoding("utf8");
@@ -189,6 +250,14 @@ function createMockGateway() {
       }
 
       writeJson(response, 200, conversation);
+      return;
+    }
+
+    if (
+      request.method === "GET"
+      && pathname.match(/^\/api\/sessions\/conv-\d+\/materials$/)
+    ) {
+      writeJson(response, 200, { materials: [] });
       return;
     }
 
@@ -320,7 +389,9 @@ function createMockGateway() {
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
-  await page.locator("textarea").fill("Hello from smoke");
+  await page
+    .getByPlaceholder("Send a message… (Shift+Enter for a new line)")
+    .fill("Hello from smoke");
   await page.getByRole("button", { name: /send/i }).click();
   await page.getByText("Desktop shell echoed: Hello from smoke").waitFor();
 
@@ -344,13 +415,17 @@ async function runBrowserSmoke(baseUrl) {
 }
 
 async function runElectronSmoke(baseUrl) {
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    console.log("electron smoke: skipped (no display server)");
+    return;
+  }
+
   console.log("electron smoke: start");
   const electronApp = await electron.launch({
     args: [desktopMain],
     cwd: repoRoot,
     env: {
       ...process.env,
-      SWAGE_DESKTOP_HEADLESS: "1",
       SWAGE_DESKTOP_TARGET_URL: baseUrl,
     },
   });

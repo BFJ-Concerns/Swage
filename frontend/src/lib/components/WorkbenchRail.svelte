@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { createMaterial, listBenchMaterials, listSessionMaterials } from "../api/materials";
+  import { listBenchMaterials, listSessionMaterials } from "../api/materials";
   import { listSharedReferences } from "../api/builder";
   import { fetchOperatorOverview } from "../api/operator";
+  import WorkbenchOperations from "./WorkbenchOperations.svelte";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type {
     LensSurface,
@@ -34,18 +35,9 @@
   let isLoading = $state(false);
   let loadError = $state<string | null>(null);
 
-  let noteTitle = $state("");
-  let noteContent = $state("");
-  let noteScope = $state<"session" | "bench">("session");
-  let saveError = $state<string | null>(null);
-  let saveNotice = $state<string | null>(null);
-  let isSaving = $state(false);
   let lastLoadKey = "";
 
   const materialCount = $derived(benchMaterials.length + sessionMaterials.length);
-  const effectiveNoteScope = $derived(
-    noteScope === "session" && sessionId ? "session" : "bench",
-  );
   const surfaceLabel = $derived(
     activeSurface === "builder"
       ? "Builder workbench"
@@ -62,21 +54,6 @@
     lastLoadKey = nextKey;
     void refreshRail();
   });
-
-  function slugify(value: string): string {
-    return value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-  }
-
-  function buildRelativePath(title: string, scope: "session" | "bench"): string {
-    const base = slugify(title) || "note";
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-    return scope === "session"
-      ? `session-notes/${stamp}-${base}.md`
-      : `shared/${stamp}-${base}.md`;
-  }
 
   async function refreshRail(): Promise<void> {
     if (!benchId) {
@@ -112,45 +89,6 @@
     }
   }
 
-  async function saveMaterialNote(): Promise<void> {
-    if (!benchId) return;
-
-    const title = noteTitle.trim();
-    const content = noteContent.trim();
-    if (!title || !content) {
-      saveError = "Material title and content are both required.";
-      return;
-    }
-
-    saveError = null;
-    saveNotice = null;
-    isSaving = true;
-
-    try {
-      await createMaterial({
-        scope_kind: effectiveNoteScope,
-        session_id: effectiveNoteScope === "session" && sessionId ? sessionId : undefined,
-        bench_id: effectiveNoteScope === "bench" ? benchId : undefined,
-        title,
-        relative_path: buildRelativePath(title, effectiveNoteScope),
-        mime_type: "text/markdown",
-        content_text: content,
-      });
-
-      noteTitle = "";
-      noteContent = "";
-      saveNotice =
-        effectiveNoteScope === "session"
-          ? "Saved a session material beside the active conversation."
-          : "Saved a bench material for the wider workspace.";
-      await refreshRail();
-    } catch (error) {
-      saveError =
-        error instanceof Error ? error.message : "Failed to save the material.";
-    } finally {
-      isSaving = false;
-    }
-  }
 </script>
 
 <aside class="workbench-rail" aria-label="Workbench rail">
@@ -170,12 +108,6 @@
 
   {#if loadError}
     <p class="feedback error">{loadError}</p>
-  {/if}
-  {#if saveError}
-    <p class="feedback error">{saveError}</p>
-  {/if}
-  {#if saveNotice}
-    <p class="feedback success">{saveNotice}</p>
   {/if}
 
   <section class="rail-metrics">
@@ -206,42 +138,7 @@
     </section>
   {/if}
 
-  <section class="rail-panel">
-    <div class="panel-heading">
-      <h3>Capture material</h3>
-      <span>{effectiveNoteScope}</span>
-    </div>
-    <p class="panel-copy">
-      Drop a note into the active conversation or promote it straight to the
-      wider bench workspace.
-    </p>
-    <div class="scope-toggle" role="tablist" aria-label="Material scope">
-      <button
-        class:active={effectiveNoteScope === "session"}
-        disabled={!sessionId}
-        onclick={() => (noteScope = "session")}
-      >
-        Session
-      </button>
-      <button
-        class:active={effectiveNoteScope === "bench"}
-        onclick={() => (noteScope = "bench")}
-      >
-        Bench
-      </button>
-    </div>
-    <label>
-      <span>Title</span>
-      <input bind:value={noteTitle} placeholder="Deployment checklist" />
-    </label>
-    <label>
-      <span>Content</span>
-      <textarea bind:value={noteContent} rows="5" placeholder="Capture a constraint, checklist, or bench note."></textarea>
-    </label>
-    <button class="primary" onclick={saveMaterialNote} disabled={isSaving || !benchId}>
-      {isSaving ? "Saving note…" : "Save material"}
-    </button>
-  </section>
+  <WorkbenchOperations {benchId} {sessionId} onChanged={refreshRail} />
 
   <section class="rail-panel">
     <div class="panel-heading">
@@ -417,7 +314,6 @@
   }
 
   .rail-copy,
-  .panel-copy,
   .muted-note,
   .item-card p,
   .signal-row span,
@@ -427,9 +323,7 @@
     line-height: 1.45;
   }
 
-  .refresh-btn,
-  .scope-toggle button,
-  .primary {
+  .refresh-btn {
     border-radius: 999px;
     border: 1px solid rgba(120, 53, 15, 0.16);
     background: rgba(255, 255, 255, 0.72);
@@ -440,16 +334,7 @@
       border-color 140ms ease;
   }
 
-  .primary {
-    background: linear-gradient(135deg, #8a3b12, #b45309);
-    border-color: rgba(146, 64, 14, 0.32);
-    color: #fff9f1;
-    font-weight: 700;
-  }
-
-  .refresh-btn:hover,
-  .scope-toggle button:hover,
-  .primary:hover {
+  .refresh-btn:hover {
     transform: translateY(-1px);
   }
 
@@ -523,39 +408,6 @@
     color: #9a3412;
   }
 
-  .scope-toggle {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-  }
-
-  .scope-toggle button.active {
-    background: rgba(180, 83, 9, 0.14);
-    border-color: rgba(146, 64, 14, 0.28);
-    color: #7c2d12;
-    font-weight: 700;
-  }
-
-  label {
-    display: grid;
-    gap: 6px;
-  }
-
-  label span {
-    font-size: 0.82rem;
-    font-weight: 700;
-    color: #6b3f1d;
-  }
-
-  input,
-  textarea {
-    border-radius: 16px;
-    border: 1px solid rgba(120, 53, 15, 0.14);
-    background: rgba(255, 255, 255, 0.76);
-    padding: 12px 14px;
-    resize: vertical;
-  }
-
   .attention-callout {
     display: grid;
     gap: 4px;
@@ -573,11 +425,6 @@
   .feedback.error {
     background: rgba(254, 226, 226, 0.76);
     color: #991b1b;
-  }
-
-  .feedback.success {
-    background: rgba(220, 252, 231, 0.8);
-    color: #166534;
   }
 
   .mono {
