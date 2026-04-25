@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -21,17 +22,37 @@ if (isHeadlessShell) {
 }
 
 async function waitForGateway(url, timeoutMs = 30_000) {
+  const healthUrl = new URL("/api/health", url);
   const startedAt = Date.now();
+  let lastError = null;
+
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(new URL("/api/health", url));
-      if (response.ok) return;
-    } catch {
-      // Gateway not ready yet.
+      if (await isGatewayHealthy(healthUrl)) return;
+    } catch (error) {
+      lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  throw new Error(`Timed out waiting for gateway at ${url}`);
+
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
+  throw new Error(`Timed out waiting for gateway at ${url}${detail}`);
+}
+
+function isGatewayHealthy(healthUrl) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(healthUrl, (response) => {
+      response.resume();
+      response.on("end", () => {
+        resolve(response.statusCode >= 200 && response.statusCode < 300);
+      });
+    });
+
+    request.setTimeout(1_000, () => {
+      request.destroy(new Error(`Timed out probing ${healthUrl.href}`));
+    });
+    request.on("error", reject);
+  });
 }
 
 function launchManagedGateway() {
@@ -77,8 +98,6 @@ function launchManagedGateway() {
 
 async function createWindow() {
   gatewayProcess = launchManagedGateway();
-  await waitForGateway(targetUrl);
-
   const win = new BrowserWindow({
     width: 1440,
     height: 940,
@@ -105,6 +124,7 @@ async function createWindow() {
     }
   });
 
+  await waitForGateway(targetUrl);
   await win.loadURL(targetUrl);
   return win;
 }
