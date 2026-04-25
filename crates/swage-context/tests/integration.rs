@@ -86,7 +86,7 @@ fn default_assembly_produces_era_01_equivalent_output() {
     // Load prompt rules from hierarchy
     let bench_path = root.path().join("benches/test");
     let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path().as_ref()),
+        (swage_config::HierarchyLevel::Global, root.path()),
         (swage_config::HierarchyLevel::Bench, bench_path.as_path()),
     ];
 
@@ -343,7 +343,7 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     let bench_path = root.path().join("benches/test");
     let agent_path = root.path().join("benches/test/agents/default");
     let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path().as_ref()),
+        (swage_config::HierarchyLevel::Global, root.path()),
         (swage_config::HierarchyLevel::Bench, bench_path.as_path()),
         (swage_config::HierarchyLevel::Agent, agent_path.as_path()),
     ];

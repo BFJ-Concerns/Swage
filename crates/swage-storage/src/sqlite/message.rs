@@ -271,7 +271,7 @@ mod tests {
         NewMessage {
             thread_id,
             turn_id: None,
-            role: role.into(),
+            role,
             content: content.into(),
             position,
             agent_id: "test-agent".to_string(),
@@ -282,7 +282,7 @@ mod tests {
         AppendMessage {
             thread_id,
             turn_id: None,
-            role: role.into(),
+            role,
             content: content.into(),
             agent_id: "test-agent".to_string(),
         }

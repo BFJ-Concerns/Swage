@@ -69,7 +69,7 @@ pub trait Sandbox: Send + Sync {
     /// Sends a shutdown signal, waits for acknowledgement within the grace
     /// period, then forcefully terminates if needed. Idempotent — succeeds
     /// silently if the agent has already terminated.
-    async fn shutdown(&mut self) -> Result<(), SandboxError>;
+    async fn shutdown(&self) -> Result<(), SandboxError>;
 }
 
 // ---------------------------------------------------------------------------

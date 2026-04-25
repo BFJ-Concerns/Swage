@@ -62,7 +62,6 @@ async fn start_test_server() -> (Router, SocketAddr) {
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     let router = build_router(state);
 

@@ -288,7 +288,7 @@ impl HookRegistry {
                 HookOutcome::Continue
             }
             FailureMode::FailClosed => {
-                let reason = format!("hook '{}' {}", hook_name, cause);
+                let reason = format!("hook '{hook_name}' {cause}");
                 debug!(hook = %hook_name, cause = %cause, "FailClosed: blocking after failure");
                 HookOutcome::Block(reason)
             }

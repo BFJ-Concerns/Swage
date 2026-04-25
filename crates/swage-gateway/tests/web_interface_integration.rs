@@ -37,7 +37,6 @@ fn make_router() -> Router {
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     build_router(state)
 }

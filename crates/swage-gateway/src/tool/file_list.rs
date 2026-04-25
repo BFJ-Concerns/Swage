@@ -166,8 +166,8 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.contains("subdir"), "got: {}", output);
-        assert!(output.contains("file.txt"), "got: {}", output);
+        assert!(output.contains("subdir"), "got: {output}");
+        assert!(output.contains("file.txt"), "got: {output}");
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod tests {
             .execute(json!({ "path": "../../etc" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(err.to_string().contains("outside"), "got: {err}");
     }
 
     #[tokio::test]
@@ -230,8 +230,7 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string().contains("not found") || err.to_string().contains("No such"),
-            "got: {}",
-            err
+            "got: {err}"
         );
     }
 
@@ -243,6 +242,6 @@ mod tests {
             .execute(json!({ "path": "file.txt" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Not a directory"), "got: {}", err);
+        assert!(err.to_string().contains("Not a directory"), "got: {err}");
     }
 }

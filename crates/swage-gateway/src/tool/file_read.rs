@@ -142,7 +142,7 @@ mod tests {
             .execute(json!({ "path": "../../../etc/passwd" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(err.to_string().contains("outside"), "got: {err}");
     }
 
     #[tokio::test]
@@ -154,8 +154,7 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string().contains("not found") || err.to_string().contains("No such"),
-            "got: {}",
-            err
+            "got: {err}"
         );
     }
 
@@ -168,7 +167,7 @@ mod tests {
             .execute(json!({ "path": "data.bin" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("binary"), "got: {}", err);
+        assert!(err.to_string().contains("binary"), "got: {err}");
     }
 
     #[tokio::test]

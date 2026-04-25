@@ -178,7 +178,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(err.to_string().contains("outside"), "got: {err}");
     }
 
     #[cfg(unix)]
@@ -198,7 +198,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(err.to_string().contains("outside"), "got: {err}");
         assert!(!outside.path().join("escape.txt").exists());
     }
 
@@ -210,7 +210,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("path"), "got: {}", err);
+        assert!(err.to_string().contains("path"), "got: {err}");
     }
 
     #[tokio::test]
@@ -221,6 +221,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("content"), "got: {}", err);
+        assert!(err.to_string().contains("content"), "got: {err}");
     }
 }

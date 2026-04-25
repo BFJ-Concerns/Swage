@@ -439,7 +439,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                             let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
-                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                    if ws_sink.send(Message::Text(json)).await.is_err() {
                                         // Client disconnected — stop forwarding.
                                         break;
                                     }
@@ -468,7 +468,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
                                     // Attempt the send; ignore the result for broadcast events.
-                                    let _ = ws_sink.send(Message::Text(json.into())).await;
+                                    let _ = ws_sink.send(Message::Text(json)).await;
                                     if is_shutdown {
                                         // Server is going down — close after delivering the event.
                                         break;
@@ -1072,6 +1072,8 @@ fn classify_gateway_error(err: &swage_core::GatewayError) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use std::{collections::HashMap, sync::Arc};
 
     use tokio::sync::Mutex;
@@ -1503,6 +1505,8 @@ mod tests {
     // Skill dispatch tests [5cpd]
     // -----------------------------------------------------------------------
 
+    // These tests mutate SWAGE_HOME and then exercise async skill discovery.
+    // Hold the process-env lock across awaits to keep concurrent tests isolated.
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
@@ -1668,7 +1672,6 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
@@ -1726,7 +1729,6 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,

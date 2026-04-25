@@ -210,7 +210,7 @@ mod tests {
                     "error message should contain provider error, got: {message}"
                 );
             }
-            other => panic!("expected IpcError, got {:?}", other),
+            other => panic!("expected IpcError, got {other:?}"),
         }
     }
 

@@ -13,7 +13,6 @@ use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
-use swage_sandbox::Sandbox;
 use swage_storage::store::{BenchStore, Storage};
 
 use crate::channel_gateway::ChannelOrigin;
@@ -51,12 +50,6 @@ pub struct AppState {
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
-    /// Sandboxed agent process for isolated tool execution.
-    ///
-    /// `None` when sandbox is disabled (config.sandbox.enabled = false) or when
-    /// bubblewrap is not available on the host. Tool calls fall back to the normal
-    /// dispatch path in either case.
-    pub sandbox: Option<Arc<dyn Sandbox>>,
     /// Records the timestamp of the last significant gateway activity.
     ///
     /// Used by the idle lifecycle monitor to trigger automatic shutdown when
@@ -114,7 +107,6 @@ impl AppState {
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
-        sandbox: Option<Arc<dyn Sandbox>>,
         hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
@@ -131,7 +123,6 @@ impl AppState {
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(tool_dispatcher),
-            sandbox,
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
@@ -156,38 +147,12 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use serde_json::Value;
     use swage_agent::approval::ApprovalDecisionValue;
-    use swage_core::SandboxError;
-    use swage_sandbox::{Sandbox, ToolCallResult};
 
     use super::*;
     use crate::turn::tests::{MockProvider, MockStorage};
 
-    // Minimal no-op sandbox for testing AppState field construction.
-    struct NoopSandbox;
-
-    #[async_trait]
-    impl Sandbox for NoopSandbox {
-        async fn spawn_agent(&mut self) -> Result<(), SandboxError> {
-            Ok(())
-        }
-
-        async fn execute_tool(
-            &self,
-            _name: &str,
-            _params: Value,
-        ) -> Result<ToolCallResult, SandboxError> {
-            Ok(ToolCallResult::success(Value::Null, 0))
-        }
-
-        async fn shutdown(&mut self) -> Result<(), SandboxError> {
-            Ok(())
-        }
-    }
-
-    fn make_minimal_state(sandbox: Option<Arc<dyn Sandbox>>) -> AppState {
+    fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
         let (broadcast, _) = tokio::sync::broadcast::channel(16);
         AppState {
@@ -201,7 +166,6 @@ mod tests {
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
@@ -219,29 +183,10 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_is_none_when_constructed_with_none() {
-        let state = make_minimal_state(None);
-        assert!(
-            state.sandbox.is_none(),
-            "sandbox should be None when not provided"
-        );
-    }
-
-    #[test]
-    fn sandbox_is_some_when_constructed_with_sandbox() {
-        let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
-        let state = make_minimal_state(Some(sandbox));
-        assert!(
-            state.sandbox.is_some(),
-            "sandbox should be Some when provided"
-        );
-    }
-
-    #[test]
     fn approval_channels_starts_empty() {
         // Newly constructed state must have an empty approval_channels map —
         // no leftover entries from a previous session.
-        let state = make_minimal_state(None);
+        let state = make_minimal_state();
         let guard = state
             .approval_channels
             .lock()
@@ -256,7 +201,7 @@ mod tests {
     async fn approval_decision_roundtrip() {
         // An agent inserts a oneshot sender keyed by approval_id;
         // the WebSocket handler removes it and fires the decision.
-        let state = make_minimal_state(None);
+        let state = make_minimal_state();
         let approval_id = Uuid::new_v4();
         let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
         state
@@ -282,18 +227,16 @@ mod tests {
     }
 
     #[test]
-    fn appstate_new_sets_sandbox_field() {
+    fn appstate_new_initialises_approval_channels() {
         let storage = Arc::new(MockStorage::new());
-        let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
-            Some(Arc::clone(&sandbox)),
             None,
         );
-        assert!(state.sandbox.is_some());
+        assert!(state.approval_channels.lock().unwrap().is_empty());
     }
 }

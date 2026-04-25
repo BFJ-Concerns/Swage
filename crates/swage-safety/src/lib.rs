@@ -104,7 +104,7 @@ impl LeakDetector {
         } else {
             Some(
                 AhoCorasick::new(&literal_strings)
-                    .map_err(|e| format!("failed to build Aho-Corasick automaton: {}", e))?,
+                    .map_err(|e| format!("failed to build Aho-Corasick automaton: {e}"))?,
             )
         };
 
@@ -183,7 +183,7 @@ impl LeakDetector {
 
         for (start, end, label) in merged {
             result.push_str(&text[last_end..start]);
-            result.push_str(&format!("[REDACTED:{}]", label));
+            result.push_str(&format!("[REDACTED:{label}]"));
             last_end = end;
         }
         result.push_str(&text[last_end..]);

@@ -553,6 +553,7 @@ impl Agent {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn consume_provider_stream(
         &self,
         request: CompletionRequest,

@@ -212,33 +212,28 @@ def assemble(ctx):
     let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
     // Build a conversation history with identifiable decisions and facts.
-    let mut history = Vec::new();
-    // Older history with extractable content.
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::User,
-        "Let's use PostgreSQL for the database. The team decided this yesterday.",
-    ));
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::Assistant,
-        "Good choice. I'll set up the PostgreSQL schema. The constraint is that we need to support concurrent writes.",
-    ));
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::User,
-        "Also, the deadline is March 30th. That's non-negotiable.",
-    ));
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::Assistant,
-        "Noted. Action item: create the migration scripts by end of this week.",
-    ));
-    // Recent history.
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::User,
-        "What's the current status?",
-    ));
-    history.push(swage_core::ChatMessage::new(
-        swage_core::Role::Assistant,
-        "Working on the schema now.",
-    ));
+    let history = vec![
+        // Older history with extractable content.
+        swage_core::ChatMessage::new(
+            swage_core::Role::User,
+            "Let's use PostgreSQL for the database. The team decided this yesterday.",
+        ),
+        swage_core::ChatMessage::new(
+            swage_core::Role::Assistant,
+            "Good choice. I'll set up the PostgreSQL schema. The constraint is that we need to support concurrent writes.",
+        ),
+        swage_core::ChatMessage::new(
+            swage_core::Role::User,
+            "Also, the deadline is March 30th. That's non-negotiable.",
+        ),
+        swage_core::ChatMessage::new(
+            swage_core::Role::Assistant,
+            "Noted. Action item: create the migration scripts by end of this week.",
+        ),
+        // Recent history.
+        swage_core::ChatMessage::new(swage_core::Role::User, "What's the current status?"),
+        swage_core::ChatMessage::new(swage_core::Role::Assistant, "Working on the schema now."),
+    ];
 
     let elements: Vec<Box<dyn swage_context::element::ContextElement>> = vec![
         Box::new(swage_context::prompts::PromptsElement::new(vec![

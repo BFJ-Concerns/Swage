@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ pub enum SandboxConfigError {
 ///
 /// Configures isolation boundaries, mount points, Landlock filesystem rules,
 /// and timeout parameters for a sandboxed agent process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// The agent's working directory — read-write inside the sandbox.
     pub working_directory: PathBuf,

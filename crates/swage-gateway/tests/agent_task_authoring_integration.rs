@@ -1,3 +1,7 @@
+#![allow(clippy::await_holding_lock)]
+
+// These integration tests serialise process-env mutations with a std mutex.
+// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -77,7 +81,6 @@ fn test_state(db_path: &Path, provider: Arc<dyn LlmProvider>) -> AppState {
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
-        None,
         None,
     )
 }

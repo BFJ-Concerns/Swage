@@ -219,7 +219,6 @@ async fn start_test_server_with_dispatcher(
         swage_config::ResolvedConfig::default(),
         dispatcher,
         None,
-        None,
     );
     let router = build_router(state);
 

@@ -415,7 +415,7 @@ fn ensure_known(
     if !known_values.contains(value) {
         problems.push(problem(
             path.to_string(),
-            format!("{field_name} '{}' does not exist", value),
+            format!("{field_name} '{value}' does not exist"),
         ));
     }
 }

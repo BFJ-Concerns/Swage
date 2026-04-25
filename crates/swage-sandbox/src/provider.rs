@@ -162,7 +162,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                other => panic!("expected LlmRequest, got {:?}", other),
+                other => panic!("expected LlmRequest, got {other:?}"),
             }
         });
 
@@ -237,7 +237,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
 
         agent_handle.await.unwrap().unwrap();
@@ -297,7 +297,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
 
         agent_handle.await.unwrap().unwrap();
@@ -367,7 +367,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
 
         let response = agent_handle.await.unwrap().unwrap();
@@ -416,7 +416,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
 
         let response = agent_handle.await.unwrap().unwrap();

@@ -58,12 +58,7 @@ pub fn build_bwrap_command(
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
     let bwrap_path = find_bwrap()?;
-    Ok(build_bwrap_command_with_path(
-        &bwrap_path,
-        config,
-        socket_path,
-        agent_binary,
-    ))
+    build_bwrap_command_with_path(&bwrap_path, config, socket_path, agent_binary)
 }
 
 /// Constructs the `bwrap` command given an explicit path to the binary.
@@ -75,7 +70,7 @@ pub(crate) fn build_bwrap_command_with_path(
     config: &SandboxConfig,
     socket_path: &Path,
     agent_binary: &Path,
-) -> Command {
+) -> Result<Command, SandboxError> {
     let mut cmd = Command::new(bwrap_path);
 
     // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
@@ -112,11 +107,17 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.arg("--setenv")
         .arg("SWAGE_IPC_SOCKET")
         .arg(socket_path.as_os_str());
+    let config_json = serde_json::to_string(config).map_err(|error| SandboxError::SpawnFailed {
+        message: format!("failed to serialise sandbox config for child Landlock setup: {error}"),
+    })?;
+    cmd.arg("--setenv")
+        .arg("SWAGE_SANDBOX_CONFIG_JSON")
+        .arg(config_json);
 
     // Separator then the agent binary, instructing it to enter sandbox mode.
     cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
 
-    cmd
+    Ok(cmd)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ pub(crate) fn build_bwrap_command_with_path(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::config::SandboxConfig;
@@ -184,7 +185,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
         assert!(
@@ -205,7 +207,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
         assert!(args.contains(&OsStr::new("--dev")));
@@ -222,7 +225,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
         assert!(
@@ -254,7 +258,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -289,7 +294,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -330,7 +336,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -374,7 +381,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -411,7 +419,8 @@ mod tests {
             &config,
             Path::new("/run/swage/test.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -433,6 +442,61 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_config_env_is_set_for_child_landlock() {
+        let config = basic_config();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/test.sock"),
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+
+        let args = args_of(&cmd);
+        let config_env_pos = args
+            .iter()
+            .position(|a| *a == OsStr::new("SWAGE_SANDBOX_CONFIG_JSON"))
+            .expect("sandbox config env var must appear");
+
+        let config_json = args
+            .get(config_env_pos + 1)
+            .and_then(|value| value.to_str())
+            .expect("sandbox config env var must have UTF-8 JSON");
+        let decoded: SandboxConfig = serde_json::from_str(config_json).unwrap();
+
+        assert_eq!(decoded.working_directory, Path::new("/tmp/agent-workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_sandbox_config_path_fails_command_build() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let config = SandboxConfig::builder()
+            .working_directory(PathBuf::from(OsString::from_vec(vec![
+                b'/', b't', b'm', b'p', 0xff,
+            ])))
+            .build()
+            .unwrap();
+
+        let error = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/test.sock"),
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap_err();
+
+        match error {
+            SandboxError::SpawnFailed { message } => {
+                assert!(message.contains("failed to serialise sandbox config"));
+            }
+            other => panic!("expected SpawnFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn agent_binary_and_sandbox_mode_flag_appear_after_separator() {
         let config = basic_config();
         let cmd = build_bwrap_command_with_path(
@@ -440,7 +504,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 
@@ -469,7 +534,8 @@ mod tests {
             &config,
             Path::new("/run/swage/agent.sock"),
             Path::new("/usr/bin/swage-agent"),
-        );
+        )
+        .unwrap();
 
         let args = args_of(&cmd);
 

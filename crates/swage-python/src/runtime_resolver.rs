@@ -247,8 +247,10 @@ mod tests {
 
     #[test]
     fn missing_explicit_runtime_path_errors() {
-        let mut config = PythonExecuteToolConfig::default();
-        config.runtime_path = Some("/definitely/missing/python".to_string());
+        let config = PythonExecuteToolConfig {
+            runtime_path: Some("/definitely/missing/python".to_string()),
+            ..Default::default()
+        };
         let error = ResolvedPythonRuntime::resolve(&config).unwrap_err();
         assert!(matches!(error, PythonRuntimeError::RuntimeNotFound { .. }));
     }

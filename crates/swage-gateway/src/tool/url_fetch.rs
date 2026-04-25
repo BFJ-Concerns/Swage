@@ -92,9 +92,9 @@ impl Tool for UrlFetchTool {
                     parsed_url
                 )
             } else if e.is_connect() || e.is_request() {
-                format!("Failed to reach {}: {e}", parsed_url)
+                format!("Failed to reach {parsed_url}: {e}")
             } else {
-                format!("Request failed for {}: {e}", parsed_url)
+                format!("Request failed for {parsed_url}: {e}")
             };
             ToolError::ExecutionFailed {
                 name: self.name().to_owned(),

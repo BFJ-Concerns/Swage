@@ -298,10 +298,7 @@ mod tests {
     fn parse_multiple_events_from_raw_text() {
         // Simulate splitting a raw SSE response on \n\n.
         let raw = "data: first\n\ndata: second\n\n: comment\n\ndata: third\n\n";
-        let events: Vec<SseEvent> = raw
-            .split("\n\n")
-            .filter_map(|block| parse_sse_block(block))
-            .collect();
+        let events: Vec<SseEvent> = raw.split("\n\n").filter_map(parse_sse_block).collect();
 
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].data, "first");

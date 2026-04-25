@@ -165,7 +165,6 @@ async fn start_test_server_with_config(
         config,
         dispatcher,
         None,
-        None,
     );
     let router = build_router(state);
 
@@ -235,11 +234,8 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {
     let mut events = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) => break,
-        }
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
+        events.push(event);
     }
     events
 }

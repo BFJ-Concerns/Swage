@@ -125,7 +125,7 @@ impl SubscriptionState {
                 let has_errors = report
                     .get("errors")
                     .and_then(|e| e.as_array())
-                    .map_or(false, |arr| !arr.is_empty());
+                    .is_some_and(|arr| !arr.is_empty());
 
                 has_errors || self.is_subscribed(ObservabilityChannel::Context)
             }

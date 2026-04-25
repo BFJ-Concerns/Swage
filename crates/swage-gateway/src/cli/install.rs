@@ -72,9 +72,13 @@ pub async fn uninstall(_args: &UninstallArgs) -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::sync::Mutex;
 
+    // These tests mutate HOME. Hold the process-env lock across awaits so
+    // concurrent tests cannot observe a half-mutated environment.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]

@@ -262,7 +262,7 @@ impl ToolDispatcher {
         // Step 7: Leak detection — serialise, scan, parse back.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
-        let result: Value = serde_json::from_str(&scanned_str).unwrap_or_else(|_| {
+        let result: Value = serde_json::from_str(&scanned_str).unwrap_or({
             // Redaction altered the JSON structure (rare but possible if a
             // credential spans a structural token). Preserve as a string
             // rather than silently returning empty output.
@@ -345,7 +345,7 @@ impl ToolDispatcher {
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
         let result: Value =
-            serde_json::from_str(&scanned_str).unwrap_or_else(|_| Value::String(scanned_str));
+            serde_json::from_str(&scanned_str).unwrap_or(Value::String(scanned_str));
 
         // Step 8: Assemble output.
         Ok(ToolOutput {

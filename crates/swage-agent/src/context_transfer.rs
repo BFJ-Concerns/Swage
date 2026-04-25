@@ -135,7 +135,7 @@ pub async fn evaluate_transfer_async(
 
             // Target a max token output — use the configured budget or a
             // reasonable default. The budget is advisory (max_tokens hint).
-            let max_tokens = summary_budget.unwrap_or(512) as u32;
+            let max_tokens = summary_budget.unwrap_or(512);
 
             let request = CompletionRequest {
                 messages: vec![ChatMessage::new(

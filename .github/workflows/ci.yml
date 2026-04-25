@@ -6,23 +6,138 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  verify:
-    name: Verify
+  rust-format:
+    name: Rust format
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85
+          toolchain: 1.88
           components: rustfmt
 
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: Rust Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Build frontend assets
+        run: npm --prefix frontend run build
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+  frontend-check:
+    name: Frontend check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Check frontend
+        run: npm --prefix frontend run check
+
+  frontend-test-build:
+    name: Frontend test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Test frontend
+        run: npm --prefix frontend test
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
+  desktop-smoke:
+    name: Desktop smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -36,20 +151,8 @@ jobs:
       - name: Install desktop dependencies
         run: npm --prefix desktop ci
 
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-
-      - name: Test Rust workspace
-        run: cargo test --workspace
-
-      - name: Check frontend
-        run: npm --prefix frontend run check
-
-      - name: Test frontend
-        run: npm --prefix frontend test
-
-      - name: Build frontend
-        run: npm --prefix frontend run build
+      - name: Install Playwright browsers
+        run: npm --prefix desktop exec -- playwright install --with-deps chromium
 
       - name: Smoke desktop shell
         run: npm --prefix desktop test

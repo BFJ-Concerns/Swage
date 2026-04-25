@@ -14,7 +14,7 @@ use crate::config::SandboxConfig;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
 use crate::llm_handler::HostLlmHandler;
-use crate::process::ChildProcessManager;
+use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
@@ -73,8 +73,8 @@ pub struct FallbackSandbox {
     config: SandboxConfig,
     llm_handler: HostLlmHandler,
     // Populated after spawn_agent.
-    socket_manager: Option<SocketManager>,
-    process: Option<ChildProcessManager>,
+    socket_manager: Mutex<Option<SocketManager>>,
+    process: Mutex<Option<ChildProcessManager>>,
     // Mutex for interior mutability: execute_tool receives &self but must
     // send/receive on the transport. Populated after spawn_agent.
     transport: Mutex<Option<IpcTransport>>,
@@ -88,8 +88,8 @@ impl FallbackSandbox {
         Self {
             config,
             llm_handler,
-            socket_manager: None,
-            process: None,
+            socket_manager: Mutex::new(None),
+            process: Mutex::new(None),
             transport: Mutex::new(None),
         }
     }
@@ -107,8 +107,8 @@ impl FallbackSandbox {
         Self {
             config,
             llm_handler,
-            socket_manager: None,
-            process: None,
+            socket_manager: Mutex::new(None),
+            process: Mutex::new(None),
             transport: Mutex::new(Some(transport)),
         }
     }
@@ -145,36 +145,80 @@ impl Sandbox for FallbackSandbox {
         tracing::debug!(pid = process.pid(), "fallback sandbox agent spawned");
 
         // Accept the agent's incoming connection.
-        let (stream, _addr) = listener
-            .accept()
-            .await
-            .map_err(|e| SandboxError::SpawnFailed {
-                message: format!("IPC accept failed: {e}"),
-            })?;
+        let (stream, _addr) =
+            match tokio::time::timeout(self.config.tool_call_timeout, listener.accept()).await {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(error)) => {
+                    cleanup_failed_startup_process(
+                        process,
+                        self.config.shutdown_grace_period,
+                        "failed to shut down fallback sandbox after IPC accept error",
+                    )
+                    .await;
+                    return Err(SandboxError::SpawnFailed {
+                        message: format!("IPC accept failed: {error}"),
+                    });
+                }
+                Err(_) => {
+                    cleanup_failed_startup_process(
+                        process,
+                        self.config.shutdown_grace_period,
+                        "failed to shut down fallback sandbox after IPC accept timeout",
+                    )
+                    .await;
+                    return Err(SandboxError::SpawnFailed {
+                        message: "timed out waiting for sandbox agent IPC connection".into(),
+                    });
+                }
+            };
 
         let mut transport = IpcTransport::new(stream);
 
         // Wait for the agent to signal it is initialised and ready.
-        let msg = transport
+        let msg = match transport
             .receive_timeout(self.config.tool_call_timeout)
-            .await?;
+            .await
+        {
+            Ok(message) => message,
+            Err(error) => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down fallback sandbox after startup handshake error",
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         match msg {
             IpcMessage::Ready => {}
             IpcMessage::ErrorMessage { description, .. } => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down fallback sandbox after startup error message",
+                )
+                .await;
                 return Err(SandboxError::IpcError {
                     message: format!("agent error during startup: {description}"),
                 });
             }
             other => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down fallback sandbox after unexpected startup message",
+                )
+                .await;
                 return Err(SandboxError::IpcError {
                     message: format!("expected Ready signal, got: {other:?}"),
                 });
             }
         }
 
-        self.socket_manager = Some(socket_manager);
-        self.process = Some(process);
+        *self.socket_manager.get_mut() = Some(socket_manager);
+        *self.process.get_mut() = Some(process);
         *self.transport.lock().await = Some(transport);
 
         Ok(())
@@ -302,10 +346,8 @@ impl Sandbox for FallbackSandbox {
     ///
     /// Idempotent — silently succeeds if the agent has already terminated or
     /// was never spawned.
-    async fn shutdown(&mut self) -> Result<(), SandboxError> {
-        // Take the transport out of the Mutex — we have &mut self so there
-        // can be no outstanding lock guards.
-        let transport_opt = self.transport.get_mut().take();
+    async fn shutdown(&self) -> Result<(), SandboxError> {
+        let transport_opt = self.transport.lock().await.take();
 
         if let Some(mut transport) = transport_opt {
             // Signal the agent to shut down gracefully.
@@ -328,14 +370,14 @@ impl Sandbox for FallbackSandbox {
         }
 
         // Terminate the child process (SIGTERM then SIGKILL after grace period).
-        if let Some(mut process) = self.process.take() {
+        if let Some(mut process) = self.process.lock().await.take() {
             process
                 .graceful_shutdown(self.config.shutdown_grace_period)
                 .await?;
         }
 
         // Drop the socket manager — its Drop impl removes the socket file.
-        self.socket_manager = None;
+        *self.socket_manager.lock().await = None;
 
         Ok(())
     }
@@ -347,6 +389,9 @@ impl Sandbox for FallbackSandbox {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use serde_json::json;
@@ -374,6 +419,45 @@ mod tests {
             .unwrap()
     }
 
+    fn startup_timeout_config() -> SandboxConfig {
+        SandboxConfig::builder()
+            .working_directory(std::env::temp_dir())
+            .tool_call_timeout(Duration::from_millis(50))
+            .shutdown_grace_period(Duration::from_millis(250))
+            .llm_request_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn write_non_connecting_child_script(dir: &Path) -> (PathBuf, PathBuf) {
+        let pid_file = dir.join("child.pid");
+        let script_path = dir.join("non_connecting_child.sh");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\n/bin/sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).unwrap();
+        (script_path, pid_file)
+    }
+
+    fn read_pid(pid_file: &Path) -> u32 {
+        fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
+    }
+
+    fn is_pid_running(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
     fn no_op_llm_handler() -> HostLlmHandler {
         HostLlmHandler::new(|_req| async {
             Ok::<_, SandboxError>(CompletionResponse {
@@ -396,6 +480,33 @@ mod tests {
             IpcTransport::new(host_stream),
         );
         (sandbox, IpcTransport::new(agent_stream))
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_timeout_kills_spawned_child() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (script_path, pid_file) = write_non_connecting_child_script(temp_dir.path());
+        let previous_binary = std::env::var_os(crate::SANDBOX_AGENT_BINARY_ENV);
+        unsafe { std::env::set_var(crate::SANDBOX_AGENT_BINARY_ENV, &script_path) };
+
+        let mut sandbox = FallbackSandbox::new(startup_timeout_config(), no_op_llm_handler());
+        let result = sandbox.spawn_agent().await;
+
+        match previous_binary {
+            Some(value) => unsafe { std::env::set_var(crate::SANDBOX_AGENT_BINARY_ENV, value) },
+            None => unsafe { std::env::remove_var(crate::SANDBOX_AGENT_BINARY_ENV) },
+        }
+
+        assert!(
+            result.is_err(),
+            "spawn should time out when child never connects"
+        );
+        let pid = read_pid(&pid_file);
+        assert!(
+            !is_pid_running(pid),
+            "timed-out fallback startup should terminate and reap child process {pid}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -670,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_before_spawn_is_idempotent() {
-        let mut sandbox = FallbackSandbox::new(test_config(), no_op_llm_handler());
+        let sandbox = FallbackSandbox::new(test_config(), no_op_llm_handler());
         // No process, no connection — should succeed silently.
         sandbox
             .shutdown()
@@ -680,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_sends_shutdown_and_awaits_ack() {
-        let (mut sandbox, mut agent) = sandbox_with_mock_agent();
+        let (sandbox, mut agent) = sandbox_with_mock_agent();
 
         let shutdown_handle = tokio::spawn(async move { sandbox.shutdown().await });
 
@@ -708,7 +819,7 @@ mod tests {
             .unwrap();
 
         let (host_stream, _agent_stream) = UnixStream::pair().unwrap();
-        let mut sandbox = FallbackSandbox::with_transport(
+        let sandbox = FallbackSandbox::with_transport(
             config,
             no_op_llm_handler(),
             IpcTransport::new(host_stream),

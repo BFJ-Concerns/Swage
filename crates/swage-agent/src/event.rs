@@ -400,7 +400,7 @@ mod tests {
             content: "x".to_string(),
         };
         let cloned = event.clone();
-        let debug_str = format!("{:?}", cloned);
+        let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("Token"));
     }
 
@@ -436,7 +436,7 @@ mod tests {
             message: "bad".to_string(),
         };
         let cloned = err.clone();
-        let debug_str = format!("{:?}", cloned);
+        let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("SchemaValidationError"));
     }
 
@@ -482,7 +482,7 @@ mod tests {
             errors: vec![],
         };
         let cloned = event.clone();
-        let debug_str = format!("{:?}", cloned);
+        let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("OutputSchemaRetry"));
     }
 
@@ -523,7 +523,7 @@ mod tests {
             errors: vec![],
         };
         let cloned = event.clone();
-        let debug_str = format!("{:?}", cloned);
+        let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("OutputSchemaFailed"));
     }
 

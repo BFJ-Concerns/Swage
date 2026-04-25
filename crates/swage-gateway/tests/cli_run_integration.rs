@@ -110,7 +110,6 @@ async fn start_test_server(
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     if let Some(voice_provider) = voice_provider {
         state.voice_provider = voice_provider;

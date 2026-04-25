@@ -1489,7 +1489,7 @@ pub async fn list_skills(
         .get(params.bench_id)
         .await
         .map_err(|e| ApiError(GatewayError::Storage(e)))?
-        .ok_or_else(|| {
+        .ok_or({
             ApiError(GatewayError::BenchNotFound {
                 id: params.bench_id,
             })
@@ -2086,8 +2086,7 @@ pub async fn decide_approval(
                         })),
                     )),
                     Ok(false) => Err(ApiError::conflict(format!(
-                        "approval {} already resolved",
-                        approval_id,
+                        "approval {approval_id} already resolved"
                     ))),
                     Err(e) => Err(ApiError::internal(e.to_string())),
                 }
@@ -2154,8 +2153,7 @@ pub async fn decide_approval(
                             ))
                         }
                         Ok(false) => Err(ApiError::conflict(format!(
-                            "approval {} already resolved",
-                            approval_id,
+                            "approval {approval_id} already resolved"
                         ))),
                         Err(e) => Err(ApiError::internal(e.to_string())),
                     }
@@ -2319,7 +2317,6 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast,
@@ -3930,7 +3927,6 @@ def build_topology():
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: broadcast_tx,

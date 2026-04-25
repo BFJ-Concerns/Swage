@@ -45,7 +45,7 @@ impl IpcTransport {
         })?;
         if line.len() > MAX_IPC_MESSAGE_BYTES {
             return Err(SandboxError::IpcError {
-                message: format!("IPC message exceeds {} byte limit", MAX_IPC_MESSAGE_BYTES),
+                message: format!("IPC message exceeds {MAX_IPC_MESSAGE_BYTES} byte limit"),
             });
         }
         // Newline delimiter — NDJSON protocol.
@@ -88,7 +88,7 @@ impl IpcTransport {
         let ended_with_newline = line.last() == Some(&b'\n');
         if line.len() > MAX_IPC_MESSAGE_BYTES || !ended_with_newline {
             return Err(SandboxError::IpcError {
-                message: format!("IPC message exceeds {} byte limit", MAX_IPC_MESSAGE_BYTES),
+                message: format!("IPC message exceeds {MAX_IPC_MESSAGE_BYTES} byte limit"),
             });
         }
 
@@ -164,7 +164,7 @@ mod tests {
                 assert_eq!(tool_name, "fs_read");
                 assert_eq!(parameters["path"], "/tmp/test");
             }
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         }
     }
 
@@ -212,7 +212,7 @@ mod tests {
                     "error message should mention 'timeout', got: {message}"
                 );
             }
-            other => panic!("expected SandboxError::IpcError, got {:?}", other),
+            other => panic!("expected SandboxError::IpcError, got {other:?}"),
         }
     }
 

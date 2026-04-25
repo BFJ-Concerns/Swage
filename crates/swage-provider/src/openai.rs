@@ -467,7 +467,7 @@ impl OpenAiProvider {
 
         // Usage information may arrive in a chunk with empty choices (e.g. the
         // final chunk from OpenAI when stream_options.include_usage is set).
-        if let Some(ref choice) = chunk.choices.first() {
+        if let Some(choice) = chunk.choices.first() {
             // Accumulate streaming tool calls.
             if let Some(ref tool_calls) = choice.delta.tool_calls {
                 for tc in tool_calls {

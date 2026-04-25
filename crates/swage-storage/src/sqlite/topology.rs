@@ -161,7 +161,7 @@ impl TopologyTraceStore for SqliteStorage {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            let source_turn_id = run.source_turn_id.clone();
+            let source_turn_id = run.source_turn_id;
             let state = run.state.clone();
             let final_output = run.final_output.clone();
             let error_message = run.error_message.clone();

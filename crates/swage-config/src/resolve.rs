@@ -442,8 +442,10 @@ mod tests {
 
     #[test]
     fn apply_overlay_preserves_instructions() {
-        let mut base = ResolvedConfig::default();
-        base.instructions = "You are a helpful assistant.".to_string();
+        let base = ResolvedConfig {
+            instructions: "You are a helpful assistant.".to_string(),
+            ..Default::default()
+        };
 
         let overlay = PartialConfig {
             provider: Some(merge::PartialProviderConfig {

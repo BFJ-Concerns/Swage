@@ -5,9 +5,12 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use swage_core::{ChatMessage, GatewayError, Role};
+use swage_core::{ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
-use swage_storage::model::{AppendMessage, InboundAudit, NewAgentMessage, NewTurn, TurnState};
+use swage_storage::model::{
+    AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
+    NewTurn, TurnState,
+};
 
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 use swage_context::element::ContextElement;
@@ -22,6 +25,7 @@ use swage_agent::{
     MessageRouter, TurnRequest,
 };
 use swage_safety::LeakDetector;
+use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
@@ -168,6 +172,173 @@ pub(crate) fn build_approval_registrar(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxDegradationApproval {
+    Approved,
+    Rejected,
+    Interrupted,
+}
+
+struct SandboxDegradationApprovalRequest<'a> {
+    config: &'a swage_config::ResolvedConfig,
+    ws_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    turn_id: Uuid,
+    agent_id: &'a str,
+    prompt: String,
+    context: serde_json::Value,
+    cancel_token: &'a CancellationToken,
+}
+
+async fn request_sandbox_degradation_approval(
+    state: &AppState,
+    request: SandboxDegradationApprovalRequest<'_>,
+) -> Result<SandboxDegradationApproval, GatewayError> {
+    let SandboxDegradationApprovalRequest {
+        config,
+        ws_tx,
+        turn_id,
+        agent_id,
+        prompt,
+        context,
+        cancel_token,
+    } = request;
+    let timeout = std::time::Duration::from_secs(config.hitl.timeout);
+    let timeout_at = chrono::Utc::now()
+        + chrono::Duration::from_std(timeout)
+            .unwrap_or_else(|_| chrono::Duration::seconds(config.hitl.timeout as i64));
+    let timeout_policy = config.hitl.timeout_policy.clone();
+
+    let approval = state
+        .storage
+        .create_approval(NewApprovalRequest {
+            turn_id,
+            agent_id: agent_id.to_owned(),
+            kind: ApprovalKind::Hook,
+            tool_name: None,
+            tool_arguments: None,
+            hook_name: Some("sandbox_degradation".to_string()),
+            prompt: prompt.clone(),
+            context: Some(context.clone()),
+            timeout_at,
+            timeout_policy: timeout_policy.clone(),
+        })
+        .await?;
+
+    state
+        .storage
+        .update_turn_state(turn_id, TurnState::AwaitingApproval)
+        .await?;
+
+    let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(approval.id, decision_tx);
+
+    let _ = ws_tx.send(ServerEvent::ApprovalRequired {
+        approval_id: approval.id.to_string(),
+        turn_id: turn_id.to_string(),
+        agent_id: agent_id.to_owned(),
+        kind: "hook".to_string(),
+        tool_name: None,
+        tool_arguments: None,
+        prompt,
+        context: Some(context),
+        timeout_at: timeout_at.to_rfc3339(),
+        timeout_policy: timeout_policy.to_string(),
+    });
+
+    enum ApprovalWait {
+        Decision(swage_agent::ApprovalDecision),
+        Timeout,
+        Cancelled,
+    }
+
+    let wait_result = tokio::select! {
+        decision = decision_rx => match decision {
+            Ok(decision) => ApprovalWait::Decision(decision),
+            Err(_) => ApprovalWait::Timeout,
+        },
+        _ = tokio::time::sleep(timeout) => ApprovalWait::Timeout,
+        _ = cancel_token.cancelled() => ApprovalWait::Cancelled,
+    };
+
+    state
+        .approval_channels
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&approval.id);
+
+    let outcome = match wait_result {
+        ApprovalWait::Decision(decision) if decision.is_approved() => {
+            state
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Approved,
+                    decision.reason.as_deref(),
+                )
+                .await?;
+            let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
+                approval_id: approval.id.to_string(),
+                decision: "approved".to_string(),
+                reason: decision.reason,
+            });
+            SandboxDegradationApproval::Approved
+        }
+        ApprovalWait::Decision(decision) => {
+            state
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Rejected,
+                    decision.reason.as_deref(),
+                )
+                .await?;
+            let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
+                approval_id: approval.id.to_string(),
+                decision: "rejected".to_string(),
+                reason: decision.reason,
+            });
+            SandboxDegradationApproval::Rejected
+        }
+        ApprovalWait::Timeout => {
+            state
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Expired,
+                    Some("approval timed out"),
+                )
+                .await?;
+            let _ = ws_tx.send(ServerEvent::ApprovalExpired {
+                approval_id: approval.id.to_string(),
+                timeout_policy: timeout_policy.to_string(),
+            });
+            match timeout_policy {
+                ApprovalTimeoutPolicy::Reject => SandboxDegradationApproval::Rejected,
+                ApprovalTimeoutPolicy::Interrupt => SandboxDegradationApproval::Interrupted,
+            }
+        }
+        ApprovalWait::Cancelled => {
+            state
+                .storage
+                .update_approval_state(approval.id, ApprovalState::Expired, Some("turn cancelled"))
+                .await?;
+            SandboxDegradationApproval::Interrupted
+        }
+    };
+
+    if !matches!(outcome, SandboxDegradationApproval::Interrupted) {
+        state
+            .storage
+            .update_turn_state(turn_id, TurnState::Processing)
+            .await?;
+    }
+    Ok(outcome)
+}
+
 /// Tools that read from the filesystem and require a `read` workspace grant.
 const WORKSPACE_READ_TOOLS: &[&str] = &["file_read", "file_list", "file_search"];
 
@@ -185,13 +356,36 @@ pub(crate) struct WorkspacePermissionSummary {
     pub(crate) has_write: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedWorkspacePath {
+    pub(crate) path: PathBuf,
+    pub(crate) can_read: bool,
+    pub(crate) can_write: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TrustedWorkspacePolicy {
+    pub(crate) permissions: WorkspacePermissionSummary,
+    pub(crate) paths: Vec<TrustedWorkspacePath>,
+}
+
 /// Inspect the bench's workspace attachments and derive which permission
 /// grants are in force. Storage failures degrade to "no grants" so that a
 /// transient lookup error never silently widens the policy.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn summarise_trusted_workspace_permissions(
     storage: &Arc<dyn swage_storage::store::Storage>,
     bench_id: Uuid,
 ) -> WorkspacePermissionSummary {
+    load_trusted_workspace_policy(storage, bench_id)
+        .await
+        .permissions
+}
+
+pub(crate) async fn load_trusted_workspace_policy(
+    storage: &Arc<dyn swage_storage::store::Storage>,
+    bench_id: Uuid,
+) -> TrustedWorkspacePolicy {
     let attachments = match storage.list_workspace_attachments_by_bench(bench_id).await {
         Ok(list) => list,
         Err(error) => {
@@ -200,21 +394,36 @@ pub(crate) async fn summarise_trusted_workspace_permissions(
                 %error,
                 "failed to load workspace attachments; treating bench as having no granted permissions"
             );
-            return WorkspacePermissionSummary::default();
+            return TrustedWorkspacePolicy::default();
         }
     };
 
-    let mut summary = WorkspacePermissionSummary::default();
+    let mut policy = TrustedWorkspacePolicy::default();
     for attachment in attachments.into_iter().filter(|a| a.is_trusted) {
+        let mut can_read = false;
+        let mut can_write = false;
         for permission in &attachment.permissions {
             match permission.as_str() {
-                "read" => summary.has_read = true,
-                "write" => summary.has_write = true,
+                "read" => {
+                    policy.permissions.has_read = true;
+                    can_read = true;
+                }
+                "write" => {
+                    policy.permissions.has_write = true;
+                    can_write = true;
+                }
                 _ => {}
             }
         }
+        if can_read || can_write {
+            policy.paths.push(TrustedWorkspacePath {
+                path: PathBuf::from(attachment.path),
+                can_read,
+                can_write,
+            });
+        }
     }
-    summary
+    policy
 }
 
 fn build_permission_config(
@@ -287,18 +496,177 @@ fn build_permission_config(
     }
 }
 
+pub(crate) struct SandboxGuard {
+    sandbox: Arc<dyn Sandbox>,
+    shutdown_complete: Mutex<bool>,
+}
+
+impl SandboxGuard {
+    fn new(sandbox: Arc<dyn Sandbox>) -> Self {
+        Self {
+            sandbox,
+            shutdown_complete: Mutex::new(false),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), swage_core::SandboxError> {
+        let mut shutdown_complete = self.shutdown_complete.lock().await;
+        if *shutdown_complete {
+            return Ok(());
+        }
+        self.sandbox.shutdown().await?;
+        *shutdown_complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for SandboxGuard {
+    fn drop(&mut self) {
+        if !*self.shutdown_complete.get_mut() {
+            tracing::warn!("sandbox guard dropped without explicit async shutdown");
+        }
+    }
+}
+
+async fn shutdown_sandbox_guard(guard: &Option<SandboxGuard>, context: &'static str) {
+    if let Some(guard) = guard
+        && let Err(error) = guard.shutdown().await
+    {
+        tracing::warn!(error = %error, "{context}");
+    }
+}
+
+pub(crate) struct GatewayDispatcherBuild {
+    pub(crate) dispatcher: ToolDispatcher,
+    pub(crate) sandbox_guard: Option<SandboxGuard>,
+}
+
+pub(crate) struct GatewayDispatcherRequest<'a> {
+    pub(crate) config: &'a swage_config::ResolvedConfig,
+    pub(crate) agent_config: &'a AgentConfig,
+    pub(crate) session_metadata: Option<&'a serde_json::Value>,
+    pub(crate) bench_id: Option<Uuid>,
+    pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
+}
+
+fn sandbox_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn build_sandbox_config(
+    agent_config: &AgentConfig,
+    workspace_policy: Option<&TrustedWorkspacePolicy>,
+) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
+    let working_directory = sandbox_path(&agent_config.working_directory);
+    let mut builder = swage_sandbox::SandboxConfig::builder()
+        .working_directory(&working_directory)
+        .read_write_mount(&working_directory)
+        .landlock_write_path(&working_directory);
+
+    for allowed_path in &agent_config.allowed_paths {
+        let path = sandbox_path(allowed_path);
+        if path != working_directory {
+            builder = builder.read_only_mount(&path).landlock_read_path(&path);
+        }
+    }
+
+    if let Some(policy) = workspace_policy {
+        for grant in &policy.paths {
+            let path = sandbox_path(&grant.path);
+            match path.try_exists() {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        path = %grant.path.display(),
+                        "skipping missing trusted workspace path in sandbox config"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %grant.path.display(),
+                        %error,
+                        "skipping trusted workspace path that could not be checked for sandbox config"
+                    );
+                    continue;
+                }
+            }
+            if grant.can_write {
+                builder = builder.read_write_mount(&path).landlock_write_path(&path);
+            } else if grant.can_read {
+                builder = builder.read_only_mount(&path).landlock_read_path(&path);
+            }
+        }
+    }
+
+    builder.build()
+}
+
+async fn build_turn_sandbox(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    agent_config: &AgentConfig,
+    workspace_policy: Option<&TrustedWorkspacePolicy>,
+) -> Result<Option<Arc<dyn Sandbox>>, swage_core::SandboxError> {
+    if !config.sandbox.enabled {
+        return Ok(None);
+    }
+    if std::env::current_exe().ok().is_some_and(|path| {
+        path.parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "deps")
+    }) {
+        tracing::debug!("skipping per-turn sandbox inside Cargo test harness");
+        return Ok(None);
+    }
+    #[cfg(test)]
+    if std::env::var_os("SWAGE_ENABLE_TEST_SANDBOX").is_none() {
+        return Ok(None);
+    }
+
+    let sandbox_config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
+        swage_core::SandboxError::SpawnFailed {
+            message: format!("failed to build sandbox config: {error}"),
+        }
+    })?;
+
+    let provider = state.provider.clone();
+    let llm_handler = HostLlmHandler::new(move |req: swage_core::CompletionRequest| {
+        let provider = provider.clone();
+        async move {
+            provider
+                .complete(req)
+                .await
+                .map_err(|error| swage_core::SandboxError::IpcError {
+                    message: error.to_string(),
+                })
+        }
+    });
+
+    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(sandbox_config, llm_handler);
+    sandbox.spawn_agent().await?;
+    Ok(Some(Arc::new(sandbox) as Arc<dyn Sandbox>))
+}
+
 pub(crate) async fn build_gateway_dispatcher(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
+    agent_config: &AgentConfig,
     session_metadata: Option<&serde_json::Value>,
     bench_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> ToolDispatcher {
-    let workspace_grants = match bench_id {
-        Some(id) => Some(summarise_trusted_workspace_permissions(&state.storage, id).await),
+) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
+    let workspace_policy = match bench_id {
+        Some(id) => Some(load_trusted_workspace_policy(&state.storage, id).await),
         None => None,
     };
-    let permissions = build_permission_config(config, &state.config, workspace_grants);
+    let permissions = build_permission_config(
+        config,
+        &state.config,
+        workspace_policy
+            .as_ref()
+            .map(|policy| policy.permissions.clone()),
+    );
 
     let dispatcher = ToolDispatcher::new(
         state.tool_dispatcher.registry().clone(),
@@ -309,8 +677,13 @@ pub(crate) async fn build_gateway_dispatcher(
         false,
     );
 
+    let sandbox =
+        build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
+    let sandbox_guard = sandbox
+        .as_ref()
+        .map(|sandbox| SandboxGuard::new(sandbox.clone()));
     let inner_strategy: Option<Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>> =
-        state.sandbox.as_ref().map(|sandbox| {
+        sandbox.as_ref().map(|sandbox| {
             Arc::new(SandboxedExecutor::new(sandbox.clone()))
                 as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
         });
@@ -318,13 +691,63 @@ pub(crate) async fn build_gateway_dispatcher(
     let execution_host =
         crate::execution_host::resolve_execution_host(state, session_metadata).await;
 
-    dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
-        inner_strategy,
+    Ok(GatewayDispatcherBuild {
+        dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+            inner_strategy,
+            ws_tx,
+            execution_host,
+            state.secret_manager.clone(),
+            state.storage.clone(),
+        ))),
+        sandbox_guard,
+    })
+}
+
+pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
+    state: &AppState,
+    request: GatewayDispatcherRequest<'_>,
+    execution_context: &'static str,
+) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
+    let GatewayDispatcherRequest {
+        config,
+        agent_config,
+        session_metadata,
+        bench_id,
         ws_tx,
-        execution_host,
-        state.secret_manager.clone(),
-        state.storage.clone(),
-    )))
+    } = request;
+
+    match build_gateway_dispatcher(
+        state,
+        config,
+        agent_config,
+        session_metadata,
+        bench_id,
+        ws_tx.clone(),
+    )
+    .await
+    {
+        Ok(build) => Ok(build),
+        Err(error) if config.sandbox.enabled => {
+            tracing::warn!(
+                error = %error,
+                execution_context,
+                "sandbox setup failed; degrading execution to unsandboxed dispatcher"
+            );
+
+            let mut unsandboxed_config = config.clone();
+            unsandboxed_config.sandbox.enabled = false;
+            build_gateway_dispatcher(
+                state,
+                &unsandboxed_config,
+                agent_config,
+                session_metadata,
+                bench_id,
+                ws_tx,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn build_agent_config(
@@ -461,8 +884,8 @@ impl DelegationHandler for GatewayDelegationHandler {
             AgentError::InvalidConfig(format!("delegation bench {bench_id} no longer exists"))
         })?;
 
-        let target_resolved = swage_config::load_resolved_config(&bench.slug, target_agent_id)
-            .map_err(|error| {
+        let target_resolved =
+            load_session_config(&self.state, &bench.slug, target_agent_id).map_err(|error| {
                 AgentError::InvalidConfig(format!(
                     "failed to load config for delegated agent '{target_agent_id}' in bench '{}': {error}",
                     bench.slug
@@ -477,14 +900,23 @@ impl DelegationHandler for GatewayDelegationHandler {
         // internal tool activity is not surfaced on the parent conversation's
         // WebSocket stream.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
-        let target_dispatcher = build_gateway_dispatcher(
+        let target_dispatcher_build = build_gateway_dispatcher_with_unsandboxed_degradation(
             &self.state,
-            &target_resolved,
-            None,
-            Some(bench_id),
-            silent_ws_tx,
+            GatewayDispatcherRequest {
+                config: &target_resolved,
+                agent_config: &target_agent_config,
+                session_metadata: None,
+                bench_id: Some(bench_id),
+                ws_tx: silent_ws_tx,
+            },
+            "delegated turn",
         )
-        .await;
+        .await
+        .map_err(|error| {
+            AgentError::InvalidConfig(format!("failed to build delegated sandbox: {error}"))
+        })?;
+        let target_sandbox_guard = target_dispatcher_build.sandbox_guard;
+        let target_dispatcher = target_dispatcher_build.dispatcher;
 
         let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
         let executor = DelegationExecutor {
@@ -507,7 +939,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             payload["context"] = context;
         }
 
-        let delegate_msg = router
+        let delegate_msg = match router
             .send_message(NewAgentMessage {
                 sender_agent_id: sender_agent_id.to_string(),
                 recipient_agent_id: target_agent_id.to_string(),
@@ -515,9 +947,27 @@ impl DelegationHandler for GatewayDelegationHandler {
                 correlation_id: None,
                 payload,
             })
-            .await?;
+            .await
+        {
+            Ok(message) => message,
+            Err(error) => {
+                shutdown_sandbox_guard(
+                    &target_sandbox_guard,
+                    "failed to shut down delegated sandbox after message creation error",
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
-        router.deliver_message(&delegate_msg).await?;
+        if let Err(error) = router.deliver_message(&delegate_msg).await {
+            shutdown_sandbox_guard(
+                &target_sandbox_guard,
+                "failed to shut down delegated sandbox after message delivery error",
+            )
+            .await;
+            return Err(error);
+        }
 
         let child_cancel_token = cancel_token.child_token();
         let result_msg = match executor
@@ -534,14 +984,31 @@ impl DelegationHandler for GatewayDelegationHandler {
         {
             Ok(result_msg) => result_msg,
             Err(error) => {
+                shutdown_sandbox_guard(
+                    &target_sandbox_guard,
+                    "failed to shut down delegated sandbox after delegation error",
+                )
+                .await;
                 let _ = router
                     .fail_message(delegate_msg.id, &error.to_string())
                     .await;
                 return Err(error);
             }
         };
+        shutdown_sandbox_guard(
+            &target_sandbox_guard,
+            "failed to shut down delegated sandbox",
+        )
+        .await;
 
-        router.deliver_message(&result_msg).await?;
+        if let Err(error) = router.deliver_message(&result_msg).await {
+            shutdown_sandbox_guard(
+                &target_sandbox_guard,
+                "failed to shut down delegated sandbox after result delivery error",
+            )
+            .await;
+            return Err(error);
+        }
         Ok(result_msg.payload.clone())
     }
 }
@@ -592,6 +1059,7 @@ pub async fn process_turn(
     skip(state, content, ws_tx, subscription),
     fields(turn_id = tracing::field::Empty),
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
     session_id: Uuid,
@@ -862,22 +1330,87 @@ pub(crate) async fn process_turn_with_existing_turn(
         serde_json::json!({ "error": "serialisation failed" })
     });
 
+    let agent_config =
+        build_agent_config(session.agent_id.clone(), &config, output_schema_override);
+
     // Step 9: Resolve tool permissions from config cascade and build the
-    // ToolDispatcher with the resolved permission set. When a sandbox is
-    // available, inject SandboxedExecutor as the execution strategy so tool
-    // calls are routed through bubblewrap transparently.
-    let dispatcher = build_gateway_dispatcher(
+    // ToolDispatcher with the resolved permission set. When sandboxing is
+    // enabled, this also spawns the per-turn sandbox and returns its cleanup
+    // guard to this turn scope.
+    let dispatcher_build = match build_gateway_dispatcher(
         state,
         &config,
+        &agent_config,
         session.metadata.as_ref(),
         Some(bench_id),
         ws_tx.clone(),
     )
-    .await;
+    .await
+    {
+        Ok(build) => build,
+        Err(error) if config.sandbox.enabled => {
+            let approval = request_sandbox_degradation_approval(
+                state,
+                SandboxDegradationApprovalRequest {
+                    config: &config,
+                    ws_tx: &ws_tx,
+                    turn_id: prepared_turn_id,
+                    agent_id: &session.agent_id,
+                    prompt:
+                        "Sandbox setup failed. Approve running this turn without sandbox isolation?"
+                            .to_string(),
+                    context: serde_json::json!({
+                        "degradation": "unsandboxed_execution",
+                        "error": error.to_string(),
+                    }),
+                    cancel_token: &cancel_token,
+                },
+            )
+            .await?;
+            match approval {
+                SandboxDegradationApproval::Approved => {}
+                SandboxDegradationApproval::Rejected => {
+                    state
+                        .storage
+                        .update_turn_state(prepared_turn_id, TurnState::Failed)
+                        .await?;
+                    let mut turns = state.active_turns.lock().await;
+                    turns.remove(&session_id);
+                    return Err(GatewayError::WebSocketError(format!(
+                        "sandbox setup failed and unsandboxed execution was not approved: {error}"
+                    )));
+                }
+                SandboxDegradationApproval::Interrupted => {
+                    state
+                        .storage
+                        .update_turn_state(prepared_turn_id, TurnState::Interrupted)
+                        .await?;
+                    let _ = ws_tx.send(ServerEvent::Cancelled {});
+                    let mut turns = state.active_turns.lock().await;
+                    turns.remove(&session_id);
+                    return Ok(());
+                }
+            }
+
+            let mut unsandboxed_config = config.clone();
+            unsandboxed_config.sandbox.enabled = false;
+            build_gateway_dispatcher(
+                state,
+                &unsandboxed_config,
+                &agent_config,
+                session.metadata.as_ref(),
+                Some(bench_id),
+                ws_tx.clone(),
+            )
+            .await
+            .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string()))?
+        }
+        Err(error) => return Err(GatewayError::WebSocketError(error.to_string())),
+    };
+    let sandbox_guard = dispatcher_build.sandbox_guard;
+    let dispatcher = dispatcher_build.dispatcher;
 
     // Step 10: Build the Agent that will execute the turn.
-    let agent_config =
-        build_agent_config(session.agent_id.clone(), &config, output_schema_override);
     let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
@@ -907,6 +1440,11 @@ pub(crate) async fn process_turn_with_existing_turn(
                     error = %error,
                     "failed to mark turn failed after agent construction error"
                 );
+            }
+            if let Some(guard) = &sandbox_guard {
+                if let Err(error) = guard.shutdown().await {
+                    tracing::warn!(error = %error, "failed to shut down turn sandbox after agent construction error");
+                }
             }
             // Cleanup cancellation token before returning.
             let mut turns = state.active_turns.lock().await;
@@ -1191,6 +1729,12 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     }
 
+    if let Some(guard) = &sandbox_guard {
+        if let Err(error) = guard.shutdown().await {
+            tracing::warn!(error = %error, "failed to shut down turn sandbox");
+        }
+    }
+
     // Cleanup: remove the cancellation token regardless of outcome.
     {
         let mut turns = state.active_turns.lock().await;
@@ -1294,15 +1838,22 @@ pub(crate) fn route_approval_agent_event(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{collections::HashMap, pin::Pin, sync::Arc};
+    use std::{
+        collections::HashMap,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use async_trait::async_trait;
     use futures::stream;
     use tokio::sync::{Mutex, Notify, mpsc};
 
     use swage_core::{
-        CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-        ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, ProviderError, SandboxError, StreamChunk,
+        ToolCompletionRequest, ToolCompletionResponse,
     };
     use swage_core::{FinishReason, StorageError};
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -1330,6 +1881,7 @@ pub(crate) mod tests {
     };
 
     use swage_agent::AgentEvent;
+    use swage_sandbox::ToolCallResult;
 
     use super::*;
     use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
@@ -1363,6 +1915,68 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             unsafe { std::env::remove_var("SWAGE_HOME") };
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox guard
+    // -----------------------------------------------------------------------
+
+    struct RetryingShutdownSandbox {
+        shutdown_attempts: AtomicUsize,
+        failures_before_success: usize,
+    }
+
+    impl RetryingShutdownSandbox {
+        fn new(failures_before_success: usize) -> Self {
+            Self {
+                shutdown_attempts: AtomicUsize::new(0),
+                failures_before_success,
+            }
+        }
+
+        fn shutdown_attempts(&self) -> usize {
+            self.shutdown_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Sandbox for RetryingShutdownSandbox {
+        async fn spawn_agent(&mut self) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn execute_tool(
+            &self,
+            _tool_name: &str,
+            _params: serde_json::Value,
+        ) -> Result<ToolCallResult, SandboxError> {
+            unimplemented!("not used by SandboxGuard tests")
+        }
+
+        async fn shutdown(&self) -> Result<(), SandboxError> {
+            let attempt = self.shutdown_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= self.failures_before_success {
+                return Err(SandboxError::SpawnFailed {
+                    message: "shutdown failed".to_string(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_guard_retries_shutdown_after_failure() {
+        let sandbox = Arc::new(RetryingShutdownSandbox::new(1));
+        let guard = SandboxGuard::new(sandbox.clone());
+
+        assert!(guard.shutdown().await.is_err());
+        assert_eq!(sandbox.shutdown_attempts(), 1);
+
+        guard.shutdown().await.unwrap();
+        assert_eq!(sandbox.shutdown_attempts(), 2);
+
+        guard.shutdown().await.unwrap();
+        assert_eq!(sandbox.shutdown_attempts(), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -4548,7 +5162,6 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -4617,7 +5230,6 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -4756,7 +5368,6 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -4782,7 +5393,7 @@ pub(crate) mod tests {
         let state_clone = Arc::clone(&state);
         let handle = tokio::spawn(async move {
             process_turn(
-                &*state_clone,
+                &state_clone,
                 session_id,
                 None,
                 "Hi".to_string(),
@@ -5084,7 +5695,6 @@ pub(crate) mod tests {
                 EchoMockTool,
             )
                 as Arc<dyn crate::tool::Tool>])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -5157,7 +5767,6 @@ pub(crate) mod tests {
                 EchoMockTool,
             )
                 as Arc<dyn crate::tool::Tool>])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -5425,7 +6034,6 @@ pub(crate) mod tests {
                 },
             )
                 as Arc<dyn crate::tool::Tool>])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -5803,7 +6411,6 @@ pub(crate) mod tests {
             swage_config::ResolvedConfig::default(),
             dispatcher,
             None,
-            None,
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -6027,7 +6634,6 @@ pub(crate) mod tests {
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
                 capture_tool as Arc<dyn crate::tool::Tool>,
             ])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -6125,7 +6731,6 @@ pub(crate) mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -6195,7 +6800,6 @@ pub(crate) mod tests {
                 WorkingDirReadTool,
             )
                 as Arc<dyn crate::tool::Tool>])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -6377,7 +6981,6 @@ pub(crate) mod tests {
                 WorkingDirReadTool,
             )
                 as Arc<dyn crate::tool::Tool>])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
             broadcast: {
@@ -6434,339 +7037,6 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sandbox dispatch routing tests
-    // -----------------------------------------------------------------------
-
-    /// Records calls and returns a predefined result.
-    struct MockSandbox {
-        calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
-        result: std::sync::Mutex<
-            Option<Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>>,
-        >,
-    }
-
-    impl MockSandbox {
-        fn returning(
-            result: Result<swage_sandbox::ToolCallResult, swage_core::SandboxError>,
-        ) -> Self {
-            Self {
-                calls: Arc::new(Mutex::new(vec![])),
-                result: std::sync::Mutex::new(Some(result)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl swage_sandbox::Sandbox for MockSandbox {
-        async fn spawn_agent(&mut self) -> Result<(), swage_core::SandboxError> {
-            Ok(())
-        }
-
-        async fn execute_tool(
-            &self,
-            name: &str,
-            params: serde_json::Value,
-        ) -> Result<swage_sandbox::ToolCallResult, swage_core::SandboxError> {
-            self.calls.lock().await.push((name.to_string(), params));
-            self.result
-                .lock()
-                .unwrap()
-                .take()
-                .expect("execute_tool called more than once")
-        }
-
-        async fn shutdown(&mut self) -> Result<(), swage_core::SandboxError> {
-            Ok(())
-        }
-    }
-
-    /// Minimal tool stub for sandbox tests — registered so dispatch can find
-    /// the tool, but execution is intercepted by SandboxedExecutor before
-    /// reaching this implementation.
-    struct StubTool {
-        tool_name: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::tool::Tool for StubTool {
-        fn name(&self) -> &str {
-            self.tool_name
-        }
-        fn description(&self) -> &str {
-            "stub for sandbox routing tests"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object", "additionalProperties": true})
-        }
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &dyn swage_tool::context::ToolContext,
-        ) -> Result<serde_json::Value, swage_core::ToolError> {
-            // Should never be reached when SandboxedExecutor is the strategy.
-            Err(swage_core::ToolError::ExecutionFailed {
-                name: self.tool_name.to_string(),
-                message: "direct execution not supported in sandbox mode".into(),
-            })
-        }
-    }
-
-    /// Build an AppState with an active sandbox and specified tools registered.
-    ///
-    /// Tools are registered in the dispatcher so the dispatch pipeline can find
-    /// them (step 1). The SandboxedExecutor strategy intercepts execution at
-    /// step 6, routing calls through the sandbox instead of executing locally.
-    async fn make_state_with_sandbox(
-        rounds: Vec<Vec<StreamChunk>>,
-        sandbox: Arc<dyn swage_sandbox::Sandbox>,
-        tools: Vec<Arc<dyn crate::tool::Tool>>,
-    ) -> (AppState, Uuid) {
-        let storage = Arc::new(MockStorage::new());
-
-        let bench = storage.get_or_create_default().await.expect("bench");
-        let session = storage
-            .create_session(NewSession {
-                bench_id: bench.id,
-                agent_id: "gateway".to_string(),
-                metadata: None,
-            })
-            .await
-            .expect("session");
-        let session_id = session.id;
-
-        ThreadStore::create(
-            &*storage,
-            NewThread {
-                session_id,
-                agent_id: "gateway".to_string(),
-            },
-        )
-        .await
-        .expect("thread");
-
-        let provider = Arc::new(MultiRoundMockProvider::new(rounds));
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(tools)),
-            sandbox: Some(sandbox),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-        };
-        (state, session_id)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sandbox_routes_tool_calls_through_sandbox_when_present() {
-        let round_1 = vec![
-            StreamChunk::ToolUse {
-                call_id: "sb_call".into(),
-                name: "echo".into(),
-                arguments: serde_json::json!({"text": "sandbox_hi"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-        let round_2 = vec![
-            StreamChunk::Delta {
-                content: "done".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-
-        let sandbox = Arc::new(MockSandbox::returning(Ok(
-            swage_sandbox::ToolCallResult::success(serde_json::json!("sandbox_output"), 5),
-        )));
-        // Register the tool so dispatch step 1 (lookup) succeeds; execution
-        // is intercepted at step 6 by SandboxedExecutor.
-        let tools: Vec<Arc<dyn crate::tool::Tool>> =
-            vec![Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>];
-        let (state, session_id) =
-            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        process_turn(
-            &state,
-            session_id,
-            None,
-            "Use echo".to_string(),
-            tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))),
-            None,
-        )
-        .await
-        .expect("turn should complete");
-
-        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-        // The empty direct dispatcher would produce status="error". Only the
-        // sandbox path can produce status="success" here.
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                ServerEvent::ToolEnd { call_id, status, .. }
-                if call_id == "sb_call" && status == "success"
-            )),
-            "sandbox tool call should succeed; got events: {events:?}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sandbox_ipc_error_produces_tool_end_error_with_communication_message() {
-        let round_1 = vec![
-            StreamChunk::ToolUse {
-                call_id: "err_call".into(),
-                name: "broken".into(),
-                arguments: serde_json::json!({}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-        let round_2 = vec![
-            StreamChunk::Delta {
-                content: "done".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-
-        let sandbox = Arc::new(MockSandbox::returning(Err(
-            swage_core::SandboxError::IpcError {
-                message: "pipe broken".to_string(),
-            },
-        )));
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![Arc::new(StubTool {
-            tool_name: "broken",
-        }) as Arc<dyn crate::tool::Tool>];
-        let (state, session_id) =
-            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        process_turn(
-            &state,
-            session_id,
-            None,
-            "Use broken".to_string(),
-            tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))),
-            None,
-        )
-        .await
-        .expect("turn should complete");
-
-        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-        let tool_end = events
-            .iter()
-            .find(|e| matches!(e, ServerEvent::ToolEnd { call_id, .. } if call_id == "err_call"))
-            .expect("expected ToolEnd for err_call");
-
-        match tool_end {
-            ServerEvent::ToolEnd { status, result, .. } => {
-                assert_eq!(status, "error", "IPC error must produce error status");
-                let msg = result.as_str().unwrap_or("");
-                assert!(
-                    msg.contains("sandbox communication error"),
-                    "result should contain 'sandbox communication error', got: {msg}"
-                );
-            }
-            _ => panic!("expected ToolEnd"),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sandbox_tool_error_field_produces_tool_end_error() {
-        // ToolCallResult.error = Some(...) means the sandboxed tool itself failed.
-        let round_1 = vec![
-            StreamChunk::ToolUse {
-                call_id: "fail_call".into(),
-                name: "fail_tool".into(),
-                arguments: serde_json::json!({}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-        let round_2 = vec![
-            StreamChunk::Delta {
-                content: "done".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ];
-
-        let sandbox = Arc::new(MockSandbox::returning(Ok(
-            swage_sandbox::ToolCallResult::failed("tool execution failed inside sandbox", 10),
-        )));
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![Arc::new(StubTool {
-            tool_name: "fail_tool",
-        }) as Arc<dyn crate::tool::Tool>];
-        let (state, session_id) =
-            make_state_with_sandbox(vec![round_1, round_2], sandbox, tools).await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        process_turn(
-            &state,
-            session_id,
-            None,
-            "Use fail_tool".to_string(),
-            tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))),
-            None,
-        )
-        .await
-        .expect("turn should complete");
-
-        let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-        let tool_end = events
-            .iter()
-            .find(|e| matches!(e, ServerEvent::ToolEnd { call_id, .. } if call_id == "fail_call"))
-            .expect("expected ToolEnd for fail_call");
-
-        match tool_end {
-            ServerEvent::ToolEnd { status, result, .. } => {
-                assert_eq!(status, "error");
-                let msg = result.as_str().unwrap_or("");
-                assert!(
-                    msg.contains("tool execution failed"),
-                    "result should contain the sandbox error message, got: {msg}"
-                );
-            }
-            _ => panic!("expected ToolEnd"),
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Turn ID correlation span test
     // -----------------------------------------------------------------------
 
@@ -6783,12 +7053,13 @@ pub(crate) mod tests {
 
         // Accumulates (span_name, [field_names]) for every span created
         // during process_turn. Shared between the subscriber and the assertions.
-        let recorded: StdArc<StdMutex<Vec<(String, Vec<String>)>>> =
-            StdArc::new(StdMutex::new(Vec::new()));
+        type RecordedFields = Vec<(String, Vec<String>)>;
+
+        let recorded: StdArc<StdMutex<RecordedFields>> = StdArc::new(StdMutex::new(Vec::new()));
         let captured = StdArc::clone(&recorded);
 
         // Minimal Layer that records span names and field names on creation.
-        struct SpanFieldRecorder(StdArc<StdMutex<Vec<(String, Vec<String>)>>>);
+        struct SpanFieldRecorder(StdArc<StdMutex<RecordedFields>>);
 
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanFieldRecorder {
             fn on_new_span(
@@ -6896,11 +7167,12 @@ pub(crate) mod tests {
 
         // Accumulates (level_str, [field_names]) for every event emitted
         // during process_turn. Shared between the layer and the assertions.
-        let recorded: StdArc<StdMutex<Vec<(String, Vec<String>)>>> =
-            StdArc::new(StdMutex::new(Vec::new()));
+        type RecordedFields = Vec<(String, Vec<String>)>;
+
+        let recorded: StdArc<StdMutex<RecordedFields>> = StdArc::new(StdMutex::new(Vec::new()));
         let captured = StdArc::clone(&recorded);
 
-        struct EventFieldRecorder(StdArc<StdMutex<Vec<(String, Vec<String>)>>>);
+        struct EventFieldRecorder(StdArc<StdMutex<RecordedFields>>);
 
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFieldRecorder {
             fn on_event(
@@ -7144,7 +7416,10 @@ pub(crate) mod tests {
 
         let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
 
-        assert!(!summary.has_read, "untrusted attachment must not grant read");
+        assert!(
+            !summary.has_read,
+            "untrusted attachment must not grant read"
+        );
         assert!(
             !summary.has_write,
             "untrusted attachment must not grant write"
@@ -7205,6 +7480,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn sandbox_config_skips_missing_trusted_workspace_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let working_directory = temp_dir.path().join("work");
+        let existing_workspace = temp_dir.path().join("existing");
+        let missing_workspace = temp_dir.path().join("missing");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        std::fs::create_dir_all(&existing_workspace).unwrap();
+
+        let agent_config = AgentConfig::new("agent")
+            .with_workspace(&working_directory, vec![working_directory.clone()]);
+        let policy = TrustedWorkspacePolicy {
+            permissions: WorkspacePermissionSummary {
+                has_read: true,
+                has_write: true,
+            },
+            paths: vec![
+                TrustedWorkspacePath {
+                    path: existing_workspace.clone(),
+                    can_read: true,
+                    can_write: false,
+                },
+                TrustedWorkspacePath {
+                    path: missing_workspace.clone(),
+                    can_read: true,
+                    can_write: true,
+                },
+            ],
+        };
+
+        let sandbox_config = build_sandbox_config(&agent_config, Some(&policy)).unwrap();
+        let existing_workspace = sandbox_path(&existing_workspace);
+
+        assert!(
+            sandbox_config
+                .read_only_mounts
+                .contains(&existing_workspace)
+        );
+        assert!(
+            sandbox_config
+                .landlock_read_paths
+                .contains(&existing_workspace)
+        );
+        assert!(
+            !sandbox_config
+                .read_write_mounts
+                .contains(&missing_workspace)
+        );
+        assert!(
+            !sandbox_config
+                .landlock_write_paths
+                .contains(&missing_workspace)
+        );
+    }
+
+    #[test]
     fn permission_config_unchanged_when_workspace_grants_absent() {
         let config = swage_config::ResolvedConfig::default();
         let policy = build_permission_config_for_test(&config, None);
@@ -7220,10 +7550,8 @@ pub(crate) mod tests {
     #[test]
     fn permission_config_denies_all_workspace_tools_when_no_grants() {
         let config = swage_config::ResolvedConfig::default();
-        let policy = build_permission_config_for_test(
-            &config,
-            Some(WorkspacePermissionSummary::default()),
-        );
+        let policy =
+            build_permission_config_for_test(&config, Some(WorkspacePermissionSummary::default()));
 
         for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
             assert!(
@@ -7282,10 +7610,8 @@ pub(crate) mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.deny = vec!["file_write".into()];
 
-        let policy = build_permission_config_for_test(
-            &config,
-            Some(WorkspacePermissionSummary::default()),
-        );
+        let policy =
+            build_permission_config_for_test(&config, Some(WorkspacePermissionSummary::default()));
 
         let file_write_count = policy
             .deny
@@ -7956,10 +8282,12 @@ pub(crate) mod tests {
             "properties": { "result": { "type": "string" } },
             "required": ["result"]
         });
-        let mut config = swage_config::ResolvedConfig::default();
-        config.output = OutputConfig {
-            schema: Some(schema),
-            max_retries: 1,
+        let config = swage_config::ResolvedConfig {
+            output: OutputConfig {
+                schema: Some(schema),
+                max_retries: 1,
+            },
+            ..Default::default()
         };
 
         let (state, session_id) = make_state_with_config(chunks, config).await;
@@ -8020,10 +8348,12 @@ pub(crate) mod tests {
             "properties": { "x": { "type": "integer" } },
             "required": ["x"]
         });
-        let mut config = swage_config::ResolvedConfig::default();
-        config.output = OutputConfig {
-            schema: Some(schema),
-            max_retries: 1,
+        let config = swage_config::ResolvedConfig {
+            output: OutputConfig {
+                schema: Some(schema),
+                max_retries: 1,
+            },
+            ..Default::default()
         };
 
         let (state, session_id) = make_state_with_config(chunks, config).await;
@@ -8128,6 +8458,216 @@ pub(crate) mod tests {
     // -----------------------------------------------------------------------
     // Approval event routing tests [byi8]
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: threads[0].id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("hello".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mut turn_config = state.config.clone();
+        turn_config.hitl.timeout = 7;
+        turn_config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Interrupt;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let approval_channels = Arc::clone(&state.approval_channels);
+        let state_for_task = state.clone();
+        let task = tokio::spawn(async move {
+            request_sandbox_degradation_approval(
+                &state_for_task,
+                SandboxDegradationApprovalRequest {
+                    config: &turn_config,
+                    ws_tx: &tx,
+                    turn_id: turn.id,
+                    agent_id: "gateway",
+                    prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
+                    context: serde_json::json!({ "degradation": "unsandboxed_execution" }),
+                    cancel_token: &cancel_token,
+                },
+            )
+            .await
+        });
+
+        let approval_id = match rx.recv().await.expect("approval event should be sent") {
+            ServerEvent::ApprovalRequired {
+                approval_id,
+                timeout_policy,
+                ..
+            } => {
+                assert_eq!(timeout_policy, "interrupt");
+                Uuid::parse_str(&approval_id).unwrap()
+            }
+            other => panic!("expected ApprovalRequired, got: {other:?}"),
+        };
+
+        let approval = state
+            .storage
+            .get_approval(approval_id)
+            .await
+            .unwrap()
+            .expect("approval should be stored");
+        assert_eq!(
+            approval.timeout_policy,
+            swage_core::ApprovalTimeoutPolicy::Interrupt
+        );
+
+        approval_channels
+            .lock()
+            .unwrap()
+            .remove(&approval_id)
+            .expect("approval channel should be registered")
+            .send(swage_agent::ApprovalDecision {
+                decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                reason: None,
+            })
+            .expect("approval decision should be delivered");
+
+        let outcome = task
+            .await
+            .expect("approval task should finish")
+            .expect("approval should succeed");
+        assert_eq!(outcome, SandboxDegradationApproval::Approved);
+    }
+
+    #[tokio::test]
+    async fn sandbox_degradation_approval_preserves_cancelled_wait() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: threads[0].id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("hello".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let turn_config = state.config.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let cancel_for_task = cancel_token.clone();
+        let state_for_task = state.clone();
+        let task = tokio::spawn(async move {
+            request_sandbox_degradation_approval(
+                &state_for_task,
+                SandboxDegradationApprovalRequest {
+                    config: &turn_config,
+                    ws_tx: &tx,
+                    turn_id: turn.id,
+                    agent_id: "gateway",
+                    prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
+                    context: serde_json::json!({ "degradation": "unsandboxed_execution" }),
+                    cancel_token: &cancel_for_task,
+                },
+            )
+            .await
+        });
+
+        match rx.recv().await.expect("approval event should be sent") {
+            ServerEvent::ApprovalRequired { .. } => {}
+            other => panic!("expected ApprovalRequired, got: {other:?}"),
+        }
+
+        cancel_token.cancel();
+
+        let outcome = task
+            .await
+            .expect("approval task should finish")
+            .expect("approval should complete as cancelled");
+        assert_eq!(outcome, SandboxDegradationApproval::Interrupted);
+
+        let stored_turn = state
+            .storage
+            .get_turn(turn.id)
+            .await
+            .unwrap()
+            .expect("turn should exist");
+        assert_eq!(stored_turn.state, TurnState::AwaitingApproval);
+    }
+
+    #[tokio::test]
+    async fn sandbox_degradation_timeout_interrupts_and_cleans_channel() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: threads[0].id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("hello".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mut turn_config = state.config.clone();
+        turn_config.hitl.timeout = 0;
+        turn_config.hitl.timeout_policy = ApprovalTimeoutPolicy::Interrupt;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let state_for_task = state.clone();
+        let task = tokio::spawn(async move {
+            request_sandbox_degradation_approval(
+                &state_for_task,
+                SandboxDegradationApprovalRequest {
+                    config: &turn_config,
+                    ws_tx: &tx,
+                    turn_id: turn.id,
+                    agent_id: "gateway",
+                    prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
+                    context: serde_json::json!({ "degradation": "unsandboxed_execution" }),
+                    cancel_token: &cancel_token,
+                },
+            )
+            .await
+        });
+
+        let approval_id = match rx.recv().await.expect("approval event should be sent") {
+            ServerEvent::ApprovalRequired { approval_id, .. } => {
+                Uuid::parse_str(&approval_id).unwrap()
+            }
+            other => panic!("expected ApprovalRequired, got: {other:?}"),
+        };
+
+        let outcome = task
+            .await
+            .expect("approval task should finish")
+            .expect("approval should complete as interrupted");
+        assert_eq!(outcome, SandboxDegradationApproval::Interrupted);
+
+        assert!(
+            state
+                .approval_channels
+                .lock()
+                .unwrap()
+                .get(&approval_id)
+                .is_none(),
+            "timed-out degradation approvals must not leave stale decision channels"
+        );
+        let approval = state
+            .storage
+            .get_approval(approval_id)
+            .await
+            .unwrap()
+            .expect("approval should exist");
+        assert_eq!(approval.state, ApprovalState::Expired);
+    }
 
     #[test]
     fn approval_required_routes_to_ws_tx() {

@@ -22,8 +22,9 @@ use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind}
 
 use crate::state::AppState;
 use crate::turn::{
-    GatewayDelegationHandler, build_agent_config, build_assembly_elements,
-    build_gateway_dispatcher, load_bench_memory,
+    GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config,
+    build_assembly_elements, build_gateway_dispatcher_with_unsandboxed_degradation,
+    load_bench_memory,
 };
 use crate::websocket::ServerEvent;
 
@@ -268,8 +269,7 @@ impl TopologyExecutor {
 
                 if total_tokens_consumed > max_total_tokens {
                     run_failed = Some(format!(
-                        "topology token budget exceeded: {} > {}",
-                        total_tokens_consumed, max_total_tokens
+                        "topology token budget exceeded: {total_tokens_consumed} > {max_total_tokens}"
                     ));
                     run_cancel_token.cancel();
                     break;
@@ -457,6 +457,7 @@ struct NodeCompletion {
     output_tokens: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_node(
     state: AppState,
     bench: swage_storage::model::Bench,
@@ -636,6 +637,7 @@ struct NodeRetryRecord {
     recovery_guidance: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_agent_node(
     state: &AppState,
     bench: &swage_storage::model::Bench,
@@ -721,10 +723,23 @@ async fn execute_agent_node(
     .await;
 
     let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let dispatcher =
-        build_gateway_dispatcher(state, &config, None, Some(bench.id), silent_ws_tx).await;
     let agent_config =
         build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
+    let dispatcher_build = build_gateway_dispatcher_with_unsandboxed_degradation(
+        state,
+        GatewayDispatcherRequest {
+            config: &config,
+            agent_config: &agent_config,
+            session_metadata: None,
+            bench_id: Some(bench.id),
+            ws_tx: silent_ws_tx,
+        },
+        "topology agent node",
+    )
+    .await
+    .map_err(|error| TopologyEngineError::InvalidGraph(error.to_string()))?;
+    let sandbox_guard = dispatcher_build.sandbox_guard;
+    let dispatcher = dispatcher_build.dispatcher;
     let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
         .provider(state.provider.clone())
@@ -738,7 +753,20 @@ async fn execute_agent_node(
     if let Some(hook_registry) = state.hook_registry.clone() {
         agent_builder = agent_builder.hook_registry(hook_registry);
     }
-    let agent = agent_builder.build()?;
+    let agent = match agent_builder.build() {
+        Ok(agent) => agent,
+        Err(error) => {
+            if let Some(guard) = &sandbox_guard {
+                if let Err(shutdown_error) = guard.shutdown().await {
+                    tracing::warn!(
+                        error = %shutdown_error,
+                        "failed to shut down topology sandbox after agent construction error"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
+    };
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let outbound = agent
@@ -791,7 +819,25 @@ async fn execute_agent_node(
         }
     }
 
-    let outbound = outbound?;
+    let outbound = match outbound {
+        Ok(outbound) => outbound,
+        Err(error) => {
+            if let Some(guard) = &sandbox_guard {
+                if let Err(shutdown_error) = guard.shutdown().await {
+                    tracing::warn!(
+                        error = %shutdown_error,
+                        "failed to shut down topology sandbox after agent error"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
+    };
+    if let Some(guard) = &sandbox_guard {
+        if let Err(error) = guard.shutdown().await {
+            tracing::warn!(error = %error, "failed to shut down topology sandbox");
+        }
+    }
     if let Some(turn_id) = turn_id {
         if let Some(ref output) = outbound.structured_output {
             state
@@ -1200,7 +1246,6 @@ mod tests {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            sandbox: None,
             hook_registry: None,
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,

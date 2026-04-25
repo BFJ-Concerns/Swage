@@ -126,16 +126,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
     );
 
-    // Step 8: Initialise the sandbox when enabled.
-    let sandbox = match build_sandbox(&config, Arc::clone(&provider)).await {
-        Ok(sandbox) => sandbox,
-        Err(error) => {
-            eprintln!("Sandbox initialisation failed: {error}");
-            std::process::exit(1);
-        }
-    };
-
-    // Step 9: Assemble application state and build the router.
+    // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let bench_store: Arc<dyn swage_storage::store::BenchStore> = raw_storage;
@@ -145,7 +136,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         provider,
         config.clone(),
         tool_dispatcher,
-        sandbox,
         None,
     );
     state.voice_provider = voice_provider;
@@ -225,22 +215,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
         warn!("Failed to remove runtime metadata on shutdown: {e}");
-    }
-
-    // Step 13: Shut down the sandbox cleanly.
-    if let Some(mut sandbox_arc) = state.sandbox {
-        if let Some(sandbox) = Arc::get_mut(&mut sandbox_arc) {
-            if let Err(e) = sandbox.shutdown().await {
-                warn!("Sandbox shutdown returned an error: {e}");
-            } else {
-                info!("Sandbox agent shut down cleanly");
-            }
-        } else {
-            warn!(
-                "Sandbox Arc has unexpected extra references at shutdown \
-                 — skipping clean shutdown"
-            );
-        }
     }
 }
 
@@ -329,7 +303,7 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
     let swage_log = std::env::var("SWAGE_LOG").ok();
     let legacy_tevik_log = std::env::var("TEVIK_LOG").ok();
     let override_env = select_log_override(swage_log.as_deref(), legacy_tevik_log.as_deref());
-    let filter = build_log_filter(&config.logging.level, override_env.as_deref());
+    let filter = build_log_filter(&config.logging.level, override_env);
 
     let use_pretty = std::env::var("SWAGE_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("pretty"))
@@ -343,15 +317,13 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
         {
             eprintln!("Warning: failed to initialise logging subscriber: {e}");
         }
-    } else {
-        if let Err(e) = tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .try_init()
-        {
-            eprintln!("Warning: failed to initialise logging subscriber: {e}");
-        }
+    } else if let Err(e) = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+    {
+        eprintln!("Warning: failed to initialise logging subscriber: {e}");
     }
 }
 
@@ -536,53 +508,6 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
     Arc::from(provider)
 }
 
-/// Initialise the sandbox agent when configuration enables it.
-async fn build_sandbox(
-    config: &swage_config::ResolvedConfig,
-    provider: Arc<dyn swage_provider::LlmProvider>,
-) -> Result<Option<Arc<dyn swage_sandbox::Sandbox>>, swage_core::SandboxError> {
-    use crate::tool::workspace::resolve_workspace_root;
-    use swage_core::SandboxError;
-    use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
-
-    if !config.sandbox.enabled {
-        return Ok(None);
-    }
-
-    let workspace_root = resolve_workspace_root(config);
-
-    let sandbox_config = match swage_sandbox::SandboxConfig::builder()
-        .working_directory(&workspace_root)
-        .read_write_mount(&workspace_root)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(SandboxError::SpawnFailed {
-                message: format!("failed to build sandbox config: {e}"),
-            });
-        }
-    };
-
-    let llm_handler = HostLlmHandler::new(move |req: swage_core::CompletionRequest| {
-        let p = Arc::clone(&provider);
-        async move {
-            p.complete(req).await.map_err(|e| SandboxError::IpcError {
-                message: e.to_string(),
-            })
-        }
-    });
-
-    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(sandbox_config, llm_handler);
-    match sandbox.spawn_agent().await {
-        Ok(()) => {
-            info!("Sandbox agent spawned — tool calls will run in an isolated process");
-            Ok(Some(Arc::new(sandbox) as Arc<dyn swage_sandbox::Sandbox>))
-        }
-        Err(e) => Err(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -608,8 +533,7 @@ mod tests {
         let filter = build_log_filter(&LogLevel::Debug, None);
         assert!(
             filter.to_string().contains("debug"),
-            "expected 'debug' in filter, got: {}",
-            filter,
+            "expected 'debug' in filter, got: {filter}",
         );
     }
 
@@ -619,8 +543,7 @@ mod tests {
         let filter = build_log_filter(&LogLevel::Info, Some("warn"));
         assert!(
             filter.to_string().contains("warn"),
-            "expected 'warn' in filter, got: {}",
-            filter,
+            "expected 'warn' in filter, got: {filter}",
         );
     }
 
@@ -630,8 +553,7 @@ mod tests {
         let filter = build_log_filter(&LogLevel::Error, Some("!!!invalid!!!"));
         assert!(
             filter.to_string().contains("error"),
-            "expected 'error' in filter, got: {}",
-            filter,
+            "expected 'error' in filter, got: {filter}",
         );
     }
 

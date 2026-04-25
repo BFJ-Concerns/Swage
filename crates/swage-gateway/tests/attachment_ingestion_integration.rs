@@ -69,7 +69,6 @@ fn test_state(
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     state.workflow_capabilities = workflow_capabilities;
     (state, storage)

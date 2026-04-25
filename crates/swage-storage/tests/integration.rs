@@ -136,9 +136,8 @@ async fn full_hierarchy_survives_reconnection() {
         .await
         .expect("create bench");
 
-        let ids = create_full_hierarchy(&storage, bench.id, AGENT_A).await;
         // Storage dropped here — connection closed.
-        ids
+        create_full_hierarchy(&storage, bench.id, AGENT_A).await
     };
 
     // Phase 2: reconnect and verify everything is readable.

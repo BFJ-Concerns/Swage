@@ -516,6 +516,8 @@ fn make_base32_secret(minimum_length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use std::sync::{Mutex, MutexGuard};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -523,6 +525,8 @@ mod tests {
 
     use super::*;
 
+    // Secret resolution reads process-wide env vars. Hold this guard across
+    // awaits so concurrent secret tests cannot race the managed key value.
     static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_secret_env() -> MutexGuard<'static, ()> {

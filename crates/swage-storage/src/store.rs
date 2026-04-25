@@ -481,6 +481,7 @@ pub trait ToolCallStore: Send + Sync {
     /// Write the completed result back onto an in-progress tool call.
     ///
     /// Matched by `call_id` scoped to `turn_id` to avoid cross-turn collisions.
+    #[allow(clippy::too_many_arguments)]
     async fn update_tool_call_result(
         &self,
         call_id: &str,
@@ -1891,7 +1892,7 @@ mod tests {
     #[test]
     fn message_store_list_messages_by_thread_compile_check() {
         fn _assert<T: MessageStore>(t: &T) {
-            let _ = t.list_messages_by_thread(Uuid::new_v4());
+            std::mem::drop(t.list_messages_by_thread(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1901,7 +1902,7 @@ mod tests {
     #[test]
     fn message_store_get_message_compile_check() {
         fn _assert<T: MessageStore>(t: &T) {
-            let _ = t.get_message(Uuid::new_v4());
+            std::mem::drop(t.get_message(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1911,7 +1912,7 @@ mod tests {
     #[test]
     fn message_store_delete_by_thread_compile_check() {
         fn _assert<T: MessageStore>(t: &T) {
-            let _ = t.delete_by_thread(Uuid::new_v4());
+            std::mem::drop(t.delete_by_thread(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1921,7 +1922,7 @@ mod tests {
     #[test]
     fn message_store_get_latest_for_session_compile_check() {
         fn _assert<T: MessageStore>(t: &T) {
-            let _ = t.get_latest_for_session(Uuid::new_v4());
+            std::mem::drop(t.get_latest_for_session(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1952,7 +1953,7 @@ mod tests {
     #[test]
     fn storage_supertrait_includes_thread_store() {
         fn _assert<T: Storage>(t: &T) {
-            let _ = t.update_state(Uuid::new_v4(), ThreadState::Processing);
+            std::mem::drop(t.update_state(Uuid::new_v4(), ThreadState::Processing));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1972,7 +1973,7 @@ mod tests {
     #[test]
     fn turn_store_update_cost_compile_check() {
         fn _assert<T: TurnStore>(t: &T) {
-            let _ = t.update_cost(Uuid::new_v4(), 42);
+            std::mem::drop(t.update_cost(Uuid::new_v4(), 42));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1982,8 +1983,8 @@ mod tests {
     #[test]
     fn context_snapshot_store_compile_check() {
         fn _assert<T: ContextSnapshotStore>(t: &T) {
-            let _ = t.store_snapshot(Uuid::new_v4(), "{\"total_tokens\":100}");
-            let _ = t.get_snapshot(Uuid::new_v4());
+            std::mem::drop(t.store_snapshot(Uuid::new_v4(), "{\"total_tokens\":100}"));
+            std::mem::drop(t.get_snapshot(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -1993,10 +1994,10 @@ mod tests {
     #[test]
     fn skill_activation_store_compile_check() {
         fn _assert<T: SkillActivationStore>(t: &T) {
-            let _ = t.activate_skill(Uuid::new_v4(), "forge");
-            let _ = t.deactivate_skill(Uuid::new_v4(), "forge");
-            let _ = t.list_active_skills(Uuid::new_v4());
-            let _ = t.clear_active_skills(Uuid::new_v4());
+            std::mem::drop(t.activate_skill(Uuid::new_v4(), "forge"));
+            std::mem::drop(t.deactivate_skill(Uuid::new_v4(), "forge"));
+            std::mem::drop(t.list_active_skills(Uuid::new_v4()));
+            std::mem::drop(t.clear_active_skills(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2006,7 +2007,7 @@ mod tests {
     #[test]
     fn storage_supertrait_includes_skill_activation_store() {
         fn _assert<T: Storage>(t: &T) {
-            let _ = t.activate_skill(Uuid::new_v4(), "forge");
+            std::mem::drop(t.activate_skill(Uuid::new_v4(), "forge"));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2016,13 +2017,13 @@ mod tests {
     #[test]
     fn topology_trace_store_compile_check() {
         fn _assert<T: TopologyTraceStore>(t: &T) {
-            let _ = t.get_topology_run(Uuid::new_v4());
-            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
-            let _ = t.list_topology_runs_by_session(Uuid::new_v4());
-            let _ = t.get_node_execution(Uuid::new_v4());
-            let _ = t.list_node_executions_by_run(Uuid::new_v4());
-            let _ = t.list_edge_evaluations_by_run(Uuid::new_v4());
-            let _ = t.list_node_retries(Uuid::new_v4());
+            std::mem::drop(t.get_topology_run(Uuid::new_v4()));
+            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
+            std::mem::drop(t.list_topology_runs_by_session(Uuid::new_v4()));
+            std::mem::drop(t.get_node_execution(Uuid::new_v4()));
+            std::mem::drop(t.list_node_executions_by_run(Uuid::new_v4()));
+            std::mem::drop(t.list_edge_evaluations_by_run(Uuid::new_v4()));
+            std::mem::drop(t.list_node_retries(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2032,7 +2033,7 @@ mod tests {
     #[test]
     fn storage_supertrait_includes_topology_trace_store() {
         fn _assert<T: Storage>(t: &T) {
-            let _ = t.list_topology_runs_by_team(Uuid::new_v4());
+            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2042,11 +2043,11 @@ mod tests {
     #[test]
     fn approval_store_compile_check() {
         fn _assert<T: ApprovalStore>(t: &T) {
-            let _ = t.get_approval(Uuid::new_v4());
-            let _ = t.list_pending_by_agent("agent-1");
-            let _ = t.list_all_pending();
-            let _ = t.list_approvals();
-            let _ = t.cleanup_orphaned_approvals();
+            std::mem::drop(t.get_approval(Uuid::new_v4()));
+            std::mem::drop(t.list_pending_by_agent("agent-1"));
+            std::mem::drop(t.list_all_pending());
+            std::mem::drop(t.list_approvals());
+            std::mem::drop(t.cleanup_orphaned_approvals());
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2059,7 +2060,7 @@ mod tests {
     #[test]
     fn storage_supertrait_includes_approval_store() {
         fn _assert<T: Storage>(t: &T) {
-            let _ = t.list_all_pending();
+            std::mem::drop(t.list_all_pending());
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2068,8 +2069,8 @@ mod tests {
     #[test]
     fn delivery_store_compile_check() {
         fn _assert<T: DeliveryStore>(t: &T) {
-            let _ = t.list_delivery_records();
-            let _ = t.list_delivery_records_by_session(Uuid::new_v4());
+            std::mem::drop(t.list_delivery_records());
+            std::mem::drop(t.list_delivery_records_by_session(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2078,7 +2079,7 @@ mod tests {
     #[test]
     fn audit_store_compile_check() {
         fn _assert<T: AuditStore>(t: &T) {
-            let _ = t.create_audit_event(NewAuditEvent {
+            std::mem::drop(t.create_audit_event(NewAuditEvent {
                 id: "audit".into(),
                 session_id: None,
                 entity_kind: "secret".into(),
@@ -2086,9 +2087,9 @@ mod tests {
                 event_kind: "created".into(),
                 summary: "created".into(),
                 metadata: serde_json::json!({}),
-            });
-            let _ = t.list_audit_events();
-            let _ = t.list_audit_events_by_session(Uuid::new_v4());
+            }));
+            std::mem::drop(t.list_audit_events());
+            std::mem::drop(t.list_audit_events_by_session(Uuid::new_v4()));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2098,7 +2099,7 @@ mod tests {
     fn agent_memory_store_compile_check() {
         fn _assert<T: AgentMemoryStore>(t: &T) {
             let id = Uuid::new_v4();
-            let _ = t.create_agent_memory(NewAgentMemoryRecord {
+            std::mem::drop(t.create_agent_memory(NewAgentMemoryRecord {
                 id,
                 bench_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
@@ -2113,9 +2114,15 @@ mod tests {
                 outcome_status: Some("succeeded".into()),
                 source_summary: "turn completed".into(),
                 metadata: serde_json::json!({}),
-            });
-            let _ = t.get_agent_memory(id);
-            let _ = t.list_agent_memories(Uuid::new_v4(), Some("agent-a"), None, Some("tag"), 10);
+            }));
+            std::mem::drop(t.get_agent_memory(id));
+            std::mem::drop(t.list_agent_memories(
+                Uuid::new_v4(),
+                Some("agent-a"),
+                None,
+                Some("tag"),
+                10,
+            ));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2125,7 +2132,7 @@ mod tests {
     fn configuration_version_store_compile_check() {
         fn _assert<T: ConfigurationVersionStore>(t: &T) {
             let id = Uuid::new_v4();
-            let _ = t.create_configuration_version(NewConfigurationVersion {
+            std::mem::drop(t.create_configuration_version(NewConfigurationVersion {
                 id,
                 bench_id: Some(Uuid::new_v4()),
                 session_id: None,
@@ -2139,11 +2146,11 @@ mod tests {
                 diff: serde_json::json!([]),
                 previous_version_id: None,
                 rollback_to_version_id: None,
-            });
-            let _ = t.get_configuration_version(id);
-            let _ = t.list_configuration_versions(Some(Uuid::new_v4()));
-            let _ = t.list_configuration_versions_for_entity("team", "team-1");
-            let _ = t.get_latest_configuration_version("team", "team-1");
+            }));
+            std::mem::drop(t.get_configuration_version(id));
+            std::mem::drop(t.list_configuration_versions(Some(Uuid::new_v4())));
+            std::mem::drop(t.list_configuration_versions_for_entity("team", "team-1"));
+            std::mem::drop(t.get_latest_configuration_version("team", "team-1"));
         }
         let stub = StubStorage;
         _assert(&stub);
@@ -2153,7 +2160,7 @@ mod tests {
     fn secret_store_compile_check() {
         fn _assert<T: SecretStore>(t: &T) {
             let id = Uuid::new_v4();
-            let _ = t.create_secret(NewSecretRecord {
+            std::mem::drop(t.create_secret(NewSecretRecord {
                 id,
                 name: "provider".into(),
                 material_kind: "provider_key".into(),
@@ -2164,13 +2171,18 @@ mod tests {
                 external_reference: None,
                 metadata: serde_json::json!({}),
                 value: Some("secret".into()),
-            });
-            let _ = t.list_secrets();
-            let _ = t.get_secret(id);
-            let _ = t.update_secret_value(id, Some("rotated".into()), None, serde_json::json!({}));
-            let _ = t.revoke_secret(id);
-            let _ = t.restore_secret(id);
-            let _ = t.get_managed_secret_value(id);
+            }));
+            std::mem::drop(t.list_secrets());
+            std::mem::drop(t.get_secret(id));
+            std::mem::drop(t.update_secret_value(
+                id,
+                Some("rotated".into()),
+                None,
+                serde_json::json!({}),
+            ));
+            std::mem::drop(t.revoke_secret(id));
+            std::mem::drop(t.restore_secret(id));
+            std::mem::drop(t.get_managed_secret_value(id));
         }
         let stub = StubStorage;
         _assert(&stub);

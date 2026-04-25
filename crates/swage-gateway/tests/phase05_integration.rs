@@ -79,7 +79,6 @@ async fn start_test_gateway() -> (Router, SocketAddr) {
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     let router = build_router(state);
 

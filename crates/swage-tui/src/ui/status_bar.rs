@@ -61,19 +61,19 @@ pub(crate) fn build_status_line(
 
     // Left section is always shown: " ● bench_name ".
     // Display width: 1 (leading space) + 1 (●) + 1 (space) + name + 1 (space).
-    let left_suffix = format!(" {} ", bench_name);
+    let left_suffix = format!(" {bench_name} ");
     let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " bench_name "
 
     // Build right-side candidates, most detailed first.
     // Graceful truncation: drop token counts, then model, always keep left.
     let model_str = model_name.unwrap_or("—");
     let tokens_str = match (input_tokens, output_tokens) {
-        (Some(i), Some(o)) => format!("in: {} / out: {}", i, o),
+        (Some(i), Some(o)) => format!("in: {i} / out: {o}"),
         _ => "—".to_string(),
     };
 
-    let full_right = format!("{} │ {} ", model_str, tokens_str);
-    let model_right = format!("{} ", model_str);
+    let full_right = format!("{model_str} │ {tokens_str} ");
+    let model_right = format!("{model_str} ");
 
     let right: String = if left_width + full_right.chars().count() <= width {
         full_right

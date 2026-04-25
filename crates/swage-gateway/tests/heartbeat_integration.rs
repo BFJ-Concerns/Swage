@@ -73,7 +73,6 @@ fn test_state(db_path: &Path, provider: impl LlmProvider + 'static) -> AppState 
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     )
 }
 

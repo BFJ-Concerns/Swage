@@ -49,16 +49,13 @@ impl MessageRouter {
                 kind: msg.kind.to_string(),
                 payload: msg.payload.clone(),
             };
-            match registry.dispatch(event).await {
-                HookOutcome::Block(reason) => {
-                    return Err(AgentError::HookBlocked {
-                        hook: "MessageSend".into(),
-                        reason,
-                    });
-                }
-                // Fail-open: hook errors don't prevent message creation.
-                _ => {}
+            if let HookOutcome::Block(reason) = registry.dispatch(event).await {
+                return Err(AgentError::HookBlocked {
+                    hook: "MessageSend".into(),
+                    reason,
+                });
             }
+            // Fail-open: hook errors don't prevent message creation.
         }
 
         // Notify is ephemeral — not persisted. Return a synthetic message.

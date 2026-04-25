@@ -66,7 +66,6 @@ fn test_state(db_path: &Path, workspace_root: &Path) -> (AppState, Arc<SqliteSto
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     (state, storage)
 }

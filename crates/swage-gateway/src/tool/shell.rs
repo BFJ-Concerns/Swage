@@ -262,8 +262,7 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("errout"),
-            "stderr should appear in error message: {:?}",
-            msg
+            "stderr should appear in error message: {msg:?}"
         );
     }
 
@@ -290,8 +289,7 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("timed out"),
-            "error message should mention timeout: {:?}",
-            msg
+            "error message should mention timeout: {msg:?}"
         );
     }
 
@@ -336,9 +334,7 @@ mod tests {
         assert!(
             output.contains(canonical.to_str().unwrap())
                 || canonical.to_str().unwrap().contains(output),
-            "pwd output {:?} should match workspace {:?}",
-            output,
-            canonical
+            "pwd output {output:?} should match workspace {canonical:?}"
         );
     }
 }

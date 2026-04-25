@@ -492,7 +492,7 @@ async fn approval_returned_when_single_hook_requests_it() {
         HookOutcome::RequestApproval { prompt, .. } => {
             assert_eq!(prompt, "please review");
         }
-        _ => panic!("expected RequestApproval, got {:?}", outcome),
+        _ => panic!("expected RequestApproval, got {outcome:?}"),
     }
 }
 
@@ -525,7 +525,7 @@ async fn approval_with_continue_hooks_returns_approval() {
         HookOutcome::RequestApproval { prompt, .. } => {
             assert_eq!(prompt, "needs review");
         }
-        _ => panic!("expected RequestApproval, got {:?}", outcome),
+        _ => panic!("expected RequestApproval, got {outcome:?}"),
     }
 }
 
@@ -562,7 +562,7 @@ async fn block_overrides_approval_regardless_of_order() {
 
     match outcome {
         HookOutcome::Block(reason) => assert_eq!(reason, "hard block"),
-        _ => panic!("expected Block, got {:?}", outcome),
+        _ => panic!("expected Block, got {outcome:?}"),
     }
 }
 
@@ -599,6 +599,6 @@ async fn first_approval_wins_among_multiple_approvals() {
                 "first (highest-priority) approval should win"
             );
         }
-        _ => panic!("expected RequestApproval, got {:?}", outcome),
+        _ => panic!("expected RequestApproval, got {outcome:?}"),
     }
 }

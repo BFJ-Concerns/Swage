@@ -92,6 +92,7 @@ pub trait PythonAssemblyRunner: Send + Sync {
     /// `elements` and `tokeniser` are used to build per-element accessor data
     /// for the Python `AssemblyContext`. `search_levels` is forwarded to the
     /// runtime so `ctx.include()` can resolve named sub-assemblies.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         path: &Path,

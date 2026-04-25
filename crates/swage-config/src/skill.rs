@@ -122,9 +122,9 @@ pub fn parse_skill_file(
 /// Unlike prompt rule files, skills *must* have frontmatter — there is no
 /// sensible default for `description`. Missing frontmatter is therefore an
 /// error here rather than a tolerated absence.
-fn parse_skill_frontmatter(
-    raw: &str,
-) -> Result<(Option<String>, Option<String>, Vec<String>, String), String> {
+type SkillFrontmatterParts = (Option<String>, Option<String>, Vec<String>, String);
+
+fn parse_skill_frontmatter(raw: &str) -> Result<SkillFrontmatterParts, String> {
     // Skills always require a frontmatter block.
     if !raw.starts_with("---\n") && !raw.starts_with("---\r\n") {
         return Err(
@@ -281,8 +281,7 @@ pub fn discover_skills(
                 warnings.push(SkillWarning {
                     file_path: entry.clone(),
                     reason: format!(
-                        "invalid skill directory name {:?}; names must match [a-z0-9-]+",
-                        dir_name,
+                        "invalid skill directory name {dir_name:?}; names must match [a-z0-9-]+"
                     ),
                 });
                 continue;

@@ -2586,7 +2586,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swage"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "futures",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "swage-agent"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "swage-client"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "chrono",
  "futures",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "swage-config"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "serde",
  "serde_json",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "swage-context"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "swage-core"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "swage-gateway"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "axum",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "swage-hook"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "regex",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "swage-provider"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "swage-python"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "serde",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "swage-safety"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "swage-sandbox"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2822,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "swage-storage"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "aes-gcm-siv",
  "async-trait",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "swage-tool"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "async-trait",
  "serde",
@@ -2858,7 +2858,7 @@ dependencies = [
 
 [[package]]
 name = "swage-topology"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "serde",
  "serde_json",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "swage-tui"
-version = "0.2603.2200"
+version = "0.202604.2500"
 dependencies = [
  "axum",
  "chrono",

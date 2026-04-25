@@ -280,8 +280,10 @@ mod tests {
 
     #[test]
     fn apply_task_overlay_appends_task_instructions_after_base_instructions() {
-        let mut base = ResolvedConfig::default();
-        base.instructions = "Base persona guidance.".into();
+        let base = ResolvedConfig {
+            instructions: "Base persona guidance.".into(),
+            ..Default::default()
+        };
 
         let task = TaskDefinition {
             name: "review".into(),

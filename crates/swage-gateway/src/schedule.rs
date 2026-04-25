@@ -95,7 +95,7 @@ enum ParsedSchedule {
         expression: String,
     },
     Cron {
-        schedule: Schedule,
+        schedule: Box<Schedule>,
         expression: String,
     },
 }
@@ -117,9 +117,9 @@ impl ParsedSchedule {
                 expression: every.clone(),
             }),
             ScheduleSpecRequest::Cron { cron } => Ok(Self::Cron {
-                schedule: Schedule::from_str(cron).map_err(|error| {
+                schedule: Box::new(Schedule::from_str(cron).map_err(|error| {
                     GatewayError::ValidationError(format!("invalid cron expression: {error}"))
-                })?,
+                })?),
                 expression: cron.clone(),
             }),
         }
@@ -251,7 +251,7 @@ pub async fn create_scheduled_job(
         })
         .await?;
 
-    Ok(map_job_response(job)?)
+    map_job_response(job)
 }
 
 pub async fn list_scheduled_jobs(
@@ -309,7 +309,7 @@ pub async fn update_scheduled_job(
         )
         .await?;
 
-    Ok(map_job_response(updated)?)
+    map_job_response(updated)
 }
 
 pub async fn pause_scheduled_job(
@@ -326,7 +326,7 @@ pub async fn pause_scheduled_job(
             },
         )
         .await?;
-    Ok(map_job_response(updated)?)
+    map_job_response(updated)
 }
 
 pub async fn resume_scheduled_job(
@@ -358,7 +358,7 @@ pub async fn resume_scheduled_job(
             },
         )
         .await?;
-    Ok(map_job_response(updated)?)
+    map_job_response(updated)
 }
 
 pub async fn delete_scheduled_job(state: &AppState, job_id: Uuid) -> Result<bool, GatewayError> {

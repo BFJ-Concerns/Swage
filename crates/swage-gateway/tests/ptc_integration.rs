@@ -29,7 +29,6 @@ use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 use swage_storage::model::NewWorkspaceAttachment;
 use swage_storage::store::{BenchStore, WorkspaceAttachmentStore};
-use swage_tool;
 
 // ---------------------------------------------------------------------------
 // Mock providers
@@ -102,10 +101,12 @@ async fn start_ptc_test_server(
     ]));
 
     // Create the PythonExecuteTool with access to sub-tools and storage.
-    let runtime = swage_python::PythonWorkerRuntime::new(
-        swage_config::model::PythonExecuteToolConfig::default(),
-    )
-    .expect("Python worker runtime must be available for PTC integration tests");
+    let runtime =
+        swage_python::PythonWorkerRuntime::new(swage_config::model::PythonExecuteToolConfig {
+            require_sandbox: false,
+            ..swage_config::model::PythonExecuteToolConfig::default()
+        })
+        .expect("Python worker runtime must be available for PTC integration tests");
     let pool = swage_python::WorkerPool::new(Arc::new(runtime))
         .expect("worker pool should initialise for PTC integration tests");
     let ptc_tool = swage_gateway::tool::python_execute::PythonExecuteTool::new(
@@ -149,7 +150,6 @@ async fn start_ptc_test_server(
         Arc::new(provider),
         config,
         dispatcher,
-        None,
         None,
     );
     let router = build_router(state);
@@ -353,7 +353,7 @@ print(f"{result1.strip()} {result2.strip()}")
     // Create conversation + open WebSocket.
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("http://{addr}/api/conversations"))
+        .post(format!("http://{addr}/api/conversations"))
         .send()
         .await
         .unwrap();
@@ -448,7 +448,7 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("http://{addr}/api/conversations"))
+        .post(format!("http://{addr}/api/conversations"))
         .send()
         .await
         .unwrap();
@@ -554,7 +554,7 @@ x = 1 / 0  # ZeroDivisionError
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("http://{addr}/api/conversations"))
+        .post(format!("http://{addr}/api/conversations"))
         .send()
         .await
         .unwrap();
@@ -643,7 +643,7 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("http://{addr}/api/conversations"))
+        .post(format!("http://{addr}/api/conversations"))
         .send()
         .await
         .unwrap();

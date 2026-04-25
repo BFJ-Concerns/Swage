@@ -85,7 +85,7 @@ impl SqliteStorage {
         F: FnOnce(&Connection) -> Result<T, rusqlite::Error>,
     {
         let guard = self.conn.lock().await;
-        tokio::task::block_in_place(|| f(&*guard)).map_err(map_rusqlite_error)
+        tokio::task::block_in_place(|| f(&guard)).map_err(map_rusqlite_error)
     }
 }
 

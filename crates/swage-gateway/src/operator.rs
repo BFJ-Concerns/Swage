@@ -123,18 +123,15 @@ fn classify_gateway_health(
     presence: &crate::presence::PresenceSnapshotResponse,
     channels: &ChannelStatusListResponse,
 ) -> &'static str {
-    if presence.gateway.shutdown_requested {
-        "degraded"
-    } else if presence
-        .machines
-        .iter()
-        .any(|machine| machine.state != "connected")
-    {
-        "degraded"
-    } else if channels
-        .channels
-        .iter()
-        .any(|channel| channel.status == "degraded")
+    if presence.gateway.shutdown_requested
+        || presence
+            .machines
+            .iter()
+            .any(|machine| machine.state != "connected")
+        || channels
+            .channels
+            .iter()
+            .any(|channel| channel.status == "degraded")
     {
         "degraded"
     } else if presence.gateway.active_turn_count > 0 {

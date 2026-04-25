@@ -322,7 +322,7 @@ fn wrapped_line_count(text: &str, visible_width: usize) -> usize {
     }
 
     let char_count = text.chars().count().max(1);
-    (char_count + visible_width - 1) / visible_width
+    char_count.div_ceil(visible_width)
 }
 
 fn role_label_text(role: &str) -> String {

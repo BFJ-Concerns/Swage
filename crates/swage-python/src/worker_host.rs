@@ -251,7 +251,7 @@ impl PythonWorkerRuntime {
             .transport
             .send(&HostToWorkerMessage::Execute {
                 request_id: request_id.clone(),
-                payload,
+                payload: Box::new(payload),
             })
             .await?;
 

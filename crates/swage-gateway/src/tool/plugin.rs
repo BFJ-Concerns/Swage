@@ -102,7 +102,7 @@ impl Tool for PluginTool {
             return Ok(Value::Null);
         }
 
-        serde_json::from_str(&stdout).or_else(|_| Ok(Value::String(stdout)))
+        serde_json::from_str(&stdout).or(Ok(Value::String(stdout)))
     }
 }
 

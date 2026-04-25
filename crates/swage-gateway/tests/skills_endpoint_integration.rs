@@ -1,3 +1,6 @@
+#![allow(clippy::await_holding_lock)]
+// These integration tests serialise process-env mutations with a std mutex.
+// The guard intentionally spans awaits because the gateway reads env during requests.
 //! Integration tests for GET /api/skills — skill listing with hierarchy resolution.
 
 use std::sync::Arc;
@@ -64,7 +67,6 @@ fn make_router() -> (Router, Arc<SqliteStorage>) {
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
-        None,
         None,
     );
     let router = build_router(state);

@@ -801,11 +801,11 @@ impl BuilderConfigurationService {
                     .map_err(GatewayError::ValidationError)?;
                 let existing = self.state.storage.get_lens(&lens_id).await?;
                 match existing {
-                    None => diagnostics.push(format!("Lens {} does not exist.", lens_id)),
+                    None => diagnostics.push(format!("Lens {lens_id} does not exist.")),
                     Some(record)
                         if record.source_kind == swage_storage::LensSourceKind::BuiltIn =>
                     {
-                        diagnostics.push(format!("Built-in lens {} cannot be edited.", lens_id))
+                        diagnostics.push(format!("Built-in lens {lens_id} cannot be edited."))
                     }
                     Some(_) => {}
                 }
@@ -920,8 +920,7 @@ impl BuilderConfigurationService {
                     extension.name == *extension_name && extension.source_kind == "managed"
                 }) {
                     diagnostics.push(format!(
-                        "Managed extension {} does not exist.",
-                        extension_name
+                        "Managed extension {extension_name} does not exist."
                     ));
                 }
             }
@@ -933,8 +932,7 @@ impl BuilderConfigurationService {
                     extension.name == *extension_name && extension.status == "approval_required"
                 }) {
                     diagnostics.push(format!(
-                        "Workspace extension {} is not awaiting approval.",
-                        extension_name
+                        "Workspace extension {extension_name} is not awaiting approval."
                     ));
                 }
             }
@@ -1716,6 +1714,7 @@ impl BuilderConfigurationService {
             .transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_configuration_change(
         &self,
         entity_kind: &str,
@@ -2054,12 +2053,12 @@ impl BuilderConfigurationService {
         let team = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
             .get_team(team_id)
             .await?;
-        Ok(capture_team_agent_from_response(&team, agent_id)
+        capture_team_agent_from_response(&team, agent_id)
             .map(|snapshot| {
                 serde_json::to_value(snapshot)
                     .map_err(|error| GatewayError::ValidationError(error.to_string()))
             })
-            .transpose()?)
+            .transpose()
     }
 
     async fn capture_team_task_snapshot(
@@ -2070,14 +2069,15 @@ impl BuilderConfigurationService {
         let team = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
             .get_team(team_id)
             .await?;
-        Ok(capture_team_task_from_response(&team, task_name)
+        capture_team_task_from_response(&team, task_name)
             .map(|snapshot| {
                 serde_json::to_value(snapshot)
                     .map_err(|error| GatewayError::ValidationError(error.to_string()))
             })
-            .transpose()?)
+            .transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_audit(
         &self,
         entity_kind: &str,

@@ -173,10 +173,13 @@ fn is_pid_dead(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::sync::Mutex;
 
-    // Serialise env-touching tests to prevent XDG_RUNTIME_DIR races.
+    // Serialise env-touching tests to prevent XDG_RUNTIME_DIR races. The guard
+    // intentionally spans awaits because runtime metadata reads process env.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
@@ -252,7 +255,7 @@ mod tests {
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
 
         // Spawn a long-running process to simulate the gateway.
-        let child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("100")
             .spawn()
             .expect("failed to spawn sleep process");
@@ -263,6 +266,7 @@ mod tests {
 
         let args = StopArgs { force: true };
         let result = run(&args).await;
+        let _ = child.wait();
 
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
 

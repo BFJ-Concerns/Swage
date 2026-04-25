@@ -116,61 +116,50 @@ impl AgentConnection {
         // Await the response, correlating by request_id.
         // The IPC channel is sequential (one outstanding LLM request at a time),
         // but we still validate request_id to catch protocol violations.
-        loop {
-            let msg = self.transport.receive().await?;
-            match msg {
-                IpcMessage::LlmResponse {
-                    request_id: ref resp_id,
+        let msg = self.transport.receive().await?;
+        match msg {
+            IpcMessage::LlmResponse {
+                request_id: ref resp_id,
+                ..
+            } if resp_id == &request_id => {
+                // Destructure now that we've confirmed the id.
+                if let IpcMessage::LlmResponse {
+                    content,
+                    token_usage,
+                    finish_reason,
+                    tool_calls,
                     ..
-                } if resp_id == &request_id => {
-                    // Destructure now that we've confirmed the id.
-                    if let IpcMessage::LlmResponse {
+                } = msg
+                {
+                    return Ok(LlmIpcResponse {
                         content,
                         token_usage,
                         finish_reason,
                         tool_calls,
-                        ..
-                    } = msg
-                    {
-                        return Ok(LlmIpcResponse {
-                            content,
-                            token_usage,
-                            finish_reason,
-                            tool_calls,
-                        });
-                    }
-                    unreachable!()
-                }
-                IpcMessage::ErrorMessage {
-                    request_id: Some(ref err_req_id),
-                    ref description,
-                    ..
-                } if err_req_id == &request_id => {
-                    return Err(SandboxError::IpcError {
-                        message: description.clone(),
                     });
                 }
-                // An LlmResponse for a different request_id is a protocol error.
-                IpcMessage::LlmResponse {
-                    request_id: ref other_id,
-                    ..
-                } => {
-                    return Err(SandboxError::IpcError {
-                        message: format!(
-                            "received LlmResponse for unexpected request_id '{other_id}', expected '{request_id}'"
-                        ),
-                    });
-                }
-                // Any other message while awaiting an LlmResponse is unexpected.
-                other => {
-                    return Err(SandboxError::IpcError {
-                        message: format!(
-                            "unexpected message while awaiting LlmResponse: {:?}",
-                            other
-                        ),
-                    });
-                }
+                unreachable!()
             }
+            IpcMessage::ErrorMessage {
+                request_id: Some(ref err_req_id),
+                ref description,
+                ..
+            } if err_req_id == &request_id => Err(SandboxError::IpcError {
+                message: description.clone(),
+            }),
+            // An LlmResponse for a different request_id is a protocol error.
+            IpcMessage::LlmResponse {
+                request_id: ref other_id,
+                ..
+            } => Err(SandboxError::IpcError {
+                message: format!(
+                    "received LlmResponse for unexpected request_id '{other_id}', expected '{request_id}'"
+                ),
+            }),
+            // Any other message while awaiting an LlmResponse is unexpected.
+            other => Err(SandboxError::IpcError {
+                message: format!("unexpected message while awaiting LlmResponse: {other:?}"),
+            }),
         }
     }
 
@@ -259,7 +248,7 @@ mod tests {
                 assert_eq!(request_id, "req-42");
                 assert_eq!(tool_name, "bash");
             }
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         }
     }
 
@@ -301,7 +290,7 @@ mod tests {
                 assert_eq!(duration_ms, 17);
                 assert!(error.is_none());
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
     }
 
@@ -326,7 +315,7 @@ mod tests {
             IpcMessage::ToolCallResult { error, .. } => {
                 assert_eq!(error, Some("command not found".into()));
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
     }
 
@@ -359,7 +348,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                other => panic!("host expected LlmRequest, got {:?}", other),
+                other => panic!("host expected LlmRequest, got {other:?}"),
             }
         });
 
@@ -436,7 +425,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
 
         agent_handle.await.unwrap().unwrap();
@@ -466,7 +455,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            other => panic!("host expected LlmRequest, got {:?}", other),
+            other => panic!("host expected LlmRequest, got {other:?}"),
         }
 
         let result = agent_handle.await.unwrap();
@@ -518,7 +507,7 @@ mod tests {
                 assert_eq!(category, ErrorCategory::ToolExecution);
                 assert_eq!(description, "tool panicked");
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
     }
 
@@ -538,7 +527,7 @@ mod tests {
             IpcMessage::ErrorMessage { request_id, .. } => {
                 assert!(request_id.is_none());
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
     }
 }

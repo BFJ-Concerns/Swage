@@ -221,7 +221,7 @@ fn hook_event_is_debug() {
     let event = HookEvent::AgentStop {
         agent_id: "a1".into(),
     };
-    let debug_str = format!("{:?}", event);
+    let debug_str = format!("{event:?}");
     assert!(debug_str.contains("AgentStop"));
 }
 
@@ -268,7 +268,7 @@ fn hook_outcome_is_clone() {
 #[test]
 fn hook_outcome_is_debug() {
     let outcome = HookOutcome::Continue;
-    let debug_str = format!("{:?}", outcome);
+    let debug_str = format!("{outcome:?}");
     assert!(debug_str.contains("Continue"));
 }
 
@@ -369,7 +369,7 @@ fn hook_outcome_request_approval_is_debug() {
         context: None,
         timeout: None,
     };
-    let debug_str = format!("{:?}", outcome);
+    let debug_str = format!("{outcome:?}");
     assert!(debug_str.contains("RequestApproval"));
     assert!(debug_str.contains("needs review"));
 }

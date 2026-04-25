@@ -331,7 +331,7 @@ mod tests {
             }
         }
 
-        async fn shutdown(&mut self) -> Result<(), SandboxError> {
+        async fn shutdown(&self) -> Result<(), SandboxError> {
             Ok(())
         }
     }
@@ -362,8 +362,10 @@ mod tests {
 
     struct ObservingTool {
         output: Value,
-        last_execution: Mutex<Option<(bool, Option<String>, Option<uuid::Uuid>)>>,
+        last_execution: Mutex<Option<ObservedExecution>>,
     }
+
+    type ObservedExecution = (bool, Option<String>, Option<uuid::Uuid>);
 
     impl ObservingTool {
         fn new(output: Value) -> Self {

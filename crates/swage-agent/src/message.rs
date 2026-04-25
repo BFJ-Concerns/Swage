@@ -257,7 +257,7 @@ mod turn_request_tests {
             existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
         };
-        let s = format!("{:?}", req);
+        let s = format!("{req:?}");
         assert!(s.contains("TurnRequest"));
     }
 }

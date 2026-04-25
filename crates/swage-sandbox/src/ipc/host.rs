@@ -317,7 +317,7 @@ mod tests {
         let msg = agent_transport.receive().await.unwrap();
         let request_id = match &msg {
             IpcMessage::ToolCallRequest { request_id, .. } => request_id.clone(),
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         };
         agent_transport
             .send(&IpcMessage::ToolCallResult {
@@ -348,7 +348,7 @@ mod tests {
         let msg = agent_transport.receive().await.unwrap();
         let request_id = match &msg {
             IpcMessage::ToolCallRequest { request_id, .. } => request_id.clone(),
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         };
         // Agent returns an error result (tool ran but failed).
         agent_transport
@@ -378,7 +378,7 @@ mod tests {
         let msg = agent_transport.receive().await.unwrap();
         let request_id = match &msg {
             IpcMessage::ToolCallRequest { request_id, .. } => Some(request_id.clone()),
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         };
         // Agent responds with an IPC-level error.
         agent_transport
@@ -396,7 +396,7 @@ mod tests {
             SandboxError::IpcError { message } => {
                 assert!(message.contains("execution context unavailable"));
             }
-            other => panic!("expected IpcError, got {:?}", other),
+            other => panic!("expected IpcError, got {other:?}"),
         }
     }
 
@@ -455,7 +455,7 @@ mod tests {
                 assert_eq!(request_id, "llm-42");
                 assert_eq!(content, "Answer here.");
             }
-            other => panic!("expected LlmResponse, got {:?}", other),
+            other => panic!("expected LlmResponse, got {other:?}"),
         }
     }
 
@@ -530,7 +530,7 @@ mod tests {
                 assert_eq!(tool_name, "bash");
                 assert_eq!(parameters["cmd"], "ls");
             }
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         }
     }
 
@@ -597,7 +597,7 @@ mod tests {
                 assert_eq!(category, ErrorCategory::Provider);
                 assert!(description.contains("rate-limited"));
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
     }
 }

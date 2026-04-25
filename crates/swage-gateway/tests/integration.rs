@@ -30,7 +30,6 @@ use swage_storage::{
     SqliteStorage,
     model::{NewThread, NewTurn, TurnState},
 };
-use swage_tool;
 
 // ---------------------------------------------------------------------------
 // Mock providers
@@ -193,7 +192,6 @@ async fn start_test_server_with_dispatcher(
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,
-        None,
         None,
     );
     let router = build_router(state);
@@ -430,7 +428,7 @@ async fn stream_cancellation_preserves_partial_response() {
     let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     let messages = body["messages"].as_array().unwrap();
     assert!(
-        messages.len() >= 1,
+        !messages.is_empty(),
         "at least the user message should be stored"
     );
 

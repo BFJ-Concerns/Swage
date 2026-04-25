@@ -23,6 +23,9 @@ mod socket;
 
 pub(crate) const SANDBOX_AGENT_BINARY_ENV: &str = "SWAGE_SANDBOX_AGENT_BINARY";
 
+#[cfg(test)]
+pub(crate) static SANDBOX_TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
     if let Some(path) = std::env::var_os(SANDBOX_AGENT_BINARY_ENV) {
         return Ok(PathBuf::from(path));
@@ -36,7 +39,7 @@ pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
 pub use agent_loop::run_agent_loop;
 pub use bubblewrap::BubblewrapSandbox;
 pub use bubblewrap::find_bwrap;
-pub use config::SandboxConfig;
+pub use config::{SandboxConfig, SandboxConfigError};
 pub use fallback::FallbackSandbox;
 pub use process::ChildProcessManager;
 pub use provider::IpcCompletionProvider;

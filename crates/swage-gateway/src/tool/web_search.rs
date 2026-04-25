@@ -154,7 +154,11 @@ impl Tool for WebSearchTool {
 
         // Build a provider from config. Only SearxNG is supported for now.
         let provider: Box<dyn SearchProvider> = match config.provider_type.as_str() {
-            "searxng" | _ => Box::new(SearxNgProvider {
+            "searxng" => Box::new(SearxNgProvider {
+                base_url: config.base_url.clone(),
+                client: reqwest::Client::new(),
+            }),
+            _ => Box::new(SearxNgProvider {
                 base_url: config.base_url.clone(),
                 client: reqwest::Client::new(),
             }),
@@ -217,7 +221,7 @@ mod tests {
             .execute(json!({ "query": "rust programming" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("[tools.search]"), "got: {}", err);
+        assert!(err.to_string().contains("[tools.search]"), "got: {err}");
     }
 
     #[tokio::test]
@@ -227,7 +231,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("query"), "got: {}", err);
+        assert!(err.to_string().contains("query"), "got: {err}");
     }
 
     #[tokio::test]
@@ -243,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn formats_results_correctly() {
         // Test the formatting logic directly.
-        let results = vec![SearchResult {
+        let results = [SearchResult {
             title: "Rust Programming Language".to_string(),
             url: "https://www.rust-lang.org".to_string(),
             snippet: "A systems programming language".to_string(),

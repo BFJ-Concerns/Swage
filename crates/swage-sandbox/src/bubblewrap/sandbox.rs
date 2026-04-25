@@ -1,7 +1,8 @@
 //! BubblewrapSandbox — full Sandbox trait implementation for Linux.
 //!
-//! Spawns agents inside bubblewrap with namespace isolation, Landlock
-//! filesystem restrictions, and IPC-mediated tool dispatch and LLM proxying.
+//! Spawns agents inside bubblewrap with namespace isolation and IPC-mediated
+//! tool dispatch and LLM proxying. Landlock is applied by the child process
+//! after bubblewrap has exec'd the agent binary.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -14,7 +15,7 @@ use crate::config::SandboxConfig;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
 use crate::llm_handler::HostLlmHandler;
-use crate::process::ChildProcessManager;
+use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
@@ -35,12 +36,11 @@ const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "G
 // BubblewrapSandbox
 // ---------------------------------------------------------------------------
 
-/// Bubblewrap-based sandbox with full namespace isolation and Landlock.
+/// Bubblewrap-based sandbox with full namespace isolation.
 ///
 /// On Linux with `bwrap` installed, agents run inside PID, network, mount,
-/// user, IPC, and UTS namespace-isolated sandboxes with kernel-enforced
-/// filesystem access control via Landlock. Credential isolation via IPC
-/// proxying is layered on top — the agent never sees API keys.
+/// user, IPC, and UTS namespace-isolated sandboxes. Credential isolation via
+/// IPC proxying is layered on top — the agent never sees API keys.
 ///
 /// `execute_tool` takes `&self` to satisfy the Sandbox trait, so the
 /// transport is protected by a `Mutex` for interior mutability.
@@ -48,8 +48,8 @@ pub struct BubblewrapSandbox {
     config: SandboxConfig,
     llm_handler: HostLlmHandler,
     // Populated after spawn_agent.
-    socket_manager: Option<SocketManager>,
-    process: Option<ChildProcessManager>,
+    socket_manager: Mutex<Option<SocketManager>>,
+    process: Mutex<Option<ChildProcessManager>>,
     // Mutex for interior mutability: execute_tool receives &self but must
     // send/receive on the transport. Populated after spawn_agent.
     transport: Mutex<Option<IpcTransport>>,
@@ -65,8 +65,8 @@ impl BubblewrapSandbox {
         Self {
             config,
             llm_handler,
-            socket_manager: None,
-            process: None,
+            socket_manager: Mutex::new(None),
+            process: Mutex::new(None),
             transport: Mutex::new(None),
         }
     }
@@ -84,8 +84,8 @@ impl BubblewrapSandbox {
         Self {
             config,
             llm_handler,
-            socket_manager: None,
-            process: None,
+            socket_manager: Mutex::new(None),
+            process: Mutex::new(None),
             transport: Mutex::new(Some(transport)),
         }
     }
@@ -93,11 +93,10 @@ impl BubblewrapSandbox {
 
 #[async_trait]
 impl Sandbox for BubblewrapSandbox {
-    /// Spawn the agent inside a bubblewrap sandbox with Landlock restrictions.
+    /// Spawn the agent inside a bubblewrap sandbox.
     ///
-    /// Builds the `bwrap` command, strips credential env vars, applies the
-    /// Landlock ruleset in a `pre_exec` hook, and waits for the agent's
-    /// `Ready` signal before returning.
+    /// Builds the `bwrap` command, strips credential env vars, and waits for
+    /// the agent's `Ready` signal before returning.
     async fn spawn_agent(&mut self) -> Result<(), SandboxError> {
         // Create the IPC socket before spawning so the child can connect.
         let (socket_manager, listener) = SocketManager::create("swage-sandbox")?;
@@ -116,66 +115,84 @@ impl Sandbox for BubblewrapSandbox {
             cmd.env_remove(var);
         }
 
-        // Apply Landlock filesystem restrictions in the child process before
-        // bwrap executes. Landlock is inherited across exec(), so both bwrap
-        // and the agent inside the namespace are restricted.
-        //
-        // Safety note: calling LandlockRuleset::apply() in pre_exec involves
-        // heap allocation (CString, Vec) which is not strictly async-signal-safe
-        // after fork() in a multi-threaded process. In practice this is safe on
-        // modern Linux because malloc is reentrant across fork when no other
-        // thread holds its lock. Errors are silently discarded — bubblewrap's
-        // namespace isolation is the primary protection; Landlock is depth-in-
-        // defence.
-        #[cfg(target_os = "linux")]
-        {
-            let ruleset = crate::landlock::LandlockRuleset::new(&self.config);
-            // Safety: pre_exec runs between fork and exec in the child process.
-            // All operations are syscall-based or use O_PATH file opens.
-            unsafe {
-                cmd.pre_exec(move || {
-                    // Ignore the result — partial Landlock or Unavailable still
-                    // leaves bwrap namespace isolation intact.
-                    let _ = ruleset.apply();
-                    Ok(())
-                });
-            }
-        }
-
         let process = ChildProcessManager::spawn(cmd)?;
         tracing::debug!(pid = process.pid(), "bubblewrap sandbox agent spawned");
 
         // Accept the agent's incoming connection.
-        let (stream, _addr) = listener
-            .accept()
-            .await
-            .map_err(|e| SandboxError::SpawnFailed {
-                message: format!("IPC accept failed: {e}"),
-            })?;
+        let (stream, _addr) =
+            match tokio::time::timeout(self.config.tool_call_timeout, listener.accept()).await {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(error)) => {
+                    cleanup_failed_startup_process(
+                        process,
+                        self.config.shutdown_grace_period,
+                        "failed to shut down bubblewrap sandbox after IPC accept error",
+                    )
+                    .await;
+                    return Err(SandboxError::SpawnFailed {
+                        message: format!("IPC accept failed: {error}"),
+                    });
+                }
+                Err(_) => {
+                    cleanup_failed_startup_process(
+                        process,
+                        self.config.shutdown_grace_period,
+                        "failed to shut down bubblewrap sandbox after IPC accept timeout",
+                    )
+                    .await;
+                    return Err(SandboxError::SpawnFailed {
+                        message: "timed out waiting for sandbox agent IPC connection".into(),
+                    });
+                }
+            };
 
         let mut transport = IpcTransport::new(stream);
 
         // Wait for the agent to signal it is initialised and ready.
-        let msg = transport
+        let msg = match transport
             .receive_timeout(self.config.tool_call_timeout)
-            .await?;
+            .await
+        {
+            Ok(message) => message,
+            Err(error) => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down bubblewrap sandbox after startup handshake error",
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         match msg {
             IpcMessage::Ready => {}
             IpcMessage::ErrorMessage { description, .. } => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down bubblewrap sandbox after startup error message",
+                )
+                .await;
                 return Err(SandboxError::IpcError {
                     message: format!("agent error during startup: {description}"),
                 });
             }
             other => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down bubblewrap sandbox after unexpected startup message",
+                )
+                .await;
                 return Err(SandboxError::IpcError {
                     message: format!("expected Ready signal, got: {other:?}"),
                 });
             }
         }
 
-        self.socket_manager = Some(socket_manager);
-        self.process = Some(process);
+        *self.socket_manager.get_mut() = Some(socket_manager);
+        *self.process.get_mut() = Some(process);
         *self.transport.lock().await = Some(transport);
 
         Ok(())
@@ -299,10 +316,8 @@ impl Sandbox for BubblewrapSandbox {
     ///
     /// Idempotent — silently succeeds if the agent has already terminated or
     /// was never spawned.
-    async fn shutdown(&mut self) -> Result<(), SandboxError> {
-        // Take the transport out of the Mutex — we have &mut self so there
-        // can be no outstanding lock guards.
-        let transport_opt = self.transport.get_mut().take();
+    async fn shutdown(&self) -> Result<(), SandboxError> {
+        let transport_opt = self.transport.lock().await.take();
 
         if let Some(mut transport) = transport_opt {
             // Signal the agent to shut down gracefully.
@@ -325,14 +340,14 @@ impl Sandbox for BubblewrapSandbox {
         }
 
         // Terminate the child process (SIGTERM then SIGKILL after grace period).
-        if let Some(mut process) = self.process.take() {
+        if let Some(mut process) = self.process.lock().await.take() {
             process
                 .graceful_shutdown(self.config.shutdown_grace_period)
                 .await?;
         }
 
         // Drop the socket manager — its Drop impl removes the socket file.
-        self.socket_manager = None;
+        *self.socket_manager.lock().await = None;
 
         Ok(())
     }
@@ -344,6 +359,9 @@ impl Sandbox for BubblewrapSandbox {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use serde_json::json;
@@ -371,6 +389,45 @@ mod tests {
             .unwrap()
     }
 
+    fn startup_timeout_config() -> SandboxConfig {
+        SandboxConfig::builder()
+            .working_directory(std::env::temp_dir())
+            .tool_call_timeout(Duration::from_millis(50))
+            .shutdown_grace_period(Duration::from_millis(250))
+            .llm_request_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn write_non_connecting_bwrap_script(dir: &Path) -> (PathBuf, PathBuf) {
+        let pid_file = dir.join("bwrap.pid");
+        let script_path = dir.join("bwrap");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\n/bin/sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).unwrap();
+        (script_path, pid_file)
+    }
+
+    fn read_pid(pid_file: &Path) -> u32 {
+        fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
+    }
+
+    fn is_pid_running(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
     fn no_op_llm_handler() -> HostLlmHandler {
         HostLlmHandler::new(|_req| async {
             Ok::<_, SandboxError>(CompletionResponse {
@@ -393,6 +450,41 @@ mod tests {
             IpcTransport::new(host_stream),
         );
         (sandbox, IpcTransport::new(agent_stream))
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_timeout_kills_spawned_bwrap_child() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_script_path, pid_file) = write_non_connecting_bwrap_script(temp_dir.path());
+        let previous_path = std::env::var_os("PATH");
+        let test_path = match &previous_path {
+            Some(path) => {
+                let mut paths = vec![temp_dir.path().to_path_buf()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => temp_dir.path().as_os_str().to_owned(),
+        };
+        unsafe { std::env::set_var("PATH", test_path) };
+
+        let mut sandbox = BubblewrapSandbox::new(startup_timeout_config(), no_op_llm_handler());
+        let result = sandbox.spawn_agent().await;
+
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        assert!(
+            result.is_err(),
+            "spawn should time out when bwrap child never connects"
+        );
+        let pid = read_pid(&pid_file);
+        assert!(
+            !is_pid_running(pid),
+            "timed-out bubblewrap startup should terminate and reap child process {pid}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -653,7 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_before_spawn_is_idempotent() {
-        let mut sandbox = BubblewrapSandbox::new(test_config(), no_op_llm_handler());
+        let sandbox = BubblewrapSandbox::new(test_config(), no_op_llm_handler());
         sandbox
             .shutdown()
             .await
@@ -662,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_sends_shutdown_and_awaits_ack() {
-        let (mut sandbox, mut agent) = sandbox_with_mock_agent();
+        let (sandbox, mut agent) = sandbox_with_mock_agent();
 
         let shutdown_handle = tokio::spawn(async move { sandbox.shutdown().await });
 
@@ -688,7 +780,7 @@ mod tests {
             .unwrap();
 
         let (host_stream, _agent_stream) = UnixStream::pair().unwrap();
-        let mut sandbox = BubblewrapSandbox::with_transport(
+        let sandbox = BubblewrapSandbox::with_transport(
             config,
             no_op_llm_handler(),
             IpcTransport::new(host_stream),

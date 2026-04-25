@@ -50,12 +50,12 @@ pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, 
 
     // Reject traversals that escape the workspace.
     if !normalised.starts_with(&canonical_root) {
-        return Err(format!("Path is outside the workspace: {}", requested));
+        return Err(format!("Path is outside the workspace: {requested}"));
     }
 
     let resolved = resolve_existing_prefix(&normalised, requested)?;
     if !resolved.starts_with(&canonical_root) {
-        return Err(format!("Path is outside the workspace: {}", requested));
+        return Err(format!("Path is outside the workspace: {requested}"));
     }
 
     Ok(resolved)
@@ -165,11 +165,11 @@ fn resolve_existing_prefix(path: &Path, requested: &str) -> Result<PathBuf, Stri
     while !existing.exists() {
         let file_name = existing
             .file_name()
-            .ok_or_else(|| format!("Path is outside the workspace: {}", requested))?;
+            .ok_or_else(|| format!("Path is outside the workspace: {requested}"))?;
         missing_components.push(file_name.to_os_string());
         existing = existing
             .parent()
-            .ok_or_else(|| format!("Path is outside the workspace: {}", requested))?;
+            .ok_or_else(|| format!("Path is outside the workspace: {requested}"))?;
     }
 
     let mut resolved = existing.canonicalize().map_err(|e| e.to_string())?;

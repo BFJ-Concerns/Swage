@@ -10,6 +10,7 @@
 //! deferred compaction intents, and substitutes compacted content back into
 //! the assembled message list.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -64,7 +65,7 @@ pub fn default_assembly(
     // Sort elements by priority (highest first) for deterministic ordering.
     // Sorting on a collected reference slice avoids mutating the input.
     let mut sorted: Vec<&dyn ContextElement> = elements.iter().map(|e| e.as_ref()).collect();
-    sorted.sort_by(|a, b| b.priority().cmp(&a.priority()));
+    sorted.sort_by_key(|element| Reverse(element.priority()));
 
     // Era 0.1: memory is not yet included in the assembled context.
     // Future assemblies that opt in to memory can simply remove this filter.

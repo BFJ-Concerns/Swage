@@ -169,8 +169,8 @@ pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelecto
 /// Height: 50 % of area height, capped at 15 rows.
 /// Minimum dimensions ensure the popup is always at least marginally usable.
 fn popup_area(area: Rect) -> Rect {
-    let w = (area.width * 60 / 100).min(40).max(10);
-    let h = (area.height * 50 / 100).min(15).max(5);
+    let w = (area.width * 60 / 100).clamp(10, 40);
+    let h = (area.height * 50 / 100).clamp(5, 15);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)

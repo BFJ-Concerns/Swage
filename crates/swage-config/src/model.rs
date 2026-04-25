@@ -309,17 +309,11 @@ impl PricingConfig {
 /// subscribed to every observability channel — no explicit subscribe
 /// message is required from the client. Useful for development and
 /// single-user deployments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
     /// When true, all observability events are delivered to every connected
     /// client regardless of their subscription state.
     pub force_on: bool,
-}
-
-impl Default for ObservabilityConfig {
-    fn default() -> Self {
-        Self { force_on: false }
-    }
 }
 
 /// Output schema validation settings — controls structured-output enforcement

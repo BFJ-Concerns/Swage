@@ -226,7 +226,7 @@ mod tests {
     fn number_type_passes_for_number_value() {
         ok(
             json!({"properties": {"n": {"type": "number"}}}),
-            json!({"n": 3.14}),
+            json!({"n": 2.5}),
         );
     }
 

@@ -253,7 +253,7 @@ mod tests {
                 assert_eq!(tool_name, "echo");
                 assert_eq!(parameters, json!({"text": "hello"}));
             }
-            other => panic!("expected ToolCallRequest, got {:?}", other),
+            other => panic!("expected ToolCallRequest, got {other:?}"),
         }
     }
 
@@ -279,7 +279,7 @@ mod tests {
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
             IpcMessage::ToolCallResult { error, .. } => assert!(error.is_none()),
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
     }
 
@@ -299,7 +299,7 @@ mod tests {
             IpcMessage::ToolCallResult { error, .. } => {
                 assert_eq!(error.unwrap(), "tool not found");
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
     }
 
@@ -332,7 +332,7 @@ mod tests {
                 assert_eq!(model.unwrap(), "claude-3");
                 assert_eq!(max_tokens.unwrap(), 512);
             }
-            other => panic!("expected LlmRequest, got {:?}", other),
+            other => panic!("expected LlmRequest, got {other:?}"),
         }
     }
 
@@ -367,7 +367,7 @@ mod tests {
                 assert_eq!(content, "The answer is 42.");
                 assert_eq!(token_usage.total_tokens, 15);
             }
-            other => panic!("expected LlmResponse, got {:?}", other),
+            other => panic!("expected LlmResponse, got {other:?}"),
         }
     }
 
@@ -386,8 +386,7 @@ mod tests {
             assert_eq!(
                 obj.len(),
                 1,
-                "lifecycle signals carry only 'kind', got: {:?}",
-                obj
+                "lifecycle signals carry only 'kind', got: {obj:?}"
             );
             assert!(obj.contains_key("kind"));
 
@@ -422,7 +421,7 @@ mod tests {
                 assert_eq!(request_id.unwrap(), "req-1");
                 assert_eq!(description, "upstream timeout");
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
     }
 
@@ -444,7 +443,7 @@ mod tests {
         let roundtripped: IpcMessage = serde_json::from_value(serialised).unwrap();
         match roundtripped {
             IpcMessage::ErrorMessage { request_id, .. } => assert!(request_id.is_none()),
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
     }
 }

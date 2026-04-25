@@ -59,7 +59,7 @@ async fn ipc_roundtrip_tool_call_and_llm_request() {
                 .await
                 .unwrap();
         }
-        other => panic!("expected ToolCallRequest, got {:?}", other),
+        other => panic!("expected ToolCallRequest, got {other:?}"),
     }
 
     // Host receives the tool call result.

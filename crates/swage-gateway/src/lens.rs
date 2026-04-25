@@ -192,11 +192,10 @@ pub async fn update_lens(
         .get_lens(&lens_id)
         .await
         .map_err(GatewayError::Storage)?
-        .ok_or_else(|| GatewayError::ValidationError(format!("lens {} not found", lens_id)))?;
+        .ok_or_else(|| GatewayError::ValidationError(format!("lens {lens_id} not found")))?;
     if existing.source_kind == LensSourceKind::BuiltIn {
         return Err(GatewayError::ValidationError(format!(
-            "built-in lens {} cannot be edited",
-            lens_id
+            "built-in lens {lens_id} cannot be edited"
         )));
     }
 

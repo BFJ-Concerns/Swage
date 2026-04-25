@@ -160,7 +160,7 @@ mod tests {
             reason: Some("looks good".to_string()),
         };
         let cloned = d.clone();
-        let debug = format!("{:?}", cloned);
+        let debug = format!("{cloned:?}");
         assert!(debug.contains("Approved"));
     }
 

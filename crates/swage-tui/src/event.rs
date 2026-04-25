@@ -94,7 +94,7 @@ impl EventHandler {
                     }
                 } => {
                     match gateway {
-                        Some(event) => return AppEvent::Gateway(event),
+                        Some(event) => return AppEvent::Gateway(Box::new(event)),
                         // All senders dropped — gateway has disconnected.
                         None => {
                             *gateway_rx = None;
@@ -115,7 +115,7 @@ pub enum AppEvent {
     /// A terminal input event (key press, resize, etc.).
     Terminal(crossterm::event::Event),
     /// A server event received from the gateway WebSocket.
-    Gateway(swage_client::websocket::ServerEvent),
+    Gateway(Box<swage_client::websocket::ServerEvent>),
     /// A render tick — time to redraw the screen.
     Tick,
     /// The gateway WebSocket connection was lost.

@@ -204,9 +204,9 @@ pub async fn approve_workspace_extension(
         .get(bench_id)
         .await?
         .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
-    ensure_skill_dir_exists(&source_dir, &name).await?;
+    ensure_skill_dir_exists(source_dir, &name).await?;
     let target_dir = managed_extension_root(&bench.slug)?.join(&name);
-    copy_directory_recursive(&source_dir, &target_dir).await?;
+    copy_directory_recursive(source_dir, &target_dir).await?;
 
     read_extension_response(&target_dir, &name, "active".into(), "managed".into())
 }

@@ -73,7 +73,6 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     );
     let router: Router = build_router(state);
 
@@ -96,7 +95,6 @@ async fn start_file_backed_test_server(
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
-        None,
         None,
     );
     let router: Router = build_router(state);

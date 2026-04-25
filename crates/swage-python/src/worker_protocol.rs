@@ -77,7 +77,7 @@ pub enum ExecutePayload {
 pub enum HostToWorkerMessage {
     Execute {
         request_id: String,
-        payload: ExecutePayload,
+        payload: Box<ExecutePayload>,
     },
     DispatchToolResult {
         request_id: String,

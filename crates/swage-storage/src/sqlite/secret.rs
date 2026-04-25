@@ -590,11 +590,16 @@ impl SecretStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::store::SecretStore;
     use serde_json::json;
     use std::sync::{Mutex, MutexGuard};
 
+    // These tests mutate process-wide environment variables. The guard is
+    // intentionally held across awaits so concurrent secret tests cannot race
+    // each other while resolving the managed encryption key.
     static MANAGED_SECRET_KEY_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_managed_secret_key() -> MutexGuard<'static, ()> {

@@ -182,10 +182,7 @@ impl GoogleProvider {
         } else {
             "generateContent"
         };
-        format!(
-            "{}/v1beta/models/{}:{}?key=REDACTED",
-            base_url, model, endpoint
-        )
+        format!("{base_url}/v1beta/models/{model}:{endpoint}?key=REDACTED")
     }
 
     fn redact_api_key_in_text(&self, text: impl AsRef<str>) -> String {
@@ -280,17 +277,15 @@ impl GoogleProvider {
                 } else {
                     // Regular text parts.
                     for part in &msg.content {
-                        match part {
-                            ContentPart::Text { text } => {
-                                if !text.is_empty() {
-                                    parts.push(GeminiPart {
-                                        text: Some(text.clone()),
-                                        function_call: None,
-                                        function_response: None,
-                                    });
-                                }
+                        // Image URLs are not yet supported for Gemini.
+                        if let ContentPart::Text { text } = part {
+                            if !text.is_empty() {
+                                parts.push(GeminiPart {
+                                    text: Some(text.clone()),
+                                    function_call: None,
+                                    function_response: None,
+                                });
                             }
-                            _ => {} // Image URLs not yet supported for Gemini.
                         }
                     }
 

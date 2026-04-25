@@ -377,7 +377,7 @@ mod tests {
     impl Tokeniser for FixedCostTokeniser {
         fn count_text(&self, text: &str) -> usize {
             // Roughly 1 token per 4 characters.
-            (text.len() * self.cost_per_char + 3) / 4
+            (text.len() * self.cost_per_char).div_ceil(4)
         }
 
         fn count_messages(&self, messages: &[ChatMessage]) -> usize {
@@ -392,7 +392,7 @@ mod tests {
                             _ => 0,
                         })
                         .sum();
-                    (text_len * self.cost_per_char + 3) / 4
+                    (text_len * self.cost_per_char).div_ceil(4)
                 })
                 .sum()
         }

@@ -77,6 +77,7 @@ impl DelegationExecutor {
     /// `cancel_token` is a child token for this delegation: cancelling the
     /// parent turn cascades into the delegate, while delegate-specific cancel
     /// signals do not interrupt the parent turn directly.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_delegation(
         &self,
         delegate_msg: &AgentMessage,
@@ -312,6 +313,7 @@ pub trait DelegationHandler: Send + Sync {
     /// - Creating the delegate message and child session
     /// - Running the target agent via DelegationExecutor
     /// - Returning the result (or error) as a JSON value
+    #[allow(clippy::too_many_arguments)]
     async fn handle_delegation(
         &self,
         target_agent_id: &str,
@@ -347,9 +349,9 @@ impl Drop for DelegationGuard {
         // so we can't .await directly. The tokio runtime may already be
         // shutting down, in which case the spawn fails silently (acceptable:
         // the registry is being torn down anyway).
-        let _ = tokio::task::spawn(async move {
+        std::mem::drop(tokio::task::spawn(async move {
             let mut active = delegations.write().await;
             active.remove(&id);
-        });
+        }));
     }
 }

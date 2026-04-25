@@ -54,10 +54,10 @@ fn format_total_line(total: u64, budget: Option<u64>) -> String {
     match budget {
         Some(b) if b > 0 => {
             let pct = (total as f64 / b as f64 * 100.0).round() as u64;
-            format!("Total: {} / {} tokens ({}%)", total, b, pct)
+            format!("Total: {total} / {b} tokens ({pct}%)")
         }
         // Budget is known but zero, or entirely absent — skip the ratio.
-        _ => format!("Total: {} tokens", total),
+        _ => format!("Total: {total} tokens"),
     }
 }
 

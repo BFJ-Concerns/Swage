@@ -1,3 +1,7 @@
+#![allow(clippy::await_holding_lock)]
+
+// These integration tests serialise process-env mutations with a std mutex.
+// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -130,7 +134,6 @@ async fn start_test_server(
         config,
         dispatcher,
         None,
-        None,
     );
     if register_local_host {
         register_local_execution_host(&state).await;
@@ -160,7 +163,6 @@ async fn start_file_backed_test_server(
         Arc::new(provider),
         config,
         dispatcher,
-        None,
         None,
     );
     register_local_execution_host(&state).await;

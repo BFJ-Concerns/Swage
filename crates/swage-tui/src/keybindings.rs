@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn app_action_variants_exist() {
         // Verify the enum compiles with all expected variants.
-        let actions = vec![
+        let actions = [
             AppAction::SendMessage,
             AppAction::InsertNewline,
             AppAction::InsertChar('a'),

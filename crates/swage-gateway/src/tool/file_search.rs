@@ -195,8 +195,8 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.contains("notes.txt"), "got: {}", output);
-        assert!(output.contains(":1:"), "got: {}", output);
+        assert!(output.contains("notes.txt"), "got: {output}");
+        assert!(output.contains(":1:"), "got: {output}");
     }
 
     #[tokio::test]
@@ -208,7 +208,7 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.contains("a.txt"), "got: {}", output);
+        assert!(output.contains("a.txt"), "got: {output}");
     }
 
     #[tokio::test]
@@ -232,8 +232,8 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.contains("a.txt"), "got: {}", output);
-        assert!(output.contains("b.txt"), "got: {}", output);
+        assert!(output.contains("a.txt"), "got: {output}");
+        assert!(output.contains("b.txt"), "got: {output}");
     }
 
     #[tokio::test]
@@ -249,9 +249,9 @@ mod tests {
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
-        assert!(output.contains("inside.txt"), "got: {}", output);
+        assert!(output.contains("inside.txt"), "got: {output}");
         // The outside file should not appear in a scoped search.
-        assert!(!output.contains("outside.txt"), "got: {}", output);
+        assert!(!output.contains("outside.txt"), "got: {output}");
     }
 
     #[tokio::test]
@@ -289,6 +289,6 @@ mod tests {
             .execute(json!({ "pattern": "x", "path": "../../etc" }), &ctx())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {}", err);
+        assert!(err.to_string().contains("outside"), "got: {err}");
     }
 }

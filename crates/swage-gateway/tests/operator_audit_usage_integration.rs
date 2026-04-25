@@ -72,7 +72,6 @@ fn test_state(storage: Arc<SqliteStorage>) -> AppState {
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        None,
     )
 }
 

@@ -255,12 +255,15 @@ async function settleUi(): Promise<void> {
 }
 
 async function waitForText(text: string): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     await settleUi();
     if (document.body.textContent?.includes(text)) {
       return;
     }
   }
+
+  throw new Error(`Timed out waiting for text: ${text}`);
 }
 
 function setPath(path: string): void {

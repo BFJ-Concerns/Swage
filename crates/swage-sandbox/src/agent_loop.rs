@@ -19,6 +19,25 @@ use crate::ipc::agent::AgentConnection;
 use crate::ipc::message::{ErrorCategory, IpcMessage};
 use crate::ipc::transport::IpcTransport;
 
+#[cfg(target_os = "linux")]
+fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
+    let Some(config_json) = std::env::var("SWAGE_SANDBOX_CONFIG_JSON").ok() else {
+        return Ok(());
+    };
+    let config: crate::config::SandboxConfig =
+        serde_json::from_str(&config_json).map_err(|error| SandboxError::SpawnFailed {
+            message: format!("invalid SWAGE_SANDBOX_CONFIG_JSON: {error}"),
+        })?;
+    let status = crate::landlock::LandlockRuleset::new(&config).apply()?;
+    tracing::debug!(?status, "child Landlock policy applied");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Sandbox tool context
 // ---------------------------------------------------------------------------
@@ -168,6 +187,8 @@ pub(crate) async fn run_loop(
 /// them before calling this function — typically the binary's sandbox-mode
 /// entry point.
 pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxError> {
+    apply_child_landlock_from_env()?;
+
     let socket_path = std::env::var("SWAGE_IPC_SOCKET").map_err(|_| SandboxError::IpcError {
         message: "SWAGE_IPC_SOCKET environment variable not set".into(),
     })?;
@@ -327,7 +348,7 @@ mod tests {
                 assert_eq!(output, json!({"text": "hello sandbox"}));
                 assert!(error.is_none());
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
 
         // Shut down.
@@ -363,7 +384,7 @@ mod tests {
                 assert_eq!(category, ErrorCategory::ToolExecution);
                 assert!(description.contains("nonexistent_tool"));
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
 
         host.send(&IpcMessage::Shutdown).await.unwrap();
@@ -402,7 +423,7 @@ mod tests {
                 );
                 assert!(error.unwrap().contains("intentional failure"));
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
 
         host.send(&IpcMessage::Shutdown).await.unwrap();
@@ -426,7 +447,7 @@ mod tests {
             IpcMessage::ErrorMessage { category, .. } => {
                 assert_eq!(category, ErrorCategory::Protocol);
             }
-            other => panic!("expected ErrorMessage, got {:?}", other),
+            other => panic!("expected ErrorMessage, got {other:?}"),
         }
 
         host.send(&IpcMessage::Shutdown).await.unwrap();
@@ -461,7 +482,7 @@ mod tests {
                     "duration_ms should be reasonable, got {duration_ms}"
                 );
             }
-            other => panic!("expected ToolCallResult, got {:?}", other),
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
 
         host.send(&IpcMessage::Shutdown).await.unwrap();

@@ -471,8 +471,7 @@ async fn permanent_error_bypasses_retry_and_failover() {
     let err = result.unwrap_err();
     assert!(
         matches!(err, ProviderError::Auth { .. }),
-        "Expected Auth error, got: {:?}",
-        err
+        "Expected Auth error, got: {err:?}"
     );
     assert!(!err.is_retriable());
 

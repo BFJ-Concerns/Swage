@@ -341,10 +341,7 @@ async fn execute_single(
 
         other => {
             // Unknown strategy — fall back to truncation and record why.
-            let failure = format!(
-                "strategy '{}' is not available; fell back to truncation",
-                other
-            );
+            let failure = format!("strategy '{other}' is not available; fell back to truncation");
             let (compacted, _record) =
                 compactor.compact(intent.messages.clone(), intent.budget, tokeniser);
             CompactionResult {
