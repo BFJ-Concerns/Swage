@@ -56,3 +56,6 @@ forge-progress.md
 .codex/loop/prompt.md
 .codex/loop/session-start.py
 .codex/loop/stop-hook.py
+
+# Local Swage runtime data
+.swage/materials/
