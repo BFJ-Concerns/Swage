@@ -8,7 +8,7 @@
 //! | Test | Journey / Proof | Spans tasks |
 //! |------|----------------|-------------|
 //! | `config_deny_list_blocks_tool_through_unified_turn_loop` | Permission denial proof | config model (38vd) + cascade (ee99) + gateway delegation (6dy5) |
-//! | `default_permissions_allow_all_tools_backward_compat` | Default backward compat proof | config model (38vd) + cascade (ee99) + gateway delegation (6dy5) |
+//! | `default_permissions_allow_safe_tools_without_approval` | Default permission proof | config model (38vd) + cascade (ee99) + gateway delegation (6dy5) |
 //! | `hook_events_fire_for_gateway_initiated_turns` | Hook firing proof | agent streaming (141x) + gateway delegation (6dy5) |
 //! | `streaming_tokens_arrive_through_agent_delegation` | Streaming parity proof | agent events (5r3s) + agent streaming (141x) + gateway delegation (6dy5) |
 //! | `sandbox_routes_through_execution_strategy` | Sandbox strategy proof | execution strategy (4gwe) + sandbox executor (get2) + gateway delegation (6dy5) |
@@ -332,18 +332,18 @@ async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
     );
 }
 
-/// Default config (no permissions section) allows all tools — backward compatibility.
+/// Default config (no permissions section) allows non-gated tools.
 ///
 /// Spans: config model (38vd) + config cascade (ee99) + gateway delegation (6dy5)
-/// Proves: When no tool permissions are configured, the default allow-all policy
-/// preserves existing behaviour. Existing deployments with no permission config
-/// continue to work identically.
+/// Proves: When no tool permissions are configured, ordinary tools still flow
+/// through the resolved default policy. High-risk tools are covered by separate
+/// approval-gate tests.
 ///
 /// Before unification: PASSES (trivially — gateway already allows all).
-/// After unification: MUST STILL PASS — the resolved allow-all default flows
-/// through the unified path without breaking.
+/// After unification: MUST STILL PASS — the resolved default policy flows
+/// through the unified path without breaking ordinary tool calls.
 #[tokio::test(flavor = "multi_thread")]
-async fn default_permissions_allow_all_tools_backward_compat() {
+async fn default_permissions_allow_safe_tools_without_approval() {
     // Default config — no permissions overrides
     let config = ResolvedConfig::default();
 
@@ -388,7 +388,7 @@ async fn default_permissions_allow_all_tools_backward_compat() {
 
     let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
 
-    // The echo tool should succeed — default is allow-all.
+    // The echo tool should succeed — default policy still permits ordinary tools.
     let tool_end = events.iter().find(|e| e["type"] == "tool_end");
     assert!(
         tool_end.is_some(),

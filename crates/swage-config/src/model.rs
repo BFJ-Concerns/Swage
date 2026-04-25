@@ -133,8 +133,8 @@ pub struct SearchProviderConfig {
 /// Tool permission configuration — controls which tools an agent may invoke.
 ///
 /// Follows the same allow/deny/bundle model as `swage_tool::PermissionConfig`.
-/// When no permissions are configured at any level, the default is allow-all
-/// to preserve backward compatibility.
+/// When no permissions are configured at any level, tools remain broadly
+/// available, but high-risk tools are gated by human approval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
@@ -144,7 +144,7 @@ pub struct ToolPermissionConfig {
     ///
     /// Each entry is either a plain tool name (uses global HITL defaults) or
     /// an object with per-tool timeout and policy overrides. Defaults to empty
-    /// — no approval gates unless explicitly configured.
+    /// — high-risk defaults apply unless explicitly overridden.
     #[serde(default)]
     pub require_approval: Vec<RequireApprovalEntry>,
 }
@@ -155,9 +155,16 @@ impl Default for ToolPermissionConfig {
             allow: vec!["*".into()],
             deny: vec![],
             bundles: HashMap::new(),
-            require_approval: vec![],
+            require_approval: default_high_risk_tool_approvals(),
         }
     }
+}
+
+fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
+    ["shell", "file_write", "python_execute"]
+        .into_iter()
+        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+        .collect()
 }
 
 /// Tool execution settings.
@@ -175,7 +182,7 @@ pub struct ToolConfig {
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
     /// Tool permission rules — controls which tools an agent may invoke.
-    /// Defaults to allow-all when unconfigured (backward compatibility).
+    /// Defaults to broad availability with approval gates for high-risk tools.
     #[serde(default)]
     pub permissions: ToolPermissionConfig,
 }
@@ -889,13 +896,18 @@ timeout_policy = "reject"
     // --- ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_default_is_allow_all() {
+    fn tool_permission_config_default_gates_high_risk_tools() {
         let cfg = ToolPermissionConfig::default();
         assert_eq!(cfg.allow, vec!["*".to_string()]);
         assert!(cfg.deny.is_empty());
         assert!(cfg.bundles.is_empty());
-        // No approval gates by default — preserves backward compatibility.
-        assert!(cfg.require_approval.is_empty());
+        assert_eq!(
+            cfg.require_approval
+                .iter()
+                .map(RequireApprovalEntry::tool_name)
+                .collect::<Vec<_>>(),
+            vec!["shell", "file_write", "python_execute"]
+        );
     }
 
     #[test]
@@ -1055,9 +1067,15 @@ timeout_policy = "reject"
     // --- require_approval field in ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_require_approval_defaults_to_empty() {
+    fn tool_permission_config_require_approval_defaults_gate_high_risk_tools() {
         let cfg = ToolPermissionConfig::default();
-        assert!(cfg.require_approval.is_empty());
+        assert_eq!(
+            cfg.require_approval
+                .iter()
+                .map(RequireApprovalEntry::tool_name)
+                .collect::<Vec<_>>(),
+            vec!["shell", "file_write", "python_execute"]
+        );
     }
 
     #[test]

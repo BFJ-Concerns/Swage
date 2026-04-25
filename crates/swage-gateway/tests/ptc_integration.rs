@@ -119,11 +119,16 @@ async fn start_ptc_test_server(
         shell_tool,
         Arc::new(ptc_tool) as Arc<dyn swage_gateway::tool::Tool>,
     ]);
+    let mut config = swage_config::ResolvedConfig::default();
+    // These tests exercise Python tool chaining itself. Approval routing is
+    // covered separately, so keep python_execute ungated in this harness.
+    config.tools.permissions.require_approval = vec![];
+
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
         Arc::new(provider),
-        swage_config::ResolvedConfig::default(),
+        config,
         dispatcher,
         None,
         None,

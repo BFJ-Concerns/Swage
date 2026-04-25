@@ -172,6 +172,12 @@ fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
 ) -> PermissionConfig {
+    // TODO Enforce accepted workspace permissions during turn dispatch
+    // Workspace attachments store trust and read/write permissions, but this
+    // turn policy is still derived from resolved config rather than accepted
+    // workspace grants. Fold trusted workspace permissions into this policy
+    // before release so "accepted workspace" is an enforcement boundary.
+    // ---
     let mut deny = config.tools.permissions.deny.clone();
     for entry in &startup_config.tools.permissions.deny {
         if !deny.contains(entry) {
