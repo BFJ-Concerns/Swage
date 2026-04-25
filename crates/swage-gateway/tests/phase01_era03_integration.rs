@@ -12,6 +12,8 @@
 //! | `hook_events_fire_for_gateway_initiated_turns` | Hook firing proof | agent streaming (141x) + gateway delegation (6dy5) |
 //! | `streaming_tokens_arrive_through_agent_delegation` | Streaming parity proof | agent events (5r3s) + agent streaming (141x) + gateway delegation (6dy5) |
 //! | `sandbox_routes_through_execution_strategy` | Sandbox strategy proof | execution strategy (4gwe) + sandbox executor (get2) + gateway delegation (6dy5) |
+//! | `workspace_gate_denies_file_read_without_trusted_attachment` | Workspace gate denial | turn permission build + workspace attachment store |
+//! | `workspace_gate_allows_file_read_with_trusted_read_attachment` | Workspace gate release | turn permission build + workspace attachment store |
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -35,6 +37,8 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
+use swage_storage::model::NewWorkspaceAttachment;
+use swage_storage::store::WorkspaceAttachmentStore;
 use swage_storage::{SqliteStorage, store::BenchStore};
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,35 @@ impl LlmProvider for MockProvider {
 // ---------------------------------------------------------------------------
 // Mock tool
 // ---------------------------------------------------------------------------
+
+/// Mimics the real `file_read` tool's name so the workspace permission gate
+/// applies, without touching the filesystem. The body is irrelevant — the
+/// dispatcher rejects the call by name before reaching `execute`.
+struct MockFileReadTool;
+
+#[async_trait]
+impl swage_gateway::tool::Tool for MockFileReadTool {
+    fn name(&self) -> &str {
+        "file_read"
+    }
+    fn description(&self) -> &str {
+        "Mock file_read for workspace-gate tests"
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"]
+        })
+    }
+    async fn execute(
+        &self,
+        _arguments: Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<Value, swage_core::ToolError> {
+        Ok(json!({"output": "mock-content"}))
+    }
+}
 
 /// Echoes its "text" argument back. Used to verify tool dispatch works.
 struct EchoTool;
@@ -622,5 +655,143 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     assert!(
         complete.is_some(),
         "expected turn_complete; events: {events:?}"
+    );
+}
+
+/// A bench with no trusted workspace attachment denies file_read at dispatch.
+///
+/// Proves: the workspace permission gate folded into build_permission_config
+/// during the wuje fix denies workspace-tools when no trusted attachment grants
+/// the relevant permission, even if the resolved config would otherwise allow
+/// the tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_gate_denies_file_read_without_trusted_attachment() {
+    let provider = MockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_1".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": "/etc/passwd"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "denied".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]);
+
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(MockFileReadTool) as Arc<dyn swage_gateway::tool::Tool>,
+    ]);
+    let (router, addr, _storage) =
+        start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
+
+    let (_, body) = http(&router, "POST", "/api/conversations").await;
+    let conv_id = body["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Read /etc/passwd"}),
+    )
+    .await;
+
+    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let tool_end = events
+        .iter()
+        .find(|e| e["type"] == "tool_end")
+        .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
+    assert_eq!(
+        tool_end["status"], "error",
+        "file_read must be denied without a trusted workspace; events: {events:?}"
+    );
+    let result_text = tool_end["result"].as_str().unwrap_or("");
+    assert!(
+        result_text.contains("denied") || result_text.contains("permission"),
+        "denial reason should mention permissions; got: {result_text}"
+    );
+}
+
+/// A bench with a trusted read-grant workspace allows file_read to dispatch.
+///
+/// Proves: a trusted attachment carrying the "read" permission folds into
+/// build_permission_config and lifts the workspace gate for read-side tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
+    let provider = MockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_1".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": "/tmp/notes.md"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "ok".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]);
+
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(MockFileReadTool) as Arc<dyn swage_gateway::tool::Tool>,
+    ]);
+    let (router, addr, storage) =
+        start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
+
+    // Bench-level grant must be in place before the turn dispatches.
+    let default_bench = storage.get_or_create_default().await.unwrap();
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            bench_id: default_bench.id,
+            label: "trusted-read".into(),
+            path: "/tmp".into(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .unwrap();
+
+    let (_, body) = http(&router, "POST", "/api/conversations").await;
+    let conv_id = body["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+
+    ws_send(
+        &mut sink,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Read /tmp/notes.md"}),
+    )
+    .await;
+
+    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let tool_end = events
+        .iter()
+        .find(|e| e["type"] == "tool_end")
+        .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
+    assert_eq!(
+        tool_end["status"], "success",
+        "file_read should succeed when bench has trusted read grant; events: {events:?}"
     );
 }

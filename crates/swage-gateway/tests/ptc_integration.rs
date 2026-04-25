@@ -27,6 +27,8 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
+use swage_storage::model::NewWorkspaceAttachment;
+use swage_storage::store::{BenchStore, WorkspaceAttachmentStore};
 use swage_tool;
 
 // ---------------------------------------------------------------------------
@@ -120,9 +122,26 @@ async fn start_ptc_test_server(
         Arc::new(ptc_tool) as Arc<dyn swage_gateway::tool::Tool>,
     ]);
     let mut config = swage_config::ResolvedConfig::default();
-    // These tests exercise Python tool chaining itself. Approval routing is
-    // covered separately, so keep python_execute ungated in this harness.
+    // These tests exercise Python tool chaining itself. Approval routing and
+    // the workspace permission gate are covered separately, so keep
+    // python_execute ungated and grant the bench full workspace permissions
+    // in this harness.
     config.tools.permissions.require_approval = vec![];
+
+    let default_bench = storage
+        .get_or_create_default()
+        .await
+        .expect("default bench should be seeded for PTC harness");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            bench_id: default_bench.id,
+            label: "ptc-test-workspace".to_string(),
+            path: "/tmp/ptc".to_string(),
+            permissions: vec!["read".to_string(), "write".to_string()],
+            is_trusted: true,
+        })
+        .await
+        .expect("trusted workspace attachment should attach to default bench");
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,

@@ -168,20 +168,87 @@ pub(crate) fn build_approval_registrar(
     })
 }
 
+/// Tools that read from the filesystem and require a `read` workspace grant.
+const WORKSPACE_READ_TOOLS: &[&str] = &["file_read", "file_list", "file_search"];
+
+/// Tools that mutate the filesystem or execute arbitrary code, requiring a
+/// `write` workspace grant. `shell` and `python_execute` are included because
+/// either can write paths or otherwise mutate host state.
+const WORKSPACE_WRITE_TOOLS: &[&str] = &["file_write", "shell", "python_execute"];
+
+/// Distilled view of which permission grants the bench has actually accepted
+/// across its trusted workspace attachments. Untrusted attachments contribute
+/// nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkspacePermissionSummary {
+    pub(crate) has_read: bool,
+    pub(crate) has_write: bool,
+}
+
+/// Inspect the bench's workspace attachments and derive which permission
+/// grants are in force. Storage failures degrade to "no grants" so that a
+/// transient lookup error never silently widens the policy.
+pub(crate) async fn summarise_trusted_workspace_permissions(
+    storage: &Arc<dyn swage_storage::store::Storage>,
+    bench_id: Uuid,
+) -> WorkspacePermissionSummary {
+    let attachments = match storage.list_workspace_attachments_by_bench(bench_id).await {
+        Ok(list) => list,
+        Err(error) => {
+            tracing::warn!(
+                bench_id = %bench_id,
+                %error,
+                "failed to load workspace attachments; treating bench as having no granted permissions"
+            );
+            return WorkspacePermissionSummary::default();
+        }
+    };
+
+    let mut summary = WorkspacePermissionSummary::default();
+    for attachment in attachments.into_iter().filter(|a| a.is_trusted) {
+        for permission in &attachment.permissions {
+            match permission.as_str() {
+                "read" => summary.has_read = true,
+                "write" => summary.has_write = true,
+                _ => {}
+            }
+        }
+    }
+    summary
+}
+
 fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
+    workspace_grants: Option<WorkspacePermissionSummary>,
 ) -> PermissionConfig {
-    // TODO Enforce accepted workspace permissions during turn dispatch
-    // Workspace attachments store trust and read/write permissions, but this
-    // turn policy is still derived from resolved config rather than accepted
-    // workspace grants. Fold trusted workspace permissions into this policy
-    // before release so "accepted workspace" is an enforcement boundary.
-    // ---
     let mut deny = config.tools.permissions.deny.clone();
     for entry in &startup_config.tools.permissions.deny {
         if !deny.contains(entry) {
             deny.push(entry.clone());
+        }
+    }
+
+    // Fold trusted workspace grants into the deny list. The user's accepted
+    // workspace attachments are the boundary: without a `read` grant, no
+    // filesystem-reading tool may run; without a `write` grant, no tool that
+    // mutates the host (file_write, shell, python_execute) may run. When the
+    // caller has no bench context (delegation startup, topology runs) the
+    // workspace gate is left to the resolved config alone.
+    if let Some(grants) = workspace_grants {
+        if !grants.has_read {
+            for tool in WORKSPACE_READ_TOOLS {
+                if !deny.iter().any(|entry| entry == tool) {
+                    deny.push((*tool).to_string());
+                }
+            }
+        }
+        if !grants.has_write {
+            for tool in WORKSPACE_WRITE_TOOLS {
+                if !deny.iter().any(|entry| entry == tool) {
+                    deny.push((*tool).to_string());
+                }
+            }
         }
     }
 
@@ -224,9 +291,14 @@ pub(crate) async fn build_gateway_dispatcher(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     session_metadata: Option<&serde_json::Value>,
+    bench_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> ToolDispatcher {
-    let permissions = build_permission_config(config, &state.config);
+    let workspace_grants = match bench_id {
+        Some(id) => Some(summarise_trusted_workspace_permissions(&state.storage, id).await),
+        None => None,
+    };
+    let permissions = build_permission_config(config, &state.config, workspace_grants);
 
     let dispatcher = ToolDispatcher::new(
         state.tool_dispatcher.registry().clone(),
@@ -405,8 +477,14 @@ impl DelegationHandler for GatewayDelegationHandler {
         // internal tool activity is not surfaced on the parent conversation's
         // WebSocket stream.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
-        let target_dispatcher =
-            build_gateway_dispatcher(&self.state, &target_resolved, None, silent_ws_tx).await;
+        let target_dispatcher = build_gateway_dispatcher(
+            &self.state,
+            &target_resolved,
+            None,
+            Some(bench_id),
+            silent_ws_tx,
+        )
+        .await;
 
         let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
         let executor = DelegationExecutor {
@@ -788,8 +866,14 @@ pub(crate) async fn process_turn_with_existing_turn(
     // ToolDispatcher with the resolved permission set. When a sandbox is
     // available, inject SandboxedExecutor as the execution strategy so tool
     // calls are routed through bubblewrap transparently.
-    let dispatcher =
-        build_gateway_dispatcher(state, &config, session.metadata.as_ref(), ws_tx.clone()).await;
+    let dispatcher = build_gateway_dispatcher(
+        state,
+        &config,
+        session.metadata.as_ref(),
+        Some(bench_id),
+        ws_tx.clone(),
+    )
+    .await;
 
     // Step 10: Build the Agent that will execute the turn.
     let agent_config =
@@ -7017,6 +7101,201 @@ pub(crate) mod tests {
         assert_eq!(content[0].role, flat_system.role);
         // Content should be identical — single rule, no joining needed.
         assert_eq!(content[0].content, flat_system.content);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace permission gate
+    // -----------------------------------------------------------------------
+
+    /// Convenience for invoking the private build_permission_config from tests
+    /// without having to repeat the full ResolvedConfig wiring.
+    fn build_permission_config_for_test(
+        config: &swage_config::ResolvedConfig,
+        workspace_grants: Option<WorkspacePermissionSummary>,
+    ) -> PermissionConfig {
+        super::build_permission_config(config, config, workspace_grants)
+    }
+
+    #[tokio::test]
+    async fn workspace_summary_is_empty_when_no_attachments_exist() {
+        let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+        let bench_id = Uuid::new_v4();
+
+        let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+
+        assert!(!summary.has_read);
+        assert!(!summary.has_write);
+    }
+
+    #[tokio::test]
+    async fn workspace_summary_ignores_untrusted_attachments() {
+        let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+        let bench_id = Uuid::new_v4();
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id,
+                label: "untrusted".into(),
+                path: "/tmp/untrusted".into(),
+                permissions: vec!["read".into(), "write".into()],
+                is_trusted: false,
+            })
+            .await
+            .unwrap();
+
+        let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+
+        assert!(!summary.has_read, "untrusted attachment must not grant read");
+        assert!(
+            !summary.has_write,
+            "untrusted attachment must not grant write"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_summary_combines_grants_across_trusted_attachments() {
+        let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+        let bench_id = Uuid::new_v4();
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id,
+                label: "read-only".into(),
+                path: "/tmp/read".into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id,
+                label: "write-only".into(),
+                path: "/tmp/write".into(),
+                permissions: vec!["write".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+
+        let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+
+        assert!(summary.has_read);
+        assert!(summary.has_write);
+    }
+
+    #[tokio::test]
+    async fn workspace_summary_only_aggregates_target_bench() {
+        let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+        let target_bench = Uuid::new_v4();
+        let other_bench = Uuid::new_v4();
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id: other_bench,
+                label: "other".into(),
+                path: "/tmp/other".into(),
+                permissions: vec!["read".into(), "write".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+
+        let summary = summarise_trusted_workspace_permissions(&storage, target_bench).await;
+
+        assert!(!summary.has_read);
+        assert!(!summary.has_write);
+    }
+
+    #[test]
+    fn permission_config_unchanged_when_workspace_grants_absent() {
+        let config = swage_config::ResolvedConfig::default();
+        let policy = build_permission_config_for_test(&config, None);
+
+        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
+            assert!(
+                !policy.deny.iter().any(|entry| entry == tool),
+                "no workspace gate must apply when caller passes None: {tool} should not be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_config_denies_all_workspace_tools_when_no_grants() {
+        let config = swage_config::ResolvedConfig::default();
+        let policy = build_permission_config_for_test(
+            &config,
+            Some(WorkspacePermissionSummary::default()),
+        );
+
+        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
+            assert!(
+                policy.deny.iter().any(|entry| entry == tool),
+                "{tool} should be denied when bench has no trusted workspace grants"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_config_allows_read_tools_when_only_read_granted() {
+        let config = swage_config::ResolvedConfig::default();
+        let policy = build_permission_config_for_test(
+            &config,
+            Some(WorkspacePermissionSummary {
+                has_read: true,
+                has_write: false,
+            }),
+        );
+
+        for tool in WORKSPACE_READ_TOOLS {
+            assert!(
+                !policy.deny.iter().any(|entry| entry == tool),
+                "{tool} should be permitted when bench grants read"
+            );
+        }
+        for tool in WORKSPACE_WRITE_TOOLS {
+            assert!(
+                policy.deny.iter().any(|entry| entry == tool),
+                "{tool} should still be denied without a write grant"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_config_adds_no_extra_denies_when_full_grants_present() {
+        let config = swage_config::ResolvedConfig::default();
+        let policy = build_permission_config_for_test(
+            &config,
+            Some(WorkspacePermissionSummary {
+                has_read: true,
+                has_write: true,
+            }),
+        );
+
+        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
+            assert!(
+                !policy.deny.iter().any(|entry| entry == tool),
+                "{tool} should not be denied when bench grants both read and write"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_config_does_not_duplicate_already_denied_tools() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.deny = vec!["file_write".into()];
+
+        let policy = build_permission_config_for_test(
+            &config,
+            Some(WorkspacePermissionSummary::default()),
+        );
+
+        let file_write_count = policy
+            .deny
+            .iter()
+            .filter(|entry| entry.as_str() == "file_write")
+            .count();
+        assert_eq!(
+            file_write_count, 1,
+            "file_write should appear once in deny even when both config and workspace gate it"
+        );
     }
 
     /// The build_assembly_elements helper constructs the correct elements for
