@@ -1,8 +1,8 @@
 //! Gateway lifecycle management.
 //!
 //! Tracks the last time any significant activity was observed — HTTP requests,
-//! WebSocket messages, and active tool executions. Used by the idle monitor
-//! to decide when it is safe to shut the gateway down automatically.
+//! WebSocket messages, and active tool executions. Presence and operator
+//! surfaces use this to report recent gateway activity.
 //!
 //! Activity is defined narrowly: data must actually flow through a connection.
 //! An open but idle WebSocket does not count; the first message through it does.

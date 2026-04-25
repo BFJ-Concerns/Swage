@@ -639,7 +639,7 @@ describe("shutdown events", () => {
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
 
-    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
 
     expect(store.isStreaming).toBe(false);
   });
@@ -648,11 +648,11 @@ describe("shutdown events", () => {
     const store = createStreamingStore();
     store.startTurn("question");
 
-    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
 
     expect(store.turnError).toEqual({
       code: "gateway_shutdown",
-      message: "idle_timeout",
+      message: "admin shutdown request",
     });
   });
 
@@ -662,7 +662,7 @@ describe("shutdown events", () => {
 
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
-    store.handleServerEvent({ type: "shutdown", reason: "idle_timeout" });
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
 
     const assistantMessages = conv
       .getMessages()

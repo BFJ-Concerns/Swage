@@ -52,8 +52,8 @@ pub struct AppState {
     pub tool_dispatcher: Arc<ToolDispatcher>,
     /// Records the timestamp of the last significant gateway activity.
     ///
-    /// Used by the idle lifecycle monitor to trigger automatic shutdown when
-    /// no activity has been seen for a configured duration.
+    /// Used by operator and presence surfaces to report how recently the
+    /// gateway handled non-health work.
     pub activity_tracker: Arc<ActivityTracker>,
 
     /// Broadcast channel for server-wide event delivery.

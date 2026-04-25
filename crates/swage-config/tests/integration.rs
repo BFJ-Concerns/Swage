@@ -399,9 +399,6 @@ path = "/home/user/benches/test"
 [sandbox]
 enabled = true
 
-[lifecycle]
-idle_timeout = 300
-
 [logging]
 level = "info"
 "#;
@@ -414,7 +411,6 @@ level = "info"
     assert_eq!(config.server.port, 3000);
     assert_eq!(config.provider.model, "claude-sonnet-4-20250514");
     assert!(config.sandbox.enabled);
-    assert_eq!(config.lifecycle.idle_timeout, 300);
 }
 
 // ---------------------------------------------------------------------------

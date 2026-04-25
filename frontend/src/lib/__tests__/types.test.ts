@@ -294,12 +294,12 @@ describe("ServerEvent tool variants", () => {
   it("accepts shutdown with reason string", () => {
     const ev: ServerEvent = {
       type: "shutdown",
-      reason: "idle_timeout",
+      reason: "admin shutdown request",
     };
 
     expect(ev.type).toBe("shutdown");
     if (ev.type === "shutdown") {
-      expect(ev.reason).toBe("idle_timeout");
+      expect(ev.reason).toBe("admin shutdown request");
     }
   });
 

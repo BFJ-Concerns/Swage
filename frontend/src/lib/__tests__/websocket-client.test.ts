@@ -435,7 +435,7 @@ describe("tools channel subscription", () => {
 
     client.connect("conv-abc");
     latestWs().simulateOpen();
-    latestWs().simulateMessage({ type: "shutdown", reason: "idle_timeout" });
+    latestWs().simulateMessage({ type: "shutdown", reason: "admin shutdown request" });
 
     expect(received).toHaveLength(1);
     expect(received[0].type).toBe("shutdown");

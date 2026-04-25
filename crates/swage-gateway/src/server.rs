@@ -53,9 +53,8 @@ async fn request_id_middleware(request: Request<Body>, next: Next) -> Response {
 /// Called before the request reaches any handler, ensuring even rejected or
 /// errored requests count as activity (the gateway is clearly not idle).
 ///
-/// Health probes are deliberately excluded: a process manager polling
-/// `/api/health` on a short interval would otherwise continuously reset
-/// `last_activity`, preventing the idle monitor from ever triggering.
+/// Health probes are deliberately excluded so process-manager polling does not
+/// make the operator view look busier than it is.
 async fn activity_recording_middleware(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -413,9 +412,9 @@ pub fn build_router(state: AppState) -> Router {
         // log entries within that request and returned as X-Request-Id.
         // Added last so it is the outermost layer (processes requests first).
         .layer(middleware::from_fn(request_id_middleware))
-        // Record activity on every inbound request so the idle monitor knows
-        // the gateway is in use. Applied before request_id so even early-exit
-        // paths reset the timer.
+        // Record activity on every inbound request so presence and operator
+        // views can show recent non-health work. Applied before request_id so
+        // even early-exit paths update the timestamp.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             activity_recording_middleware,

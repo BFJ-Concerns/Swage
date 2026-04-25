@@ -1,9 +1,8 @@
 use crate::model::{
-    ContextConfig, HitlConfig, LifecycleConfig, LogLevel, LoggingConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderConfig,
-    PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig,
-    SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig, ToolPermissionConfig,
-    WorkspaceConfig,
+    ContextConfig, HitlConfig, LogLevel, LoggingConfig, ModelPricing, ObservabilityConfig,
+    OutputConfig, PricingConfig, Protocol, ProviderConfig, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
+    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,12 +38,6 @@ pub struct PartialWorkspaceConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialSandboxConfig {
     pub enabled: Option<bool>,
-}
-
-/// Partial mirror of `LifecycleConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PartialLifecycleConfig {
-    pub idle_timeout: Option<u64>,
 }
 
 /// Partial mirror of `LoggingConfig`.
@@ -183,7 +176,6 @@ pub struct PartialConfig {
     pub provider: Option<PartialProviderConfig>,
     pub workspace: Option<PartialWorkspaceConfig>,
     pub sandbox: Option<PartialSandboxConfig>,
-    pub lifecycle: Option<PartialLifecycleConfig>,
     pub logging: Option<PartialLoggingConfig>,
     pub context: Option<PartialContextConfig>,
     pub pricing: Option<PartialPricingConfig>,
@@ -216,9 +208,6 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(r.sandbox.enabled),
-            }),
-            lifecycle: Some(PartialLifecycleConfig {
-                idle_timeout: Some(r.lifecycle.idle_timeout),
             }),
             logging: Some(PartialLoggingConfig {
                 level: Some(r.logging.level),
@@ -352,11 +341,6 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         sandbox: merge_section(base.sandbox, overlay.sandbox, |b, o| PartialSandboxConfig {
             enabled: o.enabled.or(b.enabled),
         }),
-        lifecycle: merge_section(base.lifecycle, overlay.lifecycle, |b, o| {
-            PartialLifecycleConfig {
-                idle_timeout: o.idle_timeout.or(b.idle_timeout),
-            }
-        }),
         logging: merge_section(base.logging, overlay.logging, |b, o| PartialLoggingConfig {
             level: o.level.or(b.level),
         }),
@@ -472,14 +456,12 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     let dp = ProviderConfig::default();
     let dw = WorkspaceConfig::default();
     let dsb = SandboxConfig::default();
-    let dl = LifecycleConfig::default();
     let dlg = LoggingConfig::default();
 
     let s = partial.server.unwrap_or_default();
     let p = partial.provider.unwrap_or_default();
     let w = partial.workspace.unwrap_or_default();
     let sb = partial.sandbox.unwrap_or_default();
-    let l = partial.lifecycle.unwrap_or_default();
     let lg = partial.logging.unwrap_or_default();
 
     ResolvedConfig {
@@ -506,9 +488,6 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sandbox: SandboxConfig {
             enabled: sb.enabled.unwrap_or(dsb.enabled),
-        },
-        lifecycle: LifecycleConfig {
-            idle_timeout: l.idle_timeout.unwrap_or(dl.idle_timeout),
         },
         logging: LoggingConfig {
             level: lg.level.unwrap_or(dlg.level),

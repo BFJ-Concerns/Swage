@@ -186,7 +186,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 12: Serve until shutdown.
     info!("Swage gateway listening on {bound_addr}");
     let state_for_shutdown = state.clone();
-    let idle_timeout = config.lifecycle.idle_timeout;
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
@@ -194,9 +193,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     .with_graceful_shutdown(async move {
         tokio::select! {
             _ = crate::shutdown::graceful_shutdown() => {}
-            _ = crate::shutdown::idle_monitor(state_for_shutdown.clone(), idle_timeout) => {
-                info!("Idle timeout triggered shutdown");
-            }
             _ = state_for_shutdown.shutdown_signal.cancelled() => {
                 info!("HTTP shutdown endpoint triggered graceful shutdown");
             }

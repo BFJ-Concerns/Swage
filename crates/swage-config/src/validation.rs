@@ -13,7 +13,6 @@ const KNOWN_SECTIONS: &[&str] = &[
     "provider",
     "workspace",
     "sandbox",
-    "lifecycle",
     "logging",
     "tools",
     "context",
@@ -31,7 +30,6 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "provider" => &["protocol", "model", "api_key_env", "base_url"],
         "workspace" => &["path"],
         "sandbox" => &["enabled"],
-        "lifecycle" => &["idle_timeout"],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
@@ -123,7 +121,6 @@ fn check_field_type(
         ("provider", "base_url") => ("string", matches!(value, Value::String(_))),
         ("workspace", "path") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
-        ("lifecycle", "idle_timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),

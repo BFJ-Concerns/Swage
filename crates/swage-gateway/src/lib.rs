@@ -16,7 +16,7 @@
 //! | [`service`] | Request/response DTOs shared by handlers and the websocket layer |
 //! | [`state`] | [`state::AppState`] — shared runtime state cloned into every handler |
 //! | [`server`] | Router construction and request-pipeline middleware |
-//! | [`lifecycle`] | [`lifecycle::ActivityTracker`] — atomic last-activity timestamp |
+//! | [`lifecycle`] | [`lifecycle::ActivityTracker`] — atomic activity timestamp for presence |
 //! | [`shutdown`] | Idle monitor, graceful shutdown, and orphaned turn recovery |
 //! | [`context`] | Provider and tool context assembly |
 //! | [`assets`] | Embedded frontend SPA served at the fallback route |
@@ -31,16 +31,6 @@
 //!   every inbound HTTP request; returned to clients as `X-Request-Id`.
 //! - `turn_id` — the database turn UUID recorded on the tracing span at the
 //!   start of each agent turn in [`turn::process_turn`].
-//!
-//! ## On-Demand Lifecycle
-//!
-//! When `idle_timeout_secs` is non-zero the gateway shuts itself down after
-//! the configured period of inactivity. Activity is tracked by
-//! [`lifecycle::ActivityTracker`] and recorded by the activity middleware on
-//! every non-health HTTP request and on every streaming token in a turn.
-//! [`shutdown::idle_monitor`] polls the tracker and, when the idle threshold is
-//! exceeded, either shuts down immediately (no active turns) or enters a grace
-//! period equal to `idle_timeout_secs` before proceeding.
 //!
 //! ## Graceful Shutdown
 //!

@@ -1609,7 +1609,7 @@ pub async fn get_turn_context(
 /// 1. Broadcasts `ServerEvent::Shutdown` to all connected WebSocket clients
 ///    so they can close gracefully before the connection is dropped.
 /// 2. Cancels `AppState::shutdown_signal`, which the server's graceful-shutdown
-///    future awaits alongside SIGTERM and the idle monitor.
+///    future awaits alongside SIGTERM.
 /// 3. Returns `200 OK` with `{ status: "shutting_down", message }`.
 pub async fn shutdown(
     State(state): State<AppState>,

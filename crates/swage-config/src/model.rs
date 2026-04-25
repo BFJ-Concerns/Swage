@@ -79,19 +79,6 @@ impl Default for SandboxConfig {
     }
 }
 
-/// Agent lifecycle settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleConfig {
-    /// Seconds of inactivity before the agent session is considered idle.
-    pub idle_timeout: u64,
-}
-
-impl Default for LifecycleConfig {
-    fn default() -> Self {
-        Self { idle_timeout: 300 }
-    }
-}
-
 /// Log verbosity levels.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -508,7 +495,6 @@ pub struct ResolvedConfig {
     pub provider: ProviderConfig,
     pub workspace: WorkspaceConfig,
     pub sandbox: SandboxConfig,
-    pub lifecycle: LifecycleConfig,
     pub logging: LoggingConfig,
     pub tools: ToolConfig,
     pub context: ContextConfig,
@@ -587,12 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_config_defaults() {
-        let cfg = LifecycleConfig::default();
-        assert_eq!(cfg.idle_timeout, 300);
-    }
-
-    #[test]
     fn logging_config_defaults() {
         let cfg = LoggingConfig::default();
         assert_eq!(cfg.level, LogLevel::Info);
@@ -609,7 +589,6 @@ mod tests {
         assert_eq!(cfg.provider.base_url, None);
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
-        assert_eq!(cfg.lifecycle.idle_timeout, 300);
         assert_eq!(cfg.logging.level, LogLevel::Info);
         assert_eq!(cfg.instructions, "");
     }
