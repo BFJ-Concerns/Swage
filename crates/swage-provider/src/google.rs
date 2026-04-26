@@ -191,10 +191,10 @@ impl GoogleProvider {
 
     fn redact_api_key(text: &str, api_key: Option<&str>) -> String {
         let mut redacted = text.to_string();
-        if let Some(api_key) = api_key {
-            if !api_key.is_empty() {
-                redacted = redacted.replace(api_key, "REDACTED");
-            }
+        if let Some(api_key) = api_key
+            && !api_key.is_empty()
+        {
+            redacted = redacted.replace(api_key, "REDACTED");
         }
         redacted
     }
@@ -278,14 +278,14 @@ impl GoogleProvider {
                     // Regular text parts.
                     for part in &msg.content {
                         // Image URLs are not yet supported for Gemini.
-                        if let ContentPart::Text { text } = part {
-                            if !text.is_empty() {
-                                parts.push(GeminiPart {
-                                    text: Some(text.clone()),
-                                    function_call: None,
-                                    function_response: None,
-                                });
-                            }
+                        if let ContentPart::Text { text } = part
+                            && !text.is_empty()
+                        {
+                            parts.push(GeminiPart {
+                                text: Some(text.clone()),
+                                function_call: None,
+                                function_response: None,
+                            });
                         }
                     }
 
@@ -510,12 +510,12 @@ impl GoogleProvider {
 
                 // Text delta.
                 for part in &content.parts {
-                    if let Some(ref text) = part.text {
-                        if !text.is_empty() {
-                            return Some(StreamChunk::Delta {
-                                content: text.clone(),
-                            });
-                        }
+                    if let Some(ref text) = part.text
+                        && !text.is_empty()
+                    {
+                        return Some(StreamChunk::Delta {
+                            content: text.clone(),
+                        });
                     }
                 }
             }

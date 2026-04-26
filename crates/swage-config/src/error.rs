@@ -49,7 +49,7 @@ pub enum ConfigProblemKind {
 pub struct ConfigProblem {
     /// The config file that contains the problem.
     pub file_path: PathBuf,
-    /// Dotted field path within the file, if applicable (e.g. `"provider.model"`).
+    /// Dotted field path within the file, if applicable (e.g. `"models.default"`).
     pub field_path: Option<String>,
     /// What went wrong.
     pub kind: ConfigProblemKind,
@@ -60,7 +60,7 @@ impl fmt::Display for ConfigProblem {
         let path = self.file_path.display();
         match &self.field_path {
             // When a field path is available, include it before the kind message.
-            // e.g. "config.toml: provider.model expected string, found integer"
+            // e.g. "config.toml: models.default expected string, found integer"
             Some(field) => write!(f, "{path}: {field}: {}", self.kind),
             None => write!(f, "{path}: {}", self.kind),
         }

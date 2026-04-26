@@ -20,15 +20,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.202604.2500"
+version = "0.202604.2600"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Serialisation
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 
 # Error handling
 thiserror = "2"
@@ -43,9 +43,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Random number generation (used in retry jitter)
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 aes-gcm-siv = "0.11"
 
 # Observability
@@ -53,15 +53,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # HTTP
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
 bytes = "1"
 
 # Web framework
-axum = { version = "0.7", features = ["ws"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Pattern matching (leak detection)
 aho-corasick = "1"
@@ -78,7 +78,7 @@ mime_guess = "2"
 libc = "0.2"
 
 # JSON Schema validation
-jsonschema = "0.29"
+jsonschema = "0.46"
 
 # Testing
 tempfile = "3"

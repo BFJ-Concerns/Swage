@@ -52,7 +52,7 @@ pub async fn list_runs(
     if query.active_only.unwrap_or(false) {
         runs.retain(|run| is_active_status(&run.status));
     }
-    runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.updated_at));
     if let Some(limit) = query.limit {
         runs.truncate(limit);
     }

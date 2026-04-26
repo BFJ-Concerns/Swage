@@ -5,7 +5,6 @@ use aes_gcm_siv::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -100,8 +99,7 @@ impl ManagedSecretEncryptor {
 
     fn encrypt_value(&self, plaintext: &str) -> Result<EncryptedManagedSecretValue, StorageError> {
         let mut nonce_bytes = [0_u8; 12];
-        let mut rng = rand::rngs::OsRng;
-        rng.fill_bytes(&mut nonce_bytes);
+        rand::fill(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = self
             .cipher

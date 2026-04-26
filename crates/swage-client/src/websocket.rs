@@ -400,7 +400,7 @@ impl GatewayWebSocket {
         })?;
 
         self.inner
-            .send(Message::Text(text))
+            .send(Message::Text(text.into()))
             .await
             .map_err(|e| ClientError::WebSocketFailed {
                 address: self.address.clone(),

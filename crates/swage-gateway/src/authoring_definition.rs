@@ -242,7 +242,7 @@ pub async fn preview_context_definition(
         request.memory_content,
         request.bench_name,
     );
-    let tokeniser = TiktokenTokeniser::new(&state.config.provider.model);
+    let tokeniser = TiktokenTokeniser::new(state.config.default_model_id());
     let assembly_runner =
         swage_python::ConfiguredAssemblyRunner::new(state.config.tools.python_execute.clone());
     let output = assemble(

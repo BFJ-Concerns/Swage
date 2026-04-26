@@ -1,8 +1,11 @@
+#[cfg(test)]
+use crate::model::Protocol;
 use crate::model::{
-    ContextConfig, HitlConfig, LogLevel, LoggingConfig, ModelPricing, ObservabilityConfig,
-    OutputConfig, PricingConfig, Protocol, ProviderConfig, PythonExecuteToolConfig,
-    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
-    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    ContextConfig, HitlConfig, LogLevel, LoggingConfig, ModelCatalogConfig, ModelEndpointConfig,
+    ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
+    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
+    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
+    ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,13 +22,19 @@ pub struct PartialServerConfig {
     pub port: Option<u16>,
 }
 
-/// Partial mirror of `ProviderConfig`.
+/// Partial mirror of `ProviderCatalogConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PartialProviderConfig {
-    pub protocol: Option<Protocol>,
-    pub model: Option<String>,
-    pub api_key_env: Option<String>,
-    pub base_url: Option<Option<String>>,
+pub struct PartialProviderCatalogConfig {
+    pub default: Option<String>,
+    pub entries: Option<HashMap<String, ProviderEndpointConfig>>,
+}
+
+/// Partial mirror of `ModelCatalogConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialModelCatalogConfig {
+    pub default: Option<String>,
+    pub default_model_id: Option<String>,
+    pub entries: Option<HashMap<String, ModelEndpointConfig>>,
 }
 
 /// Partial mirror of `WorkspaceConfig`.
@@ -173,7 +182,8 @@ pub struct PartialCommunicationConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialConfig {
     pub server: Option<PartialServerConfig>,
-    pub provider: Option<PartialProviderConfig>,
+    pub providers: Option<PartialProviderCatalogConfig>,
+    pub models: Option<PartialModelCatalogConfig>,
     pub workspace: Option<PartialWorkspaceConfig>,
     pub sandbox: Option<PartialSandboxConfig>,
     pub logging: Option<PartialLoggingConfig>,
@@ -197,11 +207,22 @@ impl From<ResolvedConfig> for PartialConfig {
                 host: Some(r.server.host),
                 port: Some(r.server.port),
             }),
-            provider: Some(PartialProviderConfig {
-                protocol: Some(r.provider.protocol),
-                model: Some(r.provider.model),
-                api_key_env: Some(r.provider.api_key_env),
-                base_url: Some(r.provider.base_url),
+            providers: Some(PartialProviderCatalogConfig {
+                default: Some(r.providers.default),
+                entries: if r.providers.entries.is_empty() {
+                    None
+                } else {
+                    Some(r.providers.entries)
+                },
+            }),
+            models: Some(PartialModelCatalogConfig {
+                default: Some(r.models.default),
+                default_model_id: None,
+                entries: if r.models.entries.is_empty() {
+                    None
+                } else {
+                    Some(r.models.entries)
+                },
             }),
             workspace: Some(PartialWorkspaceConfig {
                 path: Some(r.workspace.path),
@@ -315,7 +336,7 @@ fn merge_section<S>(
 
 /// Merge two `PartialConfig` values with child-wins semantics.
 ///
-/// Sections are merged independently — an overlay that sets `[provider]`
+/// Sections are merged independently — an overlay that sets `[providers]`
 /// does not erase a base `[server]`. Within a section, each field is merged
 /// independently: the overlay value wins when present, otherwise the base
 /// value is kept.
@@ -325,12 +346,44 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             host: o.host.or(b.host),
             port: o.port.or(b.port),
         }),
-        provider: merge_section(base.provider, overlay.provider, |b, o| {
-            PartialProviderConfig {
-                protocol: o.protocol.or(b.protocol),
-                model: o.model.or(b.model),
-                api_key_env: o.api_key_env.or(b.api_key_env),
-                base_url: o.base_url.or(b.base_url),
+        providers: merge_section(base.providers, overlay.providers, |b, o| {
+            let entries = match (b.entries, o.entries) {
+                (Some(mut base_entries), Some(overlay_entries)) => {
+                    base_entries.extend(overlay_entries);
+                    Some(base_entries)
+                }
+                (base_entries, overlay_entries) => overlay_entries.or(base_entries),
+            };
+            PartialProviderCatalogConfig {
+                default: o.default.or(b.default),
+                entries,
+            }
+        }),
+        models: merge_section(base.models, overlay.models, |b, o| {
+            let overlay_changes_default = o.default.is_some();
+            let effective_default = o.default.as_ref().or(b.default.as_ref());
+            let overlay_replaces_default_entry = o
+                .entries
+                .as_ref()
+                .zip(effective_default)
+                .is_some_and(|(entries, default)| entries.contains_key(default));
+            let entries = match (b.entries, o.entries) {
+                (Some(mut base_entries), Some(overlay_entries)) => {
+                    base_entries.extend(overlay_entries);
+                    Some(base_entries)
+                }
+                (base_entries, overlay_entries) => overlay_entries.or(base_entries),
+            };
+            PartialModelCatalogConfig {
+                default: o.default.or(b.default),
+                default_model_id: if o.default_model_id.is_some() {
+                    o.default_model_id
+                } else if overlay_changes_default || overlay_replaces_default_entry {
+                    None
+                } else {
+                    b.default_model_id
+                },
+                entries,
             }
         }),
         workspace: merge_section(base.workspace, overlay.workspace, |b, o| {
@@ -453,16 +506,34 @@ pub fn merge_chain(configs: Vec<PartialConfig>) -> PartialConfig {
 /// fields with their default values.
 pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     let ds = ServerConfig::default();
-    let dp = ProviderConfig::default();
     let dw = WorkspaceConfig::default();
     let dsb = SandboxConfig::default();
     let dlg = LoggingConfig::default();
 
     let s = partial.server.unwrap_or_default();
-    let p = partial.provider.unwrap_or_default();
+    let providers = partial.providers.unwrap_or_default();
+    let models = partial.models.unwrap_or_default();
+    let default_model_id_override = models.default_model_id.clone();
     let w = partial.workspace.unwrap_or_default();
     let sb = partial.sandbox.unwrap_or_default();
     let lg = partial.logging.unwrap_or_default();
+
+    let mut provider_catalog = ProviderCatalogConfig::default();
+    provider_catalog.default = providers.default.unwrap_or(provider_catalog.default);
+    if let Some(entries) = providers.entries {
+        provider_catalog.entries.extend(entries);
+    }
+
+    let mut model_catalog = ModelCatalogConfig::default();
+    model_catalog.default = models.default.unwrap_or(model_catalog.default);
+    if let Some(entries) = models.entries {
+        model_catalog.entries.extend(entries);
+    }
+    if let Some(model_id) = default_model_id_override
+        && let Some(model) = model_catalog.entries.get_mut(&model_catalog.default)
+    {
+        model.model_id = model_id;
+    }
 
     ResolvedConfig {
         server: ServerConfig {
@@ -477,12 +548,8 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 timeout_policy: h.timeout_policy.unwrap_or(dh.timeout_policy),
             }
         },
-        provider: ProviderConfig {
-            protocol: p.protocol.unwrap_or(dp.protocol),
-            model: p.model.unwrap_or(dp.model),
-            api_key_env: p.api_key_env.unwrap_or(dp.api_key_env),
-            base_url: p.base_url.unwrap_or(dp.base_url),
-        },
+        providers: provider_catalog,
+        models: model_catalog,
         workspace: WorkspaceConfig {
             path: w.path.unwrap_or(dw.path),
         },
@@ -633,10 +700,10 @@ mod tests {
         }
     }
 
-    fn partial_with_provider_model(model: &str) -> PartialConfig {
+    fn partial_with_default_model_id(model: &str) -> PartialConfig {
         PartialConfig {
-            provider: Some(PartialProviderConfig {
-                model: Some(model.to_string()),
+            models: Some(PartialModelCatalogConfig {
+                default_model_id: Some(model.to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -680,18 +747,17 @@ mod tests {
             }),
             ..Default::default()
         };
-        let overlay = partial_with_provider_model("gpt-4o");
+        let overlay = partial_with_default_model_id("gpt-4o");
         let merged = merge_partial(base, overlay);
 
         // Server from base must survive even though overlay touched only provider
         let server = merged.server.expect("server from base should survive");
         assert_eq!(server.host.as_deref(), Some("10.0.0.1"));
 
-        // Provider from overlay should be present
-        let provider = merged
-            .provider
-            .expect("provider from overlay should be present");
-        assert_eq!(provider.model.as_deref(), Some("gpt-4o"));
+        let models = merged
+            .models
+            .expect("models from overlay should be present");
+        assert_eq!(models.default_model_id.as_deref(), Some("gpt-4o"));
     }
 
     #[test]
@@ -706,7 +772,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let bench = partial_with_provider_model("claude-opus");
+        let bench = partial_with_default_model_id("claude-opus");
         let agent = partial_with_server_port(4000);
 
         let merged = merge_chain(vec![global, bench, agent]);
@@ -721,9 +787,9 @@ mod tests {
         assert_eq!(server.port, Some(4000), "agent overrides global port");
 
         // Bench's model survives
-        let provider = merged.provider.expect("provider should exist");
+        let models = merged.models.expect("models should exist");
         assert_eq!(
-            provider.model.as_deref(),
+            models.default_model_id.as_deref(),
             Some("claude-opus"),
             "bench model survives"
         );
@@ -734,16 +800,14 @@ mod tests {
         // global: port=5000, empty middle, agent: model=foo
         let global = partial_with_server_port(5000);
         let middle = PartialConfig::default(); // nothing
-        let agent = partial_with_provider_model("foo");
+        let agent = partial_with_default_model_id("foo");
 
         let merged = merge_chain(vec![global, middle, agent]);
 
         let server = merged.server.expect("server from global should survive");
         assert_eq!(server.port, Some(5000));
-        let provider = merged
-            .provider
-            .expect("provider from agent should be present");
-        assert_eq!(provider.model.as_deref(), Some("foo"));
+        let models = merged.models.expect("models from agent should be present");
+        assert_eq!(models.default_model_id.as_deref(), Some("foo"));
     }
 
     #[test]
@@ -770,8 +834,162 @@ mod tests {
         let default = ResolvedConfig::default();
         assert_eq!(resolved.server.host, default.server.host);
         assert_eq!(resolved.server.port, default.server.port);
-        assert_eq!(resolved.provider.model, default.provider.model);
+        assert_eq!(resolved.default_model_id(), default.default_model_id());
         assert_eq!(resolved.sandbox.enabled, default.sandbox.enabled);
+    }
+
+    #[test]
+    fn resolve_uses_explicit_provider_model_catalogues() {
+        let resolved = resolve(PartialConfig {
+            providers: Some(PartialProviderCatalogConfig {
+                default: Some("openai".to_string()),
+                entries: Some(HashMap::from([(
+                    "openai".to_string(),
+                    ProviderEndpointConfig {
+                        protocol: Protocol::OpenAi,
+                        api_key_env: "OPENAI_API_KEY".to_string(),
+                        base_url: None,
+                    },
+                )])),
+            }),
+            models: Some(PartialModelCatalogConfig {
+                default: Some("fast".to_string()),
+                entries: Some(HashMap::from([(
+                    "fast".to_string(),
+                    ModelEndpointConfig {
+                        provider_id: "openai".to_string(),
+                        model_id: "gpt-4o-mini".to_string(),
+                        aliases: Vec::new(),
+                        context_window: None,
+                    },
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert_eq!(resolved.providers.default, "openai");
+        assert_eq!(resolved.models.default, "fast");
+        assert_eq!(resolved.default_model_id(), "gpt-4o-mini");
+
+        let provider = resolved
+            .default_provider_endpoint()
+            .expect("default provider should resolve");
+        assert_eq!(provider.protocol, Protocol::OpenAi);
+        assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn model_override_updates_existing_default_model_entry() {
+        let mut base = ResolvedConfig::default();
+        base.models.default = "workhorse".to_string();
+        base.models.entries = HashMap::from([(
+            "workhorse".to_string(),
+            ModelEndpointConfig {
+                provider_id: "anthropic".to_string(),
+                model_id: "base-model".to_string(),
+                aliases: Vec::new(),
+                context_window: None,
+            },
+        )]);
+
+        let resolved = resolve(merge_partial(
+            PartialConfig::from(base),
+            PartialConfig {
+                models: Some(PartialModelCatalogConfig {
+                    default_model_id: Some("overlay-model".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+
+        assert_eq!(resolved.default_model_id(), "overlay-model");
+        assert_eq!(
+            resolved.models.entries["workhorse"].provider_id, "anthropic",
+            "model overrides must not erase the provider reference"
+        );
+    }
+
+    #[test]
+    fn changing_default_model_clears_inherited_default_model_id_override() {
+        let base = PartialConfig {
+            models: Some(PartialModelCatalogConfig {
+                default: Some("smart".to_string()),
+                default_model_id: Some("parent-model-id".to_string()),
+                entries: Some(HashMap::from([(
+                    "smart".to_string(),
+                    ModelEndpointConfig {
+                        provider_id: "anthropic".to_string(),
+                        model_id: "claude-3-7-sonnet".to_string(),
+                        aliases: Vec::new(),
+                        context_window: None,
+                    },
+                )])),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            models: Some(PartialModelCatalogConfig {
+                default: Some("fast".to_string()),
+                entries: Some(HashMap::from([(
+                    "fast".to_string(),
+                    ModelEndpointConfig {
+                        provider_id: "openai".to_string(),
+                        model_id: "gpt-4o-mini".to_string(),
+                        aliases: Vec::new(),
+                        context_window: None,
+                    },
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.models.default, "fast");
+        assert_eq!(resolved.default_model_id(), "gpt-4o-mini");
+        assert_eq!(resolved.models.entries["fast"].provider_id, "openai");
+    }
+
+    #[test]
+    fn replacing_default_entry_clears_inherited_default_model_id_override() {
+        let base = PartialConfig {
+            models: Some(PartialModelCatalogConfig {
+                default: Some("smart".to_string()),
+                default_model_id: Some("parent-model-id".to_string()),
+                entries: Some(HashMap::from([(
+                    "smart".to_string(),
+                    ModelEndpointConfig {
+                        provider_id: "anthropic".to_string(),
+                        model_id: "claude-3-7-sonnet".to_string(),
+                        aliases: Vec::new(),
+                        context_window: None,
+                    },
+                )])),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            models: Some(PartialModelCatalogConfig {
+                entries: Some(HashMap::from([(
+                    "smart".to_string(),
+                    ModelEndpointConfig {
+                        provider_id: "openai".to_string(),
+                        model_id: "gpt-4.1-mini".to_string(),
+                        aliases: Vec::new(),
+                        context_window: None,
+                    },
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.models.default, "smart");
+        assert_eq!(resolved.default_model_id(), "gpt-4.1-mini");
+        assert_eq!(resolved.models.entries["smart"].provider_id, "openai");
     }
 
     #[test]
@@ -1325,14 +1543,14 @@ mod tests {
     fn resolved_to_partial_round_trip_preserves_fields() {
         let mut original = ResolvedConfig::default();
         original.server.port = 8080;
-        original.provider.model = "test-model".to_string();
+        original.set_default_model_id("test-model".to_string());
         original.tools.shell_timeout_secs = 120;
 
         let partial = PartialConfig::from(original.clone());
         let restored = resolve(partial);
 
         assert_eq!(restored.server.port, 8080);
-        assert_eq!(restored.provider.model, "test-model");
+        assert_eq!(restored.default_model_id(), "test-model");
         assert_eq!(restored.tools.shell_timeout_secs, 120);
     }
 
@@ -1340,12 +1558,12 @@ mod tests {
     fn resolved_to_partial_then_overlay_merge() {
         let mut base = ResolvedConfig::default();
         base.server.port = 9000;
-        base.provider.model = "base-model".to_string();
+        base.set_default_model_id("base-model".to_string());
 
         let base_partial = PartialConfig::from(base);
         let overlay = PartialConfig {
-            provider: Some(PartialProviderConfig {
-                model: Some("overlay-model".to_string()),
+            models: Some(PartialModelCatalogConfig {
+                default_model_id: Some("overlay-model".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1356,7 +1574,8 @@ mod tests {
 
         assert_eq!(resolved.server.port, 9000, "base port should survive");
         assert_eq!(
-            resolved.provider.model, "overlay-model",
+            resolved.default_model_id(),
+            "overlay-model",
             "overlay should win"
         );
     }

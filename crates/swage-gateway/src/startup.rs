@@ -217,35 +217,52 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 fn create_voice_provider(
     config: &swage_config::ResolvedConfig,
 ) -> Arc<dyn swage_provider::VoiceProvider> {
-    let provider_config = match swage_provider::ProviderConfig::try_from(&config.provider) {
-        Ok(config) => config,
-        Err(_) => {
-            return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable because the provider configuration is invalid",
-            ));
-        }
+    let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
+        return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+            "voice is unavailable because no default provider/model pair is configured",
+        ));
     };
+    let provider_config =
+        match swage_provider::ProviderConfig::try_from((provider_endpoint, model_endpoint)) {
+            Ok(config) => config,
+            Err(_) => {
+                return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                    "voice is unavailable because the provider configuration is invalid",
+                ));
+            }
+        };
 
-    match config.provider.protocol {
+    match provider_endpoint.protocol {
         swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Arc::new(
             swage_provider::OpenAiVoiceProvider::from_config(provider_config),
         ),
         swage_config::Protocol::Anthropic | swage_config::Protocol::Google => {
             Arc::new(swage_provider::UnsupportedVoiceProvider::new(format!(
                 "voice is unavailable for provider protocol {:?}",
-                config.provider.protocol
+                provider_endpoint.protocol
             )))
         }
     }
 }
 
-fn provider_base_url(config: &swage_config::ProviderConfig) -> &str {
+fn provider_base_url(config: &swage_config::ProviderEndpointConfig) -> &str {
     config.base_url.as_deref().unwrap_or(match config.protocol {
         swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
         swage_config::Protocol::Anthropic => "https://api.anthropic.com",
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
     })
+}
+
+fn default_provider_model(
+    config: &swage_config::ResolvedConfig,
+) -> Option<(
+    &swage_config::ProviderEndpointConfig,
+    &swage_config::ModelEndpointConfig,
+)> {
+    let model = config.models.default_model()?;
+    let provider = config.providers.entries.get(&model.provider_id)?;
+    Some((provider, model))
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +481,16 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
     use swage_provider::builder::ProviderChainBuilder;
     use swage_provider::retry::RetryConfig;
 
-    let provider_config = match ProviderConfig::try_from(&config.provider) {
+    let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
+        tracing::warn!(
+            "No default provider/model pair is configured. \
+             Messaging will fail until configuration is fixed."
+        );
+        return Arc::new(swage_provider::UnsupportedLlmProvider::new(
+            "no default provider/model pair is configured",
+        ));
+    };
+    let provider_config = match ProviderConfig::try_from((provider_endpoint, model_endpoint)) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -472,13 +498,16 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
                  The server will start, but messaging will fail \
                  until the API key is set."
             );
-            ProviderConfig::keyless(&config.provider.model, provider_base_url(&config.provider))
+            ProviderConfig::keyless(
+                &model_endpoint.model_id,
+                provider_base_url(provider_endpoint),
+            )
         }
     };
 
     let retry = RetryConfig::default();
 
-    let provider: Box<dyn swage_provider::LlmProvider> = match config.provider.protocol {
+    let provider: Box<dyn swage_provider::LlmProvider> = match provider_endpoint.protocol {
         swage_config::Protocol::Anthropic => ProviderChainBuilder::new()
             .provider(swage_provider::anthropic::AnthropicProvider::from_config(
                 provider_config,
@@ -627,5 +656,35 @@ mod tests {
             build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_provider_fails_closed_when_default_model_provider_is_missing() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config
+            .models
+            .entries
+            .get_mut(&config.models.default)
+            .expect("default model entry")
+            .provider_id = "missing-provider".to_string();
+
+        let provider = create_provider(&config);
+        let result = provider
+            .complete(swage_core::CompletionRequest {
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            })
+            .await;
+
+        assert_eq!(provider.model_id(), "unavailable");
+        assert!(matches!(
+            result,
+            Err(swage_core::ProviderError::InvalidConfig { .. })
+        ));
     }
 }

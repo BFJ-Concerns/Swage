@@ -135,10 +135,10 @@ impl ResolvedPythonRuntime {
 fn bundled_runtime_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
-            candidates.push(parent.join("python"));
-        }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        candidates.push(parent.join("python"));
     }
 
     if let Some(home) = std::env::var_os("HOME") {

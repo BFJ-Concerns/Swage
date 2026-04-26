@@ -848,15 +848,15 @@ impl BuilderConfigurationService {
                 if team_id.is_none() && team_name.as_deref().unwrap_or("").trim().is_empty() {
                     diagnostics.push("update_team needs team_id or team_name.".into());
                 }
-                if let Some(entry_agent_id) = entry_agent_id {
-                    if entry_agent_id.trim().is_empty() {
-                        diagnostics.push("entry_agent_id must not be empty.".into());
-                    }
+                if let Some(entry_agent_id) = entry_agent_id
+                    && entry_agent_id.trim().is_empty()
+                {
+                    diagnostics.push("entry_agent_id must not be empty.".into());
                 }
-                if let Some(members) = members {
-                    if members.iter().any(|member| member.trim().is_empty()) {
-                        diagnostics.push("members must not contain empty agent IDs.".into());
-                    }
+                if let Some(members) = members
+                    && members.iter().any(|member| member.trim().is_empty())
+                {
+                    diagnostics.push("members must not contain empty agent IDs.".into());
                 }
                 if self
                     .resolve_team(bench_id, *team_id, team_name.as_deref())

@@ -128,13 +128,13 @@ pub fn check_permission(
             });
         }
         // Bundle expansion: the entry's tool_name may be a bundle label.
-        if let Some(bundle_tools) = config.bundles.get(&entry.tool_name) {
-            if bundle_tools.iter().any(|t| t == tool_name) {
-                return Ok(PermissionCheckResult::RequiresApproval {
-                    timeout_secs: entry.timeout_secs,
-                    timeout_policy: entry.timeout_policy.clone(),
-                });
-            }
+        if let Some(bundle_tools) = config.bundles.get(&entry.tool_name)
+            && bundle_tools.iter().any(|t| t == tool_name)
+        {
+            return Ok(PermissionCheckResult::RequiresApproval {
+                timeout_secs: entry.timeout_secs,
+                timeout_policy: entry.timeout_policy.clone(),
+            });
         }
     }
 
@@ -149,10 +149,10 @@ pub fn check_permission(
             return Ok(PermissionCheckResult::Allowed);
         }
         // Bundle expansion: treat `entry` as a bundle label and search its tools.
-        if let Some(bundle_tools) = config.bundles.get(entry) {
-            if bundle_tools.iter().any(|t| t == tool_name) {
-                return Ok(PermissionCheckResult::Allowed);
-            }
+        if let Some(bundle_tools) = config.bundles.get(entry)
+            && bundle_tools.iter().any(|t| t == tool_name)
+        {
+            return Ok(PermissionCheckResult::Allowed);
         }
     }
 

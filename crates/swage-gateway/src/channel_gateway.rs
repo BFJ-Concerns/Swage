@@ -321,10 +321,10 @@ async fn ensure_session_for_origin(
     state: &AppState,
     origin: &ChannelOrigin,
 ) -> Result<Uuid, GatewayError> {
-    if let Some(existing) = state.channel_routes.lock().await.get(origin).copied() {
-        if state.storage.get_session(existing).await?.is_some() {
-            return Ok(existing);
-        }
+    if let Some(existing) = state.channel_routes.lock().await.get(origin).copied()
+        && state.storage.get_session(existing).await?.is_some()
+    {
+        return Ok(existing);
     }
 
     if let Some(existing) = state
@@ -353,15 +353,15 @@ async fn ensure_session_for_origin(
         )
         .await?
     {
-        if let Some(session_id) = link.session_id {
-            if state.storage.get_session(session_id).await?.is_some() {
-                state
-                    .channel_routes
-                    .lock()
-                    .await
-                    .insert(origin.clone(), session_id);
-                return Ok(session_id);
-            }
+        if let Some(session_id) = link.session_id
+            && state.storage.get_session(session_id).await?.is_some()
+        {
+            state
+                .channel_routes
+                .lock()
+                .await
+                .insert(origin.clone(), session_id);
+            return Ok(session_id);
         }
 
         let session = state

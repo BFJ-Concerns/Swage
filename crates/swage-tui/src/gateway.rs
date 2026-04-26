@@ -366,11 +366,11 @@ mod tests {
         let router = Router::new()
             .route("/api/health", get(health))
             .route(
-                "/api/benches/:bench_id/sessions",
+                "/api/benches/{bench_id}/sessions",
                 post(create_bench_conversation),
             )
             .route(
-                "/api/conversations/:conversation_id/ws",
+                "/api/conversations/{conversation_id}/ws",
                 get(websocket_route),
             )
             .with_state(state.clone());

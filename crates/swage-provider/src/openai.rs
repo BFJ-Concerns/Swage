@@ -197,10 +197,10 @@ impl OpenAiProvider {
             reqwest::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        if let Some(ref key) = self.config.api_key {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {key}")) {
-                headers.insert(reqwest::header::AUTHORIZATION, val);
-            }
+        if let Some(ref key) = self.config.api_key
+            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {key}"))
+        {
+            headers.insert(reqwest::header::AUTHORIZATION, val);
         }
         headers
     }
@@ -495,12 +495,12 @@ impl OpenAiProvider {
             }
 
             // Text delta.
-            if let Some(ref content) = choice.delta.content {
-                if !content.is_empty() {
-                    return Some(StreamChunk::Delta {
-                        content: content.clone(),
-                    });
-                }
+            if let Some(ref content) = choice.delta.content
+                && !content.is_empty()
+            {
+                return Some(StreamChunk::Delta {
+                    content: content.clone(),
+                });
             }
         }
 

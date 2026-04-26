@@ -166,12 +166,12 @@ async fn write_audio_output(
         )
         .await?;
 
-    if let Some(parent) = Path::new(output_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|source| ClientError::MetadataIo { source })?;
-        }
+    if let Some(parent) = Path::new(output_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|source| ClientError::MetadataIo { source })?;
     }
 
     tokio::fs::write(output_path, response.audio_bytes)

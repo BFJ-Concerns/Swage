@@ -351,7 +351,7 @@ pub async fn operator_search(
         }
     }
 
-    results.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
+    results.sort_by_key(|result| std::cmp::Reverse(result.occurred_at));
     results.truncate(limit);
     Ok(OperatorSearchResponse { results })
 }
@@ -401,7 +401,7 @@ pub async fn list_agent_memories(
                     .await?,
             );
         }
-        memories.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
         memories.truncate(limit);
     }
 
@@ -508,15 +508,14 @@ async fn scheduled_job_usage(
     };
 
     for run in state.storage.list_scheduled_runs_by_job(job_id).await? {
-        if let Some(turn_id) = run.turn_id {
-            if let Some((_session_id, input_tokens, output_tokens, cost_microcents)) =
+        if let Some(turn_id) = run.turn_id
+            && let Some((_session_id, input_tokens, output_tokens, cost_microcents)) =
                 turn_usage(state, turn_id).await?
-            {
-                aggregate.run_count += 1;
-                aggregate.input_tokens += input_tokens;
-                aggregate.output_tokens += output_tokens;
-                aggregate.cost_microcents += cost_microcents;
-            }
+        {
+            aggregate.run_count += 1;
+            aggregate.input_tokens += input_tokens;
+            aggregate.output_tokens += output_tokens;
+            aggregate.cost_microcents += cost_microcents;
         }
     }
 

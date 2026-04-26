@@ -65,16 +65,25 @@ fn cascade_merge_three_levels() {
 host = "127.0.0.1"
 port = 3000
 
-[provider]
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
 protocol = "anthropic"
-model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://global-provider.invalid/v1"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
 "#;
 
     let bench = r#"
-[provider]
-model = "claude-opus-4-20250514"
+[models]
+default_model_id = "claude-opus-4-20250514"
 "#;
 
     let agent = r#"
@@ -97,44 +106,68 @@ port = 4000
     // Agent overrides global port
     assert_eq!(config.server.port, 4000);
     // Bench overrides global model
-    assert_eq!(config.provider.model, "claude-opus-4-20250514");
+    assert_eq!(config.default_model_id(), "claude-opus-4-20250514");
     // Global value inherited through bench (bench didn't set protocol)
-    assert_eq!(config.provider.api_key_env, "ANTHROPIC_API_KEY");
+    let provider = config
+        .default_provider_endpoint()
+        .expect("default provider should resolve");
+    assert_eq!(provider.api_key_env, "ANTHROPIC_API_KEY");
     assert_eq!(
-        config.provider.base_url.as_deref(),
+        provider.base_url.as_deref(),
         Some("https://global-provider.invalid/v1")
     );
 }
 
 /// Bench-level list field replaces (not extends) the global-level list.
-/// Using provider.protocol as an enum field — if bench sets it, global's
+/// Using provider protocol as an enum field — if bench sets it, global's
 /// value is fully replaced.
 #[test]
 fn bench_list_replaces_global() {
     let global = r#"
-[provider]
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
 protocol = "anthropic"
-model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
 "#;
 
     let bench = r#"
-[provider]
+[providers]
+default = "openai"
+
+[providers.entries.openai]
 protocol = "openai"
-model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 base_url = "http://127.0.0.1:11434/v1"
+
+[models]
+default = "gpt4o"
+
+[models.entries.gpt4o]
+provider_id = "openai"
+model_id = "gpt-4o"
 "#;
 
     let tmp = build_skeleton(Some(global), "mybench", Some(bench), "assistant", None);
     let config = load_resolved_config_from(tmp.path(), "mybench", "assistant")
         .expect("should load successfully");
 
-    // Bench completely overrides provider section values
-    assert_eq!(config.provider.model, "gpt-4o");
-    assert_eq!(config.provider.api_key_env, "OPENAI_API_KEY");
+    // Bench switches the default provider and model together.
+    assert_eq!(config.default_model_id(), "gpt-4o");
+    let provider = config
+        .default_provider_endpoint()
+        .expect("default provider should resolve");
+    assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
     assert_eq!(
-        config.provider.base_url.as_deref(),
+        provider.base_url.as_deref(),
         Some("http://127.0.0.1:11434/v1")
     );
 }
@@ -147,8 +180,8 @@ fn missing_intermediate_config_skipped() {
 [server]
 port = 5000
 
-[provider]
-model = "claude-sonnet-4-20250514"
+[models]
+default_model_id = "claude-sonnet-4-20250514"
 "#;
 
     // No bench config, no agent config
@@ -158,7 +191,7 @@ model = "claude-sonnet-4-20250514"
 
     // Global values inherited all the way through
     assert_eq!(config.server.port, 5000);
-    assert_eq!(config.provider.model, "claude-sonnet-4-20250514");
+    assert_eq!(config.default_model_id(), "claude-sonnet-4-20250514");
 }
 
 /// An unspecified team directory is outside the active config cascade.
@@ -388,10 +421,19 @@ fn valid_config_loads_cleanly() {
 host = "127.0.0.1"
 port = 3000
 
-[provider]
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
 protocol = "anthropic"
-model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
 
 [workspace]
 path = "/home/user/benches/test"
@@ -409,7 +451,7 @@ level = "info"
 
     assert_eq!(config.server.host, "127.0.0.1");
     assert_eq!(config.server.port, 3000);
-    assert_eq!(config.provider.model, "claude-sonnet-4-20250514");
+    assert_eq!(config.default_model_id(), "claude-sonnet-4-20250514");
     assert!(config.sandbox.enabled);
 }
 

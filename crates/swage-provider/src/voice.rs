@@ -121,10 +121,10 @@ impl OpenAiVoiceProvider {
 
     fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(ref key) = self.config.api_key {
-            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {key}")) {
-                headers.insert(AUTHORIZATION, value);
-            }
+        if let Some(ref key) = self.config.api_key
+            && let Ok(value) = HeaderValue::from_str(&format!("Bearer {key}"))
+        {
+            headers.insert(AUTHORIZATION, value);
         }
         headers
     }

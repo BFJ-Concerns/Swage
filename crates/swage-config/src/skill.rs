@@ -191,13 +191,12 @@ fn parse_skill_frontmatter(raw: &str) -> Result<SkillFrontmatterParts, String> {
             "description" if !value.is_empty() => {
                 description = Some(value.to_string());
             }
-            "tools" => {
-                // `tools:` with no inline value begins a list block.
-                if value.is_empty() {
-                    in_tools_list = true;
-                }
+            // `tools:` with no inline value begins a list block.
+            "tools" if value.is_empty() => {
+                in_tools_list = true;
                 // Inline `tools: value` is not a list — silently ignored.
             }
+            "tools" => {}
             _ => {
                 // Unknown keys are silently ignored (forward compatibility).
             }

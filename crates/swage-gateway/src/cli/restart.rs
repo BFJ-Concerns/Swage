@@ -6,10 +6,10 @@ use crate::cli::{RestartArgs, StartArgs, StopArgs};
 
 pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
     let stop_args = StopArgs { force: args.force };
-    if let Err(error) = super::stop::run(&stop_args).await {
-        if !matches!(error, ClientError::GatewayNotRunning { .. }) {
-            return Err(error);
-        }
+    if let Err(error) = super::stop::run(&stop_args).await
+        && !matches!(error, ClientError::GatewayNotRunning { .. })
+    {
+        return Err(error);
     }
 
     let start_args = StartArgs {

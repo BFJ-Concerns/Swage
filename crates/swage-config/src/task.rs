@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::merge::{PartialConfig, PartialOutputConfig, PartialProviderConfig, PartialToolConfig};
+use crate::merge::{
+    PartialConfig, PartialModelCatalogConfig, PartialOutputConfig, PartialToolConfig,
+};
 use crate::model::{RequireApprovalEntry, ResolvedConfig};
 use serde::{Deserialize, Serialize};
 
@@ -71,9 +73,9 @@ impl TaskDefinition {
     /// partial — unset fields are `None` and don't override the base.
     pub fn to_partial_config(&self) -> PartialConfig {
         PartialConfig {
-            provider: if self.model.is_some() {
-                Some(PartialProviderConfig {
-                    model: self.model.clone(),
+            models: if self.model.is_some() {
+                Some(PartialModelCatalogConfig {
+                    default_model_id: self.model.clone(),
                     ..Default::default()
                 })
             } else {
@@ -171,9 +173,9 @@ mod tests {
             ..Default::default()
         };
         let partial = task.to_partial_config();
-        assert!(partial.provider.is_some());
+        assert!(partial.models.is_some());
         assert_eq!(
-            partial.provider.unwrap().model.as_deref(),
+            partial.models.unwrap().default_model_id.as_deref(),
             Some("claude-haiku")
         );
         // Other sections should be None.
@@ -242,7 +244,7 @@ mod tests {
     fn to_partial_config_empty_task_produces_empty_partial() {
         let task = TaskDefinition::new("bare");
         let partial = task.to_partial_config();
-        assert!(partial.provider.is_none());
+        assert!(partial.models.is_none());
         assert!(partial.output.is_none());
         assert!(partial.tools.is_none());
     }
@@ -257,14 +259,14 @@ mod tests {
         };
 
         let result = task.apply_to(base);
-        assert_eq!(result.provider.model, "custom-model");
+        assert_eq!(result.default_model_id(), "custom-model");
     }
 
     #[test]
     fn apply_task_overlay_preserves_unset_fields() {
         let mut base = ResolvedConfig::default();
         base.server.port = 9999;
-        base.provider.model = "base-model".into();
+        base.set_default_model_id("base-model".into());
 
         let task = TaskDefinition {
             name: "instructions-only".into(),
@@ -274,7 +276,7 @@ mod tests {
 
         let result = task.apply_to(base);
         // No model override → base model preserved.
-        assert_eq!(result.provider.model, "base-model");
+        assert_eq!(result.default_model_id(), "base-model");
         assert_eq!(result.server.port, 9999);
     }
 

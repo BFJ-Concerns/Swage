@@ -141,6 +141,10 @@ pub fn load_resolved_config_from_with_team(
     // Merge and resolve to typed config.
     let merged = merge::merge_chain(config_chain);
     let mut resolved = merge::resolve(merged);
+    let reference_problems = validation::validate_resolved_catalog_references(&resolved, root);
+    if !reference_problems.is_empty() {
+        return Err(ConfigError::new(reference_problems));
+    }
 
     // Assemble instructions from the same active levels.
     // Build the team instructions path up front so it outlives the levels vec.
@@ -251,7 +255,7 @@ mod tests {
             tmp.path(),
             Some("[server]\nhost = \"10.0.0.1\"\nport = 3000\n"),
             "proj",
-            Some("[provider]\nmodel = \"claude-opus\"\n"),
+            Some("[models]\ndefault_model_id = \"claude-opus\"\n"),
             "bot",
             Some("[server]\nport = 4000\n"),
         );
@@ -260,7 +264,8 @@ mod tests {
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
         assert_eq!(cfg.server.port, 4000, "agent overrides global port");
         assert_eq!(
-            cfg.provider.model, "claude-opus",
+            cfg.default_model_id(),
+            "claude-opus",
             "bench model should apply"
         );
     }
@@ -302,6 +307,33 @@ mod tests {
     }
 
     #[test]
+    fn resolved_catalog_reference_errors_returned_as_config_error() {
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[models]\ndefault = \"missing\"\n"),
+            "proj",
+            None,
+            "bot",
+            None,
+        );
+
+        let error = load_resolved_config_from(tmp.path(), "proj", "bot")
+            .expect_err("missing default model entry should produce Err");
+
+        assert!(
+            error
+                .problems
+                .iter()
+                .any(
+                    |problem| problem.field_path.as_deref() == Some("models.default")
+                        && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+                ),
+            "missing resolved default model should be reported, got: {error:?}"
+        );
+    }
+
+    #[test]
     fn validate_files_reports_errors() {
         let tmp = TempDir::new().unwrap();
         let bad_file = tmp.path().join("config.toml");
@@ -320,7 +352,7 @@ mod tests {
             tmp.path(),
             Some("[server]\nhost = \"10.0.0.1\"\nport = 3000\n"),
             "proj",
-            Some("[provider]\nmodel = \"claude-opus\"\n"),
+            Some("[models]\ndefault_model_id = \"claude-opus\"\n"),
             "bot",
             Some("[server]\nport = 4000\n"),
         );
@@ -329,7 +361,7 @@ mod tests {
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
-            "[provider]\nmodel = \"claude-haiku\"\n",
+            "[models]\ndefault_model_id = \"claude-haiku\"\n",
         )
         .unwrap();
 
@@ -341,7 +373,8 @@ mod tests {
         assert_eq!(cfg.server.port, 4000, "agent should win on port");
         // Team overrides bench model, agent doesn't set model so team wins
         assert_eq!(
-            cfg.provider.model, "claude-haiku",
+            cfg.default_model_id(),
+            "claude-haiku",
             "team should override bench model"
         );
         // Global host survives (no override)
@@ -357,13 +390,13 @@ mod tests {
             "proj",
             None,
             "bot",
-            Some("[provider]\nmodel = \"agent-model\"\n"),
+            Some("[models]\ndefault_model_id = \"agent-model\"\n"),
         );
         let team_dir = tmp.path().join("benches/proj/teams/myteam");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
-            "[provider]\nmodel = \"team-model\"\n",
+            "[models]\ndefault_model_id = \"team-model\"\n",
         )
         .unwrap();
 
@@ -371,7 +404,8 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(
-            cfg.provider.model, "agent-model",
+            cfg.default_model_id(),
+            "agent-model",
             "agent should override team"
         );
     }
@@ -427,15 +461,15 @@ mod tests {
     fn apply_overlay_overrides_provider_model() {
         let base = ResolvedConfig::default();
         let overlay = PartialConfig {
-            provider: Some(merge::PartialProviderConfig {
-                model: Some("task-model".to_string()),
+            models: Some(merge::PartialModelCatalogConfig {
+                default_model_id: Some("task-model".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
         };
 
         let result = apply_overlay(base, overlay);
-        assert_eq!(result.provider.model, "task-model");
+        assert_eq!(result.default_model_id(), "task-model");
         // Other fields should keep defaults
         assert_eq!(result.server.port, 3000);
     }
@@ -448,8 +482,8 @@ mod tests {
         };
 
         let overlay = PartialConfig {
-            provider: Some(merge::PartialProviderConfig {
-                model: Some("fast-model".to_string()),
+            models: Some(merge::PartialModelCatalogConfig {
+                default_model_id: Some("fast-model".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -457,17 +491,17 @@ mod tests {
 
         let result = apply_overlay(base, overlay);
         assert_eq!(result.instructions, "You are a helpful assistant.");
-        assert_eq!(result.provider.model, "fast-model");
+        assert_eq!(result.default_model_id(), "fast-model");
     }
 
     #[test]
     fn apply_overlay_empty_overlay_preserves_base() {
         let mut base = ResolvedConfig::default();
         base.server.port = 9999;
-        base.provider.model = "my-model".to_string();
+        base.set_default_model_id("my-model".to_string());
 
         let result = apply_overlay(base.clone(), PartialConfig::default());
         assert_eq!(result.server.port, 9999);
-        assert_eq!(result.provider.model, "my-model");
+        assert_eq!(result.default_model_id(), "my-model");
     }
 }

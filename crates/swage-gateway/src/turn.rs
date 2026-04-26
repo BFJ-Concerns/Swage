@@ -1296,7 +1296,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         memory_content,
         bench.name.clone(),
     );
-    let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+    let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
     // Run the fail-open assembly orchestrator. For "default" (or empty)
     // assembly names this delegates to default_assembly() synchronously.
@@ -1441,10 +1441,10 @@ pub(crate) async fn process_turn_with_existing_turn(
                     "failed to mark turn failed after agent construction error"
                 );
             }
-            if let Some(guard) = &sandbox_guard {
-                if let Err(error) = guard.shutdown().await {
-                    tracing::warn!(error = %error, "failed to shut down turn sandbox after agent construction error");
-                }
+            if let Some(guard) = &sandbox_guard
+                && let Err(error) = guard.shutdown().await
+            {
+                tracing::warn!(error = %error, "failed to shut down turn sandbox after agent construction error");
             }
             // Cleanup cancellation token before returning.
             let mut turns = state.active_turns.lock().await;
@@ -1477,7 +1477,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     // transitions, tool dispatch, and message storage internally.
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.config.pricing.clone();
-    let model_name = config.provider.model.clone();
+    let model_name = config.default_model_id().to_string();
 
     let agent_handle =
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await });
@@ -1729,10 +1729,10 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     }
 
-    if let Some(guard) = &sandbox_guard {
-        if let Err(error) = guard.shutdown().await {
-            tracing::warn!(error = %error, "failed to shut down turn sandbox");
-        }
+    if let Some(guard) = &sandbox_guard
+        && let Err(error) = guard.shutdown().await
+    {
+        tracing::warn!(error = %error, "failed to shut down turn sandbox");
     }
 
     // Cleanup: remove the cancellation token regardless of outcome.
@@ -4245,7 +4245,7 @@ pub(crate) mod tests {
                     report_json: report_json.clone(),
                 });
             }
-            records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
             records.truncate(limit);
             Ok(records)
         }
@@ -4598,11 +4598,11 @@ pub(crate) mod tests {
                 .collect();
             let count = expired_ids.len() as u64;
             for id in expired_ids {
-                if let Some(approval) = db.approvals.get_mut(&id) {
-                    if approval.state == ApprovalState::Pending {
-                        approval.state = ApprovalState::Expired;
-                        approval.decided_at = Some(chrono::Utc::now());
-                    }
+                if let Some(approval) = db.approvals.get_mut(&id)
+                    && approval.state == ApprovalState::Pending
+                {
+                    approval.state = ApprovalState::Expired;
+                    approval.decided_at = Some(chrono::Utc::now());
                 }
             }
             Ok(count)
@@ -4778,7 +4778,7 @@ pub(crate) mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
             records.truncate(limit);
             Ok(records)
         }
@@ -4836,7 +4836,7 @@ pub(crate) mod tests {
             if let Some(bench_id) = bench_id {
                 versions.retain(|version| version.bench_id == Some(bench_id));
             }
-            versions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            versions.sort_by_key(|version| std::cmp::Reverse(version.created_at));
             Ok(versions)
         }
 
@@ -4856,7 +4856,7 @@ pub(crate) mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            versions.sort_by(|left, right| right.version_number.cmp(&left.version_number));
+            versions.sort_by_key(|version| std::cmp::Reverse(version.version_number));
             Ok(versions)
         }
 

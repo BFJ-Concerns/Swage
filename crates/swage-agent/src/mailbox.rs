@@ -68,10 +68,10 @@ pub async fn check_mailbox(
             }
             // Still note Cancel correlation IDs — useful for cleanup metadata
             // even during shutdown.
-            if msg.kind == MessageKind::Cancel {
-                if let Some(correlation_id) = msg.correlation_id {
-                    contents.cancelled_delegations.push(correlation_id);
-                }
+            if msg.kind == MessageKind::Cancel
+                && let Some(correlation_id) = msg.correlation_id
+            {
+                contents.cancelled_delegations.push(correlation_id);
             }
             continue;
         }

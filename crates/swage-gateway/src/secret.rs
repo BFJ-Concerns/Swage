@@ -455,12 +455,10 @@ fn validate_resolved_material(material_kind: &str, value: &str) -> Result<(), Ga
                 ));
             }
         }
-        "ssh_key" => {
-            if !value.contains("BEGIN") || !value.contains("PRIVATE KEY") {
-                return Err(GatewayError::ValidationError(
-                    "ssh_key must contain a private-key PEM block".into(),
-                ));
-            }
+        "ssh_key" if (!value.contains("BEGIN") || !value.contains("PRIVATE KEY")) => {
+            return Err(GatewayError::ValidationError(
+                "ssh_key must contain a private-key PEM block".into(),
+            ));
         }
         _ => {}
     }

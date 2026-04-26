@@ -704,12 +704,12 @@ impl BenchService {
         req: UpdateBenchRequest,
     ) -> Result<BenchResponse, GatewayError> {
         // Validate name if provided.
-        if let Some(ref name) = req.name {
-            if name.trim().is_empty() {
-                return Err(GatewayError::ValidationError(
-                    "name must not be empty".into(),
-                ));
-            }
+        if let Some(ref name) = req.name
+            && name.trim().is_empty()
+        {
+            return Err(GatewayError::ValidationError(
+                "name must not be empty".into(),
+            ));
         }
 
         // Derive the new slug from the new name, if name is being updated.
@@ -1104,15 +1104,14 @@ impl TeamService {
                 .storage
                 .get_team_by_name(existing.bench_id, name)
                 .await?
+                && conflict.id != id
             {
-                if conflict.id != id {
-                    return Err(GatewayError::Storage(StorageError::ConstraintViolation(
-                        format!(
-                            "a team named '{}' already exists in bench {}",
-                            name, existing.bench_id
-                        ),
-                    )));
-                }
+                return Err(GatewayError::Storage(StorageError::ConstraintViolation(
+                    format!(
+                        "a team named '{}' already exists in bench {}",
+                        name, existing.bench_id
+                    ),
+                )));
             }
         }
 

@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use axum::{
     Json,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -1613,24 +1613,24 @@ pub async fn get_turn_context(
 /// 3. Returns `200 OK` with `{ status: "shutting_down", message }`.
 pub async fn shutdown(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> impl IntoResponse {
     use crate::websocket::ServerEvent;
 
     // Enforce localhost-only access when a real TCP connection provides the
     // peer address. Without ConnectInfo (unit tests / same-process calls),
     // the restriction is not enforced.
-    if let Some(ConnectInfo(addr)) = connect_info {
-        if !addr.ip().is_loopback() {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "code": "forbidden",
-                    "message": "shutdown is only accessible from localhost",
-                })),
-            )
-                .into_response();
-        }
+    if let Some(Extension(ConnectInfo(addr))) = connect_info
+        && !addr.ip().is_loopback()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "code": "forbidden",
+                "message": "shutdown is only accessible from localhost",
+            })),
+        )
+            .into_response();
     }
 
     let reason = "admin shutdown request".to_string();

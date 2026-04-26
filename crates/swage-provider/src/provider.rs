@@ -47,27 +47,37 @@ impl ProviderConfig {
     }
 }
 
-impl TryFrom<&swage_config::ProviderConfig> for ProviderConfig {
+impl
+    TryFrom<(
+        &swage_config::ProviderEndpointConfig,
+        &swage_config::ModelEndpointConfig,
+    )> for ProviderConfig
+{
     type Error = ProviderError;
 
-    /// Resolve the provider config from a `swage_config::ProviderConfig`.
+    /// Resolve runtime provider config from decoupled provider and model entries.
     ///
-    /// Reads the API key from the environment variable named in `api_key_env`.
+    /// Reads the API key from the environment variable named by the provider.
     /// Returns `ProviderError::Auth` if the variable is not set.
-    fn try_from(config: &swage_config::ProviderConfig) -> Result<Self, Self::Error> {
-        let api_key = std::env::var(&config.api_key_env).map_err(|_| ProviderError::Auth {
-            provider: format!("environment variable '{}' is not set", config.api_key_env),
+    fn try_from(
+        (provider, model): (
+            &swage_config::ProviderEndpointConfig,
+            &swage_config::ModelEndpointConfig,
+        ),
+    ) -> Result<Self, Self::Error> {
+        let api_key = std::env::var(&provider.api_key_env).map_err(|_| ProviderError::Auth {
+            provider: format!("environment variable '{}' is not set", provider.api_key_env),
         })?;
 
         // Derive the provider base URL from the configured protocol.
-        let base_url = config
+        let base_url = provider
             .base_url
             .clone()
-            .unwrap_or_else(|| default_base_url(config.protocol.clone()).to_owned());
+            .unwrap_or_else(|| default_base_url(provider.protocol.clone()).to_owned());
 
         Ok(Self {
             api_key: Some(api_key),
-            model: config.model.clone(),
+            model: model.model_id.clone(),
             base_url,
         })
     }
@@ -119,6 +129,64 @@ pub trait LlmProvider: Send + Sync {
     /// rendering.
     fn stream(&self, request: CompletionRequest)
     -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>;
+}
+
+// ---------------------------------------------------------------------------
+// UnsupportedLlmProvider
+// ---------------------------------------------------------------------------
+
+/// LLM provider placeholder for configurations that must fail closed.
+///
+/// This preserves gateway startup for recoverable configuration workflows while
+/// ensuring a broken provider/model link never falls through to a real backend.
+pub struct UnsupportedLlmProvider {
+    reason: String,
+}
+
+impl UnsupportedLlmProvider {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    fn error(&self) -> ProviderError {
+        ProviderError::InvalidConfig {
+            message: self.reason.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for UnsupportedLlmProvider {
+    fn model_id(&self) -> &str {
+        "unavailable"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        Err(self.error())
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        Err(self.error())
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        Box::pin(futures::stream::once(std::future::ready(
+            StreamChunk::Error {
+                message: self.reason.clone(),
+            },
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,39 +327,72 @@ mod tests {
     #[test]
     fn provider_config_try_from_missing_env_var() {
         // Use a name that is extremely unlikely to be set.
-        let raw = swage_config::ProviderConfig {
+        let provider = swage_config::ProviderEndpointConfig {
             protocol: swage_config::Protocol::Anthropic,
-            model: "claude".into(),
             api_key_env: "TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into(),
             base_url: None,
+        };
+        let model = swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude".into(),
+            aliases: Vec::new(),
+            context_window: None,
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
         unsafe { std::env::remove_var("TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ") };
 
-        let result = ProviderConfig::try_from(&raw);
+        let result = ProviderConfig::try_from((&provider, &model));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ProviderError::Auth { .. }));
     }
 
     #[test]
     fn provider_config_try_from_resolves_env_var() {
-        let raw = swage_config::ProviderConfig {
+        let provider = swage_config::ProviderEndpointConfig {
             protocol: swage_config::Protocol::Anthropic,
-            model: "claude-sonnet".into(),
             api_key_env: "TEVIK_TEST_API_KEY_XYZ".into(),
             base_url: Some("http://127.0.0.1:11434/v1".into()),
+        };
+        let model = swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-sonnet".into(),
+            aliases: Vec::new(),
+            context_window: None,
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
         unsafe { std::env::set_var("TEVIK_TEST_API_KEY_XYZ", "test-key-value") };
 
-        let cfg = ProviderConfig::try_from(&raw).unwrap();
+        let cfg = ProviderConfig::try_from((&provider, &model)).unwrap();
         assert_eq!(cfg.api_key, Some("test-key-value".into()));
         assert_eq!(cfg.model, "claude-sonnet");
         assert_eq!(cfg.base_url, "http://127.0.0.1:11434/v1");
 
         unsafe { std::env::remove_var("TEVIK_TEST_API_KEY_XYZ") };
+    }
+
+    #[tokio::test]
+    async fn unsupported_provider_fails_closed() {
+        let provider = UnsupportedLlmProvider::new("provider/model configuration is invalid");
+        let request = CompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+
+        let error = provider.complete(request).await.unwrap_err();
+
+        assert_eq!(provider.model_id(), "unavailable");
+        assert!(matches!(
+            error,
+            ProviderError::InvalidConfig { message }
+                if message == "provider/model configuration is invalid"
+        ));
     }
 
     // -----------------------------------------------------------------------

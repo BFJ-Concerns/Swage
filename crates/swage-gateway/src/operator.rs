@@ -172,7 +172,7 @@ async fn list_operator_sessions(
         }
     }
 
-    sessions.sort_by(|left, right| right.last_activity.cmp(&left.last_activity));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity));
     Ok(sessions)
 }
 

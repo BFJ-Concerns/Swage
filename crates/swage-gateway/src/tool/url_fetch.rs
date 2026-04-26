@@ -301,7 +301,7 @@ fn is_private_or_metadata_ipv6(ip: Ipv6Addr) -> bool {
 fn html_to_text(bytes: &[u8]) -> String {
     // html2text::from_read expects a `Read` impl and a terminal width in chars.
     // 120 is wide enough to avoid wrapping most prose and code blocks.
-    html2text::from_read(bytes, 120)
+    html2text::from_read(bytes, 120).unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
 }
 
 // ---------------------------------------------------------------------------

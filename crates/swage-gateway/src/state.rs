@@ -111,7 +111,7 @@ impl AppState {
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
         let workflow_capabilities =
-            WorkflowCapabilities::for_protocol(config.provider.protocol.clone());
+            WorkflowCapabilities::for_protocol(config.default_provider_protocol());
         Self {
             storage: storage.clone(),
             bench_store,

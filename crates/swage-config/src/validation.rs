@@ -1,7 +1,8 @@
 use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
+use crate::model::ResolvedConfig;
 use std::path::Path;
-use toml::Value;
+use toml::{Table, Value};
 
 // ---------------------------------------------------------------------------
 // Schema constants
@@ -10,7 +11,8 @@ use toml::Value;
 /// Top-level TOML sections recognised by the config schema.
 const KNOWN_SECTIONS: &[&str] = &[
     "server",
-    "provider",
+    "providers",
+    "models",
     "workspace",
     "sandbox",
     "logging",
@@ -27,7 +29,8 @@ const KNOWN_SECTIONS: &[&str] = &[
 fn known_fields_for(section: &str) -> &'static [&'static str] {
     match section {
         "server" => &["host", "port"],
-        "provider" => &["protocol", "model", "api_key_env", "base_url"],
+        "providers" => &["default", "entries"],
+        "models" => &["default", "default_model_id", "entries"],
         "workspace" => &["path"],
         "sandbox" => &["enabled"],
         "logging" => &["level"],
@@ -115,10 +118,11 @@ fn check_field_type(
     let (expected, is_ok): (&str, bool) = match (section, field) {
         ("server", "host") => ("string", matches!(value, Value::String(_))),
         ("server", "port") => ("integer", matches!(value, Value::Integer(_))),
-        ("provider", "protocol") => ("string", matches!(value, Value::String(_))),
-        ("provider", "model") => ("string", matches!(value, Value::String(_))),
-        ("provider", "api_key_env") => ("string", matches!(value, Value::String(_))),
-        ("provider", "base_url") => ("string", matches!(value, Value::String(_))),
+        ("providers", "default") => ("string", matches!(value, Value::String(_))),
+        ("providers", "entries") => ("table", matches!(value, Value::Table(_))),
+        ("models", "default") => ("string", matches!(value, Value::String(_))),
+        ("models", "default_model_id") => ("string", matches!(value, Value::String(_))),
+        ("models", "entries") => ("table", matches!(value, Value::Table(_))),
         ("workspace", "path") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
@@ -184,16 +188,16 @@ fn check_field_semantics(
 
     match (section, field) {
         ("server", "port") => {
-            if let Value::Integer(port) = value {
-                if *port < 1 || *port > 65535 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!("port must be between 1 and 65535, got {port}"),
-                        },
-                    ));
-                }
+            if let Value::Integer(port) = value
+                && (*port < 1 || *port > 65535)
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("port must be between 1 and 65535, got {port}"),
+                    },
+                ));
             }
         }
         ("logging", "level") => {
@@ -212,73 +216,56 @@ fn check_field_semantics(
                 }
             }
         }
-        ("provider", "protocol") => {
-            if let Value::String(proto) = value {
-                const VALID: &[&str] = &["openai", "anthropic", "google", "openrouter"];
-                if !VALID.contains(&proto.to_lowercase().as_str()) {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "unknown protocol '{proto}'; expected one of: openai, anthropic, google, openrouter"
-                            ),
-                        },
-                    ));
-                }
-            }
-        }
-        ("provider", "model") => {
-            // A model name that is present but empty is a constraint violation.
-            if let Value::String(model) = value {
-                if model.trim().is_empty() {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: "provider.model must not be empty".to_string(),
-                        },
-                    ));
-                }
+        ("models", "default_model_id") => {
+            if let Value::String(model_id) = value
+                && model_id.trim().is_empty()
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: "models.default_model_id must not be empty".to_string(),
+                    },
+                ));
             }
         }
         ("context", "timeout") => {
-            if let Value::Integer(t) = value {
-                if *t < 1 || *t > 60 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!("context.timeout must be between 1 and 60, got {t}"),
-                        },
-                    ));
-                }
+            if let Value::Integer(t) = value
+                && (*t < 1 || *t > 60)
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("context.timeout must be between 1 and 60, got {t}"),
+                    },
+                ));
             }
         }
         ("context", "budget") => {
-            if let Value::Integer(b) = value {
-                if *b < 1 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!("context.budget must be a positive integer, got {b}"),
-                        },
-                    ));
-                }
+            if let Value::Integer(b) = value
+                && *b < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("context.budget must be a positive integer, got {b}"),
+                    },
+                ));
             }
         }
         ("hitl", "timeout") => {
-            if let Value::Integer(t) = value {
-                if *t < 1 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!("hitl.timeout must be a positive integer, got {t}"),
-                        },
-                    ));
-                }
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("hitl.timeout must be a positive integer, got {t}"),
+                    },
+                ));
             }
         }
         ("hitl", "timeout_policy") => {
@@ -298,46 +285,46 @@ fn check_field_semantics(
             }
         }
         ("output", "max_retries") => {
-            if let Value::Integer(r) = value {
-                if *r < 0 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!("output.max_retries must be non-negative, got {r}"),
-                        },
-                    ));
-                }
+            if let Value::Integer(r) = value
+                && *r < 0
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("output.max_retries must be non-negative, got {r}"),
+                    },
+                ));
             }
         }
         ("communication", "message_ttl_secs") => {
-            if let Value::Integer(t) = value {
-                if *t < 1 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "communication.message_ttl_secs must be a positive integer, got {t}"
-                            ),
-                        },
-                    ));
-                }
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "communication.message_ttl_secs must be a positive integer, got {t}"
+                        ),
+                    },
+                ));
             }
         }
         ("communication", "expiry_interval_secs") => {
-            if let Value::Integer(t) = value {
-                if *t < 1 {
-                    problems.push(make_problem(
-                        file_path,
-                        Some(field_path.to_string()),
-                        ConfigProblemKind::SemanticError {
-                            message: format!(
-                                "communication.expiry_interval_secs must be a positive integer, got {t}"
-                            ),
-                        },
-                    ));
-                }
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "communication.expiry_interval_secs must be a positive integer, got {t}"
+                        ),
+                    },
+                ));
             }
         }
         ("tools", "python_execute") => {
@@ -452,6 +439,129 @@ fn validate_python_execute_table(
     problems
 }
 
+fn validate_catalog_references(table: &Table, file_path: &Path) -> Vec<ConfigProblem> {
+    let mut problems = Vec::new();
+
+    if let Some(providers) = table.get("providers").and_then(Value::as_table)
+        && let Some(default_provider) = providers.get("default").and_then(Value::as_str)
+        && let Some(provider_entries) = providers.get("entries").and_then(Value::as_table)
+        && !provider_entries.contains_key(default_provider)
+    {
+        problems.push(make_problem(
+            file_path,
+            Some("providers.default".to_string()),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "providers.default references missing provider entry '{default_provider}'"
+                ),
+            },
+        ));
+    }
+
+    let Some(models) = table.get("models").and_then(Value::as_table) else {
+        return problems;
+    };
+    let Some(default_model) = models.get("default").and_then(Value::as_str) else {
+        return problems;
+    };
+    let Some(model_entries) = models.get("entries").and_then(Value::as_table) else {
+        return problems;
+    };
+
+    let Some(default_model_entry) = model_entries.get(default_model) else {
+        problems.push(make_problem(
+            file_path,
+            Some("models.default".to_string()),
+            ConfigProblemKind::SemanticError {
+                message: format!("models.default references missing model entry '{default_model}'"),
+            },
+        ));
+        return problems;
+    };
+
+    if let Some(provider_id) = default_model_entry
+        .as_table()
+        .and_then(|entry| entry.get("provider_id"))
+        .and_then(Value::as_str)
+        && let Some(providers) = table.get("providers").and_then(Value::as_table)
+        && let Some(provider_entries) = providers.get("entries").and_then(Value::as_table)
+        && !provider_entries.contains_key(provider_id)
+    {
+        problems.push(make_problem(
+            file_path,
+            Some(format!("models.entries.{default_model}.provider_id")),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "default model '{default_model}' references missing provider entry '{provider_id}'"
+                ),
+            },
+        ));
+    }
+
+    problems
+}
+
+/// Validate references that can only be known after all config layers merge.
+pub fn validate_resolved_catalog_references(
+    config: &ResolvedConfig,
+    file_path: &Path,
+) -> Vec<ConfigProblem> {
+    let mut problems = Vec::new();
+
+    if !config
+        .providers
+        .entries
+        .contains_key(&config.providers.default)
+    {
+        problems.push(make_problem(
+            file_path,
+            Some("providers.default".to_string()),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "providers.default references missing provider entry '{}'",
+                    config.providers.default
+                ),
+            },
+        ));
+    }
+
+    let Some(default_model) = config.models.entries.get(&config.models.default) else {
+        problems.push(make_problem(
+            file_path,
+            Some("models.default".to_string()),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "models.default references missing model entry '{}'",
+                    config.models.default
+                ),
+            },
+        ));
+        return problems;
+    };
+
+    if !config
+        .providers
+        .entries
+        .contains_key(&default_model.provider_id)
+    {
+        problems.push(make_problem(
+            file_path,
+            Some(format!(
+                "models.entries.{}.provider_id",
+                config.models.default
+            )),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "default model '{}' references missing provider entry '{}'",
+                    config.models.default, default_model.provider_id
+                ),
+            },
+        ));
+    }
+
+    problems
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -465,8 +575,8 @@ fn validate_python_execute_table(
 /// mismatches, and constraint violations are all collected.
 pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProblem> {
     // Phase 1: syntax
-    let value = match content.parse::<Value>() {
-        Ok(v) => v,
+    let table = match content.parse::<Table>() {
+        Ok(table) => table,
         Err(e) => {
             let line = e
                 .span()
@@ -481,12 +591,6 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
                 },
             )];
         }
-    };
-
-    let table = match value {
-        Value::Table(t) => t,
-        // Valid TOML that isn't a table is unusual; nothing to validate.
-        _ => return vec![],
     };
 
     let mut problems = Vec::new();
@@ -558,6 +662,8 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
             ));
         }
     }
+
+    problems.extend(validate_catalog_references(&table, file_path));
 
     problems
 }
@@ -684,10 +790,19 @@ mod tests {
 host = "127.0.0.1"
 port = 3000
 
-[provider]
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
 protocol = "anthropic"
-model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
 "#;
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
@@ -721,14 +836,74 @@ api_key_env = "ANTHROPIC_API_KEY"
     }
 
     #[test]
-    fn invalid_protocol_produces_semantic_error() {
-        let toml = "[provider]\nprotocol = \"unknown-llm\"";
+    fn empty_default_model_id_produces_semantic_error() {
+        let toml = "[models]\ndefault_model_id = \"\"";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.default_model_id")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "empty default_model_id should produce SemanticError, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn missing_default_model_entry_produces_semantic_error() {
+        let toml = r#"
+[models]
+default = "missing"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.default")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "missing default model entry should produce SemanticError, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn default_model_with_missing_provider_entry_produces_semantic_error() {
+        let toml = r#"
+[providers.entries.anthropic]
+protocol = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "missing-provider"
+model_id = "claude-sonnet-4-20250514"
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.entries.sonnet.provider_id")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "missing provider entry should produce SemanticError, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_provider_section_is_rejected() {
+        let toml = "[provider]\nprotocol = \"anthropic\"";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
             problems
                 .iter()
-                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
-            "'unknown-llm' is not a valid protocol"
+                .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownSection { .. })),
+            "legacy [provider] should be rejected"
         );
     }
 
@@ -741,18 +916,16 @@ api_key_env = "ANTHROPIC_API_KEY"
 host = "10.0.0.1"
 port = 8080
 
-[provider]
-model = "claude-opus"
+[models]
+default_model_id = "claude-opus"
 "#;
         let partial =
             parse_and_validate(toml, &path("config.toml")).expect("valid TOML should return Ok");
         let server = partial.server.expect("server section should be present");
         assert_eq!(server.host.as_deref(), Some("10.0.0.1"));
         assert_eq!(server.port, Some(8080));
-        let provider = partial
-            .provider
-            .expect("provider section should be present");
-        assert_eq!(provider.model.as_deref(), Some("claude-opus"));
+        let models = partial.models.expect("models section should be present");
+        assert_eq!(models.default_model_id.as_deref(), Some("claude-opus"));
     }
 
     #[test]
@@ -1123,9 +1296,18 @@ timeout = 10
 host = "127.0.0.1"
 port = 3000
 
-[provider]
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
 protocol = "anthropic"
-model = "claude-sonnet-4-20250514"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
 
 [output]
 max_retries = 3

@@ -108,20 +108,20 @@ pub async fn handle_cancel(
     //
     // These paths also reset the thread to Idle — no live agent loop exists
     // to do cleanup, so the thread would remain stuck in Processing.
-    if let Some(thread_id_str) = delegate.payload.get("_thread_id").and_then(|v| v.as_str()) {
-        if let Ok(thread_id) = thread_id_str.parse::<Uuid>() {
-            interrupt_turns_in_thread(
-                storage,
-                thread_id,
-                &[
-                    TurnState::Pending,
-                    TurnState::Processing,
-                    TurnState::AwaitingApproval,
-                ],
-            )
-            .await?;
-            return Ok(());
-        }
+    if let Some(thread_id_str) = delegate.payload.get("_thread_id").and_then(|v| v.as_str())
+        && let Ok(thread_id) = thread_id_str.parse::<Uuid>()
+    {
+        interrupt_turns_in_thread(
+            storage,
+            thread_id,
+            &[
+                TurnState::Pending,
+                TurnState::Processing,
+                TurnState::AwaitingApproval,
+            ],
+        )
+        .await?;
+        return Ok(());
     }
 
     // Last resort: no thread annotation — interrupt all in-progress turns.

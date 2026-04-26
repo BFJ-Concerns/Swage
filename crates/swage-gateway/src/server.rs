@@ -74,7 +74,7 @@ async fn activity_recording_middleware(
 /// - `POST /api/benches` / `GET /api/benches` - bench management
 /// - `POST /api/teams` / topology-run routes - team and topology execution
 /// - conversation, thread, turn, approval, and agent-message APIs
-/// - `GET /api/conversations/:id/ws` - WebSocket upgrade for live turn events
+/// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
 /// - `GET /api/skills`, `POST /api/shutdown`, `GET /api/health`
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
@@ -85,119 +85,119 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::create_bench).get(handlers::list_benches),
         )
         .route(
-            "/api/benches/:id",
+            "/api/benches/{id}",
             get(handlers::get_bench)
                 .put(handlers::update_bench)
                 .delete(handlers::delete_bench),
         )
         .route(
-            "/api/benches/:id/workspaces",
+            "/api/benches/{id}/workspaces",
             get(handlers::list_bench_workspaces).post(handlers::attach_bench_workspace),
         )
         .route(
-            "/api/benches/:bench_id/workspaces/:workspace_id",
+            "/api/benches/{bench_id}/workspaces/{workspace_id}",
             axum::routing::delete(handlers::detach_bench_workspace),
         )
         .route(
-            "/api/benches/:bench_id/workspaces/:workspace_id/trust",
+            "/api/benches/{bench_id}/workspaces/{workspace_id}/trust",
             put(handlers::update_bench_workspace_trust),
         )
         .route(
-            "/api/benches/:bench_id/teams",
+            "/api/benches/{bench_id}/teams",
             get(handlers::list_teams).post(handlers::create_team),
         )
         .route(
-            "/api/benches/:id/extensions",
+            "/api/benches/{id}/extensions",
             get(handlers::list_bench_extensions).post(handlers::create_bench_extension),
         )
         .route(
-            "/api/benches/:id/extensions/:name",
+            "/api/benches/{id}/extensions/{name}",
             put(handlers::update_bench_extension),
         )
         .route(
-            "/api/benches/:id/extensions/:name/approve-workspace",
+            "/api/benches/{id}/extensions/{name}/approve-workspace",
             post(handlers::approve_workspace_extension),
         )
         .route(
-            "/api/benches/:id/topology-flows",
+            "/api/benches/{id}/topology-flows",
             get(handlers::list_topology_flows).post(handlers::create_topology_flow),
         )
         .route(
-            "/api/benches/:id/topology-flows/:name",
+            "/api/benches/{id}/topology-flows/{name}",
             get(handlers::get_topology_flow).put(handlers::update_topology_flow),
         )
         .route(
-            "/api/benches/:id/context-definitions",
+            "/api/benches/{id}/context-definitions",
             get(handlers::list_context_definitions).post(handlers::create_context_definition),
         )
         .route(
-            "/api/benches/:id/context-definitions/:name",
+            "/api/benches/{id}/context-definitions/{name}",
             get(handlers::get_context_definition).put(handlers::update_context_definition),
         )
         .route(
-            "/api/benches/:id/context-definitions/:name/preview",
+            "/api/benches/{id}/context-definitions/{name}/preview",
             post(handlers::preview_context_definition),
         )
         .route(
-            "/api/benches/:id/builder/proposals",
+            "/api/benches/{id}/builder/proposals",
             post(handlers::create_builder_proposal),
         )
         .route(
-            "/api/benches/:id/builder/apply",
+            "/api/benches/{id}/builder/apply",
             post(handlers::apply_builder_proposal),
         )
         .route(
-            "/api/benches/:id/config-versions",
+            "/api/benches/{id}/config-versions",
             get(handlers::list_configuration_versions),
         )
         .route(
-            "/api/config-versions/:id/rollback",
+            "/api/config-versions/{id}/rollback",
             post(handlers::rollback_configuration_version),
         )
         .route(
-            "/api/teams/:id",
+            "/api/teams/{id}",
             get(handlers::get_team)
                 .put(handlers::update_team)
                 .delete(handlers::delete_team),
         )
         .route(
-            "/api/teams/:id/runs",
+            "/api/teams/{id}/runs",
             get(handlers::list_topology_runs).post(handlers::create_topology_run),
         )
-        .route("/api/topology-runs/:id", get(handlers::get_topology_run))
+        .route("/api/topology-runs/{id}", get(handlers::get_topology_run))
         .route(
-            "/api/conversations/:id/branches",
+            "/api/conversations/{id}/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
         )
-        .route("/api/threads/:id", get(handlers::get_thread_detail))
+        .route("/api/threads/{id}", get(handlers::get_thread_detail))
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
         .route(
-            "/api/conversations/:id",
+            "/api/conversations/{id}",
             get(handlers::get_conversation).delete(handlers::delete_conversation),
         )
-        .route("/api/conversations/:id/ws", get(websocket::ws_handler))
+        .route("/api/conversations/{id}/ws", get(websocket::ws_handler))
         .route(
-            "/api/sessions/:id/attachments",
+            "/api/sessions/{id}/attachments",
             get(handlers::list_session_attachments),
         )
         .route(
-            "/api/sessions/:id/materials",
+            "/api/sessions/{id}/materials",
             get(handlers::list_session_materials),
         )
         // Bench-scoped session routes. These supplement /api/conversations
         // and allow the frontend to fetch/create sessions per bench.
         .route(
-            "/api/benches/:bench_id/sessions",
+            "/api/benches/{bench_id}/sessions",
             get(handlers::list_bench_sessions).post(handlers::create_bench_session),
         )
         .route(
-            "/api/benches/:id/attachments",
+            "/api/benches/{id}/attachments",
             get(handlers::list_bench_attachments),
         )
         .route(
-            "/api/benches/:id/materials",
+            "/api/benches/{id}/materials",
             get(handlers::list_bench_materials),
         )
         // Skills listing — resolved hierarchy for a bench/agent combination.
@@ -242,32 +242,32 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_lenses).post(handlers::create_lens),
         )
         .route("/api/lenses/install", post(handlers::install_lens))
-        .route("/api/lenses/:id", put(handlers::update_lens))
+        .route("/api/lenses/{id}", put(handlers::update_lens))
         .route(
-            "/api/benches/:id/lens-runtime",
+            "/api/benches/{id}/lens-runtime",
             get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
         )
         .route("/api/shared-objects", get(handlers::list_shared_objects))
         .route(
-            "/api/shared-objects/:kind/:id",
+            "/api/shared-objects/{kind}/{id}",
             get(handlers::get_shared_object),
         )
         .route(
-            "/api/shared-objects/:kind/:id/events",
+            "/api/shared-objects/{kind}/{id}/events",
             post(handlers::create_shared_object_event),
         )
         .route(
-            "/api/shared-objects/team_topology/:id",
+            "/api/shared-objects/team_topology/{id}",
             get(handlers::get_team_topology_reference)
                 .put(handlers::update_team_topology_reference),
         )
         .route(
-            "/api/shared-objects/orchestration_flow/:id",
+            "/api/shared-objects/orchestration_flow/{id}",
             get(handlers::get_orchestration_flow_reference)
                 .put(handlers::update_orchestration_flow_reference),
         )
         .route(
-            "/api/shared-objects/context_definition/:id",
+            "/api/shared-objects/context_definition/{id}",
             get(handlers::get_context_definition_reference)
                 .put(handlers::update_context_definition_reference),
         )
@@ -276,55 +276,58 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_secrets).post(handlers::create_secret),
         )
         .route("/api/secrets/generate", post(handlers::generate_secret))
-        .route("/api/secrets/:id", get(handlers::get_secret))
-        .route("/api/secrets/:id/rotate", post(handlers::rotate_secret))
-        .route("/api/secrets/:id/revoke", post(handlers::revoke_secret))
-        .route("/api/secrets/:id/restore", post(handlers::restore_secret))
-        .route("/api/secrets/:id/validate", post(handlers::validate_secret))
+        .route("/api/secrets/{id}", get(handlers::get_secret))
+        .route("/api/secrets/{id}/rotate", post(handlers::rotate_secret))
+        .route("/api/secrets/{id}/revoke", post(handlers::revoke_secret))
+        .route("/api/secrets/{id}/restore", post(handlers::restore_secret))
+        .route(
+            "/api/secrets/{id}/validate",
+            post(handlers::validate_secret),
+        )
         .route(
             "/api/operator/memories",
             get(handlers::list_operator_memories),
         )
         .route(
-            "/api/operator/memories/:id",
+            "/api/operator/memories/{id}",
             get(handlers::get_operator_memory),
         )
         .route("/api/operator/runs", get(handlers::list_operator_runs))
         .route(
-            "/api/operator/runs/:kind/:id",
+            "/api/operator/runs/{kind}/{id}",
             get(handlers::get_operator_run),
         )
         // Turn context snapshots — assembly reports for past turns.
-        .route("/api/turns/:id/context", get(handlers::get_turn_context))
+        .route("/api/turns/{id}/context", get(handlers::get_turn_context))
         // Programmatic interface — async turn submission and polling.
         .route("/api/turns", post(handlers::submit_turn))
-        .route("/api/turns/:id", get(handlers::get_turn))
+        .route("/api/turns/{id}", get(handlers::get_turn))
         // Turn listing per conversation.
-        .route("/api/conversations/:id/turns", get(handlers::list_turns))
+        .route("/api/conversations/{id}/turns", get(handlers::list_turns))
         // Agent messaging — send and query inter-agent messages.
         .route("/api/messages", post(handlers::send_agent_message))
-        .route("/api/messages/:id", get(handlers::get_message_status))
+        .route("/api/messages/{id}", get(handlers::get_message_status))
         .route("/api/attachments", post(handlers::create_attachment))
         .route("/api/materials", post(handlers::create_material))
-        .route("/api/materials/:id", get(handlers::get_material))
+        .route("/api/materials/{id}", get(handlers::get_material))
         .route(
-            "/api/materials/:id/archive",
+            "/api/materials/{id}/archive",
             post(handlers::archive_material),
         )
         .route(
-            "/api/materials/:id/restore",
+            "/api/materials/{id}/restore",
             post(handlers::restore_material),
         )
         .route(
-            "/api/materials/:id/promote",
+            "/api/materials/{id}/promote",
             post(handlers::promote_material),
         )
         .route(
-            "/api/background-jobs/:id",
+            "/api/background-jobs/{id}",
             get(handlers::get_background_job),
         )
         .route(
-            "/api/background-jobs/:id/retry",
+            "/api/background-jobs/{id}/retry",
             post(handlers::retry_background_job),
         )
         // Durable scheduled jobs and recorded runs.
@@ -333,23 +336,23 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_scheduled_jobs).post(handlers::create_scheduled_job),
         )
         .route(
-            "/api/scheduled-jobs/:id",
+            "/api/scheduled-jobs/{id}",
             put(handlers::update_scheduled_job).delete(handlers::delete_scheduled_job),
         )
         .route(
-            "/api/scheduled-jobs/:id/pause",
+            "/api/scheduled-jobs/{id}/pause",
             post(handlers::pause_scheduled_job),
         )
         .route(
-            "/api/scheduled-jobs/:id/resume",
+            "/api/scheduled-jobs/{id}/resume",
             post(handlers::resume_scheduled_job),
         )
         .route(
-            "/api/scheduled-jobs/:id/trigger",
+            "/api/scheduled-jobs/{id}/trigger",
             post(handlers::trigger_scheduled_job),
         )
         .route(
-            "/api/scheduled-jobs/:id/runs",
+            "/api/scheduled-jobs/{id}/runs",
             get(handlers::list_scheduled_runs),
         )
         // Durable heartbeats and recorded runs.
@@ -358,19 +361,19 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_heartbeats).post(handlers::create_heartbeat),
         )
         .route(
-            "/api/heartbeats/:id",
+            "/api/heartbeats/{id}",
             put(handlers::update_heartbeat).delete(handlers::delete_heartbeat),
         )
         .route(
-            "/api/heartbeats/:id/enable",
+            "/api/heartbeats/{id}/enable",
             post(handlers::enable_heartbeat),
         )
         .route(
-            "/api/heartbeats/:id/disable",
+            "/api/heartbeats/{id}/disable",
             post(handlers::disable_heartbeat),
         )
         .route(
-            "/api/heartbeats/:id/runs",
+            "/api/heartbeats/{id}/runs",
             get(handlers::list_heartbeat_runs),
         )
         // Runtime presence and liveness.
@@ -380,7 +383,7 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::machine_heartbeat),
         )
         .route(
-            "/api/presence/machines/:id",
+            "/api/presence/machines/{id}",
             axum::routing::delete(handlers::disconnect_machine),
         )
         // Execution hosts and attached nodes.
@@ -397,7 +400,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/voice/speech", post(handlers::synthesise_speech))
         // Approval decisions via REST (same path for TUI, web UI, external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
-        .route("/api/approvals/:id", post(handlers::decide_approval))
+        .route("/api/approvals/{id}", post(handlers::decide_approval))
         // Graceful shutdown endpoint — localhost only, broadcasts Shutdown event.
         .route("/api/shutdown", post(handlers::shutdown))
         // Health check — lightweight, no DB or provider calls.

@@ -67,14 +67,14 @@ impl SocketManager {
     /// a stale socket only blocks a new bind on the exact same path. The
     /// unique UUID naming convention makes same-path collisions unlikely.
     pub fn cleanup(path: &Path) {
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to remove socket file during cleanup"
-                );
-            }
+        if path.exists()
+            && let Err(e) = std::fs::remove_file(path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to remove socket file during cleanup"
+            );
         }
     }
 

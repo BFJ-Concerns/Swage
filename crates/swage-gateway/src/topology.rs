@@ -199,15 +199,15 @@ impl TopologyExecutor {
 
                 let visit_count = visit_counts.entry(node.id.clone()).or_default();
                 *visit_count += 1;
-                if let Some(limit) = node.iteration_limit {
-                    if *visit_count > limit {
-                        run_failed = Some(format!(
-                            "node '{}' exceeded iteration limit {}",
-                            node.id, limit
-                        ));
-                        run_cancel_token.cancel();
-                        break;
-                    }
+                if let Some(limit) = node.iteration_limit
+                    && *visit_count > limit
+                {
+                    run_failed = Some(format!(
+                        "node '{}' exceeded iteration limit {}",
+                        node.id, limit
+                    ));
+                    run_cancel_token.cancel();
+                    break;
                 }
 
                 let state = self.state.clone();
@@ -709,7 +709,7 @@ async fn execute_agent_node(
         memory_content,
         bench.name.clone(),
     );
-    let tokeniser = TiktokenTokeniser::new(&config.provider.model);
+    let tokeniser = TiktokenTokeniser::new(config.default_model_id());
     let assembly_runner =
         swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
     let output = swage_context::assembly::assemble(
@@ -756,13 +756,13 @@ async fn execute_agent_node(
     let agent = match agent_builder.build() {
         Ok(agent) => agent,
         Err(error) => {
-            if let Some(guard) = &sandbox_guard {
-                if let Err(shutdown_error) = guard.shutdown().await {
-                    tracing::warn!(
-                        error = %shutdown_error,
-                        "failed to shut down topology sandbox after agent construction error"
-                    );
-                }
+            if let Some(guard) = &sandbox_guard
+                && let Err(shutdown_error) = guard.shutdown().await
+            {
+                tracing::warn!(
+                    error = %shutdown_error,
+                    "failed to shut down topology sandbox after agent construction error"
+                );
             }
             return Err(error.into());
         }
@@ -822,21 +822,21 @@ async fn execute_agent_node(
     let outbound = match outbound {
         Ok(outbound) => outbound,
         Err(error) => {
-            if let Some(guard) = &sandbox_guard {
-                if let Err(shutdown_error) = guard.shutdown().await {
-                    tracing::warn!(
-                        error = %shutdown_error,
-                        "failed to shut down topology sandbox after agent error"
-                    );
-                }
+            if let Some(guard) = &sandbox_guard
+                && let Err(shutdown_error) = guard.shutdown().await
+            {
+                tracing::warn!(
+                    error = %shutdown_error,
+                    "failed to shut down topology sandbox after agent error"
+                );
             }
             return Err(error.into());
         }
     };
-    if let Some(guard) = &sandbox_guard {
-        if let Err(error) = guard.shutdown().await {
-            tracing::warn!(error = %error, "failed to shut down topology sandbox");
-        }
+    if let Some(guard) = &sandbox_guard
+        && let Err(error) = guard.shutdown().await
+    {
+        tracing::warn!(error = %error, "failed to shut down topology sandbox");
     }
     if let Some(turn_id) = turn_id {
         if let Some(ref output) = outbound.structured_output {
@@ -846,7 +846,7 @@ async fn execute_agent_node(
                 .await?;
         }
         if let Some(cost) = state.config.pricing.compute_cost(
-            &config.provider.model,
+            config.default_model_id(),
             outbound.input_tokens,
             outbound.output_tokens,
         ) {
@@ -915,14 +915,13 @@ fn resolve_node_config(
     {
         config = apply_team_agent_definition(config, agent);
     }
-    if let Some(task_name) = task_name {
-        if let Some(task) = team
+    if let Some(task_name) = task_name
+        && let Some(task) = team
             .tasks
             .iter()
             .find(|candidate| candidate.name == task_name)
-        {
-            config = team_task_to_config(task).apply_to(config);
-        }
+    {
+        config = team_task_to_config(task).apply_to(config);
     }
 
     Ok(config)
@@ -981,7 +980,7 @@ fn apply_team_agent_definition(
     agent: &TeamAgentDefinition,
 ) -> swage_config::ResolvedConfig {
     if let Some(model) = agent.model.as_deref() {
-        config.provider.model = model.to_string();
+        config.set_default_model_id(model.to_string());
     }
     if !agent.instructions.trim().is_empty() {
         config.instructions = match config.instructions.trim().is_empty() {

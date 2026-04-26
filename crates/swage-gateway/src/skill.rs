@@ -236,12 +236,12 @@ impl SkillManager {
         available: &[SkillDefinition],
         storage: &dyn SkillActivationStore,
     ) -> Result<(), SkillError> {
-        if let Some(skill) = available.iter().find(|s| s.name == skill_name) {
-            if skill.level == HierarchyLevel::Agent {
-                return Err(SkillError::AgentLevelCannotDeactivate(
-                    skill_name.to_string(),
-                ));
-            }
+        if let Some(skill) = available.iter().find(|s| s.name == skill_name)
+            && skill.level == HierarchyLevel::Agent
+        {
+            return Err(SkillError::AgentLevelCannotDeactivate(
+                skill_name.to_string(),
+            ));
         }
 
         storage.deactivate_skill(session_id, skill_name).await?;

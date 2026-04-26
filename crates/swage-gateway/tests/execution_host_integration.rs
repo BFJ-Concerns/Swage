@@ -216,7 +216,7 @@ async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStrea
 }
 
 async fn ws_send(sink: &mut WsSink, payload: Value) {
-    sink.send(tungstenite::Message::Text(payload.to_string()))
+    sink.send(tungstenite::Message::Text(payload.to_string().into()))
         .await
         .expect("WebSocket send should succeed");
 }

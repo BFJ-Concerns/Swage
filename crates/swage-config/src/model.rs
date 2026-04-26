@@ -33,23 +33,89 @@ pub enum Protocol {
     OpenRouter,
 }
 
-/// LLM provider settings.
+/// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderConfig {
+pub struct ProviderEndpointConfig {
     pub protocol: Protocol,
-    pub model: String,
     pub api_key_env: String,
     pub base_url: Option<String>,
 }
 
-impl Default for ProviderConfig {
+impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
             protocol: Protocol::Anthropic,
-            model: "claude-sonnet-4-20250514".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: None,
         }
+    }
+}
+
+/// Configured LLM providers keyed by provider id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderCatalogConfig {
+    pub default: String,
+    #[serde(default)]
+    pub entries: HashMap<String, ProviderEndpointConfig>,
+}
+
+impl Default for ProviderCatalogConfig {
+    fn default() -> Self {
+        Self {
+            default: "anthropic".to_string(),
+            entries: HashMap::from([("anthropic".to_string(), ProviderEndpointConfig::default())]),
+        }
+    }
+}
+
+impl ProviderCatalogConfig {
+    pub fn default_provider(&self) -> Option<&ProviderEndpointConfig> {
+        self.entries.get(&self.default)
+    }
+}
+
+/// Model identity and metadata separate from provider connection settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelEndpointConfig {
+    pub provider_id: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+}
+
+impl Default for ModelEndpointConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "anthropic".to_string(),
+            model_id: "claude-sonnet-4-20250514".to_string(),
+            aliases: Vec::new(),
+            context_window: None,
+        }
+    }
+}
+
+/// Configured LLM models keyed by app-level model id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelCatalogConfig {
+    pub default: String,
+    #[serde(default)]
+    pub entries: HashMap<String, ModelEndpointConfig>,
+}
+
+impl Default for ModelCatalogConfig {
+    fn default() -> Self {
+        Self {
+            default: "sonnet".to_string(),
+            entries: HashMap::from([("sonnet".to_string(), ModelEndpointConfig::default())]),
+        }
+    }
+}
+
+impl ModelCatalogConfig {
+    pub fn default_model(&self) -> Option<&ModelEndpointConfig> {
+        self.entries.get(&self.default)
     }
 }
 
@@ -492,7 +558,11 @@ pub struct ResolvedConfig {
     pub server: ServerConfig,
     /// Human-in-the-loop approval settings: timeout duration and expiry policy.
     pub hitl: HitlConfig,
-    pub provider: ProviderConfig,
+    /// Canonical provider catalogue. Prefer this over the legacy singular
+    /// `provider` field when selecting runtime backends.
+    pub providers: ProviderCatalogConfig,
+    /// Canonical model catalogue. Model entries point at provider catalogue ids.
+    pub models: ModelCatalogConfig,
     pub workspace: WorkspaceConfig,
     pub sandbox: SandboxConfig,
     pub logging: LoggingConfig,
@@ -511,6 +581,32 @@ pub struct ResolvedConfig {
     pub communication: CommunicationConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+}
+
+impl ResolvedConfig {
+    pub fn default_model_id(&self) -> &str {
+        self.models
+            .default_model()
+            .map(|model| model.model_id.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn default_provider_endpoint(&self) -> Option<&ProviderEndpointConfig> {
+        let model = self.models.default_model()?;
+        self.providers.entries.get(&model.provider_id)
+    }
+
+    pub fn default_provider_protocol(&self) -> Protocol {
+        self.default_provider_endpoint()
+            .map(|provider| provider.protocol.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_default_model_id(&mut self, model_id: String) {
+        if let Some(model) = self.models.entries.get_mut(&self.models.default) {
+            model.model_id = model_id;
+        }
+    }
 }
 
 /// Which level of the hierarchy a value or instruction came from.
@@ -552,15 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_config_defaults() {
-        let cfg = ProviderConfig::default();
-        assert_eq!(cfg.protocol, Protocol::Anthropic);
-        assert_eq!(cfg.model, "claude-sonnet-4-20250514");
-        assert_eq!(cfg.api_key_env, "ANTHROPIC_API_KEY");
-        assert_eq!(cfg.base_url, None);
-    }
-
-    #[test]
     fn workspace_config_defaults() {
         let cfg = WorkspaceConfig::default();
         assert_eq!(cfg.path, ".");
@@ -583,10 +670,9 @@ mod tests {
         let cfg = ResolvedConfig::default();
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.port, 3000);
-        assert_eq!(cfg.provider.protocol, Protocol::Anthropic);
-        assert_eq!(cfg.provider.model, "claude-sonnet-4-20250514");
-        assert_eq!(cfg.provider.api_key_env, "ANTHROPIC_API_KEY");
-        assert_eq!(cfg.provider.base_url, None);
+        assert_eq!(cfg.providers.default, "anthropic");
+        assert_eq!(cfg.models.default, "sonnet");
+        assert_eq!(cfg.default_model_id(), "claude-sonnet-4-20250514");
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.logging.level, LogLevel::Info);

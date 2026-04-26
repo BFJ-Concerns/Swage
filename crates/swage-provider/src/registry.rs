@@ -164,10 +164,10 @@ impl Registry {
         }
 
         // 2. Alias match.
-        if let Some(model_id) = self.aliases.get(name) {
-            if let Some(model) = self.models.get(model_id) {
-                return self.build_resolved(model);
-            }
+        if let Some(model_id) = self.aliases.get(name)
+            && let Some(model) = self.models.get(model_id)
+        {
+            return self.build_resolved(model);
         }
 
         // 3. Explicit "provider_id/model_substring" format.

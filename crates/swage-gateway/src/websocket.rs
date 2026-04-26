@@ -439,7 +439,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                             let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
-                                    if ws_sink.send(Message::Text(json)).await.is_err() {
+                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
                                         // Client disconnected — stop forwarding.
                                         break;
                                     }
@@ -468,7 +468,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
                                     // Attempt the send; ignore the result for broadcast events.
-                                    let _ = ws_sink.send(Message::Text(json)).await;
+                                    let _ = ws_sink.send(Message::Text(json.into())).await;
                                     if is_shutdown {
                                         // Server is going down — close after delivering the event.
                                         break;
@@ -715,7 +715,7 @@ async fn dispatch_client_message(
 
                     if is_known {
                         // Activate the skill and forward any trailing text as a turn.
-                        let tok = TiktokenTokeniser::new(&state.config.provider.model);
+                        let tok = TiktokenTokeniser::new(state.config.default_model_id());
                         match SkillManager::activate(
                             session_id,
                             &skill_name,
@@ -849,7 +849,7 @@ async fn dispatch_client_message(
                     return;
                 }
             };
-            let tok = TiktokenTokeniser::new(&state.config.provider.model);
+            let tok = TiktokenTokeniser::new(state.config.default_model_id());
 
             match SkillManager::activate(
                 session_id,

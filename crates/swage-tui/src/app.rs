@@ -230,21 +230,21 @@ impl App {
         }
 
         while self.is_running {
-            if let Some(reconnect) = self.pending_reconnect.as_mut() {
-                if tokio::time::Instant::now() >= reconnect.next_attempt_at {
-                    match self.connection.connect().await {
-                        Ok(()) => {
-                            self.pending_reconnect = None;
-                            self.state
-                                .set_conversation_id(self.connection.conversation_id());
-                            self.state
-                                .push_local_message("system", "Reconnected to gateway");
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, attempt = reconnect.attempt, "gateway reconnect attempt failed");
-                            self.connection.begin_reconnect();
-                            reconnect.schedule_retry();
-                        }
+            if let Some(reconnect) = self.pending_reconnect.as_mut()
+                && tokio::time::Instant::now() >= reconnect.next_attempt_at
+            {
+                match self.connection.connect().await {
+                    Ok(()) => {
+                        self.pending_reconnect = None;
+                        self.state
+                            .set_conversation_id(self.connection.conversation_id());
+                        self.state
+                            .push_local_message("system", "Reconnected to gateway");
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, attempt = reconnect.attempt, "gateway reconnect attempt failed");
+                        self.connection.begin_reconnect();
+                        reconnect.schedule_retry();
                     }
                 }
             }

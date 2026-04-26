@@ -90,17 +90,17 @@ impl HookRegistration {
     /// Returns true if this registration should handle the given event.
     fn matches(&self, event: &HookEvent) -> bool {
         // Check the discriminant-level event filter
-        if let Some(filter) = &self.event_filter {
-            if !filter(event) {
-                return false;
-            }
+        if let Some(filter) = &self.event_filter
+            && !filter(event)
+        {
+            return false;
         }
 
         // Check the regex matcher against the event name
-        if let Some(matcher) = &self.matcher {
-            if !matcher.is_match(event.event_name()) {
-                return false;
-            }
+        if let Some(matcher) = &self.matcher
+            && !matcher.is_match(event.event_name())
+        {
+            return false;
         }
 
         true

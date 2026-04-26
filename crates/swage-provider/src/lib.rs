@@ -21,7 +21,7 @@ pub mod retry;
 // Model resolution
 pub mod registry;
 
-pub use provider::{LlmProvider, ProviderConfig};
+pub use provider::{LlmProvider, ProviderConfig, UnsupportedLlmProvider};
 pub use registry::{Registry, RegistryError, ResolvedModel};
 pub use voice::{
     OpenAiVoiceProvider, SpeechRequest, SpeechResponse, TranscriptionRequest,

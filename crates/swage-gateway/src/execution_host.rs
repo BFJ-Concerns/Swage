@@ -268,10 +268,9 @@ fn select_execution_host(
     if let Some(host_id) = session_metadata
         .and_then(|metadata| metadata.get("execution_host_id"))
         .and_then(|value| value.as_str())
+        && let Some(host) = hosts.get(host_id)
     {
-        if let Some(host) = hosts.get(host_id) {
-            return Some(host.clone());
-        }
+        return Some(host.clone());
     }
 
     if let Some(preferred_kind) = session_metadata

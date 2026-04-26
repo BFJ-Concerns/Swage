@@ -212,10 +212,10 @@ impl ToolUseAccumulator {
                             });
                         }
                     };
-                    if payload.delta.block_type == "input_json_delta" {
-                        if let Some(fragment) = payload.delta.partial_json {
-                            json_buf.push_str(&fragment);
-                        }
+                    if payload.delta.block_type == "input_json_delta"
+                        && let Some(fragment) = payload.delta.partial_json
+                    {
+                        json_buf.push_str(&fragment);
                     }
                 }
                 None

@@ -383,7 +383,7 @@ impl Agent {
                         let errors: Vec<SchemaValidationError> = validator
                             .iter_errors(&extracted)
                             .map(|e| SchemaValidationError {
-                                path: e.instance_path.to_string(),
+                                path: e.instance_path().to_string(),
                                 message: e.to_string(),
                             })
                             .collect();
@@ -1188,30 +1188,24 @@ impl Agent {
                 .await
             }
             GateResult::Decision(d) if d.is_approved() => {
-                if kind == swage_storage::model::ApprovalKind::Tool {
-                    if let (Some(tool_name), Some(tool_arguments)) =
+                if kind == swage_storage::model::ApprovalKind::Tool
+                    && let (Some(tool_name), Some(tool_arguments)) =
                         (tool_name.as_ref(), tool_arguments.as_ref())
+                    && let Ok(Some(thread)) = self.storage.get(execution.thread_id).await
+                {
+                    let request_fingerprint =
+                        crate::approval::approval_request_fingerprint(tool_arguments);
+                    if let Err(error) = self
+                        .storage
+                        .remember_approval(thread.session_id, tool_name, &request_fingerprint)
+                        .await
                     {
-                        if let Ok(Some(thread)) = self.storage.get(execution.thread_id).await {
-                            let request_fingerprint =
-                                crate::approval::approval_request_fingerprint(tool_arguments);
-                            if let Err(error) = self
-                                .storage
-                                .remember_approval(
-                                    thread.session_id,
-                                    tool_name,
-                                    &request_fingerprint,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    error = %error,
-                                    session_id = %thread.session_id,
-                                    tool = %tool_name,
-                                    "failed to persist session approval memory"
-                                );
-                            }
-                        }
+                        tracing::warn!(
+                            error = %error,
+                            session_id = %thread.session_id,
+                            tool = %tool_name,
+                            "failed to persist session approval memory"
+                        );
                     }
                 }
 

@@ -104,7 +104,6 @@ pub async fn snapshot_presence(state: &AppState) -> PresenceSnapshotResponse {
     let clients = presence
         .clients
         .values()
-        .cloned()
         .map(|record| ClientPresenceResponse {
             session_id: record.session_id,
             state: record.state.to_string(),

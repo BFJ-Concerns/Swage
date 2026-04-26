@@ -129,14 +129,14 @@ impl MessageRouter {
         event: HookEvent,
         hook_name: &str,
     ) -> Result<(), AgentError> {
-        if let Some(ref registry) = self.hook_registry {
-            if let HookOutcome::Block(reason) = registry.dispatch(event).await {
-                self.fail_message(msg.id, &reason).await?;
-                return Err(AgentError::HookBlocked {
-                    hook: hook_name.into(),
-                    reason,
-                });
-            }
+        if let Some(ref registry) = self.hook_registry
+            && let HookOutcome::Block(reason) = registry.dispatch(event).await
+        {
+            self.fail_message(msg.id, &reason).await?;
+            return Err(AgentError::HookBlocked {
+                hook: hook_name.into(),
+                reason,
+            });
         }
         Ok(())
     }
