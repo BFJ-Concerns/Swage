@@ -65,7 +65,7 @@ describe("MessageInput", () => {
     setTextareaValue("   Hello, Swage   ");
 
     flushSync(() => {
-      (document.querySelector(".send-btn") as HTMLButtonElement).click();
+      (document.querySelector(".action.send") as HTMLButtonElement).click();
     });
 
     expect(store.startTurn).toHaveBeenCalledWith("Hello, Swage");
@@ -77,7 +77,7 @@ describe("MessageInput", () => {
     setTextareaValue("   \n  ");
 
     flushSync(() => {
-      (document.querySelector(".send-btn") as HTMLButtonElement).click();
+      (document.querySelector(".action.send") as HTMLButtonElement).click();
     });
 
     expect(store.startTurn).not.toHaveBeenCalled();
@@ -126,7 +126,7 @@ describe("MessageInput", () => {
     setTextareaValue("Refocus me");
 
     flushSync(() => {
-      (document.querySelector(".send-btn") as HTMLButtonElement).click();
+      (document.querySelector(".action.send") as HTMLButtonElement).click();
     });
 
     const input = textarea();
@@ -138,7 +138,7 @@ describe("MessageInput", () => {
   it("renders a stop button while streaming and cancels on click", () => {
     const store = mountComponent(makeStreamingStore(true));
 
-    const stopButton = document.querySelector(".stop-btn") as HTMLButtonElement;
+    const stopButton = document.querySelector(".action.stop") as HTMLButtonElement;
     expect(stopButton).not.toBeNull();
 
     flushSync(() => {

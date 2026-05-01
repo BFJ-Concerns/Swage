@@ -117,6 +117,13 @@
 </div>
 
 <style>
+  /*
+    Riso conversation list: each row is a single line with a dotted hairline
+    rule below; the active row inverts to ink-on-paper with the orange offset
+    "shadow" pseudo-element. New-conversation is a small mono-styled button
+    above the list.
+  */
+
   .conversation-list {
     flex: 1;
     overflow-y: auto;
@@ -124,41 +131,44 @@
     flex-direction: column;
   }
 
-  /* -------------------------------------------------------------------------
-     New conversation button
-  ------------------------------------------------------------------------- */
-
+  /* New conversation trigger — sits above the rows. */
   .new-btn {
     width: 100%;
-    padding: 10px 16px;
-    background: none;
-    border: none;
-    border-bottom: 1px solid #e0e0e0;
+    padding: 8px 0 10px;
+    margin-bottom: 6px;
     text-align: left;
-    font-size: 0.875rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dotted var(--rule-soft);
+    font-family: var(--font-mono);
     font-weight: 500;
-    color: #333;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
     cursor: pointer;
   }
 
-  .new-btn:hover {
-    background: #f5f5f5;
+  .new-btn:hover:not(:disabled) {
+    color: var(--ink-orange);
   }
 
   .new-btn:disabled {
-    color: #aaa;
+    opacity: 0.45;
     cursor: not-allowed;
   }
 
-  /* -------------------------------------------------------------------------
-     Empty state
-  ------------------------------------------------------------------------- */
-
+  /* Empty state — short mono caption. */
   .empty-state {
-    padding: 24px 16px;
-    text-align: center;
-    color: #888;
-    font-size: 0.875rem;
+    padding: 16px 0;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 
   .empty-state p {
@@ -166,38 +176,56 @@
   }
 
   .hint {
-    font-size: 0.8rem;
-    color: #aaa;
+    font-size: 10px;
+    color: var(--ink-soft);
+    letter-spacing: 0.08em;
   }
 
-  /* -------------------------------------------------------------------------
-     Conversation list
-  ------------------------------------------------------------------------- */
-
+  /* Row list. */
   .conversations {
     list-style: none;
     margin: 0;
     padding: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .conversation-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid #f0f0f0;
-    /* Prevent text selection when clicking rapidly. */
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 6px;
+    align-items: baseline;
+    padding: 9px 0;
+    border-bottom: 1px dotted var(--rule-soft);
     user-select: none;
+    position: relative;
+    isolation: isolate;
   }
 
-  .conversation-item:hover {
-    background: #f7f7f7;
+  .conversation-item:last-child {
+    border-bottom: none;
   }
 
   .conversation-item.active {
-    background: #eef2ff;
-    border-left: 3px solid #6366f1;
-    padding-left: 9px;
+    /* Pull the row to the section edges so the ink fill reads as a band, then
+       overlay the translucent orange offset. The 22px matches the nav padding
+       in AppLayout.svelte. */
+    background: var(--ink);
+    color: var(--paper);
+    margin: 0 -22px;
+    padding: 9px 22px;
+  }
+
+  .conversation-item.active::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--accent);
+    transform: translate(var(--offset), var(--offset));
+    z-index: -1;
+    mix-blend-mode: var(--shadow-blend);
+    opacity: var(--shadow-opacity);
+    pointer-events: none;
   }
 
   .conversation-select-btn {
@@ -210,55 +238,68 @@
     cursor: pointer;
     font: inherit;
     color: inherit;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+    align-items: baseline;
   }
-
-  /* -------------------------------------------------------------------------
-     Item layout
-  ------------------------------------------------------------------------- */
 
   .item-header {
     display: flex;
-    align-items: flex-start;
+    align-items: baseline;
     gap: 4px;
-    margin-bottom: 4px;
+    min-width: 0;
   }
 
   .preview {
-    flex: 1;
-    font-size: 0.875rem;
-    color: #222;
-    /* Clamp to one line with an ellipsis — previews can be long. */
+    font-family: var(--font-body);
+    font-size: 13px;
+    line-height: 1.3;
+    color: inherit;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .conversation-item.active .preview {
+    font-weight: 600;
   }
 
   .interrupted {
     flex-shrink: 0;
-    font-size: 0.75rem;
-    color: #d97706;
-    /* Align with the top of the preview text. */
-    line-height: 1.4;
+    color: var(--ink-orange);
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .conversation-item.active .interrupted {
+    color: var(--accent);
   }
 
   .timestamp {
-    font-size: 0.75rem;
-    color: #999;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
   }
 
-  /* -------------------------------------------------------------------------
-     Delete controls
-  ------------------------------------------------------------------------- */
+  .conversation-item.active .timestamp {
+    color: rgba(255, 248, 238, 0.7);
+  }
 
+  /* Delete affordance. */
   .delete-btn {
     background: none;
     border: none;
-    color: #ccc;
-    font-size: 1rem;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: 12px;
     line-height: 1;
-    padding: 0 2px;
+    padding: 0 4px;
     cursor: pointer;
-    /* Hidden by default — revealed on row hover. */
     visibility: hidden;
   }
 
@@ -267,7 +308,12 @@
   }
 
   .delete-btn:hover {
-    color: #e53e3e;
+    color: var(--ink-orange);
+  }
+
+  .conversation-item.active .delete-btn {
+    color: rgba(255, 248, 238, 0.7);
+    visibility: visible;
   }
 
   .delete-confirm {
@@ -277,29 +323,31 @@
 
   .confirm-btn,
   .cancel-btn {
-    font-size: 0.75rem;
-    padding: 2px 6px;
-    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
     cursor: pointer;
-    border: 1px solid transparent;
   }
 
   .confirm-btn {
-    background: #fee2e2;
-    color: #c53030;
-    border-color: #fca5a5;
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
   }
 
   .confirm-btn:hover {
-    background: #fecaca;
-  }
-
-  .cancel-btn {
-    background: #f5f5f5;
-    color: #555;
+    filter: brightness(0.92);
   }
 
   .cancel-btn:hover {
-    background: #e5e5e5;
+    background: var(--ink);
+    color: var(--paper);
   }
 </style>

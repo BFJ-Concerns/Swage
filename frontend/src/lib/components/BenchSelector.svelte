@@ -133,10 +133,19 @@
   const currentName = $derived(benchStore?.currentBench?.name ?? "default");
 </script>
 
+<!--
+  Restyled for the riso shell. In the new design this control sits in the
+  navy ink-coloured bench-head (cream typography). The bench *name* is shown
+  by the parent (AppLayout's <h2 class="name">), so this control becomes a
+  small "switch / new" affordance underneath.
+
+  TODO(debt): replace with a back-arrow that returns to a dedicated bench
+  picker route, plus a ▾ menu for bench-scoped settings (per Progress.md).
+  Blocked by: bench picker route not yet implemented.
+-->
 <div class="bench-selector">
-  <span class="label">Bench</span>
-  <button class="toggle-btn" onclick={toggleDropdown}>
-    <span class="value">{currentName}</span>
+  <button class="toggle-btn" onclick={toggleDropdown} title="Switch bench">
+    <span class="value">Switch — {currentName}</span>
     <span class="caret" class:open={isOpen}>▾</span>
   </button>
 
@@ -228,102 +237,112 @@
 </div>
 
 <style>
-  /* -------------------------------------------------------------------------
-     Selector bar
-  ------------------------------------------------------------------------- */
-
+  /*
+    The selector inherits its colour context from its parent: when in the
+    navy bench-head, "color: inherit" gives cream type; when in the picker
+    nav (paper background), it gives navy ink. The dropdown opens below the
+    bench-head and uses the riso-block treatment.
+  */
   .bench-selector {
-    padding: 12px 16px;
-    border-bottom: 1px solid #e0e0e0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.875rem;
+    margin-top: 12px;
     position: relative;
-  }
-
-  .label {
-    color: #888;
-    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
   }
 
   .toggle-btn {
-    background: none;
-    border: none;
-    padding: 0;
+    width: 100%;
+    background: transparent;
+    border: 1px solid currentColor;
+    padding: 7px 10px;
     display: flex;
     align-items: center;
-    gap: 4px;
+    justify-content: space-between;
+    gap: 8px;
     cursor: pointer;
-    font-size: 0.875rem;
     color: inherit;
-    /* Stretch to fill remaining sidebar width for a larger click target. */
-    flex: 1;
+    font: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    opacity: 0.85;
   }
 
-  .toggle-btn:hover .value {
-    text-decoration: underline;
+  .toggle-btn:hover {
+    opacity: 1;
   }
 
   .value {
-    font-weight: 500;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
 
   .caret {
-    font-size: 0.75rem;
-    color: #aaa;
-    transition: transform 150ms ease;
     flex-shrink: 0;
+    transition: transform 150ms ease;
+    font-family: var(--font-mono);
   }
 
   .caret.open {
     transform: rotate(180deg);
   }
 
-  /* -------------------------------------------------------------------------
-     Dropdown
-  ------------------------------------------------------------------------- */
-
+  /* Dropdown: a riso-block panel that drops below the toggle. */
   .bench-dropdown {
     position: absolute;
-    top: 100%;
+    top: calc(100% + 6px);
     left: 0;
     right: 0;
-    background: #fff;
-    border: 1px solid #e0e0e0;
-    border-top: none;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    background: var(--paper);
+    color: var(--ink);
+    border: 2px solid var(--ink);
     z-index: 100;
+    isolation: isolate;
   }
 
-  /* -------------------------------------------------------------------------
-     Bench list
-  ------------------------------------------------------------------------- */
+  .bench-dropdown::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--accent);
+    transform: translate(var(--offset), var(--offset));
+    z-index: -1;
+    mix-blend-mode: var(--shadow-blend);
+    opacity: var(--shadow-opacity);
+    pointer-events: none;
+  }
 
+  /* Bench list rows. */
   .bench-list {
     list-style: none;
     margin: 0;
-    padding: 4px 0;
+    padding: 0;
   }
 
   .bench-item {
     display: flex;
     align-items: center;
-    padding: 8px 12px;
-    user-select: none;
+    padding: 9px 14px;
     gap: 4px;
+    user-select: none;
+    border-bottom: 1px dotted var(--rule-faint);
+    color: var(--ink);
+  }
+
+  .bench-item:last-child {
+    border-bottom: none;
   }
 
   .bench-item:hover {
-    background: #f5f5f5;
+    background: rgba(14, 59, 102, 0.08);
   }
 
   .bench-item.active {
-    background: #eef2ff;
-    font-weight: 500;
+    background: var(--ink);
+    color: var(--paper);
   }
 
   .bench-select-btn {
@@ -336,6 +355,8 @@
     cursor: pointer;
     font: inherit;
     color: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
   }
 
   .bench-name {
@@ -345,20 +366,19 @@
     text-overflow: ellipsis;
   }
 
-  /* -------------------------------------------------------------------------
-     Delete controls
-  ------------------------------------------------------------------------- */
-
+  /* Delete controls. */
   .delete-bench-btn {
     background: none;
     border: none;
-    color: #ccc;
-    font-size: 1rem;
+    color: inherit;
+    font-family: var(--font-mono);
+    font-size: 12px;
     line-height: 1;
-    padding: 0 2px;
+    padding: 0 4px;
     cursor: pointer;
     visibility: hidden;
     flex-shrink: 0;
+    opacity: 0.6;
   }
 
   .bench-item:hover .delete-bench-btn {
@@ -366,7 +386,8 @@
   }
 
   .delete-bench-btn:hover {
-    color: #e53e3e;
+    opacity: 1;
+    color: var(--ink-orange);
   }
 
   .delete-confirm {
@@ -377,87 +398,91 @@
 
   .confirm-delete-btn,
   .cancel-delete-btn {
-    font-size: 0.75rem;
-    padding: 2px 6px;
-    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
     cursor: pointer;
-    border: 1px solid transparent;
   }
 
   .confirm-delete-btn {
-    background: #fee2e2;
-    color: #c53030;
-    border-color: #fca5a5;
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
   }
 
   .confirm-delete-btn:hover {
-    background: #fecaca;
-  }
-
-  .cancel-delete-btn {
-    background: #f5f5f5;
-    color: #555;
+    filter: brightness(0.92);
   }
 
   .cancel-delete-btn:hover {
-    background: #e5e5e5;
+    background: var(--ink);
+    color: var(--paper);
   }
 
-  /* -------------------------------------------------------------------------
-     Divider and create section
-  ------------------------------------------------------------------------- */
-
+  /* Divider above the create form. */
   .dropdown-divider {
-    border-top: 1px solid #f0f0f0;
+    border-top: 1px dotted var(--rule-soft);
     margin: 4px 0;
   }
 
   .create-bench-btn {
     width: 100%;
-    padding: 8px 12px;
+    padding: 9px 14px;
     background: none;
     border: none;
     text-align: left;
-    font-size: 0.875rem;
-    color: #555;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
     cursor: pointer;
   }
 
   .create-bench-btn:hover {
-    background: #f5f5f5;
-    color: #333;
+    background: rgba(240, 106, 58, 0.1);
   }
 
-  /* -------------------------------------------------------------------------
-     Create bench form
-  ------------------------------------------------------------------------- */
-
+  /* Create-bench form. */
   .create-bench-form {
-    padding: 8px 12px;
+    padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
+    border-top: 1px dotted var(--rule-soft);
   }
 
   .create-bench-form input {
     width: 100%;
-    padding: 6px 8px;
-    border: 1px solid #d0d0d0;
-    border-radius: 4px;
-    font-size: 0.8125rem;
-    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--ink);
   }
 
   .create-bench-form input:focus {
     outline: none;
-    border-color: #6366f1;
-    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+    background: rgba(240, 106, 58, 0.06);
   }
 
   .create-error {
     margin: 0;
-    font-size: 0.75rem;
-    color: #c53030;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
   }
 
   .form-actions {
@@ -465,36 +490,40 @@
     gap: 6px;
   }
 
-  .submit-btn {
-    padding: 5px 12px;
-    background: #6366f1;
-    color: #fff;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.8125rem;
+  .submit-btn,
+  .cancel-form-btn {
+    font-family: var(--font-display);
+    font-size: 14px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    border: 1px solid var(--ink);
     cursor: pointer;
   }
 
+  .submit-btn {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
   .submit-btn:hover:not(:disabled) {
-    background: #4f46e5;
+    background: var(--accent);
+    border-color: var(--accent);
   }
 
   .submit-btn:disabled {
-    opacity: 0.6;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
   .cancel-form-btn {
-    padding: 5px 10px;
-    background: #f5f5f5;
-    color: #555;
-    border: 1px solid #d0d0d0;
-    border-radius: 4px;
-    font-size: 0.8125rem;
-    cursor: pointer;
+    background: var(--paper);
+    color: var(--ink);
   }
 
   .cancel-form-btn:hover {
-    background: #e5e5e5;
+    background: var(--ink);
+    color: var(--paper);
   }
 </style>

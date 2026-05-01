@@ -1,5 +1,7 @@
 /* Global reset and base styles for the Swage web interface. */
 
+@import "./lib/styles/riso.css";
+
 *,
 *::before,
 *::after {
@@ -15,27 +17,45 @@ body,
   width: 100%;
 }
 
+/*
+  Default to the light riso theme. Toggle to .theme-cyanotype on the body to
+  switch — every theme-aware token resolves through the same custom-property
+  names, so component CSS doesn't change.
+*/
 body {
-  font-family:
-    "Iowan Old Style",
-    "Palatino Linotype",
-    "Book Antiqua",
-    Palatino,
-    "URW Palladio L",
-    serif;
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background:
-    radial-gradient(circle at top, rgba(251, 191, 36, 0.08), transparent 34%),
-    linear-gradient(180deg, #fffdf8 0%, #f7f2ea 100%);
-  color: #1f2937;
-  line-height: 1.5;
+  background: var(--paper-deep);
+  color: var(--ink);
+  line-height: 1.55;
+  font-size: 13px;
 }
 
-/* Prevent iOS tap highlight and enforce consistent sizing. */
+body:not(.theme-riso):not(.theme-cyanotype) {
+  /* Ensure tokens resolve even before App.svelte sets the class. */
+  --ink: #0e3b66;
+  --ink-soft: rgba(14, 59, 102, 0.65);
+  --paper: #fff8ee;
+  --paper-deep: #ececea;
+  --rule-soft: rgba(14, 59, 102, 0.3);
+  --rule-faint: rgba(14, 59, 102, 0.18);
+  --ink-orange: #c54115;
+  --shadow-blend: multiply;
+  --shadow-opacity: 0.5;
+}
+
 button,
 input,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+button {
+  /* Strip the browser's default button chrome — components opt back in. */
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
 }

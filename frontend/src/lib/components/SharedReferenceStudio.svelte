@@ -325,16 +325,23 @@
 </article>
 
 <style>
+  /*
+    Riso treatment for the shared-reference studio. Flat ink-bordered panels,
+    dotted hairlines between rows, mono kickers. Lives inside the builder
+    deck, so it picks up button/input styles from the parent component when
+    they render unscoped.
+  */
+
   .studio-card {
     grid-column: 1 / -1;
-    gap: 18px;
+    gap: 16px;
   }
 
   .studio-grid {
     display: grid;
     grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.4fr);
-    gap: 16px;
-    min-height: 32rem;
+    gap: 14px;
+    min-height: 30rem;
   }
 
   .reference-rail,
@@ -344,19 +351,22 @@
   .node-card,
   .element-card,
   .interaction-card,
-  .edge-row,
   .empty-detail {
-    border-radius: 20px;
-    border: 1px solid rgba(120, 53, 15, 0.12);
-    background: rgba(255, 255, 255, 0.76);
+    border: 2px solid var(--ink);
+    background: var(--paper);
+  }
+
+  .edge-row {
+    border: 1px solid var(--rule-soft);
+    background: transparent;
   }
 
   .reference-rail,
   .reference-detail {
-    padding: 16px;
+    padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 12px;
     min-height: 0;
   }
 
@@ -367,6 +377,8 @@
     justify-content: space-between;
     gap: 12px;
     align-items: start;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--ink);
   }
 
   .summary-list,
@@ -375,30 +387,41 @@
   .edge-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     min-height: 0;
   }
 
   .summary-item {
     text-align: left;
-    padding: 14px;
+    padding: 12px 14px;
     display: flex;
     flex-direction: column;
     gap: 6px;
     cursor: pointer;
   }
 
+  .summary-item:hover {
+    background: rgba(14, 59, 102, 0.06);
+  }
+
   .summary-item.selected {
-    border-color: rgba(180, 83, 9, 0.48);
-    box-shadow: inset 0 0 0 1px rgba(180, 83, 9, 0.12);
-    background: linear-gradient(180deg, rgba(255, 247, 237, 0.98), rgba(255, 255, 255, 0.82));
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
   }
 
   .summary-kind {
-    font-size: 0.75rem;
-    letter-spacing: 0.08em;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: #9a3412;
+    color: var(--ink-soft);
+  }
+
+  .summary-item.selected .summary-kind {
+    color: rgba(255, 248, 238, 0.7);
   }
 
   .reference-detail {
@@ -412,19 +435,21 @@
   .interaction-card span,
   .edge-row span {
     margin: 0;
-    color: #6b7280;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.5;
   }
 
   .detail-body {
     display: grid;
-    gap: 14px;
+    gap: 12px;
   }
 
   .reference-panel {
     padding: 14px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
   .node-grid {
@@ -437,18 +462,18 @@
   .element-card,
   .interaction-card,
   .edge-row {
-    padding: 14px;
+    padding: 12px 14px;
   }
 
   .node-card {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
   .node-card.entry {
-    background: linear-gradient(180deg, rgba(255, 247, 237, 0.94), rgba(255, 255, 255, 0.82));
-    border-color: rgba(180, 83, 9, 0.32);
+    border-color: var(--accent);
+    border-top-width: 4px;
   }
 
   .edge-row,
@@ -457,6 +482,8 @@
     flex-wrap: wrap;
     gap: 10px;
     align-items: center;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
   }
 
   .element-card {
@@ -477,12 +504,21 @@
   .interaction-card code {
     white-space: pre-wrap;
     word-break: break-word;
-    color: #7c2d12;
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
   }
 
   .empty-detail {
-    padding: 24px;
-    color: #7c2d12;
+    padding: 22px;
+    border-style: dashed;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
   }
 
   @media (max-width: 1100px) {

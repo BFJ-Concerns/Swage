@@ -249,17 +249,24 @@
 </div>
 
 <style>
-  /* ---- Container ---------------------------------------------------------- */
+  /*
+    Riso conversation surface. Messages are not bubbles in the design — they
+    are short ink-coloured passages prefixed by an uppercased "WHO" eyebrow,
+    bordered with a single coloured rule on the left:
+      USER       → fluoro orange rule + faint orange wash
+      ASSISTANT  → ink rule + faint ink wash
+      TOOL       → dashed orange rule + transparent (mono type)
+  */
 
   .message-display {
     flex: 1;
     overflow-y: auto;
-    padding: 16px;
+    padding: 18px 22px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    /* Prevents flex item from overflowing its parent at constrained heights. */
+    gap: 14px;
     min-height: 0;
+    background: var(--paper);
   }
 
   /* ---- Empty state -------------------------------------------------------- */
@@ -269,8 +276,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #999;
-    font-size: 0.875rem;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
   }
 
   .empty-state p {
@@ -281,49 +292,58 @@
 
   .message {
     display: flex;
-    /* Limit bubble width so long messages stay readable. */
-    max-width: 80%;
+    flex-direction: column;
+    gap: 4px;
   }
 
-  .message.user {
-    /* Right-align the user's messages. */
-    align-self: flex-end;
-    flex-direction: row-reverse;
+  /* The "WHO" eyebrow sits above the bubble. We don't have a separate slot in
+     the markup, so the bubble's pseudo-element shows the role label.
+     User messages get the orange ink colour; assistant messages stay navy. */
+
+  .message::before {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
   }
 
-  .message.assistant {
-    align-self: flex-start;
+  .message.user::before {
+    content: "You";
+    color: var(--ink-orange);
   }
 
-  /* ---- Message bubbles ---------------------------------------------------- */
+  .message.assistant::before {
+    content: "Assistant";
+  }
+
+  /* ---- Message content ---------------------------------------------------- */
 
   .message-content {
     padding: 10px 14px;
-    border-radius: 12px;
-    font-size: 0.9rem;
-    line-height: 1.5;
+    border-left: 3px solid var(--ink);
+    background: rgba(14, 59, 102, 0.06);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink);
     word-break: break-word;
+    max-width: 80ch;
   }
 
   .user-content {
-    background: #1a1a1a;
-    color: #fff;
-    /* Rounded on all sides except the bottom-right, which points toward the user. */
-    border-radius: 12px 12px 2px 12px;
-    /* Preserve intentional newlines — the user controls their own line breaks. */
+    border-left-color: var(--ink-orange);
+    background: rgba(240, 106, 58, 0.08);
+    /* User-written text preserves manual line breaks. */
     white-space: pre-wrap;
   }
 
-  .assistant-content {
-    background: #f5f5f5;
-    color: #222;
-    border-radius: 2px 12px 12px 12px;
-  }
-
   .assistant-content.interrupted {
-    /* Amber left border flags that the response didn't complete normally. */
-    border-left: 3px solid #d97706;
-    padding-left: 11px;
+    /* Dashed orange rule replaces the solid ink rule when a turn was cut. */
+    border-left-style: dashed;
+    border-left-color: var(--accent);
   }
 
   /* ---- Streaming cursor --------------------------------------------------- */
@@ -331,27 +351,25 @@
   .cursor {
     display: inline-block;
     animation: blink 1s step-start infinite;
-    color: #555;
-    font-size: 0.8em;
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
   }
 
   @keyframes blink {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0;
-    }
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
   }
 
   /* ---- Interrupted turn notice -------------------------------------------- */
 
   .interrupted-notice {
     margin: 8px 0 0;
-    font-size: 0.75rem;
-    color: #d97706;
-    font-style: italic;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
   }
 
   /* ---- Inline turn error -------------------------------------------------- */
@@ -360,14 +378,17 @@
     align-self: flex-start;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     padding: 8px 12px;
-    background: #fff8f0;
-    border: 1px solid #fcd9a0;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    color: #92400e;
-    max-width: 80%;
+    background: rgba(240, 106, 58, 0.1);
+    border-left: 3px solid var(--accent);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
+    max-width: 80ch;
   }
 
   .error-icon {
@@ -375,7 +396,7 @@
   }
 
   /* ---- Markdown body ------------------------------------------------------ */
-  /* Scoped via :global() to reach into the {@html} output. */
+  /* Scoped via :global() to reach into {@html} output. */
 
   .markdown-body :global(p) {
     margin: 0 0 0.75em;
@@ -390,9 +411,18 @@
   .markdown-body :global(h3),
   .markdown-body :global(h4) {
     margin: 0.75em 0 0.25em;
-    font-weight: 600;
-    line-height: 1.25;
+    font-family: var(--font-display);
+    font-weight: 400;
+    line-height: 1.1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
   }
+
+  .markdown-body :global(h1) { font-size: 22px; }
+  .markdown-body :global(h2) { font-size: 19px; }
+  .markdown-body :global(h3) { font-size: 17px; }
+  .markdown-body :global(h4) { font-size: 15px; }
 
   .markdown-body :global(ul),
   .markdown-body :global(ol) {
@@ -405,45 +435,44 @@
   }
 
   .markdown-body :global(code) {
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      "SF Mono",
-      Menlo,
-      monospace;
+    font-family: var(--font-mono);
     font-size: 0.85em;
-    background: rgba(0, 0, 0, 0.06);
-    padding: 0.1em 0.3em;
-    border-radius: 3px;
+    background: rgba(240, 106, 58, 0.12);
+    border: 1px solid rgba(240, 106, 58, 0.45);
+    padding: 0.05em 0.35em;
+    color: var(--ink-orange);
   }
 
   .markdown-body :global(pre) {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    border-radius: 8px;
+    background: var(--paper-deep);
+    color: var(--ink);
+    border-left: 3px solid var(--ink);
     padding: 12px 16px;
     overflow-x: auto;
-    margin: 0.5em 0;
+    margin: 0.6em 0;
+    font-family: var(--font-mono);
   }
 
   .markdown-body :global(pre code) {
-    /* Code inside pre: inherit colour from hljs, remove inline-code background. */
     background: none;
+    border: none;
     padding: 0;
-    font-size: 0.85em;
     color: inherit;
+    font-size: 0.85em;
   }
 
   .markdown-body :global(blockquote) {
-    border-left: 3px solid #d0d0d0;
+    border-left: 3px dashed var(--accent);
     margin: 0.5em 0;
     padding-left: 1em;
-    color: #666;
+    color: var(--ink-soft);
   }
 
   .markdown-body :global(a) {
-    color: #6366f1;
+    color: var(--ink-orange);
     text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
   }
 
   .markdown-body :global(table) {
@@ -451,17 +480,23 @@
     width: 100%;
     margin: 0.5em 0;
     font-size: 0.875em;
+    border: 1px solid var(--ink);
   }
 
   .markdown-body :global(th),
   .markdown-body :global(td) {
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--rule-soft);
     padding: 6px 10px;
     text-align: left;
   }
 
   .markdown-body :global(th) {
-    background: #f5f5f5;
-    font-weight: 600;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 </style>

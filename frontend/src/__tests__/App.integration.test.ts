@@ -243,6 +243,18 @@ function makeLensRuntime(
         prominent_team_ids: ["workspace-core"],
         source_kind: "built_in",
       },
+      {
+        // Operator-led lens — the new shell reaches the operator surface by
+        // selecting a lens whose default_surface is "operator", rather than
+        // by switching surface tabs within a lens.
+        id: "operator",
+        title: "Operator lens",
+        summary: "Operator-first view",
+        default_surface: "operator",
+        ui_modules: ["operator", "conversation"],
+        prominent_team_ids: [],
+        source_kind: "built_in",
+      },
     ],
   };
 }
@@ -362,8 +374,11 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(document.body.textContent).toContain("Desktop shell");
-    expect(document.body.textContent).toContain("Managed gateway");
+    // The riso shell condenses runtime context into a top-bar "stamp": the
+    // managed/remote token replaces the older verbose "Desktop shell" panel.
+    const stamp = document.querySelector(".topbar .stamp");
+    expect(stamp).not.toBeNull();
+    expect(stamp!.textContent).toContain("MANAGED");
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
@@ -424,7 +439,7 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector(".send-btn") as HTMLButtonElement | null;
+    const sendButton = document.querySelector(".action.send") as HTMLButtonElement | null;
     expect(sendButton).not.toBeNull();
 
     flushSync(() => sendButton!.click());
@@ -435,7 +450,7 @@ describe("App", () => {
       content: "Hello from the app",
     });
     expect(document.querySelector(".message-display")?.textContent).toContain("Hello from the app");
-    expect(document.querySelector(".stop-btn")).not.toBeNull();
+    expect(document.querySelector(".action.stop")).not.toBeNull();
 
     websocketHarness.fireEvent({ type: "token", content: "Streamed " });
     websocketHarness.fireEvent({ type: "token", content: "reply." });
@@ -449,7 +464,7 @@ describe("App", () => {
     });
     await settleUi();
 
-    expect(document.querySelector(".stop-btn")).toBeNull();
+    expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
@@ -458,22 +473,30 @@ describe("App", () => {
 
     vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
+    );
+    // Override the default beforeEach mock (which returns "builder") so
+    // selecting the Operator lens lands us in operator mode.
+    vi.mocked(lensApi.updateLensRuntime).mockResolvedValueOnce(
+      makeLensRuntime("operator"),
     );
 
     component = mount(App, { target: document.body });
     await settleUi();
 
-    const operatorButton = Array.from(
-      document.querySelectorAll(".toggle-btn"),
-    ).find((button) => button.textContent?.includes("Operator")) as
+    // Lens tabs sit in the top bar with class .lens. We look for the lens
+    // whose title resolves to "Operator" (after stripping the trailing "lens"
+    // word in AppLayout).
+    const operatorLens = Array.from(
+      document.querySelectorAll(".topbar .lens"),
+    ).find((button) => button.textContent?.toLowerCase().includes("operator")) as
       | HTMLButtonElement
       | undefined;
 
-    expect(operatorButton).toBeDefined();
+    expect(operatorLens).toBeDefined();
 
-    flushSync(() => operatorButton!.click());
+    flushSync(() => operatorLens!.click());
     await waitForText("Live control surface for the running gateway");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
@@ -502,55 +525,18 @@ describe("App", () => {
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
+    // Bench name still surfaces in the bench head.
     expect(document.body.textContent).toContain("Workbench");
-    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+    // Operator overview is no longer pre-fetched on mount — the rail that
+    // displayed it was dropped. The operator lens loads its own data.
   });
 
-  it("keeps materials, shared references, and operator pulse visible in the workbench rail", async () => {
-    const defaultBench = makeBench({ name: "Workbench" });
-
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-rail", message_preview: "Live thread" }),
-    ]);
-    vi.mocked(materialsApi.listBenchMaterials).mockResolvedValueOnce([
-      {
-        id: "mat-1",
-        scope_kind: "bench",
-        session_id: null,
-        bench_id: defaultBench.id,
-        source_kind: "manual",
-        source_attachment_id: null,
-        status: "active",
-        title: "Workspace brief",
-        relative_path: "shared/brief.md",
-        absolute_path: "/tmp/default/shared/brief.md",
-        mime_type: "text/markdown",
-        content_text: "brief",
-        created_at: "2026-04-07T12:00:00Z",
-        updated_at: "2026-04-07T12:01:00Z",
-        archived_at: null,
-      },
-    ]);
-    vi.mocked(materialsApi.listSessionMaterials).mockResolvedValueOnce([]);
-    vi.mocked(builderApi.listSharedReferences).mockResolvedValueOnce([
-      {
-        kind: "team_topology",
-        id: "default",
-        title: "Workspace team",
-        subtitle: "default lead",
-        updated_at: "2026-04-07T12:01:00Z",
-      },
-    ]);
-
-    component = mount(App, { target: document.body });
-    await waitForText("Capture material");
-
-    expect(document.body.textContent).toContain("Capture material");
-    expect(document.body.textContent).toContain("Workspace brief");
-    expect(document.body.textContent).toContain("Workspace team");
-    expect(document.body.textContent).toContain("Operator pulse");
-  });
+  // The right-hand WorkbenchRail (materials / shared references / operator
+  // pulse) was dropped per Surfaces.md ("Reference rail dropped; shared
+  // reference objects sit in the module stage"). The test that exercised the
+  // rail's contents is no longer applicable to the riso shell. When stage
+  // modules grow to expose those views, equivalent coverage should be added
+  // there.
 
   it("persists a lens switch and changes the available primary surface", async () => {
     const defaultBench = makeBench();
@@ -561,19 +547,18 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    const builderButton = Array.from(
-      document.querySelectorAll(".toggle-btn"),
-    ).find((button) => button.textContent?.includes("Builder")) as
+    const builderLens = Array.from(
+      document.querySelectorAll(".topbar .lens"),
+    ).find((button) => button.textContent?.toLowerCase().includes("builder")) as
       | HTMLButtonElement
       | undefined;
 
-    expect(builderButton).toBeDefined();
+    expect(builderLens).toBeDefined();
 
-    flushSync(() => builderButton!.click());
+    flushSync(() => builderLens!.click());
     await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
-    expect(document.body.textContent).toContain("Builder deck");
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );

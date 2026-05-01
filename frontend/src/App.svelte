@@ -132,6 +132,64 @@
   let availableLenses = $state<LensDescriptor[]>([]);
   const desktopRuntime = getDesktopRuntime();
 
+  // ---------------------------------------------------------------------------
+  // Theme — light (riso) / dark (cyanotype) / system
+  // ---------------------------------------------------------------------------
+  // The chosen mode is what the user picked in the toggle; the resolved theme
+  // is what's actually painted (system mode resolves through the OS preference).
+
+  // Type lives in a shared module so child components type their props the
+  // same way without round-tripping through a Svelte instance script.
+  type ThemeMode = import("./lib/theme").ThemeMode;
+  const THEME_KEY = "swage:theme";
+
+  function readStoredTheme(): ThemeMode {
+    if (typeof localStorage === "undefined") return "system";
+    const value = localStorage.getItem(THEME_KEY);
+    return value === "light" || value === "dark" || value === "system" ? value : "system";
+  }
+
+  let themeMode = $state<ThemeMode>(readStoredTheme());
+
+  function resolveTheme(mode: ThemeMode): "theme-riso" | "theme-cyanotype" {
+    if (mode === "light") return "theme-riso";
+    if (mode === "dark") return "theme-cyanotype";
+    // System: follow the OS preference. matchMedia is unavailable in some
+    // headless test environments, so fall back to light.
+    if (typeof window === "undefined" || !window.matchMedia) return "theme-riso";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "theme-cyanotype"
+      : "theme-riso";
+  }
+
+  function applyTheme(mode: ThemeMode): void {
+    const next = resolveTheme(mode);
+    document.body.classList.remove("theme-riso", "theme-cyanotype");
+    document.body.classList.add(next);
+  }
+
+  function setThemeMode(mode: ThemeMode): void {
+    themeMode = mode;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(THEME_KEY, mode);
+    }
+    applyTheme(mode);
+  }
+
+  onMount(() => {
+    applyTheme(themeMode);
+
+    // Re-resolve when the OS theme changes, but only while in "system" mode —
+    // an explicit light/dark choice should stick regardless of OS toggle.
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (themeMode === "system") applyTheme("system");
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  });
+
   function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
     return availableLenses.find((lens) => lens.id === lensId);
   }
@@ -279,6 +337,8 @@
     onRefreshLenses={refreshLensRuntime}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
+    {themeMode}
+    onSelectTheme={setThemeMode}
   />
 
   {#if notFound}
@@ -303,11 +363,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #999;
-    font-size: 0.9rem;
+    background: var(--paper);
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
   }
 
   /* ---- Error screen --------------------------------------------------------- */
+  /*
+    Riso treatment: paper background, navy display heading, mono detail line,
+    flat ink-bordered Retry button.
+  */
 
   .error-screen {
     width: 100%;
@@ -316,38 +386,54 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 12px;
+    padding: 32px;
+    background: var(--paper);
+    color: var(--ink);
   }
 
   .error-heading {
-    font-weight: 600;
-    color: #333;
-    font-size: 1rem;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 32px;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink);
     margin: 0;
   }
 
   .error-detail {
-    color: #666;
-    font-size: 0.875rem;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
     margin: 0;
   }
 
   .error-screen button {
-    margin-top: 12px;
-    padding: 8px 20px;
-    border: 1px solid #d0d0d0;
-    border-radius: 8px;
-    background: #fff;
-    font-size: 0.875rem;
+    margin-top: 8px;
+    padding: 8px 18px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-display);
+    font-size: 16px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     cursor: pointer;
   }
 
   .error-screen button:hover {
-    background: #f5f5f5;
+    background: var(--ink);
+    color: var(--paper);
   }
 
   /* ---- Not-found notice ----------------------------------------------------- */
-  /* Fixed banner at the bottom — visible over the layout without displacing it. */
+  /* Fluoro-orange bar pinned to the bottom — keys with the alert banner. */
 
   .not-found-notice {
     position: fixed;
@@ -358,13 +444,15 @@
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    background: #fff8e1;
-    border: 1px solid #ffe082;
-    border-radius: 8px;
-    font-size: 0.875rem;
-    color: #5d4037;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 0.1);
-    /* Keep above the layout content. */
+    background: var(--accent);
+    color: var(--paper);
+    border: 2px solid var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     z-index: 100;
   }
 
@@ -372,13 +460,14 @@
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 0.8rem;
-    color: #8d6e63;
-    padding: 0;
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-size: 14px;
     line-height: 1;
+    padding: 0;
   }
 
   .dismiss:hover {
-    color: #5d4037;
+    opacity: 0.7;
   }
 </style>
