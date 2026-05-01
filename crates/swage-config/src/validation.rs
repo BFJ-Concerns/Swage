@@ -327,12 +327,191 @@ fn check_field_semantics(
                 ));
             }
         }
+        ("communication", "context_transfer") => {
+            if let Value::Table(table) = value {
+                problems.extend(validate_context_transfer_table(
+                    table, file_path, field_path,
+                ));
+            }
+        }
         ("tools", "python_execute") => {
             if let Value::Table(table) = value {
                 problems.extend(validate_python_execute_table(table, file_path, field_path));
             }
         }
         _ => {}
+    }
+
+    problems
+}
+
+fn validate_context_transfer_table(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+) -> Vec<ConfigProblem> {
+    let mut problems = validate_context_transfer_policy(table, file_path, field_path, true);
+
+    if let Some(Value::Table(targets)) = table.get("targets") {
+        for (target, value) in targets {
+            let target_path = format!("{field_path}.targets.{target}");
+            match value {
+                Value::Table(target_table) => {
+                    problems.extend(validate_context_transfer_policy(
+                        target_table,
+                        file_path,
+                        &target_path,
+                        false,
+                    ));
+                }
+                other => problems.push(make_problem(
+                    file_path,
+                    Some(target_path),
+                    ConfigProblemKind::TypeError {
+                        expected: "table".to_string(),
+                        found: toml_type_name(other).to_string(),
+                    },
+                )),
+            }
+        }
+    }
+
+    problems
+}
+
+fn validate_context_transfer_policy(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+    allow_targets: bool,
+) -> Vec<ConfigProblem> {
+    const POLICY_FIELDS: &[&str] = &["mode", "allowed_fields", "summary_budget"];
+    const VALID_MODES: &[&str] = &["none", "explicit", "summary"];
+    const VALID_FIELDS: &[&str] = &["system", "user", "assistant"];
+
+    let mut problems = Vec::new();
+
+    for (name, value) in table {
+        let is_known_field =
+            POLICY_FIELDS.contains(&name.as_str()) || allow_targets && name == "targets";
+        if !is_known_field {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("{field_path}.{name}")),
+                ConfigProblemKind::UnknownField {
+                    section: field_path.to_string(),
+                    name: name.clone(),
+                },
+            ));
+        }
+
+        match (name.as_str(), value) {
+            ("mode", Value::String(mode)) if !VALID_MODES.contains(&mode.as_str()) => {
+                problems.push(make_problem(
+                    file_path,
+                    Some(format!("{field_path}.mode")),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "unknown context transfer mode '{mode}'; expected one of: none, explicit, summary"
+                        ),
+                    },
+                ));
+            }
+            ("mode", Value::String(_)) => {}
+            ("mode", other) => problems.push(make_problem(
+                file_path,
+                Some(format!("{field_path}.mode")),
+                ConfigProblemKind::TypeError {
+                    expected: "string".to_string(),
+                    found: toml_type_name(other).to_string(),
+                },
+            )),
+            ("allowed_fields", Value::Array(fields)) => {
+                for (index, field) in fields.iter().enumerate() {
+                    match field {
+                        Value::String(field) if VALID_FIELDS.contains(&field.as_str()) => {}
+                        Value::String(field) => problems.push(make_problem(
+                            file_path,
+                            Some(format!("{field_path}.allowed_fields[{index}]")),
+                            ConfigProblemKind::SemanticError {
+                                message: format!(
+                                    "unknown context transfer field '{field}'; expected one of: system, user, assistant"
+                                ),
+                            },
+                        )),
+                        other => problems.push(make_problem(
+                            file_path,
+                            Some(format!("{field_path}.allowed_fields[{index}]")),
+                            ConfigProblemKind::TypeError {
+                                expected: "string".to_string(),
+                                found: toml_type_name(other).to_string(),
+                            },
+                        )),
+                    }
+                }
+            }
+            ("allowed_fields", other) => problems.push(make_problem(
+                file_path,
+                Some(format!("{field_path}.allowed_fields")),
+                ConfigProblemKind::TypeError {
+                    expected: "array".to_string(),
+                    found: toml_type_name(other).to_string(),
+                },
+            )),
+            ("summary_budget", Value::Integer(raw)) if *raw < 1 => {
+                problems.push(make_problem(
+                    file_path,
+                    Some(format!("{field_path}.summary_budget")),
+                    ConfigProblemKind::SemanticError {
+                        message: format!("summary_budget must be a positive integer, got {raw}"),
+                    },
+                ));
+            }
+            ("summary_budget", Value::Integer(_)) => {}
+            ("summary_budget", other) => problems.push(make_problem(
+                file_path,
+                Some(format!("{field_path}.summary_budget")),
+                ConfigProblemKind::TypeError {
+                    expected: "integer".to_string(),
+                    found: toml_type_name(other).to_string(),
+                },
+            )),
+            ("targets", Value::Table(_)) if allow_targets => {}
+            ("targets", other) if allow_targets => problems.push(make_problem(
+                file_path,
+                Some(format!("{field_path}.targets")),
+                ConfigProblemKind::TypeError {
+                    expected: "table".to_string(),
+                    found: toml_type_name(other).to_string(),
+                },
+            )),
+            _ => {}
+        }
+    }
+
+    let mode = table.get("mode").and_then(Value::as_str).unwrap_or("none");
+
+    if mode != "explicit"
+        && let Some(Value::Array(fields)) = table.get("allowed_fields")
+        && !fields.is_empty()
+    {
+        problems.push(make_problem(
+            file_path,
+            Some(format!("{field_path}.allowed_fields")),
+            ConfigProblemKind::SemanticError {
+                message: "allowed_fields is only valid when mode is explicit".to_string(),
+            },
+        ));
+    }
+
+    if mode != "summary" && table.contains_key("summary_budget") {
+        problems.push(make_problem(
+            file_path,
+            Some(format!("{field_path}.summary_budget")),
+            ConfigProblemKind::SemanticError {
+                message: "summary_budget is only valid when mode is summary".to_string(),
+            },
+        ));
     }
 
     problems
@@ -963,6 +1142,92 @@ timeout = 10
         assert!(
             problems.is_empty(),
             "valid [context] config should produce no errors, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn context_transfer_rejects_fields_for_none_mode() {
+        let toml = r#"
+[communication.context_transfer]
+mode = "none"
+allowed_fields = ["system"]
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref()
+                    == Some("communication.context_transfer.allowed_fields")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "allowed_fields should be rejected outside explicit mode, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn context_transfer_rejects_summary_budget_for_explicit_mode() {
+        let toml = r#"
+[communication.context_transfer]
+mode = "explicit"
+allowed_fields = ["system"]
+summary_budget = 512
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref()
+                    == Some("communication.context_transfer.summary_budget")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "summary_budget should be rejected outside summary mode, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn context_transfer_validates_target_overrides_by_mode() {
+        let toml = r#"
+[communication.context_transfer]
+mode = "none"
+
+[communication.context_transfer.targets.reviewer]
+mode = "summary"
+allowed_fields = ["user"]
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref()
+                    == Some("communication.context_transfer.targets.reviewer.allowed_fields")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+            }),
+            "target allowed_fields should be rejected outside explicit mode, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn context_transfer_rejects_nested_target_tables() {
+        let toml = r#"
+[communication.context_transfer]
+mode = "none"
+
+[communication.context_transfer.targets.reviewer]
+mode = "summary"
+
+[communication.context_transfer.targets.reviewer.targets.writer]
+mode = "explicit"
+allowed_fields = ["user"]
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref()
+                    == Some("communication.context_transfer.targets.reviewer.targets")
+                    && matches!(&problem.kind, ConfigProblemKind::UnknownField { name, .. } if name == "targets")
+            }),
+            "nested target tables should be rejected as unknown, got: {problems:?}"
         );
     }
 

@@ -37,7 +37,10 @@ pub enum Protocol {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
     pub protocol: Protocol,
-    pub api_key_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_secret_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
     pub base_url: Option<String>,
 }
 
@@ -45,7 +48,8 @@ impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
             protocol: Protocol::Anthropic,
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            api_key_secret_ref: None,
+            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             base_url: None,
         }
     }

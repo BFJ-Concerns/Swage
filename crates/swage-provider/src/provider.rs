@@ -15,7 +15,9 @@ use swage_core::{
 ///
 /// The API key is `Option<String>` to support keyless local endpoints (e.g.
 /// Ollama running on localhost). Remote providers populate it from an
-/// environment variable during resolution.
+/// configuration before provider construction. Providers should not know where
+/// a credential came from; that keeps secret access in the governed runtime
+/// surface that can validate and audit it.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub api_key: Option<String>,
@@ -55,18 +57,25 @@ impl
 {
     type Error = ProviderError;
 
-    /// Resolve runtime provider config from decoupled provider and model entries.
+    /// Legacy conversion path for callers that have not moved credential
+    /// resolution into the gateway yet.
     ///
-    /// Reads the API key from the environment variable named by the provider.
-    /// Returns `ProviderError::Auth` if the variable is not set.
+    /// New gateway-owned provider construction resolves `api_key_secret_ref`
+    /// through `SecretManager` and calls `ProviderConfig::new` or `keyless`.
     fn try_from(
         (provider, model): (
             &swage_config::ProviderEndpointConfig,
             &swage_config::ModelEndpointConfig,
         ),
     ) -> Result<Self, Self::Error> {
-        let api_key = std::env::var(&provider.api_key_env).map_err(|_| ProviderError::Auth {
-            provider: format!("environment variable '{}' is not set", provider.api_key_env),
+        let api_key_env = provider
+            .api_key_env
+            .as_deref()
+            .ok_or_else(|| ProviderError::Auth {
+                provider: "provider has no api_key_env fallback configured".into(),
+            })?;
+        let api_key = std::env::var(api_key_env).map_err(|_| ProviderError::Auth {
+            provider: format!("environment variable '{api_key_env}' is not set"),
         })?;
 
         // Derive the provider base URL from the configured protocol.
@@ -329,7 +338,8 @@ mod tests {
         // Use a name that is extremely unlikely to be set.
         let provider = swage_config::ProviderEndpointConfig {
             protocol: swage_config::Protocol::Anthropic,
-            api_key_env: "TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into(),
+            api_key_secret_ref: None,
+            api_key_env: Some("TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into()),
             base_url: None,
         };
         let model = swage_config::ModelEndpointConfig {
@@ -351,7 +361,8 @@ mod tests {
     fn provider_config_try_from_resolves_env_var() {
         let provider = swage_config::ProviderEndpointConfig {
             protocol: swage_config::Protocol::Anthropic,
-            api_key_env: "TEVIK_TEST_API_KEY_XYZ".into(),
+            api_key_secret_ref: None,
+            api_key_env: Some("TEVIK_TEST_API_KEY_XYZ".into()),
             base_url: Some("http://127.0.0.1:11434/v1".into()),
         };
         let model = swage_config::ModelEndpointConfig {

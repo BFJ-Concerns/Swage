@@ -10,17 +10,6 @@
 use serde_json::Value;
 use swage_config::OutputConfig;
 
-/// Resolved output schema and retry settings for a delegation.
-///
-/// Used when constructing the target Agent via AgentBuilder.
-#[derive(Debug, Clone)]
-pub struct DelegationOutputConfig {
-    /// JSON Schema for validating the target's output. `None` means no validation.
-    pub schema: Option<Value>,
-    /// Maximum number of retry attempts for schema validation.
-    pub max_retries: u32,
-}
-
 /// Resolve the output schema for a delegation.
 ///
 /// Priority order:
@@ -36,7 +25,7 @@ pub struct DelegationOutputConfig {
 pub fn resolve_delegation_schema(
     delegate_payload: &Value,
     target_output_config: &OutputConfig,
-) -> DelegationOutputConfig {
+) -> OutputConfig {
     let delegate_schema = delegate_payload.get("output_schema").cloned();
     let delegate_retries = delegate_payload
         .get("max_retries")
@@ -45,19 +34,19 @@ pub fn resolve_delegation_schema(
 
     if let Some(schema) = delegate_schema {
         // Delegate-specified schema takes precedence.
-        DelegationOutputConfig {
+        OutputConfig {
             schema: Some(schema),
             max_retries: delegate_retries.unwrap_or(target_output_config.max_retries),
         }
     } else if let Some(ref target_schema) = target_output_config.schema {
         // Fall back to target's own config.
-        DelegationOutputConfig {
+        OutputConfig {
             schema: Some(target_schema.clone()),
             max_retries: target_output_config.max_retries,
         }
     } else {
         // Neither specifies a schema — no validation.
-        DelegationOutputConfig {
+        OutputConfig {
             schema: None,
             max_retries: target_output_config.max_retries,
         }

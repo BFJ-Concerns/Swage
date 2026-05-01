@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -1864,6 +1865,8 @@ pub struct SendMessageRequest {
     pub recipient_agent_id: String,
     pub kind: String,
     pub correlation_id: Option<Uuid>,
+    pub bench_id: Option<Uuid>,
+    pub sender_turn_id: Option<Uuid>,
     pub payload: serde_json::Value,
 }
 
@@ -1890,19 +1893,61 @@ pub async fn send_agent_message(
         .kind
         .parse::<MessageKind>()
         .map_err(|e| ApiError::validation(e.to_string()))?;
+    let bench_id = req.bench_id;
 
-    // Store-only path — live dispatch deferred. See BACKLOG.md [fvxd].
+    if kind == MessageKind::Delegate && bench_id.is_none() {
+        return Err(ApiError::validation(
+            "delegate messages require bench_id so execution uses the correct bench configuration"
+                .to_string(),
+        ));
+    }
+
+    // Durable messages are persisted first; delegate messages then start
+    // background execution so the caller can poll the message status.
     let router = MessageRouter::new(state.storage.clone(), None);
+    let sender_agent_id = req.sender_agent_id;
+    let recipient_agent_id = req.recipient_agent_id;
+    let payload = req.payload;
+    let sender_turn_id = req.sender_turn_id;
+
     let msg = router
         .send_message(NewAgentMessage {
-            sender_agent_id: req.sender_agent_id,
-            recipient_agent_id: req.recipient_agent_id,
+            sender_agent_id,
+            recipient_agent_id,
             kind,
             correlation_id: req.correlation_id,
-            payload: req.payload,
+            payload,
         })
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if msg.kind == MessageKind::Delegate {
+        let execution_bench_id = bench_id.expect("delegate bench_id was validated before storage");
+        let state_for_task = state.clone();
+        let msg_for_task = msg.clone();
+        tokio::spawn(async move {
+            let message_id = msg_for_task.id;
+            if let Err(error) = execute_external_delegate_message(
+                state_for_task.clone(),
+                msg_for_task,
+                execution_bench_id,
+                sender_turn_id,
+            )
+            .await
+            {
+                tracing::warn!(error = ?error, "external delegate execution failed");
+                let router = MessageRouter::new(state_for_task.storage.clone(), None);
+                if let Err(fail_error) = router.fail_message(message_id, &error.0.to_string()).await
+                {
+                    tracing::warn!(
+                        message_id = %message_id,
+                        error = ?fail_error,
+                        "failed to mark external delegate message failed"
+                    );
+                }
+            }
+        });
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -1911,6 +1956,126 @@ pub async fn send_agent_message(
             status: msg.status.to_string(),
         }),
     ))
+}
+
+async fn execute_external_delegate_message(
+    state: AppState,
+    delegate_msg: swage_storage::model::AgentMessage,
+    bench_id: Uuid,
+    sender_turn_id: Option<Uuid>,
+) -> Result<(), ApiError> {
+    use std::sync::Arc;
+
+    use swage_agent::{DelegationExecutor, MessageRouter};
+
+    let bench = state
+        .bench_store
+        .get(bench_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("bench", bench_id))?;
+
+    let target_resolved =
+        crate::turn::load_session_config(&state, &bench.slug, &delegate_msg.recipient_agent_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    let target_agent_config = crate::turn::build_agent_config(
+        delegate_msg.recipient_agent_id.clone(),
+        &target_resolved,
+        None,
+    );
+    let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+
+    let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(silent_ws_rx);
+    let dispatcher_build = crate::turn::build_gateway_dispatcher_with_unsandboxed_degradation(
+        &state,
+        crate::turn::GatewayDispatcherRequest {
+            config: &target_resolved,
+            agent_config: &target_agent_config,
+            session_metadata: None,
+            bench_id: Some(bench_id),
+            ws_tx: silent_ws_tx,
+        },
+        "external delegated turn",
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let router = Arc::new(MessageRouter::new(state.storage.clone(), None));
+
+    let executor = DelegationExecutor {
+        storage: state.storage.clone(),
+        provider: state.provider.clone(),
+        hook_registry: state.hook_registry.clone(),
+        leak_detector: None,
+        approval_registrar: Some(crate::turn::build_approval_registrar(
+            state.approval_channels.clone(),
+        )),
+        delegation_handler: Some(Arc::new(crate::turn::GatewayDelegationHandler::new(
+            state.clone(),
+        ))),
+        router: router.clone(),
+        active_delegations: swage_agent::active_delegations(),
+    };
+
+    let result = executor
+        .execute_delegation(
+            &delegate_msg,
+            sender_turn_id,
+            bench_id,
+            target_agent_config,
+            target_context_transfer_config,
+            Some(dispatcher_build.dispatcher),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+    crate::turn::shutdown_sandbox_guard(
+        &dispatcher_build.sandbox_guard,
+        "failed to shut down external delegated sandbox",
+    )
+    .await;
+
+    let result_msg = result.map_err(|error| ApiError::internal(error.to_string()))?;
+    deliver_external_delegate_completion(
+        state.storage.clone(),
+        &router,
+        delegate_msg.id,
+        &result_msg,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn deliver_external_delegate_completion(
+    storage: Arc<dyn swage_storage::store::Storage>,
+    router: &swage_agent::MessageRouter,
+    delegate_message_id: Uuid,
+    result_msg: &swage_storage::model::AgentMessage,
+) -> Result<(), ApiError> {
+    // Deliver the result before completing the delegate. If result delivery
+    // fails, the spawned caller still has a pending delegate it can fail with a
+    // machine-readable status.
+    router
+        .deliver_message(result_msg)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let current_delegate = storage
+        .get_agent_message(delegate_message_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("message", delegate_message_id))?;
+
+    if current_delegate.status == swage_core::MessageStatus::Pending {
+        router
+            .deliver_message(&current_delegate)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+    }
+
+    Ok(())
 }
 
 /// `GET /api/messages/:id` — query message delivery status.
@@ -2421,8 +2586,13 @@ mod tests {
         );
         assert_eq!(turn_rows[0]["turn_id"], turn_id.to_string());
 
+        let default_bench = storage
+            .get_or_create_default()
+            .await
+            .expect("get default bench");
         let sent_message = client
-            .send_agent_message(
+            .send_agent_message_in_bench(
+                default_bench.id,
                 "agent-a",
                 "agent-b",
                 "delegate",
@@ -2436,11 +2606,28 @@ mod tests {
             .expect("message id string")
             .parse::<Uuid>()
             .expect("message id uuid");
-        let message_status = client
-            .get_message_status(message_id)
-            .await
-            .expect("query message status");
-        assert_eq!(message_status["status"], "pending");
+        let message_status = {
+            let mut terminal = None;
+            for _ in 0..50 {
+                let current = client
+                    .get_message_status(message_id)
+                    .await
+                    .expect("query message status");
+                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+                    terminal = Some(current);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            terminal.expect("delegate message should leave pending")
+        };
+        assert!(
+            matches!(
+                message_status["status"].as_str(),
+                Some("delivered" | "failed")
+            ),
+            "delegate execution should transition the message out of pending"
+        );
 
         let session = storage
             .get_session(conversation.id)
@@ -2518,6 +2705,207 @@ mod tests {
         assert_eq!(recovered_turn.state, TurnState::Interrupted);
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_stream_error_fails_original_message() {
+        use swage_client::http::GatewayClient;
+        use swage_core::StreamChunk;
+        use swage_storage::store::AgentMessageStore;
+
+        let provider = Arc::new(MockProvider::new(vec![StreamChunk::Error {
+            message: "delegate stream failed".into(),
+        }]));
+        let storage = Arc::new(MockStorage::new());
+        let (base_url, server, storage) =
+            spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
+
+        let client = GatewayClient::new(&base_url);
+        let default_bench = storage
+            .get_or_create_default()
+            .await
+            .expect("get default bench");
+        let sent_message = client
+            .send_agent_message_in_bench(
+                default_bench.id,
+                "agent-a",
+                "agent-b",
+                "delegate",
+                None,
+                serde_json::json!({ "task": "fail during delegated work" }),
+            )
+            .await
+            .expect("send delegate message through live gateway");
+        let message_id = sent_message["id"]
+            .as_str()
+            .expect("message id string")
+            .parse::<Uuid>()
+            .expect("message id uuid");
+
+        let message_status = {
+            let mut terminal = None;
+            for _ in 0..50 {
+                let current = client
+                    .get_message_status(message_id)
+                    .await
+                    .expect("query message status");
+                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+                    terminal = Some(current);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            terminal.expect("delegate message should leave pending")
+        };
+
+        assert_eq!(message_status["status"], "failed");
+        let stored = storage
+            .get_agent_message(message_id)
+            .await
+            .expect("message lookup")
+            .expect("message exists");
+        assert!(
+            stored
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("delegate stream failed")),
+            "failure reason should include provider stream failure: {:?}",
+            stored.failure_reason
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn post_delegate_message_requires_bench_id_before_persisting() {
+        use swage_storage::store::AgentMessageStore;
+
+        let (router, storage) = make_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/messages")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "sender_agent_id": "agent-a",
+                            "recipient_agent_id": "agent-b",
+                            "kind": "delegate",
+                            "payload": { "task": "summarise" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(resp).await;
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("require bench_id")),
+            "validation error should explain the missing bench context: {body:?}"
+        );
+        assert!(
+            storage
+                .list_pending_for_agent("agent-b")
+                .await
+                .expect("list pending messages")
+                .is_empty(),
+            "ambiguous delegate requests should fail before persistence"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_result_delivery_failure_leaves_delegate_pending() {
+        use swage_agent::MessageRouter;
+        use swage_core::{MessageKind, MessageStatus};
+        use swage_hook::{Hook, HookEvent, HookOutcome, HookRegistration};
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::AgentMessageStore;
+
+        struct BlockResultDeliveryHook;
+
+        #[async_trait::async_trait]
+        impl Hook for BlockResultDeliveryHook {
+            fn name(&self) -> &str {
+                "block-result-delivery"
+            }
+
+            async fn execute(&self, _event: &HookEvent) -> HookOutcome {
+                HookOutcome::Block("result delivery failed".to_string())
+            }
+        }
+
+        fn is_result_delivery(event: &HookEvent) -> bool {
+            matches!(
+                event,
+                HookEvent::MessageDeliver { kind, .. } if kind == &MessageKind::Result.to_string()
+            )
+        }
+
+        let storage = Arc::new(MockStorage::new());
+        let storage_for_router = Arc::clone(&storage) as Arc<dyn Storage>;
+        let normal_router = MessageRouter::new(storage_for_router.clone(), None);
+        let delegate_msg = normal_router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".to_string(),
+                recipient_agent_id: "agent-b".to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "summarise" }),
+            })
+            .await
+            .expect("create delegate message");
+        let result_msg = normal_router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-b".to_string(),
+                recipient_agent_id: "agent-a".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate_msg.id),
+                payload: serde_json::json!({ "result": "done" }),
+            })
+            .await
+            .expect("create result message");
+
+        let mut registry = swage_hook::HookRegistry::new();
+        let mut registration = HookRegistration::new(Arc::new(BlockResultDeliveryHook));
+        registration.event_filter = Some(is_result_delivery);
+        registry.register(registration);
+        let blocking_router =
+            MessageRouter::new(storage_for_router.clone(), Some(Arc::new(registry)));
+
+        let err = deliver_external_delegate_completion(
+            storage_for_router,
+            &blocking_router,
+            delegate_msg.id,
+            &result_msg,
+        )
+        .await
+        .expect_err("result delivery failure should surface");
+        assert!(
+            err.0.to_string().contains("result delivery failed"),
+            "error should explain the result delivery failure: {:?}",
+            err
+        );
+
+        let delegate = storage
+            .get_agent_message(delegate_msg.id)
+            .await
+            .expect("get delegate")
+            .expect("delegate exists");
+        assert_eq!(delegate.status, MessageStatus::Pending);
+        assert_eq!(delegate.failure_reason, None);
+
+        let result = storage
+            .get_agent_message(result_msg.id)
+            .await
+            .expect("get result")
+            .expect("result exists");
+        assert_eq!(result.status, MessageStatus::Failed);
     }
 
     // -----------------------------------------------------------------------

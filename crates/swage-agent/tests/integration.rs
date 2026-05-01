@@ -42,6 +42,65 @@ impl StreamingProvider {
     }
 }
 
+struct CompactionStreamingProvider {
+    stream_rounds: Mutex<Vec<Vec<StreamChunk>>>,
+    last_stream_messages: Mutex<Vec<ChatMessage>>,
+}
+
+impl CompactionStreamingProvider {
+    fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
+        Self {
+            stream_rounds: Mutex::new(rounds.into_iter().rev().collect()),
+            last_stream_messages: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn last_stream_message_count(&self) -> usize {
+        self.last_stream_messages.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CompactionStreamingProvider {
+    fn model_id(&self) -> &str {
+        "compaction-streaming-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: "summary from compacted history".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("streaming tests should not call complete_with_tools()")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        *self.last_stream_messages.lock().unwrap() = request.messages;
+        let chunks = self
+            .stream_rounds
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("mock provider ran out of streaming rounds");
+        Box::pin(stream::iter(chunks))
+    }
+}
+
 #[async_trait]
 impl LlmProvider for StreamingProvider {
     fn model_id(&self) -> &str {
@@ -233,6 +292,88 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
             ..
         } if *turn_id == outbound.turn_id && *input_tokens == 11 && *output_tokens == 7
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_compacts_context_before_provider_stream() {
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(CompactionStreamingProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]));
+    let mut config = AgentConfig::new("agent-a");
+    config.compaction_threshold = swage_agent::CompactionThreshold::MessageCount(3);
+    let agent = AgentBuilder::new()
+        .config(config)
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .build()
+        .expect("agent");
+
+    let mut request = test_request(bench.id, session.id, thread.id, "latest request", None);
+    request.assembled_context = vec![
+        ChatMessage::new(Role::System, "system"),
+        ChatMessage::new(Role::User, "old user"),
+        ChatMessage::new(Role::Assistant, "old assistant"),
+        ChatMessage::new(Role::User, "new user"),
+        ChatMessage::new(Role::Assistant, "new assistant"),
+    ];
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    agent
+        .process_turn_streaming(request, event_tx)
+        .await
+        .expect("streaming turn should succeed");
+
+    assert!(
+        provider.last_stream_message_count() <= 3,
+        "provider should receive compacted context"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(CompactionStreamingProvider::new(vec![]));
+    let mut config = AgentConfig::new("agent-a");
+    config.compaction_threshold = swage_agent::CompactionThreshold::MessageCount(0);
+    let agent = AgentBuilder::new()
+        .config(config)
+        .provider(provider)
+        .storage(storage.clone())
+        .build()
+        .expect("agent");
+
+    let mut request = test_request(bench.id, session.id, thread.id, "latest request", None);
+    request.assembled_context = vec![ChatMessage::new(Role::System, "preserved system prompt")];
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let error = agent
+        .process_turn_streaming(request, event_tx)
+        .await
+        .expect_err("uncompactable context should fail the turn");
+
+    assert!(
+        matches!(error, swage_agent::AgentError::CompactionFailed(_)),
+        "expected compaction failure, got {error:?}"
+    );
+
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turn list");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].state, TurnState::Failed);
+
+    let thread = ThreadStore::get(storage.as_ref(), thread.id)
+        .await
+        .expect("thread lookup")
+        .expect("thread exists");
+    assert_eq!(thread.state, ThreadState::Idle);
 }
 
 #[tokio::test(flavor = "multi_thread")]

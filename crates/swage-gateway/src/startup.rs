@@ -116,9 +116,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         )
     };
 
-    // Step 6: Create the LLM provider from configuration.
-    let provider = create_provider(&config);
-    let voice_provider = create_voice_provider(&config);
+    // Step 6: Create provider clients from governed credential resolution.
+    let startup_secret_manager = crate::secret::SecretManager::new(
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let provider = create_provider(&config, &startup_secret_manager).await;
+    let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
 
     // Step 7: Build the tool dispatch pipeline.
     let tool_dispatcher = build_tool_dispatcher(
@@ -214,8 +217,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     }
 }
 
-fn create_voice_provider(
+async fn create_voice_provider(
     config: &swage_config::ResolvedConfig,
+    secret_manager: &crate::secret::SecretManager,
 ) -> Arc<dyn swage_provider::VoiceProvider> {
     let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
         return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
@@ -223,11 +227,11 @@ fn create_voice_provider(
         ));
     };
     let provider_config =
-        match swage_provider::ProviderConfig::try_from((provider_endpoint, model_endpoint)) {
+        match resolve_provider_config(provider_endpoint, model_endpoint, secret_manager).await {
             Ok(config) => config,
             Err(_) => {
                 return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                    "voice is unavailable because the provider configuration is invalid",
+                    "voice is unavailable because the provider credentials are unavailable",
                 ));
             }
         };
@@ -252,6 +256,57 @@ fn provider_base_url(config: &swage_config::ProviderEndpointConfig) -> &str {
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
     })
+}
+
+async fn resolve_provider_config(
+    provider: &swage_config::ProviderEndpointConfig,
+    model: &swage_config::ModelEndpointConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Result<swage_provider::ProviderConfig, swage_core::ProviderError> {
+    let base_url = provider_base_url(provider).to_string();
+
+    if let Some(reference) = provider.api_key_secret_ref.as_deref() {
+        let resolved = secret_manager.resolve(reference).await.map_err(|error| {
+            swage_core::ProviderError::Auth {
+                provider: format!("failed to resolve provider credential {reference}: {error}"),
+            }
+        })?;
+        if resolved.record.material_kind != "provider_key" {
+            return Err(swage_core::ProviderError::Auth {
+                provider: format!(
+                    "provider credential {reference} has material_kind '{}', expected 'provider_key'",
+                    resolved.record.material_kind
+                ),
+            });
+        }
+        return Ok(swage_provider::ProviderConfig::new(
+            resolved.value,
+            &model.model_id,
+            base_url,
+        ));
+    }
+
+    if let Some(api_key_env) = provider.api_key_env.as_deref() {
+        tracing::warn!(
+            "Provider '{}' is using legacy api_key_env credential resolution. \
+             Store it as a governed provider_key secret and set api_key_secret_ref \
+             to audit credential access.",
+            model.provider_id
+        );
+        let api_key = std::env::var(api_key_env).map_err(|_| swage_core::ProviderError::Auth {
+            provider: format!("environment variable '{api_key_env}' is not set"),
+        })?;
+        return Ok(swage_provider::ProviderConfig::new(
+            api_key,
+            &model.model_id,
+            base_url,
+        ));
+    }
+
+    Ok(swage_provider::ProviderConfig::keyless(
+        &model.model_id,
+        base_url,
+    ))
 }
 
 fn default_provider_model(
@@ -476,7 +531,10 @@ fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<Pat
 }
 
 /// Create the LLM provider from resolved configuration.
-fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provider::LlmProvider> {
+async fn create_provider(
+    config: &swage_config::ResolvedConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
     use swage_provider::builder::ProviderChainBuilder;
     use swage_provider::retry::RetryConfig;
@@ -490,20 +548,21 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
             "no default provider/model pair is configured",
         ));
     };
-    let provider_config = match ProviderConfig::try_from((provider_endpoint, model_endpoint)) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "Provider not fully configured: {e}. \
+    let provider_config =
+        match resolve_provider_config(provider_endpoint, model_endpoint, secret_manager).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Provider not fully configured: {e}. \
                  The server will start, but messaging will fail \
                  until the API key is set."
-            );
-            ProviderConfig::keyless(
-                &model_endpoint.model_id,
-                provider_base_url(provider_endpoint),
-            )
-        }
-    };
+                );
+                ProviderConfig::keyless(
+                    &model_endpoint.model_id,
+                    provider_base_url(provider_endpoint),
+                )
+            }
+        };
 
     let retry = RetryConfig::default();
 
@@ -541,6 +600,7 @@ fn create_provider(config: &swage_config::ResolvedConfig) -> Arc<dyn swage_provi
 mod tests {
     use super::*;
     use swage_config::LogLevel;
+    use swage_storage::store::AuditStore;
 
     // log_level_to_directive must map every LogLevel variant correctly.
     #[test]
@@ -660,6 +720,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_provider_fails_closed_when_default_model_provider_is_missing() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
         let mut config = swage_config::ResolvedConfig::default();
         config
             .models
@@ -668,7 +733,7 @@ mod tests {
             .expect("default model entry")
             .provider_id = "missing-provider".to_string();
 
-        let provider = create_provider(&config);
+        let provider = create_provider(&config, &secret_manager).await;
         let result = provider
             .complete(swage_core::CompletionRequest {
                 messages: vec![],
@@ -686,5 +751,61 @@ mod tests {
             result,
             Err(swage_core::ProviderError::InvalidConfig { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_config_resolves_api_key_from_governed_secret_reference() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        unsafe {
+            std::env::set_var("SWAGE_PROVIDER_SECRET_REF_TEST", "resolved-provider-key");
+        }
+
+        let secret = secret_manager
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Anthropic provider key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "env".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: None,
+                external_reference: Some("SWAGE_PROVIDER_SECRET_REF_TEST".into()),
+            })
+            .await
+            .expect("secret should be created");
+
+        let provider = swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Anthropic,
+            api_key_secret_ref: Some(secret.reference),
+            api_key_env: Some("SHOULD_NOT_BE_READ".into()),
+            base_url: Some("https://provider.invalid".into()),
+        };
+        let model = swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-test".into(),
+            aliases: Vec::new(),
+            context_window: None,
+        };
+
+        let config = resolve_provider_config(&provider, &model, &secret_manager)
+            .await
+            .expect("provider config should resolve from governed secret");
+
+        assert_eq!(config.api_key.as_deref(), Some("resolved-provider-key"));
+        assert_eq!(config.model, "claude-test");
+        assert_eq!(config.base_url, "https://provider.invalid");
+
+        let audit_events = storage.list_audit_events().await.expect("audit events");
+        assert!(
+            audit_events
+                .iter()
+                .any(|event| event.event_kind == "accessed"),
+            "secret access should be audited"
+        );
     }
 }

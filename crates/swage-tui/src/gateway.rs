@@ -272,7 +272,10 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
-        extract::{Path, State, WebSocketUpgrade},
+        extract::{
+            Path, State, WebSocketUpgrade,
+            ws::{CloseFrame, Message, close_code},
+        },
         http::StatusCode,
         response::IntoResponse,
         routing::{get, post},
@@ -357,6 +360,12 @@ mod tests {
                 .unwrap()
                 .push(conversation_id);
             let _ = socket.recv().await;
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: close_code::NORMAL,
+                    reason: "test close".into(),
+                })))
+                .await;
         })
     }
 
@@ -536,6 +545,25 @@ mod tests {
         assert_eq!(created.len(), 2);
         assert_eq!(created[0], first_conversation_id);
         assert_eq!(created[1], second_conversation_id);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clean_websocket_close_is_reported_for_reconnect_path() {
+        let (base_url, server, _state) = spawn_test_gateway(TestGatewayState::ok()).await;
+        let mut mgr = ConnectionManager::new(base_url);
+        let bench_id = Uuid::new_v4();
+
+        mgr.connect_for_bench(bench_id)
+            .await
+            .expect("initial connection should succeed");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), mgr.next_event())
+            .await
+            .expect("clean close should be observed")
+            .expect("clean close should not be an error");
+
+        assert!(event.is_none(), "clean close should return Ok(None)");
 
         server.abort();
     }

@@ -250,36 +250,47 @@ enum DispatchError {
 /// Returns `Err(DispatchError::NotFound)` when the assembly file is absent or
 /// no runner is provided. Returns `Err(DispatchError::ExecutionFailed)` on
 /// Python syntax errors, runtime exceptions, or timeout.
+struct DispatchAssemblyRequest<'a> {
+    name: &'a str,
+    agent_id: &'a str,
+    elements: &'a [Box<dyn ContextElement>],
+    config: &'a ContextConfig,
+    tokeniser: &'a dyn Tokeniser,
+    search_levels: &'a [(HierarchyLevel, &'a Path)],
+    provider: &'a dyn LlmProvider,
+    python_runner: Option<&'a dyn PythonAssemblyRunner>,
+}
+
 async fn dispatch_assembly(
-    name: &str,
-    elements: &[Box<dyn ContextElement>],
-    config: &ContextConfig,
-    tokeniser: &dyn Tokeniser,
-    search_levels: &[(HierarchyLevel, &Path)],
-    provider: &dyn LlmProvider,
-    python_runner: Option<&dyn PythonAssemblyRunner>,
+    request: DispatchAssemblyRequest<'_>,
 ) -> Result<AssemblyOutput, DispatchError> {
-    match name {
-        "default" | "" => Ok(default_assembly(elements, config, tokeniser)),
+    match request.name {
+        "default" | "" => Ok(default_assembly(
+            request.elements,
+            request.config,
+            request.tokeniser,
+        )),
         _ => {
             let start = Instant::now();
 
             // Locate the Python file in the config hierarchy.
-            let resolved = resolve_assembly(name, search_levels).ok_or(DispatchError::NotFound)?;
+            let resolved = resolve_assembly(request.name, request.search_levels)
+                .ok_or(DispatchError::NotFound)?;
 
             // A runner is required for Python execution. When none is provided
             // (e.g. in test contexts without the Python crate), treat as not-found
             // and allow the fail-open fallback to take over.
-            let runner = python_runner.ok_or(DispatchError::NotFound)?;
+            let runner = request.python_runner.ok_or(DispatchError::NotFound)?;
 
-            let timeout = Duration::from_secs(config.timeout);
+            let timeout = Duration::from_secs(request.config.timeout);
             // When no budget is configured, pass usize::MAX so the Python side
             // sees an effectively unlimited budget.
-            let budget = config.budget.unwrap_or(usize::MAX);
-            let model = provider.model_id().to_string();
+            let budget = request.config.budget.unwrap_or(usize::MAX);
+            let model = request.provider.model_id().to_string();
 
             // Convert borrowed paths to owned for the runner.
-            let owned_levels: Vec<(HierarchyLevel, PathBuf)> = search_levels
+            let owned_levels: Vec<(HierarchyLevel, PathBuf)> = request
+                .search_levels
                 .iter()
                 .map(|(level, path)| (level.clone(), path.to_path_buf()))
                 .collect();
@@ -291,9 +302,9 @@ async fn dispatch_assembly(
                     timeout,
                     budget,
                     &model,
-                    "", // agent_id: not available in this context
-                    elements,
-                    tokeniser,
+                    request.agent_id,
+                    request.elements,
+                    request.tokeniser,
                     owned_levels,
                 )
                 .map_err(|err| DispatchError::ExecutionFailed {
@@ -306,7 +317,7 @@ async fn dispatch_assembly(
             if py_result.messages.is_empty() {
                 return Err(DispatchError::ExecutionFailed {
                     error_kind: "invalid_output".to_string(),
-                    message: format!("assembly '{name}' produced an empty message list"),
+                    message: format!("assembly '{}' produced an empty message list", request.name),
                 });
             }
 
@@ -314,21 +325,25 @@ async fn dispatch_assembly(
             // history_older() calls that specified a strategy).
             let executor = CompactionExecutor::new();
             let compaction_results = executor
-                .execute_pending(py_result.pending_compactions, provider)
+                .execute_pending(py_result.pending_compactions, request.provider)
                 .await;
 
             // Substitute compacted message sequences back into the output.
             let assembled = substitute_compacted(py_result.messages, &compaction_results);
 
-            let compaction_applied = build_compaction_records(compaction_results, tokeniser);
-            let total_tokens = tokeniser.count_messages(&assembled);
-            let budget_remaining = config.budget.map(|b| b as isize - total_tokens as isize);
+            let compaction_applied =
+                build_compaction_records(compaction_results, request.tokeniser);
+            let total_tokens = request.tokeniser.count_messages(&assembled);
+            let budget_remaining = request
+                .config
+                .budget
+                .map(|b| b as isize - total_tokens as isize);
 
             let report = AssemblyReport {
-                assembly_name: name.to_string(),
+                assembly_name: request.name.to_string(),
                 elements: py_result.element_reports,
                 total_tokens,
-                budget: config.budget,
+                budget: request.config.budget,
                 budget_remaining,
                 compaction_applied,
                 warnings: py_result.warnings,
@@ -452,18 +467,44 @@ pub async fn assemble(
     provider: &dyn LlmProvider,
     python_runner: Option<&dyn PythonAssemblyRunner>,
 ) -> AssemblyOutput {
-    let assembly_name = config.assembly.clone();
-    let timeout_duration = Duration::from_secs(config.timeout);
-
-    let run = dispatch_assembly(
-        &assembly_name,
+    assemble_for_agent(
+        "",
         elements,
         config,
         tokeniser,
         search_levels,
         provider,
         python_runner,
-    );
+    )
+    .await
+}
+
+/// Assemble context for a specific agent.
+///
+/// Named Python assemblies receive `agent_id` in their runtime context so
+/// assembly code can make agent-aware decisions without relying on globals.
+pub async fn assemble_for_agent(
+    agent_id: &str,
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    search_levels: &[(HierarchyLevel, &Path)],
+    provider: &dyn LlmProvider,
+    python_runner: Option<&dyn PythonAssemblyRunner>,
+) -> AssemblyOutput {
+    let assembly_name = config.assembly.clone();
+    let timeout_duration = Duration::from_secs(config.timeout);
+
+    let run = dispatch_assembly(DispatchAssemblyRequest {
+        name: &assembly_name,
+        agent_id,
+        elements,
+        config,
+        tokeniser,
+        search_levels,
+        provider,
+        python_runner,
+    });
 
     match tokio::time::timeout(timeout_duration, run).await {
         // Normal success path.
@@ -531,6 +572,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::Stream;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use swage_core::Role;
     use swage_core::{
         CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
@@ -594,6 +636,35 @@ mod tests {
 
         fn count_messages(&self, messages: &[ChatMessage]) -> usize {
             messages.len() * self.cost
+        }
+    }
+
+    struct CapturingRunner {
+        seen_agent_id: Arc<Mutex<Option<String>>>,
+    }
+
+    impl PythonAssemblyRunner for CapturingRunner {
+        fn run(
+            &self,
+            _path: &Path,
+            _timeout: Duration,
+            _budget: usize,
+            _model: &str,
+            agent_id: &str,
+            _elements: &[Box<dyn ContextElement>],
+            _tokeniser: &dyn Tokeniser,
+            _search_levels: Vec<(HierarchyLevel, PathBuf)>,
+        ) -> Result<
+            crate::python_runner::PythonAssemblyResult,
+            crate::python_runner::PythonAssemblyError,
+        > {
+            *self.seen_agent_id.lock().unwrap() = Some(agent_id.to_string());
+            Ok(crate::python_runner::PythonAssemblyResult {
+                messages: vec![ChatMessage::new(Role::User, "assembled")],
+                element_reports: Vec::new(),
+                pending_compactions: Vec::new(),
+                warnings: Vec::new(),
+            })
         }
     }
 
@@ -895,6 +966,41 @@ mod tests {
         assert_eq!(error.assembly_name, "nonexistent_python_assembly");
         assert_eq!(error.error_kind, "not_found");
         assert_eq!(error.fallback_used, "default");
+    }
+
+    #[tokio::test]
+    async fn assemble_for_agent_passes_agent_id_to_python_runner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let assemblies_dir = dir.path().join("assemblies");
+        std::fs::create_dir_all(&assemblies_dir).expect("create assemblies dir");
+        let assembly_path = assemblies_dir.join("agent_aware.py");
+        std::fs::write(&assembly_path, "def assemble(ctx):\n    pass\n").expect("write assembly");
+        let search_levels = vec![(HierarchyLevel::Bench, dir.path())];
+        let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hello", "Hi!")])];
+        let config = ContextConfig {
+            assembly: "agent_aware".to_string(),
+            timeout: 5,
+            budget: None,
+        };
+        let tokeniser = FixedCostTokeniser { cost: 10 };
+        let seen_agent_id = Arc::new(Mutex::new(None));
+        let runner = CapturingRunner {
+            seen_agent_id: seen_agent_id.clone(),
+        };
+
+        let output = assemble_for_agent(
+            "researcher",
+            &elements,
+            &config,
+            &tokeniser,
+            &search_levels,
+            &StubProvider,
+            Some(&runner),
+        )
+        .await;
+
+        assert_eq!(output.messages.len(), 1);
+        assert_eq!(seen_agent_id.lock().unwrap().as_deref(), Some("researcher"));
     }
 
     /// Fallback output matches running default_assembly directly.

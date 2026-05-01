@@ -70,35 +70,24 @@ pub async fn handle_cancel(
 
     // Try the active-delegations registry first — this gives us the exact
     // cancellation token and thread ID for scoped interruption.
-    if let Some(registry) = active_delegations {
-        // Extract the delegation data we need, then release the lock before
-        // any async I/O — holding a tokio RwLock across .await can starve
-        // pending writers.
-        let delegation_data = {
-            let active = registry.read().await;
-            active
-                .get(&correlation_id)
-                .map(|d| (d.thread_id, d.cancel_token.clone()))
-        };
-        // Guard dropped here — safe to await storage calls.
+    if let Some(registry) = active_delegations
+        && let Some((thread_id, cancel_token)) = registry.cancellation_target(correlation_id).await
+    {
+        // Trigger cooperative cancellation — the agent's turn loop checks
+        // this token between rounds and tool calls.
+        cancel_token.cancel();
 
-        if let Some((thread_id, cancel_token)) = delegation_data {
-            // Trigger cooperative cancellation — the agent's turn loop checks
-            // this token between rounds and tool calls.
-            cancel_token.cancel();
-
-            // Interrupt only the turns in this delegation's thread.
-            // The active-delegation path uses a narrower set of interruptible
-            // states (no AwaitingApproval) since the live cancel token handles
-            // in-flight approval waits directly.
-            interrupt_turns_in_thread(
-                storage,
-                thread_id,
-                &[TurnState::Pending, TurnState::Processing],
-            )
-            .await?;
-            return Ok(());
-        }
+        // Interrupt only the turns in this delegation's thread.
+        // The active-delegation path uses a narrower set of interruptible
+        // states (no AwaitingApproval) since the live cancel token handles
+        // in-flight approval waits directly.
+        interrupt_turns_in_thread(
+            storage,
+            thread_id,
+            &[TurnState::Pending, TurnState::Processing],
+        )
+        .await?;
+        return Ok(());
     }
 
     // Fallback: no active delegation entry (execution may have already
@@ -184,12 +173,9 @@ pub async fn handle_shutdown(
     // Without this, agent turn loops continue running — they stop on
     // CancellationToken, not turn state changes in storage.
     if let Some(registry) = active_delegations {
-        let active = registry.read().await;
-        for (_id, delegation) in active.iter() {
-            if delegation.recipient_agent_id == shutdown_msg.recipient_agent_id {
-                delegation.cancel_token.cancel();
-            }
-        }
+        registry
+            .cancel_for_agent(&shutdown_msg.recipient_agent_id)
+            .await;
     }
 
     // Mark any in-progress turns as Interrupted in storage — covers turns
@@ -748,18 +734,18 @@ mod tests {
 
         // Register only the first delegation in the active registry.
         let registry = crate::delegation::active_delegations();
-        {
-            let mut active = registry.write().await;
-            active.insert(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        registry
+            .insert(
                 delegate.id,
                 crate::delegation::ActiveDelegation {
                     session_id: session_a.id,
                     thread_id: thread_a.id,
                     recipient_agent_id: "agent-b".into(),
-                    cancel_token: tokio_util::sync::CancellationToken::new(),
+                    cancel_token: cancel_token.clone(),
                 },
-            );
-        }
+            )
+            .await;
 
         let cancel = AgentMessage {
             id: Uuid::new_v4(),
@@ -795,10 +781,8 @@ mod tests {
         );
 
         // Cancellation token should have been triggered.
-        let active = registry.read().await;
-        let delegation = active.get(&delegate.id).unwrap();
         assert!(
-            delegation.cancel_token.is_cancelled(),
+            cancel_token.is_cancelled(),
             "cancel token should be triggered"
         );
     }
@@ -835,9 +819,8 @@ mod tests {
         // Register a delegation targeting agent-b.
         let registry = crate::delegation::active_delegations();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        {
-            let mut active = registry.write().await;
-            active.insert(
+        registry
+            .insert(
                 Uuid::new_v4(),
                 crate::delegation::ActiveDelegation {
                     session_id: Uuid::new_v4(),
@@ -845,8 +828,8 @@ mod tests {
                     recipient_agent_id: "agent-b".into(),
                     cancel_token: cancel_token.clone(),
                 },
-            );
-        }
+            )
+            .await;
 
         let shutdown = AgentMessage {
             id: Uuid::new_v4(),

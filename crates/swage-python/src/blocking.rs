@@ -20,7 +20,7 @@ where
     let runtime_label = runtime_label.to_string();
     match Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(make_future()))
+            tokio::task::block_in_place(move || handle.block_on(make_future()))
         }
         Ok(_) => std::thread::spawn({
             let runtime_label_for_thread = runtime_label.clone();

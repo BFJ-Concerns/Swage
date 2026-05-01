@@ -111,7 +111,7 @@ port = 4000
     let provider = config
         .default_provider_endpoint()
         .expect("default provider should resolve");
-    assert_eq!(provider.api_key_env, "ANTHROPIC_API_KEY");
+    assert_eq!(provider.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     assert_eq!(
         provider.base_url.as_deref(),
         Some("https://global-provider.invalid/v1")
@@ -165,11 +165,43 @@ model_id = "gpt-4o"
     let provider = config
         .default_provider_endpoint()
         .expect("default provider should resolve");
-    assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(provider.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
     assert_eq!(
         provider.base_url.as_deref(),
         Some("http://127.0.0.1:11434/v1")
     );
+}
+
+#[test]
+fn provider_secret_reference_loads_without_legacy_env_field() {
+    let global = r#"
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
+protocol = "anthropic"
+api_key_secret_ref = "secret://gateway/11111111-1111-1111-1111-111111111111"
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-20250514"
+"#;
+
+    let tmp = build_skeleton(Some(global), "mybench", None, "assistant", None);
+    let config = load_resolved_config_from(tmp.path(), "mybench", "assistant")
+        .expect("should load successfully");
+
+    let provider = config
+        .default_provider_endpoint()
+        .expect("default provider should resolve");
+    assert_eq!(
+        provider.api_key_secret_ref.as_deref(),
+        Some("secret://gateway/11111111-1111-1111-1111-111111111111")
+    );
+    assert_eq!(provider.api_key_env, None);
 }
 
 /// Missing intermediate config files are skipped without error.

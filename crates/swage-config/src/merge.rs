@@ -847,7 +847,8 @@ mod tests {
                     "openai".to_string(),
                     ProviderEndpointConfig {
                         protocol: Protocol::OpenAi,
-                        api_key_env: "OPENAI_API_KEY".to_string(),
+                        api_key_secret_ref: None,
+                        api_key_env: Some("OPENAI_API_KEY".to_string()),
                         base_url: None,
                     },
                 )])),
@@ -876,7 +877,7 @@ mod tests {
             .default_provider_endpoint()
             .expect("default provider should resolve");
         assert_eq!(provider.protocol, Protocol::OpenAi);
-        assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(provider.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
     }
 
     #[test]

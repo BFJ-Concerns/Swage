@@ -10,6 +10,7 @@ use swage_core::GatewayError;
 /// Wraps `GatewayError` and implements axum's `IntoResponse` so handlers can
 /// return `Result<_, ApiError>` and the correct HTTP status + JSON body is sent
 /// automatically.
+#[derive(Debug)]
 pub struct ApiError(pub GatewayError);
 
 impl From<GatewayError> for ApiError {

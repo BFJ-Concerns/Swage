@@ -5,7 +5,10 @@
 //! execution loop from transport concerns.
 
 use serde::{Deserialize, Serialize};
+use swage_core::ApprovalTimeoutPolicy;
 use uuid::Uuid;
+
+use crate::approval::ApprovalDecisionValue;
 
 /// A single JSON Schema validation error reported during output schema checking.
 ///
@@ -112,15 +115,15 @@ pub enum AgentEvent {
         context: Option<serde_json::Value>,
         /// ISO 8601 timestamp after which the request expires.
         timeout_at: String,
-        /// What happens on expiry: "reject" or "interrupt".
-        timeout_policy: String,
+        /// What happens on expiry.
+        timeout_policy: ApprovalTimeoutPolicy,
     },
 
     /// A pending approval was resolved by a human decision.
     ApprovalConfirmed {
         approval_id: Uuid,
-        /// "approve" or "reject".
-        decision: String,
+        /// Human decision.
+        decision: ApprovalDecisionValue,
         /// Optional explanation from the reviewer.
         reason: Option<String>,
     },
@@ -128,8 +131,8 @@ pub enum AgentEvent {
     /// A pending approval expired without a decision.
     ApprovalExpired {
         approval_id: Uuid,
-        /// The policy that was applied: "reject" or "interrupt".
-        timeout_policy: String,
+        /// The policy that was applied.
+        timeout_policy: ApprovalTimeoutPolicy,
     },
 
     /// A tool-as-delegation has started — the parent agent's turn is
@@ -329,18 +332,18 @@ mod tests {
             prompt: "ok?".to_string(),
             context: None,
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
-            timeout_policy: "reject".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
         })
         .unwrap();
         tx.send(AgentEvent::ApprovalConfirmed {
             approval_id: Uuid::new_v4(),
-            decision: "approve".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: None,
         })
         .unwrap();
         tx.send(AgentEvent::ApprovalExpired {
             approval_id: Uuid::new_v4(),
-            timeout_policy: "interrupt".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Interrupt,
         })
         .unwrap();
         tx.send(AgentEvent::DelegationStarted {
@@ -546,7 +549,7 @@ mod tests {
             prompt: "Allow destructive command?".to_string(),
             context: None,
             timeout_at: "2026-03-24T12:00:00Z".to_string(),
-            timeout_policy: "reject".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
         };
         if let AgentEvent::ApprovalRequired {
             approval_id: aid,
@@ -572,7 +575,7 @@ mod tests {
             assert_eq!(prompt, "Allow destructive command?");
             assert!(context.is_none());
             assert_eq!(timeout_at, "2026-03-24T12:00:00Z");
-            assert_eq!(timeout_policy, "reject");
+            assert_eq!(timeout_policy, ApprovalTimeoutPolicy::Reject);
         } else {
             panic!("unexpected variant");
         }
@@ -592,7 +595,7 @@ mod tests {
             prompt: "Deploy to production?".to_string(),
             context: Some(serde_json::json!({"env": "prod"})),
             timeout_at: "2026-03-24T13:00:00Z".to_string(),
-            timeout_policy: "interrupt".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Interrupt,
         };
         if let AgentEvent::ApprovalRequired {
             kind,
@@ -605,7 +608,7 @@ mod tests {
             assert_eq!(kind, "hook");
             assert_eq!(hook_name.as_deref(), Some("pre_deploy"));
             assert!(context.is_some());
-            assert_eq!(timeout_policy, "interrupt");
+            assert_eq!(timeout_policy, ApprovalTimeoutPolicy::Interrupt);
         } else {
             panic!("unexpected variant");
         }
@@ -616,7 +619,7 @@ mod tests {
         let approval_id = Uuid::new_v4();
         let event = AgentEvent::ApprovalConfirmed {
             approval_id,
-            decision: "approve".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: Some("Looks safe".to_string()),
         };
         if let AgentEvent::ApprovalConfirmed {
@@ -626,7 +629,7 @@ mod tests {
         } = event
         {
             assert_eq!(aid, approval_id);
-            assert_eq!(decision, "approve");
+            assert_eq!(decision, ApprovalDecisionValue::Approved);
             assert_eq!(reason.as_deref(), Some("Looks safe"));
         } else {
             panic!("unexpected variant");
@@ -637,7 +640,7 @@ mod tests {
     fn approval_confirmed_no_reason() {
         let event = AgentEvent::ApprovalConfirmed {
             approval_id: Uuid::new_v4(),
-            decision: "reject".to_string(),
+            decision: ApprovalDecisionValue::Rejected,
             reason: None,
         };
         if let AgentEvent::ApprovalConfirmed { reason, .. } = event {
@@ -652,7 +655,7 @@ mod tests {
         let approval_id = Uuid::new_v4();
         let event = AgentEvent::ApprovalExpired {
             approval_id,
-            timeout_policy: "reject".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
         };
         if let AgentEvent::ApprovalExpired {
             approval_id: aid,
@@ -660,7 +663,7 @@ mod tests {
         } = event
         {
             assert_eq!(aid, approval_id);
-            assert_eq!(timeout_policy, "reject");
+            assert_eq!(timeout_policy, ApprovalTimeoutPolicy::Reject);
         } else {
             panic!("unexpected variant");
         }
@@ -679,14 +682,14 @@ mod tests {
             prompt: "ok?".to_string(),
             context: None,
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
-            timeout_policy: "reject".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
         };
         let debug_str = format!("{:?}", required.clone());
         assert!(debug_str.contains("ApprovalRequired"));
 
         let confirmed = AgentEvent::ApprovalConfirmed {
             approval_id: Uuid::new_v4(),
-            decision: "approve".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: None,
         };
         let debug_str = format!("{:?}", confirmed.clone());
@@ -694,7 +697,7 @@ mod tests {
 
         let expired = AgentEvent::ApprovalExpired {
             approval_id: Uuid::new_v4(),
-            timeout_policy: "interrupt".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Interrupt,
         };
         let debug_str = format!("{:?}", expired.clone());
         assert!(debug_str.contains("ApprovalExpired"));
@@ -716,18 +719,18 @@ mod tests {
             prompt: "allow?".to_string(),
             context: None,
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
-            timeout_policy: "reject".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Reject,
         })
         .unwrap();
         tx.send(AgentEvent::ApprovalConfirmed {
             approval_id: Uuid::new_v4(),
-            decision: "approve".to_string(),
+            decision: ApprovalDecisionValue::Approved,
             reason: Some("ok".to_string()),
         })
         .unwrap();
         tx.send(AgentEvent::ApprovalExpired {
             approval_id: Uuid::new_v4(),
-            timeout_policy: "interrupt".to_string(),
+            timeout_policy: ApprovalTimeoutPolicy::Interrupt,
         })
         .unwrap();
         drop(tx);

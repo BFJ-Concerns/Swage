@@ -25,6 +25,15 @@ Desktop.ini
 *.log
 logs/
 
+# Browser automation artefacts
+.playwright-mcp/
+playwright-report/
+test-results/
+blob-report/
+
+# Ad hoc root screenshots captured during UI inspection.
+/v[0-9]*-*.png
+
 # Rust
 /target/
 

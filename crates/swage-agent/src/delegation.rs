@@ -5,7 +5,6 @@
 //! the task, collecting the result, and delivering it back to Agent A.
 //! Each delegation creates an independent agent instance — no shared state.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -46,11 +45,63 @@ pub struct ActiveDelegation {
 }
 
 /// Registry of active delegations, shared between executor and cancel handler.
-pub type ActiveDelegations = Arc<RwLock<HashMap<Uuid, ActiveDelegation>>>;
+#[derive(Debug, Clone, Default)]
+pub struct ActiveDelegations {
+    inner: Arc<RwLock<std::collections::HashMap<Uuid, ActiveDelegation>>>,
+}
+
+impl ActiveDelegations {
+    /// Create an empty active-delegations registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a live delegation.
+    pub async fn insert(&self, delegation_id: Uuid, delegation: ActiveDelegation) {
+        self.inner.write().await.insert(delegation_id, delegation);
+    }
+
+    /// Remove a delegation when execution finishes or is dropped.
+    pub async fn remove(&self, delegation_id: Uuid) {
+        self.inner.write().await.remove(&delegation_id);
+    }
+
+    /// Return the cancellation data for one delegation without exposing the map.
+    pub async fn cancellation_target(
+        &self,
+        delegation_id: Uuid,
+    ) -> Option<(Uuid, tokio_util::sync::CancellationToken)> {
+        self.inner
+            .read()
+            .await
+            .get(&delegation_id)
+            .map(|delegation| (delegation.thread_id, delegation.cancel_token.clone()))
+    }
+
+    /// Cancel every live delegation currently executing for `agent_id`.
+    pub async fn cancel_for_agent(&self, agent_id: &str) {
+        let active = self.inner.read().await;
+        for delegation in active.values() {
+            if delegation.recipient_agent_id == agent_id {
+                delegation.cancel_token.cancel();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn len(&self) -> usize {
+        self.inner.read().await.len()
+    }
+
+    #[cfg(test)]
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
+}
 
 /// Create an empty active-delegations registry.
 pub fn active_delegations() -> ActiveDelegations {
-    Arc::new(RwLock::new(HashMap::new()))
+    ActiveDelegations::new()
 }
 
 /// Dependencies needed to instantiate and execute target agents for delegation.
@@ -81,7 +132,7 @@ impl DelegationExecutor {
     pub async fn execute_delegation(
         &self,
         delegate_msg: &AgentMessage,
-        sender_turn_id: Uuid,
+        sender_turn_id: Option<Uuid>,
         bench_id: Uuid,
         target_config: AgentConfig,
         target_context_transfer_config: swage_config::ContextTransferConfig,
@@ -200,9 +251,8 @@ impl DelegationExecutor {
         // this delegation by message ID. The RAII guard ensures the entry is
         // removed even if this future is dropped mid-execution.
         let delegation_id = delegate_msg.id;
-        {
-            let mut active = self.active_delegations.write().await;
-            active.insert(
+        self.active_delegations
+            .insert(
                 delegation_id,
                 ActiveDelegation {
                     session_id: session.id,
@@ -210,8 +260,8 @@ impl DelegationExecutor {
                     recipient_agent_id: delegate_msg.recipient_agent_id.clone(),
                     cancel_token: cancel_token.clone(),
                 },
-            );
-        }
+            )
+            .await;
         let _guard = DelegationGuard {
             delegations: self.active_delegations.clone(),
             delegation_id,
@@ -228,7 +278,7 @@ impl DelegationExecutor {
             },
             user_message: task_description.to_string(),
             assembled_context,
-            parent_turn_id: Some(sender_turn_id),
+            parent_turn_id: sender_turn_id,
             existing_turn_id: None,
             cancellation_token: cancel_token.clone(),
         };
@@ -350,8 +400,7 @@ impl Drop for DelegationGuard {
         // shutting down, in which case the spawn fails silently (acceptable:
         // the registry is being torn down anyway).
         std::mem::drop(tokio::task::spawn(async move {
-            let mut active = delegations.write().await;
-            active.remove(&id);
+            delegations.remove(id).await;
         }));
     }
 }

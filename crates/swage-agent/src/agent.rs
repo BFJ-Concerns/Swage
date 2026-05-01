@@ -4,6 +4,7 @@
 //! manages sessions and threads, and processes messages through the LLM with
 //! tool dispatch, hooks, leak detection, and context compaction.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -18,6 +19,7 @@ use swage_provider::LlmProvider;
 use swage_safety::LeakDetector;
 use swage_storage::{NewToolCall, NewTurn, Storage, ThreadState, TurnState};
 use swage_tool::dispatch::ToolDispatcher;
+use swage_tool::output::ToolOutput;
 
 use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome};
 use crate::config::AgentConfig;
@@ -144,9 +146,35 @@ impl Agent {
             .update_state(thread_id, ThreadState::Processing)
             .await?;
 
-        // 4. Build initial CompletionRequest from the pre-assembled context.
+        let assembled_context = if crate::compaction::exceeds_threshold(
+            &request.assembled_context,
+            &self.config.compaction_threshold,
+        ) {
+            match crate::compaction::compact(
+                request.assembled_context,
+                &self.config.compaction_threshold,
+                self.provider.as_ref(),
+                self.storage.as_ref(),
+                thread_id,
+            )
+            .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    self.fail_turn_and_idle(turn.id, thread_id).await;
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            }
+        } else {
+            request.assembled_context
+        };
+
+        // 4. Build initial CompletionRequest from the assembled context.
         let mut llm_request = CompletionRequest {
-            messages: request.assembled_context,
+            messages: assembled_context,
             model: None,
             max_tokens: None,
             temperature: None,
@@ -739,6 +767,43 @@ impl Agent {
 // ---------------------------------------------------------------------------
 
 impl Agent {
+    async fn race_tool_dispatch<F>(
+        &self,
+        dispatch_future: F,
+        call: &ToolCall,
+        execution: &TurnExecutionContext,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
+        dispatch_started_at: std::time::Instant,
+    ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError>
+    where
+        F: Future<Output = Result<ToolOutput, swage_core::ToolError>>,
+    {
+        tokio::pin!(dispatch_future);
+
+        tokio::select! {
+            result = &mut dispatch_future => Ok(result),
+            _ = cancel_token.cancelled() => {
+                let _ = self
+                    .storage
+                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                    .await;
+                let _ = self
+                    .storage
+                    .update_state(execution.thread_id, ThreadState::Idle)
+                    .await;
+                let _ = event_tx.send(AgentEvent::ToolEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    result: Value::Null,
+                    status: "cancelled".to_string(),
+                    duration_ms: Some(dispatch_started_at.elapsed().as_millis() as u64),
+                });
+                Err(AgentError::Cancelled)
+            }
+        }
+    }
+
     /// Dispatch a single tool call through the dispatcher, handling the
     /// config-driven approval gate when `RequiresApproval` is returned.
     ///
@@ -781,35 +846,22 @@ impl Agent {
             ..ctx
         };
         let dispatch_started_at = std::time::Instant::now();
-        let dispatch_future = dispatcher.dispatch(
-            &call.name,
-            call.arguments.clone(),
-            &ctx,
-            &self.config.agent_id,
-        );
-        tokio::pin!(dispatch_future);
-
-        match tokio::select! {
-            result = &mut dispatch_future => result,
-            _ = cancel_token.cancelled() => {
-                let _ = self
-                    .storage
-                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
-                    .await;
-                let _ = self
-                    .storage
-                    .update_state(execution.thread_id, ThreadState::Idle)
-                    .await;
-                let _ = event_tx.send(AgentEvent::ToolEnd {
-                    call_id: call.call_id.clone(),
-                    tool_name: call.name.clone(),
-                    result: Value::Null,
-                    status: "cancelled".to_string(),
-                    duration_ms: Some(dispatch_started_at.elapsed().as_millis() as u64),
-                });
-                return Err(AgentError::Cancelled);
-            }
-        } {
+        match self
+            .race_tool_dispatch(
+                dispatcher.dispatch(
+                    &call.name,
+                    call.arguments.clone(),
+                    &ctx,
+                    &self.config.agent_id,
+                ),
+                call,
+                execution,
+                event_tx,
+                cancel_token,
+                dispatch_started_at,
+            )
+            .await?
+        {
             Ok(output) => {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
                 Ok((result_str, false, "success".to_string()))
@@ -837,14 +889,21 @@ impl Agent {
                     .await
                 {
                     Ok(true) => {
-                        match dispatcher
-                            .dispatch_approved(
-                                &call.name,
-                                call.arguments.clone(),
-                                &ctx,
-                                &self.config.agent_id,
+                        match self
+                            .race_tool_dispatch(
+                                dispatcher.dispatch_approved(
+                                    &call.name,
+                                    call.arguments.clone(),
+                                    &ctx,
+                                    &self.config.agent_id,
+                                ),
+                                call,
+                                execution,
+                                event_tx,
+                                cancel_token,
+                                dispatch_started_at,
                             )
-                            .await
+                            .await?
                         {
                             Ok(output) => {
                                 let result_str =
@@ -885,14 +944,21 @@ impl Agent {
                 {
                     ApprovalGateOutcome::Approved => {
                         // Re-dispatch skipping the permission check.
-                        match dispatcher
-                            .dispatch_approved(
-                                &call.name,
-                                call.arguments.clone(),
-                                &ctx,
-                                &self.config.agent_id,
+                        match self
+                            .race_tool_dispatch(
+                                dispatcher.dispatch_approved(
+                                    &call.name,
+                                    call.arguments.clone(),
+                                    &ctx,
+                                    &self.config.agent_id,
+                                ),
+                                call,
+                                execution,
+                                event_tx,
+                                cancel_token,
+                                dispatch_started_at,
                             )
-                            .await
+                            .await?
                         {
                             Ok(output) => {
                                 let result_str =
@@ -1128,7 +1194,7 @@ impl Agent {
             prompt: prompt.clone(),
             context: context.clone(),
             timeout_at: timeout_at.to_rfc3339(),
-            timeout_policy: timeout_policy.to_string(),
+            timeout_policy: timeout_policy.clone(),
         });
 
         // 4. Register the oneshot channel for the decision.
@@ -1218,7 +1284,7 @@ impl Agent {
                 .await?;
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
-                    decision: "approved".into(),
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
                     reason: d.reason,
                 });
                 Ok(ApprovalGateOutcome::Approved)
@@ -1238,7 +1304,7 @@ impl Agent {
                 .await?;
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
-                    decision: "rejected".into(),
+                    decision: crate::approval::ApprovalDecisionValue::Rejected,
                     reason: d.reason,
                 });
                 Ok(ApprovalGateOutcome::Rejected {
@@ -1249,7 +1315,7 @@ impl Agent {
                 // Timeout or channel dropped — apply policy.
                 let _ = event_tx.send(AgentEvent::ApprovalExpired {
                     approval_id: approval.id,
-                    timeout_policy: timeout_policy.to_string(),
+                    timeout_policy: timeout_policy.clone(),
                 });
 
                 match timeout_policy {

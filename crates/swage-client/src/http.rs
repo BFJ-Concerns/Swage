@@ -805,12 +805,55 @@ impl GatewayClient {
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
+        self.send_agent_message_with_bench(
+            None,
+            sender_agent_id,
+            recipient_agent_id,
+            kind,
+            correlation_id,
+            payload,
+        )
+        .await
+    }
+
+    /// Send a typed inter-agent message scoped to a bench.
+    /// Calls `POST /api/messages`.
+    pub async fn send_agent_message_in_bench(
+        &self,
+        bench_id: Uuid,
+        sender_agent_id: &str,
+        recipient_agent_id: &str,
+        kind: &str,
+        correlation_id: Option<Uuid>,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.send_agent_message_with_bench(
+            Some(bench_id),
+            sender_agent_id,
+            recipient_agent_id,
+            kind,
+            correlation_id,
+            payload,
+        )
+        .await
+    }
+
+    async fn send_agent_message_with_bench(
+        &self,
+        bench_id: Option<Uuid>,
+        sender_agent_id: &str,
+        recipient_agent_id: &str,
+        kind: &str,
+        correlation_id: Option<Uuid>,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}/api/messages", self.base_url);
         let body = serde_json::json!({
             "sender_agent_id": sender_agent_id,
             "recipient_agent_id": recipient_agent_id,
             "kind": kind,
             "correlation_id": correlation_id,
+            "bench_id": bench_id,
             "payload": payload,
         });
 

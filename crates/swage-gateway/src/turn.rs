@@ -528,7 +528,7 @@ impl Drop for SandboxGuard {
     }
 }
 
-async fn shutdown_sandbox_guard(guard: &Option<SandboxGuard>, context: &'static str) {
+pub(crate) async fn shutdown_sandbox_guard(guard: &Option<SandboxGuard>, context: &'static str) {
     if let Some(guard) = guard
         && let Err(error) = guard.shutdown().await
     {
@@ -764,7 +764,7 @@ pub(crate) fn build_agent_config(
     agent_config
 }
 
-fn load_session_config(
+pub(crate) fn load_session_config(
     state: &AppState,
     bench_slug: &str,
     agent_id: &str,
@@ -973,7 +973,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let result_msg = match executor
             .execute_delegation(
                 &delegate_msg,
-                sender_turn_id,
+                Some(sender_turn_id),
                 bench_id,
                 target_agent_config,
                 target_context_transfer_config,
@@ -1304,7 +1304,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     // embedded interpreter.
     let assembly_runner =
         swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
-    let output = swage_context::assembly::assemble(
+    let output = swage_context::assembly::assemble_for_agent(
+        &session.agent_id,
         &elements,
         &config.context,
         &tokeniser,
@@ -1802,7 +1803,7 @@ pub(crate) fn route_approval_agent_event(
                 prompt,
                 context,
                 timeout_at,
-                timeout_policy,
+                timeout_policy: timeout_policy.to_string(),
             });
             true
         }
@@ -1813,7 +1814,7 @@ pub(crate) fn route_approval_agent_event(
         } => {
             let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
                 approval_id: approval_id.to_string(),
-                decision,
+                decision: decision.to_string(),
                 reason,
             });
             true
@@ -1824,7 +1825,7 @@ pub(crate) fn route_approval_agent_event(
         } => {
             let _ = ws_tx.send(ServerEvent::ApprovalExpired {
                 approval_id: approval_id.to_string(),
-                timeout_policy,
+                timeout_policy: timeout_policy.to_string(),
             });
             true
         }
@@ -8689,7 +8690,7 @@ pub(crate) mod tests {
                 prompt: "Allow shell?".to_string(),
                 context: None,
                 timeout_at: "2026-01-01T00:00:00Z".to_string(),
-                timeout_policy: "deny".to_string(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
             },
             &tx,
         );
@@ -8721,7 +8722,7 @@ pub(crate) mod tests {
         route_approval_agent_event(
             AgentEvent::ApprovalConfirmed {
                 approval_id,
-                decision: "approved".to_string(),
+                decision: swage_agent::approval::ApprovalDecisionValue::Approved,
                 reason: Some("looks safe".to_string()),
             },
             &tx,
@@ -8749,7 +8750,7 @@ pub(crate) mod tests {
         route_approval_agent_event(
             AgentEvent::ApprovalExpired {
                 approval_id,
-                timeout_policy: "deny".to_string(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
             },
             &tx,
         );
@@ -8760,7 +8761,7 @@ pub(crate) mod tests {
                 timeout_policy,
             } => {
                 assert_eq!(aid, approval_id.to_string());
-                assert_eq!(timeout_policy, "deny");
+                assert_eq!(timeout_policy, "reject");
             }
             other => panic!("expected ApprovalExpired, got: {other:?}"),
         }
@@ -8786,7 +8787,7 @@ pub(crate) mod tests {
                 prompt: "Allow?".to_string(),
                 context: None,
                 timeout_at: "2026-01-01T00:00:00Z".to_string(),
-                timeout_policy: "deny".to_string(),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
             },
             &tx_a, // only agent-a's channel
         );

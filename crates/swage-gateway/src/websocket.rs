@@ -15,6 +15,11 @@ use uuid::Uuid;
 use crate::{state::AppState, subscription::SubscriptionState, turn};
 use swage_agent::approval::ApprovalDecisionValue;
 
+#[cfg(test)]
+static TEST_SKILL_ROOTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 // ---------------------------------------------------------------------------
 // Client → Server event types
 // ---------------------------------------------------------------------------
@@ -644,8 +649,9 @@ async fn discover_available_for_session(
         }
     };
 
-    // Resolve the Swage root directory.
-    let root = swage_config::discovery::resolve_root()
+    let root = skill_root_for_session(session_id)
+        .map(Ok)
+        .unwrap_or_else(swage_config::discovery::resolve_root)
         .map_err(|e| format!("skill discovery failed for session {session_id}: {e}"))?;
 
     // Build hierarchy paths that mirror load_resolved_config_from.
@@ -655,6 +661,20 @@ async fn discover_available_for_session(
     let (skills, _warnings) =
         crate::skill::SkillManager::discover_available(&root, &bench_dir, Some(&agent_dir));
     Ok(skills)
+}
+
+#[cfg(test)]
+fn skill_root_for_session(session_id: Uuid) -> Option<std::path::PathBuf> {
+    TEST_SKILL_ROOTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&session_id)
+        .cloned()
+}
+
+#[cfg(not(test))]
+fn skill_root_for_session(_session_id: Uuid) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Parse and dispatch a raw text frame from the client.
@@ -1505,9 +1525,33 @@ mod tests {
     // Skill dispatch tests [5cpd]
     // -----------------------------------------------------------------------
 
-    // These tests mutate SWAGE_HOME and then exercise async skill discovery.
-    // Hold the process-env lock across awaits to keep concurrent tests isolated.
-    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct SessionSkillRootGuard {
+        session_id: Uuid,
+        _root: tempfile::TempDir,
+    }
+
+    impl SessionSkillRootGuard {
+        fn empty(session_id: Uuid) -> Self {
+            let root = tempfile::TempDir::new().expect("temp skill root");
+            TEST_SKILL_ROOTS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(session_id, root.path().to_path_buf());
+            Self {
+                session_id,
+                _root: root,
+            }
+        }
+    }
+
+    impl Drop for SessionSkillRootGuard {
+        fn drop(&mut self) {
+            TEST_SKILL_ROOTS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&self.session_id);
+        }
+    }
 
     #[tokio::test]
     async fn activate_skill_with_missing_session_surfaces_discovery_error() {
@@ -1561,11 +1605,8 @@ mod tests {
     /// an empty set, causing SkillManager::activate to return NotFound.
     #[tokio::test(flavor = "current_thread")]
     async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
-        let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let swage_home = tempfile::TempDir::new().expect("temp swage home");
-        unsafe { std::env::set_var("SWAGE_HOME", swage_home.path()) };
-
         let (state, session_id) = make_state_with_session().await;
+        let _skill_root = SessionSkillRootGuard::empty(session_id);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
             false,
@@ -1584,8 +1625,6 @@ mod tests {
             }
             other => panic!("expected Error event, got: {other:?}"),
         }
-
-        unsafe { std::env::remove_var("SWAGE_HOME") };
     }
 
     /// DeactivateSkill for a skill not in available (and not in storage) sends SkillDeactivated.
@@ -1594,11 +1633,8 @@ mod tests {
     /// and storage.deactivate_skill is a no-op that returns Ok(false) → success.
     #[tokio::test(flavor = "current_thread")]
     async fn deactivate_skill_event_sends_skill_deactivated() {
-        let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let swage_home = tempfile::TempDir::new().expect("temp swage home");
-        unsafe { std::env::set_var("SWAGE_HOME", swage_home.path()) };
-
         let (state, session_id) = make_state_with_session().await;
+        let _skill_root = SessionSkillRootGuard::empty(session_id);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
             false,
@@ -1612,8 +1648,6 @@ mod tests {
             matches!(event, ServerEvent::SkillDeactivated { name } if name == "code-review"),
             "expected SkillDeactivated event",
         );
-
-        unsafe { std::env::remove_var("SWAGE_HOME") };
     }
 
     /// A plain (non-slash) SendMessage still dispatches normally — no skill events.
