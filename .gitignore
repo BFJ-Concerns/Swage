@@ -33,6 +33,7 @@ blob-report/
 
 # Ad hoc root screenshots captured during UI inspection.
 /v[0-9]*-*.png
+/*.png
 
 # Rust
 /target/
