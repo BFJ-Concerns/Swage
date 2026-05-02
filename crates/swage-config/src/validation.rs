@@ -687,10 +687,11 @@ pub fn validate_resolved_catalog_references(
 ) -> Vec<ConfigProblem> {
     let mut problems = Vec::new();
 
-    if !config
-        .providers
-        .entries
-        .contains_key(&config.providers.default)
+    if !config.providers.default.is_empty()
+        && !config
+            .providers
+            .entries
+            .contains_key(&config.providers.default)
     {
         problems.push(make_problem(
             file_path,
@@ -702,6 +703,10 @@ pub fn validate_resolved_catalog_references(
                 ),
             },
         ));
+    }
+
+    if config.models.default.is_empty() && config.models.entries.is_empty() {
+        return problems;
     }
 
     let Some(default_model) = config.models.entries.get(&config.models.default) else {
@@ -722,6 +727,7 @@ pub fn validate_resolved_catalog_references(
         .providers
         .entries
         .contains_key(&default_model.provider_id)
+        && !default_model.provider_id.is_empty()
     {
         problems.push(make_problem(
             file_path,

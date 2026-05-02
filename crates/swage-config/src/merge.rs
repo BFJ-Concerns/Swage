@@ -552,9 +552,21 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     if let Some(entries) = models.entries {
         model_catalog.entries.extend(entries);
     }
-    if let Some(model_id) = default_model_id_override
-        && let Some(model) = model_catalog.entries.get_mut(&model_catalog.default)
-    {
+    if let Some(model_id) = default_model_id_override {
+        if model_catalog.default.is_empty() {
+            model_catalog.default = "default".to_string();
+        }
+        let model =
+            model_catalog
+                .entries
+                .entry(model_catalog.default.clone())
+                .or_insert_with(|| ModelEndpointConfig {
+                    provider_id: String::new(),
+                    model_id: String::new(),
+                    aliases: Vec::new(),
+                    context_window: None,
+                    generation_preset: None,
+                });
         model.model_id = model_id;
     }
 

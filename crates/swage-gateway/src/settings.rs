@@ -252,12 +252,16 @@ pub async fn restart_gateway(state: &AppState) -> Result<RestartStatusResponse, 
 }
 
 fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiError> {
-    if !request.providers.contains_key(&request.default_provider) {
+    if !request.default_provider.is_empty()
+        && !request.providers.contains_key(&request.default_provider)
+    {
         return Err(ApiError::validation(
             "default provider does not exist".to_string(),
         ));
     }
-    if !request.models.contains_key(&request.default_model) {
+    if !(request.default_model.is_empty() && request.models.is_empty())
+        && !request.models.contains_key(&request.default_model)
+    {
         return Err(ApiError::validation(
             "default model does not exist".to_string(),
         ));

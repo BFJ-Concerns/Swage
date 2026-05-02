@@ -47,9 +47,9 @@ pub struct ProviderEndpointConfig {
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
-            protocol: Protocol::Anthropic,
+            protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
-            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+            api_key_env: None,
             base_url: None,
         }
     }
@@ -66,8 +66,8 @@ pub struct ProviderCatalogConfig {
 impl Default for ProviderCatalogConfig {
     fn default() -> Self {
         Self {
-            default: "anthropic".to_string(),
-            entries: HashMap::from([("anthropic".to_string(), ProviderEndpointConfig::default())]),
+            default: String::new(),
+            entries: HashMap::new(),
         }
     }
 }
@@ -94,8 +94,8 @@ pub struct ModelEndpointConfig {
 impl Default for ModelEndpointConfig {
     fn default() -> Self {
         Self {
-            provider_id: "anthropic".to_string(),
-            model_id: "claude-sonnet-4-20250514".to_string(),
+            provider_id: String::new(),
+            model_id: String::new(),
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
@@ -114,8 +114,8 @@ pub struct ModelCatalogConfig {
 impl Default for ModelCatalogConfig {
     fn default() -> Self {
         Self {
-            default: "sonnet".to_string(),
-            entries: HashMap::from([("sonnet".to_string(), ModelEndpointConfig::default())]),
+            default: String::new(),
+            entries: HashMap::new(),
         }
     }
 }
@@ -642,13 +642,25 @@ impl ResolvedConfig {
     pub fn default_provider_protocol(&self) -> Protocol {
         self.default_provider_endpoint()
             .map(|provider| provider.protocol.clone())
-            .unwrap_or_default()
+            .unwrap_or(Protocol::OpenAi)
     }
 
     pub fn set_default_model_id(&mut self, model_id: String) {
-        if let Some(model) = self.models.entries.get_mut(&self.models.default) {
-            model.model_id = model_id;
+        if self.models.default.is_empty() {
+            self.models.default = "default".to_string();
         }
+        let model =
+            self.models
+                .entries
+                .entry(self.models.default.clone())
+                .or_insert_with(|| ModelEndpointConfig {
+                    provider_id: String::new(),
+                    model_id: String::new(),
+                    aliases: Vec::new(),
+                    context_window: None,
+                    generation_preset: None,
+                });
+        model.model_id = model_id;
     }
 }
 
@@ -713,9 +725,11 @@ mod tests {
         let cfg = ResolvedConfig::default();
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.port, 3000);
-        assert_eq!(cfg.providers.default, "anthropic");
-        assert_eq!(cfg.models.default, "sonnet");
-        assert_eq!(cfg.default_model_id(), "claude-sonnet-4-20250514");
+        assert_eq!(cfg.providers.default, "");
+        assert!(cfg.providers.entries.is_empty());
+        assert_eq!(cfg.models.default, "");
+        assert!(cfg.models.entries.is_empty());
+        assert_eq!(cfg.default_model_id(), "");
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.logging.level, LogLevel::Info);

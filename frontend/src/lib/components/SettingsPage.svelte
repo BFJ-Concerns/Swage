@@ -3,9 +3,7 @@
 
   Renders the inner pane of the settings window. The window chrome (topbar
   with Settings label + × CLOSE, and the parked nav with the page list) lives
-  in AppLayout — this component only owns the .settings-pane content per the
-  riso-cyanotype design (Initiatives/Active/Swage/UI/riso-cyanotype.html,
-  Settings — display).
+  in AppLayout; this component only owns the .settings-pane content.
 
   Sub-pages are driven by the route. AppLayout renders the page list and
   navigates between /settings/providers, /settings/generation, and
@@ -15,7 +13,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
-  import type { DiscoveredModel, GenerationPresetConfig, ProviderProtocol, SettingsResponse } from "../types";
+  import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, SettingsResponse } from "../types";
 
   interface Props {
     tab?: "providers" | "generation" | "automation";
@@ -30,17 +28,29 @@
   let selectedProvider = $state("");
   let selectedPreset = $state("");
   let modelQuery = $state("");
+  // Add-provider flow is a two-stage chip expansion. addingProvider toggles
+  // the kind row; compatibleDraft holds the OpenAI-compatible name/URL while
+  // the inline inputs are open (null otherwise).
+  let addingProvider = $state(false);
+  let compatibleDraft = $state<{ name: string; base_url: string } | null>(null);
+  let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let status = $state("");
   let error = $state<string | null>(null);
 
-  const PROTOCOLS: ProviderProtocol[] = ["Anthropic", "OpenAi", "OpenRouter", "Google"];
+  const PROVIDER_KINDS = [
+    { id: "OpenAi", label: "OpenAI", protocol: "OpenAi" },
+    { id: "Anthropic", label: "Anthropic", protocol: "Anthropic" },
+    { id: "Google", label: "Google", protocol: "Google" },
+    { id: "OpenRouter", label: "OpenRouter", protocol: "OpenRouter" },
+    { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "OpenAi" },
+  ] as const satisfies readonly ProviderKindDefinition[];
 
   const providerIds = $derived(Object.keys(settings?.providers ?? {}));
   const modelIds = $derived(Object.keys(settings?.models ?? {}));
   const presetIds = $derived(Object.keys(settings?.generation_presets ?? {}));
-  const provider = $derived(settings && selectedProvider ? settings.providers[selectedProvider] : null);
   const currentPreset = $derived(settings && selectedPreset ? settings.generation_presets[selectedPreset] : null);
+  const defaultModel = $derived(settings?.models[settings.default_model] ?? null);
   // Discovered models that have already been added under this provider — used
   // to mark the chip as ADDED rather than silently overwriting on re-click.
   const addedModelIds = $derived(
@@ -96,10 +106,144 @@
     };
   }
 
+  function providerModels(providerId: string): [string, ModelSettings][] {
+    if (!settings) return [];
+    return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId);
+  }
+
+  type ProviderKindDefinition = {
+    id: ProviderKind;
+    label: string;
+    protocol: ProviderProtocol;
+  };
+
+  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible";
+
+  function slugifyProviderName(value: string): string {
+    return value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  function nextProviderId(baseId: string): string {
+    if (!settings || !settings.providers[baseId]) return baseId;
+    let suffix = 2;
+    let candidate = `${baseId}-${suffix}`;
+    while (settings.providers[candidate]) {
+      suffix += 1;
+      candidate = `${baseId}-${suffix}`;
+    }
+    return candidate;
+  }
+
+  function providerDisplayName(id: string): string {
+    if (!settings) return id;
+    const provider = settings.providers[id];
+    if (!provider) return id;
+    if (provider.protocol === "OpenAi" && provider.base_url) return "OpenAI compatible";
+    return PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol && kind.id !== "OpenAiCompatible")?.label ?? id;
+  }
+
+  function toggleAddProvider(): void {
+    addingProvider = !addingProvider;
+    if (!addingProvider) compatibleDraft = null;
+    error = null;
+  }
+
+  function pickProviderKind(kind: ProviderKindDefinition): void {
+    if (!settings) return;
+    // OpenAI-compatible providers need a name and base URL — open the inline
+    // inputs instead of creating immediately. Clicking again collapses them.
+    if (kind.id === "OpenAiCompatible") {
+      compatibleDraft = compatibleDraft ? null : { name: "", base_url: "" };
+      error = null;
+      return;
+    }
+    const id = nextProviderId(slugifyProviderName(kind.label));
+    settings.providers[id] = {
+      protocol: kind.protocol,
+      base_url: null,
+      api_key_secret_ref: null,
+      api_key_env: null,
+      has_credential: false,
+      api_key: "",
+    };
+    selectedProvider = id;
+    discoveredModels = [];
+    addingProvider = false;
+    compatibleDraft = null;
+    error = null;
+  }
+
+  function commitCompatibleProvider(): void {
+    if (!settings || !compatibleDraft) return;
+    const baseUrl = compatibleDraft.base_url.trim();
+    if (!baseUrl) {
+      error = "OpenAI-compatible providers need a base URL.";
+      return;
+    }
+    const baseId = slugifyProviderName(compatibleDraft.name) || "openai-compatible";
+    const id = nextProviderId(baseId);
+    settings.providers[id] = {
+      protocol: "OpenAi",
+      base_url: baseUrl,
+      api_key_secret_ref: null,
+      api_key_env: null,
+      has_credential: false,
+      api_key: "",
+    };
+    selectedProvider = id;
+    discoveredModels = [];
+    addingProvider = false;
+    compatibleDraft = null;
+    error = null;
+  }
+
+  function removeProvider(id: string): void {
+    if (!settings) return;
+    for (const modelId of Object.keys(settings.models)) {
+      if (settings.models[modelId].provider_id === id) removeModel(modelId);
+    }
+    delete settings.providers[id];
+    if (settings.default_provider === id) settings.default_provider = defaultModel?.provider_id ?? "";
+    if (selectedProvider === id) selectedProvider = providerIds.find((providerId) => providerId !== id) ?? "";
+  }
+
+  function addManualModel(providerId: string): void {
+    if (!settings) return;
+    const modelId = (newModelIdByProvider[providerId] ?? "").trim();
+    if (!modelId) {
+      error = "Model ID is required.";
+      return;
+    }
+    const id = `${providerId}:${modelId}`;
+    if (settings.models[id]) {
+      error = `Model '${id}' already exists.`;
+      return;
+    }
+    settings.models[id] = {
+      provider_id: providerId,
+      model_id: modelId,
+      aliases: [],
+      context_window: null,
+      generation_preset: null,
+    };
+    settings.default_model ||= id;
+    settings.default_provider ||= providerId;
+    newModelIdByProvider[providerId] = "";
+    error = null;
+  }
+
   function removeModel(id: string): void {
     if (!settings) return;
     delete settings.models[id];
-    if (settings.default_model === id) settings.default_model = modelIds[0] ?? "";
+    if (settings.default_model === id) {
+      const replacement = modelIds.find((modelId) => modelId !== id) ?? "";
+      settings.default_model = replacement;
+      settings.default_provider = replacement ? settings.models[replacement]?.provider_id ?? "" : "";
+    }
   }
 
   function addPreset(): void {
@@ -157,6 +301,7 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     try {
+      settings.default_provider = defaultModel?.provider_id ?? "";
       settings = await saveSettings(settings);
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
@@ -236,180 +381,276 @@
     {#if tab === "providers"}
       <div class="field">
         <div class="key">
-          Default provider
-          <small>Picked when a request doesn't name one explicitly.</small>
+          Default model
+          <small>The model selects the provider. There is no separate provider default.</small>
         </div>
         <div class="val">
-          {#each providerIds as id (id)}
+          {#each modelIds as id (id)}
             <button
               type="button"
-              class="opt"
-              class:active={settings.default_provider === id}
+              class="opt opt-with-x"
+              class:active={settings.default_model === id}
               onclick={() => {
-                if (settings) settings.default_provider = id;
+                if (settings) {
+                  settings.default_model = id;
+                  settings.default_provider = settings.models[id].provider_id;
+                }
               }}
             >
               {id}
             </button>
+          {:else}
+            <p class="empty">No models configured. Add a provider, then add a model under it.</p>
           {/each}
         </div>
       </div>
 
       <div class="field">
         <div class="key">
-          Provider
-          <small>Choose which provider's settings to edit below.</small>
+          Add provider
+          <small>Pick a kind. Swage generates the internal config key.</small>
         </div>
-        <div class="val">
-          {#each providerIds as id (id)}
-            <button
-              type="button"
-              class="opt"
-              class:active={selectedProvider === id}
-              onclick={() => selectProvider(id)}
-            >
-              {id}
-            </button>
-          {/each}
+        <div class="val val-stack">
+          {#if !addingProvider}
+            <div class="opt-row">
+              <button type="button" class="opt opt-anchor" onclick={toggleAddProvider}>
+                <span class="anchor-mark" aria-hidden="true">+</span>
+                <span>Add provider</span>
+              </button>
+            </div>
+          {:else}
+            <div class="opt-row add-row">
+              {#each PROVIDER_KINDS as kind (kind.id)}
+                <button
+                  type="button"
+                  class="opt opt-pick"
+                  class:active={kind.id === "OpenAiCompatible" && !!compatibleDraft}
+                  onclick={() => pickProviderKind(kind)}
+                >
+                  <span class="pick-mark" aria-hidden="true">+</span>
+                  <span>{kind.label}</span>
+                </button>
+              {/each}
+              <button type="button" class="opt opt-cancel" onclick={toggleAddProvider}>
+                <span aria-hidden="true">×</span>
+                <span>Cancel</span>
+              </button>
+            </div>
+            {#if compatibleDraft}
+              <div class="search-row">
+                <input
+                  type="text"
+                  class="text search"
+                  value={compatibleDraft.name}
+                  oninput={(event) => {
+                    if (compatibleDraft) compatibleDraft.name = event.currentTarget.value;
+                  }}
+                  placeholder="Provider name"
+                  autocomplete="off"
+                />
+                <input
+                  type="text"
+                  class="text"
+                  value={compatibleDraft.base_url}
+                  oninput={(event) => {
+                    if (compatibleDraft) compatibleDraft.base_url = event.currentTarget.value;
+                  }}
+                  placeholder="https://api.example.com/v1"
+                  autocomplete="off"
+                />
+                <button type="button" class="opt opt-pick" onclick={commitCompatibleProvider}>
+                  <span class="pick-mark" aria-hidden="true">+</span>
+                  <span>Connect</span>
+                </button>
+              </div>
+            {/if}
+          {/if}
         </div>
       </div>
 
-      {#if provider}
-        <div class="field">
-          <div class="key">
-            Protocol
-            <small>Wire format Swage uses to talk to this provider.</small>
-          </div>
-          <div class="val">
-            {#each PROTOCOLS as proto (proto)}
-              <button
-                type="button"
-                class="opt"
-                class:active={provider.protocol === proto}
-                onclick={() => (provider.protocol = proto)}
-              >
-                {proto}
+      {#each providerIds as id, ix (id)}
+        {@const provider = settings.providers[id]}
+        {@const modelsForProvider = providerModels(id)}
+        <section class="provider-section" aria-label={`Provider ${id}`}>
+          <div class="provider-head">
+            <div class="provider-head-text">
+              <span class="provider-index">
+                Provider <span class="ix">{String(ix + 1).padStart(2, "0")}</span>
+              </span>
+              <h2>{providerDisplayName(id)}</h2>
+              <p class="provider-meta-line">
+                <span class="meta-protocol">{provider.protocol}</span>
+                <span class="meta-key">{id}</span>
+                <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
+              </p>
+            </div>
+            <div class="provider-meta">
+              <span class="credential-status" class:set={provider.has_credential}>
+                {provider.has_credential ? "Credential stored" : "No credential"}
+              </span>
+              <button type="button" class="opt opt-cancel" onclick={() => removeProvider(id)}>
+                <span aria-hidden="true">×</span>
+                <span>Remove</span>
               </button>
-            {/each}
+            </div>
           </div>
-        </div>
 
-        <div class="field">
-          <div class="key">
-            Base URL
-            <small>Override the provider's default endpoint. Leave blank to use the canonical URL.</small>
-          </div>
-          <div class="val">
-            <input
-              type="text"
-              class="text"
-              bind:value={provider.base_url}
-              placeholder="Provider default"
-              autocomplete="off"
-            />
-          </div>
-        </div>
-
-        <div class="field">
-          <div class="key">
-            API key
-            <small>Stored server-side and never returned. Paste a new value to replace what's there.</small>
-          </div>
-          <div class="val key-val">
-            <input
-              type="password"
-              class="text"
-              bind:value={provider.api_key}
-              placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
-              autocomplete="off"
-            />
-            <span class="credential-status" class:set={provider.has_credential}>
-              {provider.has_credential ? "Stored" : "Empty"}
-            </span>
-          </div>
-        </div>
-
-        <div class="field">
-          <div class="key">
-            Discovered models
-            <small>Live list pulled from the provider. Click to add — added models become available across Swage.</small>
-          </div>
-          <div class="val val-stack">
-            <div class="search-row">
+          <div class="field">
+            <div class="key">
+              Base URL
+              <small>Override the provider's canonical endpoint when needed.</small>
+            </div>
+            <div class="val">
               <input
                 type="text"
-                class="text search"
-                bind:value={modelQuery}
-                oninput={loadModels}
-                placeholder="Search…"
+                class="text"
+                bind:value={provider.base_url}
+                placeholder="Provider default"
                 autocomplete="off"
               />
-              <button type="button" class="btn" onclick={loadModels}>Refresh</button>
             </div>
-            <div class="opt-grid">
-              {#each discoveredModels as model (model.id)}
-                {@const added = addedModelIds.has(model.id)}
+          </div>
+
+          <div class="field">
+            <div class="key">
+              API key
+              <small>Paste a new value to store or rotate this provider's credential.</small>
+            </div>
+            <div class="val key-val">
+              <input
+                type="password"
+                class="text"
+                bind:value={provider.api_key}
+                placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
+                autocomplete="off"
+              />
+              <span class="credential-status" class:set={provider.has_credential}>
+                {provider.has_credential ? "Stored" : "Empty"}
+              </span>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="key">
+              Models
+              <small>Configured model IDs for this provider. The active default is marked.</small>
+            </div>
+            <div class="val val-stack">
+              {#each modelsForProvider as [modelKey, model] (modelKey)}
+                <div class="model-row provider-model-row">
+                  <div class="model-main">
+                    <span class="model-id">{model.model_id}</span>
+                    <span class="model-sub">{modelKey}</span>
+                  </div>
+                  <div class="model-facts">
+                    <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
+                    <span>{model.generation_preset ?? "provider generation defaults"}</span>
+                    {#if settings.default_model === modelKey}
+                      <span class="fact-strong">Default</span>
+                    {/if}
+                  </div>
+                  <div class="opt-row row-actions">
+                    <button
+                      type="button"
+                      class="opt"
+                      class:active={settings.default_model === modelKey}
+                      onclick={() => {
+                        if (!settings) return;
+                        settings.default_model = modelKey;
+                        settings.default_provider = id;
+                      }}
+                    >
+                      Use
+                    </button>
+                    <button type="button" class="opt opt-warn" onclick={() => removeModel(modelKey)}>Remove</button>
+                  </div>
+                </div>
+              {:else}
+                <p class="empty">No models configured for this provider.</p>
+              {/each}
+
+              <div class="search-row">
+                <input
+                  type="text"
+                  class="text search"
+                  value={newModelIdByProvider[id] ?? ""}
+                  oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
+                  placeholder="model-id"
+                  autocomplete="off"
+                />
+                <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
+                  <span class="pick-mark" aria-hidden="true">+</span>
+                  <span>Add model</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="key">
+              Discover
+              <small>Fetch known models for this provider, then add the ones Swage should use.</small>
+            </div>
+            <div class="val val-stack">
+              <div class="search-row">
+                <input
+                  type="text"
+                  class="text search"
+                  value={selectedProvider === id ? modelQuery : ""}
+                  onfocus={() => selectProvider(id)}
+                  oninput={(event) => {
+                    selectedProvider = id;
+                    modelQuery = event.currentTarget.value;
+                    loadModels();
+                  }}
+                  placeholder="Search models"
+                  autocomplete="off"
+                />
                 <button
                   type="button"
                   class="opt"
-                  class:active={added}
-                  disabled={added}
-                  onclick={() => addDiscoveredModel(model)}
-                  title={added ? "Already added" : `Add ${model.name}`}
-                >
-                  <span class="opt-label">{model.name}</span>
-                  <span class="opt-tag">{added ? "Added" : "Add"}</span>
-                </button>
-              {:else}
-                <p class="empty">
-                  No models discovered. {provider.has_credential ? "Try refreshing." : "Set an API key first."}
-                </p>
-              {/each}
-            </div>
-          </div>
-        </div>
-
-        {#if modelIds.length > 0}
-          <div class="field">
-            <div class="key">
-              Default model
-              <small>Used when a request doesn't pin a model.</small>
-            </div>
-            <div class="val">
-              {#each modelIds as id (id)}
-                <button
-                  type="button"
-                  class="opt opt-with-x"
-                  class:active={settings.default_model === id}
                   onclick={() => {
-                    if (settings) settings.default_model = id;
+                    selectedProvider = id;
+                    loadModels();
                   }}
                 >
-                  <span class="opt-label">{id}</span>
-                  <span
-                    class="opt-x"
-                    role="button"
-                    tabindex="0"
-                    aria-label={`Remove ${id}`}
-                    title="Remove model"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      removeModel(id);
-                    }}
-                    onkeydown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        removeModel(id);
-                      }
-                    }}
-                  >×</span>
+                  Refresh
                 </button>
-              {/each}
+              </div>
+              {#if selectedProvider === id}
+                <div class="opt-grid">
+                  {#each discoveredModels as model (model.id)}
+                    {@const added = addedModelIds.has(model.id)}
+                    <button
+                      type="button"
+                      class="opt"
+                      class:active={added}
+                      disabled={added}
+                      onclick={() => addDiscoveredModel(model)}
+                      title={added ? "Already added" : `Add ${model.name}`}
+                    >
+                      <span class="opt-label">{model.name}</span>
+                      <span class="opt-tag">{added ? "Added" : "Add"}</span>
+                    </button>
+                  {:else}
+                    <p class="empty">No discovered models to show.</p>
+                  {/each}
+                </div>
+              {/if}
             </div>
           </div>
-        {/if}
-      {/if}
+        </section>
+      {:else}
+        <div class="field">
+          <div class="key">
+            No providers
+            <small>Swage will start without messaging until a model/provider pair exists.</small>
+          </div>
+          <div class="val">
+            <p class="empty">Add a provider above. Nothing is assumed.</p>
+          </div>
+        </div>
+      {/each}
     {:else if tab === "generation"}
       <div class="field">
         <div class="key">
@@ -570,8 +811,6 @@
 <style>
   /* ---------------------------------------------------------------------------
      Settings pane — body content for the riso settings shell.
-     Mirrors .rs .settings-pane in
-     Documents/Notes/Other Notes/Initiatives/Active/Swage/UI/riso-cyanotype.html.
      --------------------------------------------------------------------------- */
 
   .settings-pane {
@@ -803,6 +1042,121 @@
     color: var(--paper);
   }
 
+  /* Anchor — the "Add provider" entry. A ticket-stub chip: a printer's
+     mark on the left in mono, the action label in display on the right,
+     divided by a hairline. Reads as a deliberate stamp rather than a
+     dashed afterthought. The riso shadow shows on hover. */
+  .opt-anchor {
+    padding: 7px 16px 7px 7px;
+    gap: 12px;
+    border-width: 1.5px;
+  }
+
+  .opt-anchor .anchor-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin: -1px 0;
+    border: 1px solid currentColor;
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .opt-anchor:hover:not(:disabled):not(.active) {
+    background: var(--paper);
+  }
+
+  /* Riso second-pass shadow on hover — proper blended offset rather than
+     a solid box-shadow, so it composes with the page like the rest of
+     the riso surfaces. */
+  .opt-anchor:hover:not(:disabled):not(.active)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--accent);
+    transform: translate(var(--offset), var(--offset));
+    z-index: -1;
+    mix-blend-mode: var(--shadow-blend);
+    opacity: var(--shadow-opacity);
+    pointer-events: none;
+  }
+
+  .opt-anchor:hover:not(:disabled) .anchor-mark {
+    color: var(--accent);
+  }
+
+  /* Pick chip — mono "+" prefix as its own glyph cell. Used by the kind
+     chips, the inline Connect, and the per-provider Add model. The mark
+     is mono so it sits visually beneath the Bebas label. */
+  .opt-pick {
+    gap: 8px;
+    padding-left: 10px;
+  }
+
+  .opt-pick .pick-mark {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--ink-orange);
+    letter-spacing: 0;
+  }
+
+  .opt-pick.active .pick-mark,
+  .opt-pick:hover:not(:disabled):not(.active) .pick-mark {
+    color: inherit;
+  }
+
+  /* Quiet cancel — outline removed, sits beside the chip row as a soft
+     dismiss. Hover surfaces the orange so the affordance still reads. */
+  .opt-cancel {
+    gap: 6px;
+    border-color: transparent;
+    color: var(--ink-soft);
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .opt-cancel:hover:not(:disabled) {
+    background: transparent;
+    color: var(--ink-orange);
+  }
+
+  /* Stagger reveal — when the kind row expands, chips bloom left-to-right.
+     Each :nth-child carries its own delay; the cancel sits at the end. */
+  .add-row > .opt {
+    animation: chip-in 220ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+  }
+
+  .add-row > .opt:nth-child(1) { animation-delay: 0ms; }
+  .add-row > .opt:nth-child(2) { animation-delay: 35ms; }
+  .add-row > .opt:nth-child(3) { animation-delay: 70ms; }
+  .add-row > .opt:nth-child(4) { animation-delay: 105ms; }
+  .add-row > .opt:nth-child(5) { animation-delay: 140ms; }
+  .add-row > .opt:nth-child(6) { animation-delay: 200ms; }
+
+  @keyframes chip-in {
+    from {
+      opacity: 0;
+      transform: translateX(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .add-row > .opt {
+      animation: none;
+    }
+  }
+
   .opt-tag {
     font-family: var(--font-mono);
     font-weight: 500;
@@ -814,31 +1168,6 @@
 
   .opt.active .opt-tag {
     border-color: var(--paper);
-  }
-
-  .opt-with-x {
-    padding-right: 6px;
-  }
-
-  .opt-x {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    margin-left: 6px;
-    border: 1px solid currentColor;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .opt-x:hover {
-    background: var(--accent);
-    color: var(--paper);
-    border-color: var(--accent);
   }
 
   /* Inputs — flat 1px border, paper background, body face. */
@@ -909,11 +1238,127 @@
     justify-content: space-between;
   }
 
+  /* Empty caption — print stamp typography, framed by hairline rules.
+     Replaces the bland italic gray default; a quiet but composed
+     "field unused" mark that fits the riso vocabulary. */
   .empty {
     margin: 0;
-    font-style: italic;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
     color: var(--ink-soft);
-    font-size: 12.5px;
+  }
+
+  .empty::before {
+    content: "";
+    flex: 0 0 22px;
+    height: 1px;
+    background: var(--rule-soft);
+  }
+
+  .provider-section {
+    border-top: 2px solid var(--ink);
+    padding-top: 18px;
+    position: relative;
+  }
+
+  /* Registration crosshair — small print mark hung off the section's
+     top-left. A wink at riso/print, never required for affordance. */
+  .provider-section::before {
+    content: "+";
+    position: absolute;
+    top: -10px;
+    left: -2px;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--paper);
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .provider-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 18px;
+    padding-bottom: 12px;
+  }
+
+  .provider-head-text {
+    min-width: 0;
+  }
+
+  .provider-index {
+    display: block;
+    margin-bottom: 6px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .provider-index .ix {
+    color: var(--ink-orange);
+  }
+
+  .provider-head h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 26px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .provider-meta-line {
+    margin: 8px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    word-break: break-word;
+  }
+
+  .provider-meta-line span {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .provider-meta-line span + span::before {
+    content: "·";
+    color: var(--rule-soft);
+  }
+
+  .provider-meta-line .meta-protocol {
+    color: var(--ink);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .provider-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   /* Per-model row inside Model compatibility — id label on the left, chip
@@ -936,6 +1381,46 @@
     font-size: 12px;
     color: var(--ink);
     word-break: break-all;
+  }
+
+  .provider-model-row {
+    grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+    align-items: start;
+  }
+
+  .model-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .model-sub,
+  .model-facts {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--ink-soft);
+  }
+
+  .model-facts {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .model-facts span {
+    padding: 2px 6px;
+    border: 1px solid var(--rule-soft);
+  }
+
+  .model-facts .fact-strong {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .row-actions {
+    justify-content: flex-end;
   }
 
   .opt-row {

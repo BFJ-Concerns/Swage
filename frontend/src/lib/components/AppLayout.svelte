@@ -1,16 +1,6 @@
 <!--
   Riso/cyanotype shell.
 
-  Layout follows the design spec in
-  Documents/Notes/Other Notes/Initiatives/Active/Swage/UI/riso-cyanotype.html:
-
-    .window
-      ┌──────────────┬───────────────────────────────────────────────┐
-      │              │  topbar — lens tabs (collapsed when no bench) │
-      │   nav        ├───────────────────────────────────────────────┤
-      │ (280px wide) │  body — conversation pane and optional stage  │
-      └──────────────┴───────────────────────────────────────────────┘
-
   When no bench is selected the top bar collapses and the body becomes a
   full-width bench picker. Switching benches goes through BenchSelector,
   which resets the layout via onBenchChange.
@@ -19,8 +9,8 @@
   reference objects now sit on the module stage like any other module.
 
   Surface switching: the lens descriptor still exposes ui_modules, but the
-  riso design does not have per-lens surface tabs. We honour the lens's
-  default_surface and place the corresponding module on the stage.
+  shell has no per-lens surface tabs. We honour the lens's default_surface
+  and place the corresponding module on the stage.
   TODO(debt): reconcile lens.ui_modules with the single-surface-per-lens
   design once lens definitions are reshaped. Tracked: future UI cleanup.
 -->
@@ -150,10 +140,9 @@
 >
   {#if settingsTab}
     <!--
-      Settings shell takes the window over completely (per riso-cyanotype.html
-      design 03 — Settings — display): topbar collapses to a single label and
-      a × CLOSE affordance, nav becomes a parked bench-head plus a vertical
-      page list, body is single-column.
+      Settings shell takes the window over completely: topbar collapses to a
+      single label and a × CLOSE affordance, nav becomes a parked bench-head
+      plus a vertical page list, body is single-column.
     -->
     <header class="topbar settings-topbar">
       <span class="settings-label">Settings · {settingsTab}</span>
