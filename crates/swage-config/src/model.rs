@@ -87,6 +87,8 @@ pub struct ModelEndpointConfig {
     pub aliases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_preset: Option<String>,
 }
 
 impl Default for ModelEndpointConfig {
@@ -96,6 +98,7 @@ impl Default for ModelEndpointConfig {
             model_id: "claude-sonnet-4-20250514".to_string(),
             aliases: Vec::new(),
             context_window: None,
+            generation_preset: None,
         }
     }
 }
@@ -551,6 +554,40 @@ impl Default for CommunicationConfig {
     }
 }
 
+/// Named generation parameters that can be applied to provider requests.
+///
+/// Empty presets are invalid at the settings API boundary. The config type is
+/// permissive so older or hand-written files can still be loaded and repaired
+/// through settings rather than making the whole gateway unusable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerationPresetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_sequences: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl GenerationPresetConfig {
+    pub fn is_empty(&self) -> bool {
+        self.max_tokens.is_none()
+            && self.temperature.is_none()
+            && self.stop_sequences.is_empty()
+            && self.metadata.is_none()
+    }
+}
+
+/// Global generation preset catalogue. `None` is intentionally not represented
+/// here; it is a built-in UI/runtime selection meaning provider defaults.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    #[serde(default)]
+    pub presets: HashMap<String, GenerationPresetConfig>,
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -583,6 +620,8 @@ pub struct ResolvedConfig {
     /// Inter-agent communication settings — context transfer policy.
     /// Defaults to no communication (context transfer mode = none).
     pub communication: CommunicationConfig,
+    /// Named generation parameter presets available to model entries.
+    pub generation: GenerationConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
 }

@@ -6,6 +6,7 @@
 export interface Route {
   path: string;
   conversationId: string | null;
+  settingsTab: "providers" | "generation" | "automation" | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -43,9 +44,18 @@ export interface RouterOptions {
 export function parseRoute(pathname: string): Route {
   const match = pathname.match(/^\/conversations\/([^/]+)$/);
   if (match) {
-    return { path: pathname, conversationId: match[1], notFound: false };
+    return { path: pathname, conversationId: match[1], settingsTab: null, notFound: false };
   }
-  return { path: "/", conversationId: null, notFound: false };
+  const settingsMatch = pathname.match(/^\/settings(?:\/(providers|generation|automation))?$/);
+  if (settingsMatch) {
+    return {
+      path: pathname,
+      conversationId: null,
+      settingsTab: (settingsMatch[1] as Route["settingsTab"]) ?? "providers",
+      notFound: false,
+    };
+  }
+  return { path: "/", conversationId: null, settingsTab: null, notFound: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +79,7 @@ export function createRouter(options?: RouterOptions): Router {
           // The ID in the URL is stale (conversation deleted or never existed).
           // Fall back to the root and flag the not-found state so the UI
           // can show an appropriate notice.
-          currentRoute = { path: "/", conversationId: null, notFound: true };
+          currentRoute = { path: "/", conversationId: null, settingsTab: null, notFound: true };
           window.history.replaceState(null, "", "/");
         } else {
           throw error;

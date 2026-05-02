@@ -1719,6 +1719,8 @@ mod tests {
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         }
     }
 
@@ -1776,6 +1778,8 @@ mod tests {
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         (state, session_id)

@@ -790,6 +790,7 @@ mod tests {
             model_id: "claude-test".into(),
             aliases: Vec::new(),
             context_window: None,
+            generation_preset: None,
         };
 
         let config = resolve_provider_config(&provider, &model, &secret_manager)

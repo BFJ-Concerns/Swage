@@ -66,6 +66,7 @@ pub mod schedule;
 pub mod secret;
 pub mod server;
 pub mod service;
+pub mod settings;
 pub mod shared_reference;
 pub mod shutdown;
 pub mod skill;

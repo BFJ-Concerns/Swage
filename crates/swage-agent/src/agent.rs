@@ -176,10 +176,10 @@ impl Agent {
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            stop_sequences: self.config.stop_sequences.clone(),
+            metadata: self.config.generation_metadata.clone(),
             tool_definitions: self
                 .tool_dispatcher
                 .as_ref()

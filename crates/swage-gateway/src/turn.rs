@@ -761,6 +761,19 @@ pub(crate) fn build_agent_config(
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
+    if let Some(model) = config.models.default_model()
+        && let Some(preset_id) = model.generation_preset.as_deref()
+        && let Some(preset) = config.generation.presets.get(preset_id)
+    {
+        agent_config.max_tokens = preset.max_tokens;
+        agent_config.temperature = preset.temperature;
+        agent_config.stop_sequences = if preset.stop_sequences.is_empty() {
+            None
+        } else {
+            Some(preset.stop_sequences.clone())
+        };
+        agent_config.generation_metadata = preset.metadata.clone();
+    }
     agent_config
 }
 
@@ -5181,6 +5194,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (state, session_id)
     }
@@ -5249,6 +5264,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (state, session_id)
     }
@@ -5387,6 +5404,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -5714,6 +5733,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (state, session_id)
     }
@@ -5786,6 +5807,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         (state, session_id, captured)
@@ -6053,6 +6076,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -6653,6 +6678,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -6750,6 +6777,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -6819,6 +6848,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -7000,6 +7031,8 @@ pub(crate) mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();

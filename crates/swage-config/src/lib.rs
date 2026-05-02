@@ -19,11 +19,11 @@ pub mod validation;
 // Resolved config types
 pub use model::{
     CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferField,
-    ContextTransferMode, ContextTransferTargetConfig, HierarchyLevel, HitlConfig, LogLevel,
-    LoggingConfig, ModelCatalogConfig, ModelEndpointConfig, ObservabilityConfig, OutputConfig,
-    PricingConfig, Protocol, ProviderCatalogConfig, ProviderEndpointConfig, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig,
+    ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
+    HierarchyLevel, HitlConfig, LogLevel, LoggingConfig, ModelCatalogConfig, ModelEndpointConfig,
+    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
+    ProviderEndpointConfig, RequireApprovalEntry, ResolvedConfig, SandboxConfig,
+    SearchProviderConfig, ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 
 // Error types

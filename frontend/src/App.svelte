@@ -19,6 +19,7 @@
   import { createStreamingStore } from "./lib/stores/streaming";
   import { createBenchStore } from "./lib/stores/benches";
   import { createRouter } from "./lib/router";
+  import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
 
@@ -130,6 +131,7 @@
   let activeLens = $state<AppLens>("assistant");
   let activeSurface = $state<LensSurface>("conversation");
   let availableLenses = $state<LensDescriptor[]>([]);
+  let currentRoute = $state<Route>(router.currentRoute);
   const desktopRuntime = getDesktopRuntime();
 
   // ---------------------------------------------------------------------------
@@ -233,6 +235,11 @@
     if (id) connectionStore.connectTo(id);
   }
 
+  function navigate(path: string): void {
+    router.navigate(path);
+    currentRoute = router.currentRoute;
+  }
+
   async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
     const benchId = benchStore.currentBench?.id;
     if (!benchId) return;
@@ -273,6 +280,7 @@
       connectionStore.disconnect();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
+      currentRoute = router.currentRoute;
       // Load the new bench's conversations.
       await conversationStore.loadConversations(benchId);
       await refreshLensRuntime("conversation");
@@ -296,6 +304,7 @@
       await refreshLensRuntime();
 
       await router.init();
+      currentRoute = router.currentRoute;
 
       // Snapshot the not-found flag — set by the router if the URL pointed
       // at a conversation that no longer exists on the server.
@@ -338,8 +347,10 @@
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}
-    onSelectTheme={setThemeMode}
-  />
+      onSelectTheme={setThemeMode}
+      route={currentRoute}
+      onNavigate={navigate}
+    />
 
   {#if notFound}
     <!--

@@ -28,6 +28,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/")).toEqual({
       path: "/",
       conversationId: null,
+      settingsTab: null,
       notFound: false,
     });
   });
@@ -36,6 +37,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/conversations/abc-123")).toEqual({
       path: "/conversations/abc-123",
       conversationId: "abc-123",
+      settingsTab: null,
       notFound: false,
     });
   });
@@ -44,6 +46,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/other/path")).toEqual({
       path: "/",
       conversationId: null,
+      settingsTab: null,
       notFound: false,
     });
   });
@@ -52,6 +55,16 @@ describe("parseRoute", () => {
     expect(parseRoute("")).toEqual({
       path: "/",
       conversationId: null,
+      settingsTab: null,
+      notFound: false,
+    });
+  });
+
+  it("maps settings routes to their active tab", () => {
+    expect(parseRoute("/settings/generation")).toEqual({
+      path: "/settings/generation",
+      conversationId: null,
+      settingsTab: "generation",
       notFound: false,
     });
   });

@@ -1260,6 +1260,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (state, storage)
     }

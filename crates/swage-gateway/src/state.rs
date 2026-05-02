@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use chrono::{DateTime, Utc};
@@ -93,6 +96,10 @@ pub struct AppState {
     pub secret_manager: Arc<SecretManager>,
     /// Capability surface used to gate attachment and media workflows.
     pub workflow_capabilities: WorkflowCapabilities,
+    /// True after persisted global settings differ from this running process.
+    pub restart_required: Arc<AtomicBool>,
+    /// Whether this process can restart itself via the desktop/runtime wrapper.
+    pub managed_gateway: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +141,19 @@ impl AppState {
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             workflow_capabilities,
+            restart_required: Arc::new(AtomicBool::new(false)),
+            managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
+    }
+
+    pub fn mark_restart_required(&self) {
+        self.restart_required.store(true, Ordering::SeqCst);
+    }
+
+    pub fn restart_required(&self) -> bool {
+        self.restart_required.load(Ordering::SeqCst)
     }
 }
 
@@ -179,6 +198,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         }
     }
 

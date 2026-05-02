@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -86,6 +87,7 @@ use crate::{
         UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
         WorkspaceAttachmentService,
     },
+    settings::{SaveSettingsRequest, SettingsResponse},
     shared_reference::{
         CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
         SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
@@ -123,6 +125,39 @@ pub async fn workflow_capabilities(
 /// `GET /api/voice/capabilities` — inspect voice support for the current runtime.
 pub async fn voice_capabilities(State(state): State<AppState>) -> Json<VoiceCapabilitiesResponse> {
     Json(crate::voice::voice_capabilities(&state).await)
+}
+
+pub async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
+    Json(crate::settings::load_settings(&state).await)
+}
+
+pub async fn save_settings(
+    State(state): State<AppState>,
+    Json(request): Json<SaveSettingsRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    Ok(Json(crate::settings::save_settings(&state, request).await?))
+}
+
+pub async fn discover_provider_models(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<crate::settings::ModelDiscoveryResponse>, ApiError> {
+    Ok(Json(
+        crate::settings::discover_models(&state, provider_id, query.get("q").cloned()).await?,
+    ))
+}
+
+pub async fn restart_status(
+    State(state): State<AppState>,
+) -> Json<crate::settings::RestartStatusResponse> {
+    Json(crate::settings::restart_status(&state))
+}
+
+pub async fn restart_gateway(
+    State(state): State<AppState>,
+) -> Result<Json<crate::settings::RestartStatusResponse>, ApiError> {
+    Ok(Json(crate::settings::restart_gateway(&state).await?))
 }
 
 /// `POST /api/voice/transcriptions` — turn uploaded audio bytes into text.
@@ -2497,6 +2532,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (build_router(state), storage)
     }
@@ -4330,6 +4367,8 @@ def build_topology():
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

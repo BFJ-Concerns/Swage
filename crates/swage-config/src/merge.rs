@@ -1,11 +1,11 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    ContextConfig, HitlConfig, LogLevel, LoggingConfig, ModelCatalogConfig, ModelEndpointConfig,
-    ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
-    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig,
+    ContextConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
+    ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
+    PricingConfig, ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
+    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,6 +75,12 @@ pub struct PartialContextConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialPricingConfig {
     pub models: Option<HashMap<String, ModelPricing>>,
+}
+
+/// Partial mirror of `GenerationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialGenerationConfig {
+    pub presets: Option<HashMap<String, GenerationPresetConfig>>,
 }
 
 /// Partial mirror of `ObservabilityConfig`.
@@ -194,6 +200,7 @@ pub struct PartialConfig {
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
+    pub generation: Option<PartialGenerationConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +313,13 @@ impl From<ResolvedConfig> for PartialConfig {
                 }),
                 message_ttl_secs: Some(r.communication.message_ttl_secs),
                 expiry_interval_secs: Some(r.communication.expiry_interval_secs),
+            }),
+            generation: Some(PartialGenerationConfig {
+                presets: if r.generation.presets.is_empty() {
+                    None
+                } else {
+                    Some(r.generation.presets)
+                },
             }),
         }
     }
@@ -488,6 +502,15 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
             }
         }),
+        generation: merge_section(base.generation, overlay.generation, |b, o| {
+            let mut presets = b.presets.unwrap_or_default();
+            if let Some(overlay_presets) = o.presets {
+                presets.extend(overlay_presets);
+            }
+            PartialGenerationConfig {
+                presets: Some(presets),
+            }
+        }),
     }
 }
 
@@ -607,6 +630,13 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         pricing: {
             let models = partial.pricing.and_then(|p| p.models).unwrap_or_default();
             PricingConfig { models }
+        },
+        generation: {
+            let presets = partial
+                .generation
+                .and_then(|generation| generation.presets)
+                .unwrap_or_default();
+            GenerationConfig { presets }
         },
         observability: {
             let do_ = ObservabilityConfig::default();
@@ -862,6 +892,7 @@ mod tests {
                         model_id: "gpt-4o-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()
@@ -891,6 +922,7 @@ mod tests {
                 model_id: "base-model".to_string(),
                 aliases: Vec::new(),
                 context_window: None,
+                generation_preset: None,
             },
         )]);
 
@@ -925,6 +957,7 @@ mod tests {
                         model_id: "claude-3-7-sonnet".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
             }),
@@ -940,6 +973,7 @@ mod tests {
                         model_id: "gpt-4o-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()
@@ -966,6 +1000,7 @@ mod tests {
                         model_id: "claude-3-7-sonnet".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
             }),
@@ -980,6 +1015,7 @@ mod tests {
                         model_id: "gpt-4.1-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()

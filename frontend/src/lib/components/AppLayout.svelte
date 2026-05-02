@@ -31,7 +31,9 @@
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import type { Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { AppLens, LensDescriptor, LensSurface } from "../types";
@@ -59,6 +61,8 @@
     desktopRuntime?: DesktopRuntimeInfo | null;
     themeMode?: ThemeMode;
     onSelectTheme?: (mode: ThemeMode) => void;
+    route?: Route;
+    onNavigate?: (path: string) => void;
   }
 
   // activeSurface and onSelectSurface are kept in Props for API compatibility
@@ -78,6 +82,8 @@
     desktopRuntime,
     themeMode = "system",
     onSelectTheme,
+    route,
+    onNavigate,
   }: Props = $props();
 
   // Lazy-load stage modules so a builder-only crate isn't pulled in for
@@ -91,6 +97,27 @@
   const currentBench = $derived(benchStore?.currentBench ?? null);
   const conversationCount = $derived(conversationStore.conversations.length);
   const activeConversation = $derived(conversationStore.activeConversation);
+  const settingsTab = $derived(route?.settingsTab ?? null);
+
+  // Settings sub-pages — drives both the URL the page list links to and the
+  // ix counter shown beside each entry. Kept in this component because the
+  // settings nav is part of the window chrome, not the body pane.
+  const SETTINGS_PAGES: ReadonlyArray<{
+    id: NonNullable<typeof settingsTab>;
+    label: string;
+    ix: string;
+  }> = [
+    { id: "providers", label: "Providers", ix: "—" },
+    { id: "generation", label: "Generation", ix: "—" },
+    { id: "automation", label: "Automation", ix: "—" },
+  ];
+
+  // × CLOSE returns to the active conversation if one was open before the
+  // user entered settings; otherwise drops back to the bench picker (root).
+  function closeSettings(): void {
+    const id = activeConversation?.id;
+    onNavigate?.(id ? `/conversations/${id}` : "/");
+  }
 
   // Stage surface — the module placed by the active lens. The conversation
   // surface is always present, so we ignore the special-cased "conversation"
@@ -116,8 +143,30 @@
   });
 </script>
 
-<div class="window" class:no-topbar={!currentBench}>
-  {#if currentBench}
+<div
+  class="window"
+  class:no-topbar={!currentBench && !settingsTab}
+  class:settings-mode={!!settingsTab}
+>
+  {#if settingsTab}
+    <!--
+      Settings shell takes the window over completely (per riso-cyanotype.html
+      design 03 — Settings — display): topbar collapses to a single label and
+      a × CLOSE affordance, nav becomes a parked bench-head plus a vertical
+      page list, body is single-column.
+    -->
+    <header class="topbar settings-topbar">
+      <span class="settings-label">Settings · {settingsTab}</span>
+      <button
+        type="button"
+        class="settings-close"
+        onclick={closeSettings}
+        title="Close settings"
+      >
+        × Close
+      </button>
+    </header>
+  {:else if currentBench}
     <!--
       Top bar: lens tabs. Each tab is a live lens with a close affordance and
       a `+` to add another. When no bench is selected the bar drops out.
@@ -158,8 +207,33 @@
     </header>
   {/if}
 
-  <aside class="nav" aria-label="Navigation">
-    {#if currentBench}
+  <aside class="nav" class:settings={!!settingsTab} aria-label="Navigation">
+    {#if settingsTab}
+      <!--
+        Settings nav: parked bench-head shows where × CLOSE returns to,
+        then a vertical list of settings pages drives the active sub-route.
+      -->
+      <div class="bench-head settings-head">
+        <div class="crumb">
+          <span class="return-mark">Return to</span>
+        </div>
+        <h2 class="name">{currentBench?.name ?? "Swage"}</h2>
+        <div class="meta">on close</div>
+      </div>
+      <div class="settings-pages">
+        {#each SETTINGS_PAGES as page (page.id)}
+          <button
+            type="button"
+            class="settings-page"
+            class:active={settingsTab === page.id}
+            onclick={() => onNavigate?.(`/settings/${page.id}`)}
+          >
+            <span>{page.label}</span>
+            <span class="ix">{page.ix}</span>
+          </button>
+        {/each}
+      </div>
+    {:else if currentBench}
       <!-- Bench header — large display name, becomes back-arrow + secondary
            menu in future iterations. -->
       <div class="bench-head">
@@ -183,11 +257,15 @@
         <ConversationList store={conversationStore} />
       </div>
 
-      <!-- Footer: settings entry point and account placeholder.
-           TODO(debt): settings overlay not yet implemented; account auth not
-           yet wired. Buttons render disabled to preserve layout. -->
+      <!-- Footer: global settings entry point and account placeholder. -->
       <div class="footer">
-        <button class="footer-item" disabled title="Settings (not yet wired)">Settings</button>
+        <button
+          class="footer-item"
+          class:active={settingsTab !== null}
+          onclick={() => onNavigate?.("/settings/providers")}
+        >
+          Settings
+        </button>
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
@@ -212,10 +290,12 @@
 
   <main
     class="body"
-    class:full={!currentBench}
-    class:stage-dominant={isStageDominant}
+    class:full={!currentBench || !!settingsTab}
+    class:stage-dominant={isStageDominant && !settingsTab}
   >
-    {#if !currentBench}
+    {#if settingsTab}
+      <SettingsPage tab={settingsTab} />
+    {:else if !currentBench}
       <!-- Bench picker view: full card grid with two-stage selection. -->
       <BenchPicker {benchStore} {onBenchChange} />
     {:else}
@@ -316,6 +396,156 @@
 
   .window.no-topbar .topbar {
     display: none;
+  }
+
+  /* ---------------------------------------------------------------------------
+     Settings shell — overrides for the settings-mode window.
+     The topbar collapses to a label + close, the nav swaps the conversation
+     list for a settings page list, and the body runs full width.
+     --------------------------------------------------------------------------- */
+
+  .settings-topbar {
+    grid-area: top;
+    display: flex;
+    align-items: stretch;
+    background: var(--ink);
+    color: var(--paper);
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .settings-label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 22px;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .settings-close {
+    padding: 0 22px;
+    display: flex;
+    align-items: center;
+    background: transparent;
+    color: var(--paper);
+    border: none;
+    border-left: 1px solid rgba(255, 248, 238, 0.3);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .settings-close:hover {
+    background: var(--accent);
+  }
+
+  /* Parked bench-head in settings nav: same ink block as the regular nav,
+     but the orange registration band underneath is suppressed (the bench
+     isn't currently active, just the destination of × CLOSE). */
+  .nav.settings .bench-head {
+    padding: 14px 22px;
+  }
+
+  .nav.settings .bench-head::after {
+    display: none;
+  }
+
+  .nav.settings .bench-head .crumb {
+    margin-bottom: 6px;
+  }
+
+  .return-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.18em;
+  }
+
+  /* Decorative pip — orange on cream is below AA so it stays as a pure
+     graphic element; the text colour reads against the ink block instead. */
+  .return-mark::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+  }
+
+  .nav.settings .bench-head .name {
+    font-size: 26px;
+    letter-spacing: 0.03em;
+  }
+
+  .nav.settings .bench-head .meta {
+    margin-top: 4px;
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.5;
+    color: rgba(255, 248, 238, 0.7);
+  }
+
+  .settings-pages {
+    padding: 16px 14px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: var(--paper);
+  }
+
+  .settings-page {
+    position: relative;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid transparent;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 12px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    isolation: isolate;
+  }
+
+  .settings-page:hover:not(.active) {
+    background: rgba(14, 59, 102, 0.08);
+  }
+
+  .settings-page.active {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .settings-page.active::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--accent);
+    transform: translate(2px, 2px);
+    z-index: -1;
+    mix-blend-mode: var(--shadow-blend);
+    opacity: var(--shadow-opacity);
+    pointer-events: none;
+  }
+
+  .settings-page .ix {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    opacity: 0.6;
   }
 
   /* ---------------------------------------------------------------------------

@@ -27,6 +27,11 @@ pub struct AgentConfig {
     pub working_directory: PathBuf,
     /// Gateway-governed allowed path roots for tool execution.
     pub allowed_paths: Vec<PathBuf>,
+    /// Optional generation controls loaded from the selected global preset.
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub generation_metadata: Option<Value>,
 }
 
 impl AgentConfig {
@@ -44,6 +49,10 @@ impl AgentConfig {
             max_output_retries: 3,
             working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             allowed_paths: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            generation_metadata: None,
         }
     }
 
