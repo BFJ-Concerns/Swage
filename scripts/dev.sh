@@ -7,11 +7,13 @@
 #   - Both processes share this terminal; Ctrl-C cleanly stops both.
 #
 # Usage:
-#   scripts/dev.sh                 # default ports (gateway 3000, vite 5173)
+#   scripts/dev.sh                 # gateway 3000, Vite 5173 on all interfaces
 #   scripts/dev.sh --gateway-port 3030
 #
-# Open http://localhost:5173 once both have started. Vite proxies /api and the
-# WebSocket through to the gateway port — keep them aligned with vite.config.ts.
+# Open http://localhost:5173 or the printed LAN URL once both have started.
+# Vite proxies /api and the WebSocket through to the gateway port — keep them
+# aligned with vite.config.ts. LAN mode has no auth; only run it on networks
+# you trust.
 #
 # Always a debug build — release takes minutes to compile, which is the wrong
 # trade-off for iteration. Use scripts/install.sh when you want a release build.
@@ -22,6 +24,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 gateway_port=3000     # matches the vite.config.ts proxy target
+vite_host=0.0.0.0
+vite_port=5173
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -92,15 +96,29 @@ echo "==> Starting gateway on port ${gateway_port} (cargo run, debug)"
 gateway_pid=$!
 
 # --- Frontend dev server ----------------------------------------------------
-echo "==> Starting Vite dev server on port 5173"
+echo "==> Starting Vite dev server on ${vite_host}:${vite_port}"
 (
-    npm --prefix frontend run dev
+    npm --prefix frontend run dev -- --host "$vite_host" --port "$vite_port"
 ) &
 vite_pid=$!
 
+# Best-effort LAN IP for printing the reachable URL.
+lan_ip=""
+if command -v hostname >/dev/null 2>&1; then
+    lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+
 echo
 echo "    Gateway: http://127.0.0.1:${gateway_port}"
-echo "    Web UI:  http://localhost:5173"
+echo "    Web UI:  http://localhost:${vite_port}"
+if [[ -n "$lan_ip" ]]; then
+    echo "    LAN UI:  http://${lan_ip}:${vite_port}"
+else
+    echo "    LAN UI:  http://<this-machine-ip>:${vite_port}"
+fi
+echo
+echo "    LAN exposure warning: the dev server has no authentication."
+echo "    Only run this on networks you trust."
 echo "    Ctrl-C to stop both."
 echo
 
