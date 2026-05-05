@@ -33,6 +33,21 @@ use crate::message::{OutboundMessage, TurnRequest};
 // Agent struct
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+pub(crate) struct TurnApprovalScope {
+    approves_remaining_gates: bool,
+}
+
+impl TurnApprovalScope {
+    fn approve_remaining_gates(&mut self) {
+        self.approves_remaining_gates = true;
+    }
+
+    fn should_skip_gate(&self) -> bool {
+        self.approves_remaining_gates
+    }
+}
+
 /// A single-agent runtime that processes messages through an LLM.
 pub struct Agent {
     pub(crate) config: AgentConfig,
@@ -145,6 +160,8 @@ impl Agent {
         self.storage
             .update_state(thread_id, ThreadState::Processing)
             .await?;
+
+        let mut approval_scope = TurnApprovalScope::default();
 
         let assembled_context = if crate::compaction::exceeds_threshold(
             &request.assembled_context,
@@ -277,43 +294,61 @@ impl Agent {
                         context,
                         timeout,
                     }) => {
-                        // Hook-driven approval gate.
-                        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
-                        let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
-                            DEFAULT_APPROVAL_TIMEOUT_SECS,
-                        ));
-                        match self
-                            .handle_approval_gate(
+                        if approval_scope.should_skip_gate() {
+                            // A previous "Allow turn" decision covers later
+                            // gates within this same live turn only.
+                            self.dispatch_tool_call(
+                                call,
                                 &execution,
-                                swage_storage::model::ApprovalKind::Hook,
-                                Some(call.name.clone()),
-                                Some(call.arguments.clone()),
-                                None,
-                                prompt,
-                                context,
-                                gate_timeout,
-                                swage_core::ApprovalTimeoutPolicy::default(),
+                                &llm_request.messages,
                                 &event_tx,
                                 &cancel_token,
+                                &mut approval_scope,
                             )
                             .await?
-                        {
-                            ApprovalGateOutcome::Approved => {
-                                // Approved — proceed with normal dispatch.
-                                self.dispatch_tool_call(
-                                    call,
+                        } else {
+                            // Hook-driven approval gate.
+                            use crate::approval::{
+                                ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                            };
+                            let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
+                                DEFAULT_APPROVAL_TIMEOUT_SECS,
+                            ));
+                            match self
+                                .handle_approval_gate(
                                     &execution,
-                                    &llm_request.messages,
+                                    swage_storage::model::ApprovalKind::Hook,
+                                    Some(call.name.clone()),
+                                    Some(call.arguments.clone()),
+                                    None,
+                                    prompt,
+                                    context,
+                                    gate_timeout,
+                                    swage_core::ApprovalTimeoutPolicy::default(),
                                     &event_tx,
                                     &cancel_token,
+                                    &mut approval_scope,
                                 )
                                 .await?
-                            }
-                            ApprovalGateOutcome::Rejected { feedback } => {
-                                (feedback, true, "rejected".to_string())
-                            }
-                            ApprovalGateOutcome::Interrupted => {
-                                return Err(AgentError::Cancelled);
+                            {
+                                ApprovalGateOutcome::Approved => {
+                                    // Approved — proceed with normal dispatch.
+                                    self.dispatch_tool_call(
+                                        call,
+                                        &execution,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                    )
+                                    .await?
+                                }
+                                ApprovalGateOutcome::Rejected { feedback } => {
+                                    (feedback, true, "rejected".to_string())
+                                }
+                                ApprovalGateOutcome::Interrupted => {
+                                    return Err(AgentError::Cancelled);
+                                }
                             }
                         }
                     }
@@ -324,6 +359,7 @@ impl Agent {
                             &llm_request.messages,
                             &event_tx,
                             &cancel_token,
+                            &mut approval_scope,
                         )
                         .await?
                     }
@@ -817,6 +853,7 @@ impl Agent {
         current_context: &[ChatMessage],
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
     ) -> Result<(String, bool, String), AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
@@ -872,57 +909,38 @@ impl Agent {
                 timeout_policy,
             }) => {
                 // Config-driven approval gate.
-                use crate::approval::{
-                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                    approval_request_fingerprint,
-                };
+                use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
                 let gate_timeout = std::time::Duration::from_secs(
                     timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
                 );
                 let policy = timeout_policy.unwrap_or_default();
                 let prompt = format!("Approval required to execute tool: {}", call.name);
-                let request_fingerprint = approval_request_fingerprint(&call.arguments);
 
-                match self
-                    .storage
-                    .has_approval_memory(execution.session_id, &call.name, &request_fingerprint)
-                    .await
-                {
-                    Ok(true) => {
-                        match self
-                            .race_tool_dispatch(
-                                dispatcher.dispatch_approved(
-                                    &call.name,
-                                    call.arguments.clone(),
-                                    &ctx,
-                                    &self.config.agent_id,
-                                ),
-                                call,
-                                execution,
-                                event_tx,
-                                cancel_token,
-                                dispatch_started_at,
-                            )
-                            .await?
-                        {
-                            Ok(output) => {
-                                let result_str =
-                                    serde_json::to_string(&output.result).unwrap_or_default();
-                                return Ok((result_str, false, "success".to_string()));
-                            }
-                            Err(e) => {
-                                return Ok((e.to_string(), true, "error".to_string()));
-                            }
+                if approval_scope.should_skip_gate() {
+                    match self
+                        .race_tool_dispatch(
+                            dispatcher.dispatch_approved(
+                                &call.name,
+                                call.arguments.clone(),
+                                &ctx,
+                                &self.config.agent_id,
+                            ),
+                            call,
+                            execution,
+                            event_tx,
+                            cancel_token,
+                            dispatch_started_at,
+                        )
+                        .await?
+                    {
+                        Ok(output) => {
+                            let result_str =
+                                serde_json::to_string(&output.result).unwrap_or_default();
+                            return Ok((result_str, false, "success".to_string()));
                         }
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            session_id = %execution.session_id,
-                            tool = %call.name,
-                            "failed to read approval memory; falling back to explicit approval"
-                        );
+                        Err(e) => {
+                            return Ok((e.to_string(), true, "error".to_string()));
+                        }
                     }
                 }
 
@@ -939,6 +957,7 @@ impl Agent {
                         policy,
                         event_tx,
                         cancel_token,
+                        &mut *approval_scope,
                     )
                     .await?
                 {
@@ -1151,6 +1170,7 @@ impl Agent {
         timeout_policy: swage_core::ApprovalTimeoutPolicy,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
         use swage_storage::model::{ApprovalState, NewApprovalRequest};
@@ -1254,25 +1274,8 @@ impl Agent {
                 .await
             }
             GateResult::Decision(d) if d.is_approved() => {
-                if kind == swage_storage::model::ApprovalKind::Tool
-                    && let (Some(tool_name), Some(tool_arguments)) =
-                        (tool_name.as_ref(), tool_arguments.as_ref())
-                    && let Ok(Some(thread)) = self.storage.get(execution.thread_id).await
-                {
-                    let request_fingerprint =
-                        crate::approval::approval_request_fingerprint(tool_arguments);
-                    if let Err(error) = self
-                        .storage
-                        .remember_approval(thread.session_id, tool_name, &request_fingerprint)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            session_id = %thread.session_id,
-                            tool = %tool_name,
-                            "failed to persist session approval memory"
-                        );
-                    }
+                if d.scope == crate::approval::ApprovalDecisionScope::Turn {
+                    approval_scope.approve_remaining_gates();
                 }
 
                 self.resume_after_approval_decision(

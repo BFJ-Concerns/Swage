@@ -35,9 +35,11 @@ export async function fetchOperatorOverview(): Promise<OperatorOverview> {
 export async function approvePendingAction(
   approvalId: string,
   reason?: string,
+  scope: "once" | "turn" = "once",
 ): Promise<void> {
   await request(`/api/approvals/${approvalId}`, "POST", {
     decision: "approved",
+    scope,
     reason,
   });
 }

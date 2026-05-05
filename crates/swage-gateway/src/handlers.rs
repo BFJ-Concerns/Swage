@@ -2220,6 +2220,8 @@ impl ApprovalOutcome {
 #[derive(Debug, Deserialize)]
 pub struct ApprovalDecisionRequest {
     pub decision: ApprovalDecisionValue,
+    #[serde(default)]
+    pub scope: swage_agent::approval::ApprovalDecisionScope,
     pub reason: Option<String>,
 }
 
@@ -2257,6 +2259,7 @@ pub async fn decide_approval(
         Some(tx) => {
             let decision = ApprovalDecision {
                 decision: req.decision,
+                scope: req.scope,
                 reason: req.reason.clone(),
             };
 

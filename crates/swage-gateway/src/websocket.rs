@@ -45,6 +45,9 @@ pub enum ClientEvent {
         approval_id: String,
         /// The human's verdict: `"approved"` or `"rejected"`.
         decision: String,
+        /// How widely an approved decision should apply.
+        #[serde(default)]
+        scope: swage_agent::approval::ApprovalDecisionScope,
         /// Optional explanation from the human reviewer.
         reason: Option<String>,
     },
@@ -950,6 +953,7 @@ async fn dispatch_client_message(
         ClientEvent::ApprovalDecision {
             approval_id,
             decision,
+            scope,
             reason,
         } => {
             // Step 1: Parse the approval_id as a UUID.
@@ -1058,6 +1062,7 @@ async fn dispatch_client_message(
                     };
                     let _ = sender.send(swage_agent::ApprovalDecision {
                         decision: decision_value,
+                        scope,
                         reason: reason.clone(),
                     });
                 }
@@ -1934,10 +1939,12 @@ mod tests {
             ClientEvent::ApprovalDecision {
                 approval_id,
                 decision,
+                scope,
                 reason,
             } => {
                 assert_eq!(approval_id, "apr_01");
                 assert_eq!(decision, "approved");
+                assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
                 assert!(reason.is_none(), "reason should be None when absent");
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -1952,10 +1959,12 @@ mod tests {
             ClientEvent::ApprovalDecision {
                 approval_id,
                 decision,
+                scope,
                 reason,
             } => {
                 assert_eq!(approval_id, "apr_02");
                 assert_eq!(decision, "rejected");
+                assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
                 assert_eq!(reason.as_deref(), Some("too risky"));
             }
             other => panic!("unexpected variant: {other:?}"),

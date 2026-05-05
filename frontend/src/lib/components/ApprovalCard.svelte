@@ -2,10 +2,9 @@
   Approval card — replaces the message input while a turn is gated on a
   human-in-the-loop approval. Mirrors riso-cyanotype.html, view 03.
 
-  Allow once / Deny are wired to the existing /api/approvals/:id endpoint
-  (see api/operator.ts). "Allow turn" is rendered as a non-functional
-  affordance because the approval API does not yet have a turn-scoped
-  decision — see the mote on the button below.
+  Allow once / Allow turn / Deny are wired to /api/approvals/:id. The
+  turn-scoped action applies only to later approval gates in the same live
+  turn; it does not create broader session approval memory.
 -->
 <script lang="ts">
   import { approvePendingAction, rejectPendingAction } from "../api/operator";
@@ -17,15 +16,17 @@
 
   let { approval }: Props = $props();
 
-  let busy = $state<"allow" | "deny" | null>(null);
+  let busy = $state<"allow" | "allow-turn" | "deny" | null>(null);
   let error = $state<string | null>(null);
 
-  async function decide(action: "allow" | "deny"): Promise<void> {
+  async function decide(action: "allow" | "allow-turn" | "deny"): Promise<void> {
     busy = action;
     error = null;
     try {
       if (action === "allow") {
         await approvePendingAction(approval.approval_id, "approval card");
+      } else if (action === "allow-turn") {
+        await approvePendingAction(approval.approval_id, "approval card", "turn");
       } else {
         await rejectPendingAction(approval.approval_id, "approval card");
       }
@@ -62,28 +63,14 @@
       {busy === "allow" ? "Allowing…" : "Allow once"}
     </button>
 
-    <!--
-      TODO type=task priority=normal tags=ui,approval,hitl
-      Wire "Allow turn" once the approval API gains a turn-scoped decision.
-      Today /api/approvals/:id only accepts approved/rejected — there is no
-      "approve everything in this turn" semantic, so the workup's middle
-      button can't be honoured. The button stays visible (workup view 03
-      shows it as a primary affordance) but is rendered non-functional.
-      Why: the workup explicitly distinguishes "Allow once" from "Allow
-      turn" as two separate trust scopes; presenting only "Allow once"
-      misrepresents the design.
-      How to apply: when the approval API supports turn scope, replace
-      the disabled handler with a real approve-turn call.
-      ---
-    -->
     <button
       type="button"
       class="btn"
-      disabled
-      title="Allow turn — not yet wired (no turn-scoped approval API)"
+      onclick={() => decide("allow-turn")}
+      disabled={busy !== null}
+      title="Allow the rest of this turn"
     >
-      Allow turn
-      <span class="shell-mark">SHELL</span>
+      {busy === "allow-turn" ? "Allowing…" : "Allow turn"}
     </button>
 
     <button
@@ -229,14 +216,4 @@
     border-color: var(--accent);
   }
 
-  .shell-mark {
-    padding: 2px 5px;
-    background: var(--accent);
-    color: var(--paper);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 9px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-  }
 </style>

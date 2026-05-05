@@ -936,11 +936,32 @@ impl GatewayClient {
         decision: &str,
         reason: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
+        self.decide_approval_with_scope(approval_id, decision, None, reason)
+            .await
+    }
+
+    /// Decide on a pending approval with an explicit scope.
+    /// Calls `POST /api/approvals/{id}`.
+    pub async fn decide_approval_with_scope(
+        &self,
+        approval_id: Uuid,
+        decision: &str,
+        scope: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}/api/approvals/{approval_id}", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "decision": decision,
             "reason": reason,
         });
+        if let Some(scope) = scope
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert(
+                "scope".to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+        }
 
         let response = self
             .client

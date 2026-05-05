@@ -16,6 +16,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct ApprovalDecision {
     pub decision: ApprovalDecisionValue,
+    pub scope: ApprovalDecisionScope,
     /// Optional human-readable rationale from the reviewer.
     pub reason: Option<String>,
 }
@@ -23,6 +24,22 @@ pub struct ApprovalDecision {
 impl ApprovalDecision {
     pub fn is_approved(&self) -> bool {
         self.decision == ApprovalDecisionValue::Approved
+    }
+}
+
+/// How widely an approval decision should apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionScope {
+    /// Approve only the pending request.
+    Once,
+    /// Approve this request and any later approval gates in the same turn.
+    Turn,
+}
+
+impl Default for ApprovalDecisionScope {
+    fn default() -> Self {
+        Self::Once
     }
 }
 
@@ -107,30 +124,6 @@ pub(crate) enum ApprovalGateOutcome {
 /// Default approval timeout when neither config nor hook specifies one.
 pub(crate) const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
 
-/// Compute a stable fingerprint for a tool request so identical requests can
-/// reuse session-scoped approval memory.
-pub(crate) fn approval_request_fingerprint(params: &serde_json::Value) -> String {
-    canonical_json(params).to_string()
-}
-
-fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut ordered = serde_json::Map::new();
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-            for key in keys {
-                ordered.insert(key.clone(), canonical_json(&map[&key]));
-            }
-            serde_json::Value::Object(ordered)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(canonical_json).collect())
-        }
-        other => other.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +132,7 @@ mod tests {
     fn approval_decision_approved() {
         let d = ApprovalDecision {
             decision: ApprovalDecisionValue::Approved,
+            scope: ApprovalDecisionScope::Once,
             reason: None,
         };
         assert!(d.is_approved());
@@ -148,6 +142,7 @@ mod tests {
     fn approval_decision_rejected() {
         let d = ApprovalDecision {
             decision: ApprovalDecisionValue::Rejected,
+            scope: ApprovalDecisionScope::Once,
             reason: Some("too dangerous".to_string()),
         };
         assert!(!d.is_approved());
@@ -157,6 +152,7 @@ mod tests {
     fn approval_decision_debug_and_clone() {
         let d = ApprovalDecision {
             decision: ApprovalDecisionValue::Approved,
+            scope: ApprovalDecisionScope::Once,
             reason: Some("looks good".to_string()),
         };
         let cloned = d.clone();
@@ -169,6 +165,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
         tx.send(ApprovalDecision {
             decision: ApprovalDecisionValue::Approved,
+            scope: ApprovalDecisionScope::Once,
             reason: None,
         })
         .unwrap();
@@ -184,17 +181,6 @@ mod tests {
         });
         let (tx, _rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
         registrar(Uuid::new_v4(), tx);
-    }
-
-    #[test]
-    fn approval_request_fingerprint_is_stable_for_object_key_order() {
-        let left = serde_json::json!({"b": 2, "a": 1, "nested": {"z": true, "m": false}});
-        let right = serde_json::json!({"nested": {"m": false, "z": true}, "a": 1, "b": 2});
-
-        assert_eq!(
-            approval_request_fingerprint(&left),
-            approval_request_fingerprint(&right)
-        );
     }
 
     #[test]

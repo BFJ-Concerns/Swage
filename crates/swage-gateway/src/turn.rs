@@ -6331,6 +6331,7 @@ pub(crate) mod tests {
         approval_sender
             .send(swage_agent::ApprovalDecision {
                 decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Once,
                 reason: None,
             })
             .expect("approval decision should be delivered");
@@ -8563,6 +8564,7 @@ pub(crate) mod tests {
             .expect("approval channel should be registered")
             .send(swage_agent::ApprovalDecision {
                 decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Once,
                 reason: None,
             })
             .expect("approval decision should be delivered");

@@ -239,6 +239,7 @@ mod tests {
         sender
             .send(ApprovalDecision {
                 decision: ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Once,
                 reason: None,
             })
             .unwrap();

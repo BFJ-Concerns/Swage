@@ -68,6 +68,23 @@ describe("operator actions", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         decision: "approved",
+        scope: "once",
+        reason: "approved in test",
+      }),
+    });
+  });
+
+  it("approves a pending action for the current turn", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 200));
+
+    await approvePendingAction("approval-1", "approved in test", "turn");
+
+    expect(fetch).toHaveBeenCalledWith("/api/approvals/approval-1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: "approved",
+        scope: "turn",
         reason: "approved in test",
       }),
     });
