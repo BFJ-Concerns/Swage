@@ -15,8 +15,23 @@
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, SettingsResponse } from "../types";
 
+  // Pages added per the Riso workup (`riso-cyanotype.html`, view 06) — only
+  // providers, generation, and automation have a working backend. The rest are
+  // shells; see the per-page motes below.
+  type SettingsTabId =
+    | "providers"
+    | "generation"
+    | "automation"
+    | "plugins"
+    | "channels"
+    | "nodes"
+    | "voice"
+    | "recovery"
+    | "display"
+    | "account";
+
   interface Props {
-    tab?: "providers" | "generation" | "automation";
+    tab?: SettingsTabId;
   }
 
   let { tab = "providers" }: Props = $props();
@@ -323,7 +338,7 @@
     }
   }
 
-  const TAB_TITLES: Record<NonNullable<Props["tab"]>, { title: string; sub: string }> = {
+  const TAB_TITLES: Record<SettingsTabId, { title: string; sub: string }> = {
     providers: {
       title: "Providers",
       sub: "Connection settings for the LLM gateways Swage talks to. Credentials are stored on the server and never returned over the wire.",
@@ -336,11 +351,212 @@
       title: "Automation",
       sub: "Lifecycle hooks and runtime triggers loaded by the gateway at startup.",
     },
+    plugins: {
+      title: "Plugins",
+      sub: "Managed and workspace plugin bundles. Plugins extend tools, skills, and lenses available to agents.",
+    },
+    channels: {
+      title: "Channels",
+      sub: "External delivery integrations the gateway can route conversations through.",
+    },
+    nodes: {
+      title: "Nodes",
+      sub: "Attached execution hosts that the gateway can dispatch sandboxed work to.",
+    },
+    voice: {
+      title: "Voice",
+      sub: "Speech transcription and synthesis capabilities offered by the active gateway.",
+    },
+    recovery: {
+      title: "Recovery",
+      sub: "Operator-managed export bundles capturing benches, conversations, and configuration for restore.",
+    },
+    display: {
+      title: "Display",
+      sub: "How Swage looks. Settings here are platform-level — they apply across all benches and lenses.",
+    },
+    account: {
+      title: "Account",
+      sub: "Identity and billing. Sign-in is local-first today; remote identity arrives with the multi-host era.",
+    },
   };
+
+  // Non-functional pages — listed once so the shell branch can short-circuit
+  // without duplicating the gating logic. See the per-page motes for the gap.
+  const SHELL_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "plugins",
+    "channels",
+    "nodes",
+    "voice",
+    "recovery",
+    "display",
+    "account",
+  ]);
+
+  const isShellTab = $derived(SHELL_TABS.has(tab));
 </script>
 
 <div class="settings-pane" aria-label="Settings">
-  {#if !settings}
+  {#if isShellTab}
+    {@const heading = TAB_TITLES[tab]}
+    <!--
+      Shell pages from the Riso workup (`riso-cyanotype.html`, view 06) that do
+      not yet have a working backend. Each page renders the heading and any
+      partial functionality the gateway already exposes (read-only operator
+      data where it exists), with an explicit non-functional banner so the
+      operator knows nothing is going to be persisted.
+    -->
+    <div class="head">
+      <div class="head-text">
+        <p class="eyebrow">Settings</p>
+        <h1 class="title">{heading.title}</h1>
+        <p class="sub">{heading.sub}</p>
+      </div>
+    </div>
+
+    <div class="shell-banner" role="note">
+      <span class="shell-flag">Non-functional</span>
+      <span class="shell-body">
+        This page is a placeholder for the Riso workup view. No values here are
+        saved or applied — the underlying backend hasn't been built yet.
+      </span>
+    </div>
+
+    {#if tab === "plugins"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,plugins
+        Wire the Plugins page to a real plugin/extension catalogue. Today the
+        gateway exposes per-bench extensions (`/api/benches/{id}/extensions`)
+        but no platform-level plugin registry. Surface installed plugins,
+        their tools, and an enable/disable toggle.
+        Why: the workup view 06 lists Plugins as the first page; today users
+        cannot see or manage anything plugin-shaped from settings.
+        How to apply: when the gateway gains a plugin registry endpoint,
+        replace this shell with a real list bound to that endpoint.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Installed plugins</h2>
+        <p class="shell-empty">No platform plugin registry yet. Bench-level extensions live in the Builder lens.</p>
+      </section>
+    {:else if tab === "channels"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,channels
+        Render the channel list returned by /api/operator/overview.channels
+        and add per-channel route/credential editing. Today the page is a
+        shell because the operator endpoint is read-only and there is no
+        management API.
+        Why: Riso workup view 06 lists Channels as a settings page; the
+        operator deck reads them but there is no way to add/configure them.
+        How to apply: extend swage-gateway with channel CRUD, then bind here.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Delivery channels</h2>
+        <p class="shell-empty">Channel management is read-only via the operator API; this page will configure them once a CRUD endpoint exists.</p>
+      </section>
+    {:else if tab === "nodes"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,nodes
+        Show registered execution hosts (operator overview already returns
+        nodes). Add register/disconnect flows once the gateway exposes them.
+        Why: workup view 06 includes Nodes; today there is no settings-level
+        view of attached hosts.
+        How to apply: bind to /api/operator/overview.nodes for a read-only
+        view first; design a registration flow before building the form.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Attached nodes</h2>
+        <p class="shell-empty">Node listing will mirror /api/operator/overview.nodes once this page is wired.</p>
+      </section>
+    {:else if tab === "voice"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,voice
+        Bind to /api/voice/capabilities for read-only state, then add voice
+        provider configuration (transcription engine, synthesis voice,
+        per-bench overrides). The capabilities endpoint exists; the
+        configuration endpoint does not.
+        Why: workup view 06 lists Voice; the WorkbenchOperations capability
+        strip is the only place voice surfaces today.
+        How to apply: once a /api/voice/config endpoint exists, replace this
+        shell with the real form.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Voice capabilities</h2>
+        <p class="shell-empty">Read-only capability flags live on the voice endpoint; configuration arrives with a future settings backend.</p>
+      </section>
+    {:else if tab === "recovery"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,recovery
+        Surface recovery export status and a download trigger. The export
+        endpoint exists (used by WorkbenchOperations) but there is no listing
+        of past exports or a schedule control here.
+        Why: workup view 06 lists Recovery; an operator should be able to
+        review and trigger exports from settings, not only from the bench.
+        How to apply: extend the recovery API to list exports and bind here.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Recovery exports</h2>
+        <p class="shell-empty">Export bundles are produced by the workbench operations panel today; a listing API will land alongside scheduled exports.</p>
+      </section>
+    {:else if tab === "display"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,display
+        Move the display preferences from per-component locations (theme
+        toggle in topbar, density implicit in CSS) into a single settings
+        page. Need a persisted preference store first — today theme is the
+        only knob and it lives in the topbar component.
+        Why: workup view 06 specifies a Display page covering theme,
+        density, per-message model, conversation rendering, and print marks.
+        How to apply: design a `display_preferences` table in storage,
+        expose it via /api/preferences, then bind real toggles here.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Display preferences</h2>
+        <div class="shell-grid">
+          <div class="shell-row">
+            <span class="shell-label">Theme</span>
+            <span class="shell-value">Use the topbar toggle until the preferences API lands.</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Density</span>
+            <span class="shell-value">Compact (fixed)</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Show model on each message</span>
+            <span class="shell-value">Off (fixed)</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Conversation rendering</span>
+            <span class="shell-value">Markdown (fixed)</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Print marks</span>
+            <span class="shell-value">Full (fixed)</span>
+          </div>
+        </div>
+      </section>
+    {:else if tab === "account"}
+      <!--
+        TODO type=task priority=normal tags=ui,settings,account
+        Account is unscoped. Swage runs locally with no notion of identity;
+        a remote identity provider would precede any meaningful account
+        page. Until then this stays a shell so the workup nav resolves.
+        Why: workup view 06 lists Account but the application has no
+        account model yet.
+        How to apply: revisit when remote identity / multi-host work begins.
+        ---
+      -->
+      <section class="shell-section">
+        <h2 class="shell-section-title">Account</h2>
+        <p class="shell-empty">Swage runs locally — there is no account concept yet.</p>
+      </section>
+    {/if}
+  {:else if !settings}
     <p class="loading">Loading settings…</p>
   {:else}
     {@const heading = TAB_TITLES[tab]}
@@ -824,6 +1040,101 @@
     font-family: var(--font-body);
     overflow: auto;
     isolation: isolate;
+  }
+
+  /* ---------------------------------------------------------------------------
+     Non-functional page shell — used by the workup pages without a backend.
+     --------------------------------------------------------------------------- */
+
+  .shell-banner {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    border: 2px solid var(--ink);
+    background: var(--paper);
+  }
+
+  .shell-flag {
+    display: flex;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .shell-body {
+    padding: 10px 14px;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .shell-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--rule-soft);
+    background: var(--paper);
+  }
+
+  .shell-section-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 18px;
+    line-height: 1.05;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .shell-empty {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .shell-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .shell-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.4fr) 1fr;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px dotted var(--rule-soft);
+  }
+
+  .shell-row:last-child {
+    border-bottom: none;
+  }
+
+  .shell-label {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .shell-value {
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .loading {

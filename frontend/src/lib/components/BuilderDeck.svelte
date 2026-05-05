@@ -614,6 +614,63 @@
       Select a bench before editing teams or extensions.
     </section>
   {:else}
+    <!--
+      Workup module shells — the Riso workup (view 05) places three modules
+      on the Builder stage: orchestration flow (real diagram), agent inspector,
+      tool palette. The actual implementation today is the form-driven editor
+      below; these shells preserve the workup vocabulary so the layout reads
+      correctly until the diagrammatic modules exist.
+
+      TODO type=issue priority=normal tags=ui,builder,modules
+      type: issue
+      The Builder stage modules below are non-functional — they describe
+      what the workup specifies but no diagram, inspector, or palette
+      component exists. The form-driven editor that follows is the live
+      authoring surface.
+      Why: workup view 05 expects an interactive flow diagram with an
+      inspector and palette panel; without them, the lens reads as a
+      data-entry form rather than an authoring surface.
+      How to apply: build a flow-diagram component bound to the team
+      topology shared reference (`SharedReferenceStudio` already covers
+      part of this), an agent inspector bound to the selected node, and
+      a tool palette bound to the registry. Promote each to a task once
+      the components are scoped.
+      ---
+    -->
+    <section class="workup-shell-row" aria-label="Builder workup shells">
+      <article class="workup-shell-card" data-tone="span">
+        <header class="workup-shell-head">
+          <h3>Orchestration flow</h3>
+          <span class="workup-shell-tag">SHELL · workup view 05</span>
+        </header>
+        <p class="workup-shell-body">
+          The workup places an editable flow diagram here (agents, edges,
+          triggers). The form-driven team editor below is the live surface
+          today; the diagrammatic component is not yet built.
+        </p>
+      </article>
+      <article class="workup-shell-card">
+        <header class="workup-shell-head">
+          <h3>Agent inspector</h3>
+          <span class="workup-shell-tag">SHELL</span>
+        </header>
+        <p class="workup-shell-body">
+          Inspector for the selected agent (model, scope, prompt, tools).
+          Definitions exist server-side; the inspector module isn't built.
+        </p>
+      </article>
+      <article class="workup-shell-card">
+        <header class="workup-shell-head">
+          <h3>Tool palette</h3>
+          <span class="workup-shell-tag">SHELL</span>
+        </header>
+        <p class="workup-shell-body">
+          Tools available to the selected agent. The tool registry exists; a
+          palette component bound to the active agent does not.
+        </p>
+      </article>
+    </section>
+
     <section class="builder-grid">
       <article class="builder-card conversational-card">
         <div class="card-heading">
@@ -1167,6 +1224,72 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
+  }
+
+  /* Non-functional shell row — workup view 05 stage modules above the live
+     form-driven editor. */
+  .workup-shell-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .workup-shell-card {
+    border: 2px dashed var(--accent);
+    background: var(--paper);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .workup-shell-card[data-tone="span"] {
+    grid-column: 1 / -1;
+    border-style: solid;
+  }
+
+  .workup-shell-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 6px;
+  }
+
+  .workup-shell-card h3 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 16px;
+    line-height: 1.05;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .workup-shell-tag {
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .workup-shell-body {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 1100px) {
+    .workup-shell-row {
+      grid-template-columns: 1fr;
+    }
   }
 
   .builder-card {

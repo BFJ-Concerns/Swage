@@ -20,6 +20,7 @@
   import BenchPicker from "./BenchPicker.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
+  import ApprovalCard from "./ApprovalCard.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
@@ -90,16 +91,36 @@
   const settingsTab = $derived(route?.settingsTab ?? null);
 
   // Settings sub-pages — drives both the URL the page list links to and the
-  // ix counter shown beside each entry. Kept in this component because the
-  // settings nav is part of the window chrome, not the body pane.
+  // ix counter shown beside each entry. The list mirrors the Riso workup
+  // (`riso-cyanotype.html`, view 06): Plugins, Automations, Channels, Nodes,
+  // Voice, Recovery, Display, Account. Pages whose backends don't exist yet
+  // render shells (see SettingsPage.svelte) — the entries land here so the nav
+  // looks complete and the routes resolve.
+  //
+  // TODO type=issue priority=normal tags=ui,settings
+  // type: issue
+  // Several settings entries route to non-functional shells (plugins,
+  // channels, nodes, voice, recovery, display, account). Promote each to a
+  // task once its underlying backend (or, for display, a preferences API)
+  // is scoped. The shell pages themselves carry per-page motes describing
+  // the gap.
+  // ---
   const SETTINGS_PAGES: ReadonlyArray<{
     id: NonNullable<typeof settingsTab>;
     label: string;
     ix: string;
+    functional: boolean;
   }> = [
-    { id: "providers", label: "Providers", ix: "—" },
-    { id: "generation", label: "Generation", ix: "—" },
-    { id: "automation", label: "Automation", ix: "—" },
+    { id: "providers", label: "Providers", ix: "—", functional: true },
+    { id: "generation", label: "Generation", ix: "—", functional: true },
+    { id: "automation", label: "Automation", ix: "—", functional: true },
+    { id: "plugins", label: "Plugins", ix: "—", functional: false },
+    { id: "channels", label: "Channels", ix: "—", functional: false },
+    { id: "nodes", label: "Nodes", ix: "—", functional: false },
+    { id: "voice", label: "Voice", ix: "—", functional: false },
+    { id: "recovery", label: "Recovery", ix: "—", functional: false },
+    { id: "display", label: "Display", ix: "—", functional: false },
+    { id: "account", label: "Account", ix: "—", functional: false },
   ];
 
   // × CLOSE returns to the active conversation if one was open before the
@@ -122,6 +143,35 @@
   // module is on the stage. Per Progress.md, each lens picks one layout —
   // this isn't an on-demand swap.
   const isStageDominant = $derived(stageSurface !== null);
+
+  // Stamp shown on the right of the topbar — `BENCH · NAME · STATE` per
+  // workup view 01/02/03/07. The bench portion is real; the state cycles
+  // through the streaming store. Team-live and approval states are real
+  // too, but the workup also uses time-on-state ("TEAM LIVE 04:18") which
+  // we do not have an aggregator for yet (see mote below).
+  const stampState = $derived<{ label: string; tone: "idle" | "busy" | "alert" }>(
+    streamingStore.isStreaming
+      ? { label: "Working", tone: "busy" }
+      : streamingStore.turnError
+        ? { label: "Retrying", tone: "alert" }
+        : { label: "Idle", tone: "idle" },
+  );
+
+  // The Builder lens carries a caret (workup view 05). Clicking the lens body
+  // activates it; clicking the caret toggles the mode menu independently. The
+  // menu is rendered as a non-functional shell because the gateway has no
+  // mode dispatcher — see the mote on the dropdown markup below.
+  let builderModeOpen = $state(false);
+
+  function isBuilderLens(id: AppLens): boolean {
+    return /builder/i.test(id);
+  }
+
+  function toggleBuilderMode(event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    builderModeOpen = !builderModeOpen;
+  }
 
   $effect(() => {
     if (stageSurface === "builder" && !builderDeckModule) {
@@ -162,32 +212,127 @@
     -->
     <header class="topbar" role="tablist" aria-label="Lenses">
       {#each availableLenses as lens (lens.id)}
-        <button
-          class="lens"
-          class:active={activeLens === lens.id}
-          role="tab"
-          aria-selected={activeLens === lens.id}
-          onclick={() => onSelectLens(lens.id)}
-        >
-          <span class="lens-name">{lens.title.replace(/ lens$/i, "")}</span>
-          <!--
-            The caret is decorative — the dropdown affordance only applies to
-            the builder lens (mode picker). TODO(debt): wire the builder mode
-            menu (team / agent / context / lens / skill / tool). Blocked by:
-            backend doesn't yet expose the mode dispatcher.
-          -->
-        </button>
+        {@const builder = isBuilderLens(lens.id)}
+        <div class="lens-wrap" class:active={activeLens === lens.id}>
+          <button
+            class="lens"
+            class:active={activeLens === lens.id}
+            class:has-caret={builder}
+            role="tab"
+            aria-selected={activeLens === lens.id}
+            onclick={() => onSelectLens(lens.id)}
+          >
+            <span class="lens-name">{lens.title.replace(/ lens$/i, "")}</span>
+          </button>
+          {#if builder}
+            <button
+              type="button"
+              class="lens-caret"
+              class:active={activeLens === lens.id}
+              aria-haspopup="menu"
+              aria-expanded={builderModeOpen}
+              onclick={(event) => toggleBuilderMode(event)}
+              title="Builder mode menu (workup view 05)"
+            >▾</button>
+          {/if}
+        </div>
       {/each}
-      <!-- '+' to add a new lens. TODO(debt): no backend yet — render but disabled. -->
-      <button class="lens-add" disabled title="Add lens (not yet wired)">＋</button>
 
-      <!-- Stamp area: identity / runtime info + theme toggle. Kept minimal
-           per Principles.md ("working state stays out of the way"). -->
+      <!--
+        TODO type=task priority=normal tags=ui,lens,topbar
+        Wire the `+` affordance to the lens-creation flow. The button is
+        disabled today because no end-to-end path exists from the topbar to
+        a "create lens" action — lens creation lives inside the Builder
+        lens form. Workup view 01 keeps this affordance so the user can
+        always add a lens without diving into the Builder.
+        Why: the workup treats the `+` as ambient access to lens creation;
+        burying it inside Builder breaks the canonical state.
+        How to apply: when the Builder lens has a "create blank lens" RPC,
+        bind it here.
+        ---
+      -->
+      <button
+        class="lens-add"
+        disabled
+        title="Add lens — not yet wired (placeholder per Riso workup view 01)"
+      >＋</button>
+
+      {#if builderModeOpen && isBuilderLens(activeLens)}
+        <!--
+          Builder mode menu, view 05 of the Riso workup. Listed entries
+          mirror the workup exactly: Team / Agent / Context / Lens / Skill /
+          Tool. None of them dispatch — see the mote below.
+
+          TODO type=issue priority=normal tags=ui,builder,mode-picker
+          type: issue
+          The builder mode menu is non-functional. The gateway has no mode
+          dispatcher: today the Builder lens always renders the same
+          BuilderDeck regardless of intent. Each entry should swap the
+          stage modules (orchestration flow, agent inspector, tool
+          palette, etc.) for the active mode.
+          Why: workup view 05 places the mode picker as the central
+          affordance for Builder; without it the lens doesn't deliver the
+          authoring vocabulary the workup describes.
+          How to apply: design a `builder_mode` runtime field; when an
+          entry is selected, push a "select_mode" event over the wire and
+          let the lens runtime swap modules. Promote to a task once the
+          dispatcher is scoped.
+          ---
+        -->
+        <div class="builder-pop" role="menu" aria-label="Builder mode">
+          <div class="builder-pop-banner">Non-functional · workup view 05</div>
+          {#each [
+            { num: "01", name: "Team", hint: "topology + flow" },
+            { num: "02", name: "Agent", hint: "role + tools" },
+            { num: "03", name: "Context", hint: "assembly" },
+            { num: "04", name: "Lens", hint: "layout + modules" },
+            { num: "05", name: "Skill", hint: "trigger + content" },
+            { num: "06", name: "Tool", hint: "schema + handler" },
+          ] as item (item.num)}
+            <button
+              type="button"
+              class="builder-pop-item"
+              disabled
+              title="Builder mode menu is not yet wired"
+            >
+              <span class="builder-pop-num">{item.num}</span>
+              <span class="builder-pop-name">{item.name}</span>
+              <span class="builder-pop-hint">{item.hint}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Stamp area: bench + runtime state. The bench/state portion is real;
+           the runtime label (MANAGED/REMOTE) and timer are partial — see the
+           mote on `.stamp-state-timer`. -->
       <div class="stamp">
-        {#if desktopRuntime}
-          <span class="stamp-label" title={desktopRuntime.gatewayUrl}>
-            {desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}
+        {#if currentBench}
+          <span class="stamp-segment stamp-bench">Bench · {currentBench.name}</span>
+          <span class="stamp-divider" aria-hidden="true">·</span>
+          <span class="stamp-segment stamp-state" data-tone={stampState.tone}>
+            {stampState.label}
           </span>
+          <!--
+            TODO type=task priority=normal tags=ui,topbar,stamp
+            The workup stamp shows time-on-state (e.g. "TEAM LIVE 04:18",
+            "RETRY 3 / 5"). Today we have no aggregator that tracks how
+            long a turn has been busy or which retry attempt the provider
+            chain is on, so the stamp shows only a label.
+            Why: workup view 02/07 use the timer as the operator's primary
+            cue that work is in flight; without it the stamp reads the
+            same whether the agent is one second or one hour into a turn.
+            How to apply: emit per-attempt retry events from the provider
+            chain and a periodic "turn tick" event from the gateway, then
+            render alongside the state label here.
+            ---
+          -->
+        {/if}
+        {#if desktopRuntime}
+          <span
+            class="stamp-runtime"
+            title={desktopRuntime.gatewayUrl}
+          >{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>
         {/if}
         {#if onSelectTheme}
           <ThemeToggle mode={themeMode} onSelect={onSelectTheme} />
@@ -215,10 +360,18 @@
             type="button"
             class="settings-page"
             class:active={settingsTab === page.id}
+            class:shell={!page.functional}
             onclick={() => onNavigate?.(`/settings/${page.id}`)}
+            title={page.functional ? page.label : `${page.label} (not yet wired)`}
           >
             <span>{page.label}</span>
-            <span class="ix">{page.ix}</span>
+            <span class="ix">
+              {#if !page.functional}
+                <span class="shell-mark" aria-label="Non-functional placeholder">SHELL</span>
+              {:else}
+                {page.ix}
+              {/if}
+            </span>
           </button>
         {/each}
       </div>
@@ -258,14 +411,37 @@
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
-      <!-- No bench selected: nav becomes the wordmark + a quick legend.
-           Selection happens in the body via BenchPicker; duplicating the
-           switcher here would split the user's attention. -->
+      <!-- No bench selected: nav shows a "Recent" list per workup view 04 plus
+           a quick legend. Selection still happens in the body via BenchPicker;
+           the nav's recent list is a fast lane for re-opening recent work. -->
       <div class="bench-head picker-mode">
         <div class="crumb">
-          <span class="bench-label">No bench</span>
+          <span class="bench-label">Choose a bench</span>
         </div>
         <h2 class="name">Swage</h2>
+      </div>
+      <div class="section">
+        <div class="key">
+          <span>Recent</span>
+          <!--
+            TODO type=task priority=normal tags=ui,bench,recent
+            The Recent list orders by `last_opened` per workup view 04. The
+            Bench API today exposes `created_at` but not `last_opened`, so
+            this section is a non-functional shell — the list isn't even
+            fetched until a bench is selected.
+            Why: workup view 04 puts a Recent list in the nav so the user
+            can re-enter their last bench in one click; without
+            last_opened, ordering would be arbitrary and misleading.
+            How to apply: persist `last_opened_at` on bench rows and
+            expose it on /api/benches; sort here by descending value.
+            ---
+          -->
+          <span class="shell-mark">SHELL</span>
+        </div>
+        <p class="recent-shell-body">
+          Recent benches list (by last opened) lands here once the bench
+          API exposes `last_opened_at`.
+        </p>
       </div>
       <div class="section picker-legend">
         <p class="eyebrow">Two-stage select</p>
@@ -293,16 +469,63 @@
            scope — without one, no WebSocket is attempted, so a "lost" banner
            would be misleading. -->
       <section class="pane conversation-pane" aria-label="Conversation">
+        <header class="pane-head">
+          <span class="pane-label">Conversation</span>
+          <span class="pane-index">
+            {#if streamingStore.isStreaming}
+              Live
+            {:else if streamingStore.turnError}
+              Retrying
+            {:else}
+              Idle
+            {/if}
+          </span>
+        </header>
         {#if activeConversation}
           <ConnectionIndicator store={connectionStore} {onRetry} />
         {/if}
         <MessageDisplay store={conversationStore} {streamingStore} />
-        <MessageInput store={streamingStore} />
+        {#if streamingStore.pendingApproval}
+          <!-- Approval replaces the input box (workup view 03). -->
+          <ApprovalCard approval={streamingStore.pendingApproval} />
+        {:else}
+          <MessageInput store={streamingStore} />
+        {/if}
+        <!--
+          Conversation meta strip (workup view 01/02/05). The token count is
+          read from the streaming store once the gateway emits turn_complete;
+          before that there is no live count. The 200,000 budget is currently
+          a placeholder copied from the workup — see the mote below.
+
+          TODO type=task priority=normal tags=ui,conversation,tokens
+          Bind the token budget to the active model's context window. The
+          gateway already has the model record (settings.models[*].context_window);
+          surface that on the conversation API and read it here.
+          Why: workup view 01 shows `tokens · 4,820 / 200,000` — the budget
+          must reflect the active model, not a hard-coded number.
+          How to apply: extend the conversation detail response to include
+          `context_window`, then render `tokens / context_window`.
+          ---
+        -->
+        <footer class="conv-meta" aria-hidden="false">
+          <span class="conv-meta-tokens">
+            tokens · <span class="conv-meta-shell" title="Live token totals are not wired yet">—</span>
+          </span>
+          <span class="conv-meta-state" data-tone={stampState.tone}>
+            ● {stampState.label}
+          </span>
+        </footer>
       </section>
 
       <!-- Stage pane: shows the module placed by the active lens. -->
       {#if stageSurface}
         <section class="pane stage-pane" aria-label="Module stage">
+          <header class="pane-head">
+            <span class="pane-label">Stage</span>
+            <span class="pane-index">
+              {stageSurface === "builder" ? "Builder" : "Operator"}
+            </span>
+          </header>
           {#if stageSurface === "builder"}
             {#if builderDeckModule}
               {#await builderDeckModule then module}
@@ -340,14 +563,82 @@
             {/if}
           {/if}
         </section>
-      {:else if activeConversation}
-        <!-- No module placed by this lens. Render an empty stage state in the
-             riso style — preserves the visual rhythm without inventing data. -->
-        <section class="pane stage-pane stage-empty" aria-label="Module stage">
-          <p class="eyebrow">Module stage</p>
-          <p class="stage-empty-body">
-            This lens does not place a module on the stage.
-          </p>
+      {:else}
+        <!--
+          No module placed by this lens. The Riso workup (view 01/02) puts
+          stage modules on this side: shared reference (assistant default),
+          active team + log tail + release notes (when a team is running).
+          None of these are wired today, so we render the catalogue as a
+          column of non-functional shells so the chrome matches the workup.
+
+          TODO type=issue priority=normal tags=ui,stage,modules
+          type: issue
+          The module catalogue is not yet wired to the lens runtime. The
+          gateway exposes lens descriptors with `ui_modules` and the
+          assistant-lens default, but no module placement happens on the
+          stage. Each shell below names the workup module it stands in
+          for and the backend gap blocking it.
+          Why: workup views 01/02 hinge on stage module presence; without
+          it the pane reads as empty even though modules belong there.
+          How to apply: design a "module placement" runtime field on the
+          lens, expose the placed module's data on the conversation API,
+          render real components when the data arrives.
+          ---
+        -->
+        <section class="pane stage-pane stage-shell" aria-label="Module stage">
+          <header class="pane-head">
+            <span class="pane-label">Stage</span>
+            <span class="pane-index">Workup shells</span>
+          </header>
+          <div class="stage-modules">
+            <article class="stage-module" data-tone="auto">
+              <header class="stage-module-head">
+                <h3>Shared · workup placeholder</h3>
+                <span class="stage-module-tag">SHELL</span>
+              </header>
+              <p class="stage-module-body">
+                The assistant lens (workup view 01) places a shared reference
+                module here — typically a file viewer auto-loaded into agent
+                context. The file_read tool exists; module placement does not.
+              </p>
+            </article>
+
+            <article class="stage-module" data-tone="streaming">
+              <header class="stage-module-head">
+                <h3>Active team · live</h3>
+                <span class="stage-module-tag">SHELL</span>
+              </header>
+              <p class="stage-module-body">
+                Workup view 02 places the active team topology here (per-agent
+                step, model, status). The gateway emits `topology_*` events
+                but the live module that consumes them isn't built.
+              </p>
+            </article>
+
+            <article class="stage-module" data-tone="streaming">
+              <header class="stage-module-head">
+                <h3>Live log tail</h3>
+                <span class="stage-module-tag">SHELL</span>
+              </header>
+              <p class="stage-module-body">
+                Workup view 02 — streaming output across all running agents.
+                No aggregator on the gateway today; per-agent token streams
+                exist but there is no merged tail.
+              </p>
+            </article>
+
+            <article class="stage-module" data-tone="static">
+              <header class="stage-module-head">
+                <h3>Release notes draft</h3>
+                <span class="stage-module-tag">SHELL</span>
+              </header>
+              <p class="stage-module-body">
+                Workup view 02 — collaboratively edited document module. No
+                document concept exists yet; benches store files but there
+                is no live "shared draft" abstraction.
+              </p>
+            </article>
+          </div>
         </section>
       {/if}
     {/if}
@@ -537,6 +828,30 @@
     opacity: 0.6;
   }
 
+  /* Non-functional settings entries advertise themselves with an explicit
+     SHELL chip rather than fading into the background. The intent is that
+     the user can still see what's coming without thinking they're broken. */
+  .settings-page.shell .ix {
+    opacity: 1;
+  }
+
+  .shell-mark {
+    display: inline-block;
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .settings-page.active .shell-mark {
+    background: var(--paper);
+    color: var(--ink);
+  }
+
   /* ---------------------------------------------------------------------------
      Top bar — lens tabs.
      --------------------------------------------------------------------------- */
@@ -625,10 +940,154 @@
     font-weight: 500;
     font-size: 11px;
     letter-spacing: 0.08em;
+    text-transform: uppercase;
     /* Tells ThemeToggle what colour to paint as the active button text.
        The toggle's .opt.active uses currentColor (ink) as background, so the
        text needs to flip to paper. */
     --toggle-active-fg: var(--paper);
+  }
+
+  .stamp-segment {
+    color: var(--ink);
+    letter-spacing: 0.16em;
+  }
+
+  .stamp-bench {
+    color: var(--ink);
+  }
+
+  .stamp-divider {
+    color: var(--ink-soft);
+  }
+
+  .stamp-state {
+    padding: 2px 6px;
+    border: 1px solid var(--ink);
+  }
+
+  .stamp-state[data-tone="busy"] {
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
+  }
+
+  .stamp-state[data-tone="alert"] {
+    background: var(--paper);
+    color: var(--ink-orange);
+    border-color: var(--accent);
+  }
+
+  .stamp-runtime {
+    color: var(--ink-soft);
+    text-transform: uppercase;
+  }
+
+  /* Caret as a separate button beside the Builder lens — workup view 05.
+     The split lets clicking the lens body activate it without opening the
+     menu, while the caret toggles the menu independently. */
+  .lens-wrap {
+    display: flex;
+    align-items: stretch;
+    border-right: 1px solid var(--rule-soft);
+  }
+
+  .lens-wrap .lens {
+    border-right: none;
+  }
+
+  .lens-caret {
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    background: transparent;
+    color: var(--ink);
+    border: none;
+    border-left: 1px dotted var(--rule-soft);
+    font-family: var(--font-display);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .lens-caret.active {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .lens-caret:hover {
+    background: rgba(14, 59, 102, 0.08);
+  }
+
+  .lens-caret.active:hover {
+    background: var(--ink);
+    color: var(--paper);
+    filter: brightness(1.1);
+  }
+
+  /* Builder mode dropdown — non-functional shell per workup view 05. */
+  .builder-pop {
+    position: absolute;
+    top: 48px;
+    left: 22px;
+    width: 240px;
+    background: var(--paper);
+    border: 2px solid var(--ink);
+    z-index: 20;
+    isolation: isolate;
+    box-shadow: 4px 4px 0 var(--accent);
+  }
+
+  .builder-pop-banner {
+    padding: 6px 10px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .builder-pop-item {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-bottom: 1px dotted var(--rule-soft);
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 12px;
+    text-align: left;
+    text-transform: none;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+
+  .builder-pop-item:last-child {
+    border-bottom: none;
+  }
+
+  .builder-pop-num {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--ink-soft);
+  }
+
+  .builder-pop-name {
+    font-weight: 600;
+  }
+
+  .builder-pop-hint {
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
   }
 
   /* ---------------------------------------------------------------------------
@@ -763,6 +1222,13 @@
     cursor: not-allowed;
   }
 
+  .recent-shell-body {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
   /* Legend block shown in the nav when no bench is selected. */
   .picker-legend {
     gap: 8px;
@@ -840,20 +1306,150 @@
     background: var(--paper);
   }
 
-  .stage-pane.stage-empty {
-    /* Empty state when a lens places no module — preserves the visual frame
-       without inventing fake content. */
-    align-items: flex-start;
-    justify-content: flex-start;
-    gap: 10px;
+  /* Pane heads — workup view 01/02/05 place a small label + index above each
+     pane. Index expresses live state ("LIVE", "Builder", "Workup shells"). */
+  .pane-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 22px 8px;
+    border-bottom: 1px solid var(--ink);
+    flex-shrink: 0;
+    background: var(--paper);
+  }
+
+  .pane-label {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .pane-index {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     color: var(--ink-soft);
   }
 
-  .stage-empty-body {
-    font-family: var(--font-body);
-    font-size: 13px;
+  /* Conversation meta footer — workup view 01 places token / state below the
+     input. Token totals are not wired (see mote in markup). */
+  .conv-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 22px 12px;
+    border-top: 1px dotted var(--rule-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     color: var(--ink-soft);
-    max-width: 36ch;
+    flex-shrink: 0;
+  }
+
+  .conv-meta-shell {
+    color: var(--ink-orange);
+    border-bottom: 1px dashed var(--accent);
+  }
+
+  .conv-meta-state {
+    padding: 2px 6px;
+    border: 1px solid var(--rule-soft);
+  }
+
+  .conv-meta-state[data-tone="busy"] {
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
+  }
+
+  .conv-meta-state[data-tone="alert"] {
+    color: var(--ink-orange);
+    border-color: var(--accent);
+  }
+
+  /* Stage shell — column of non-functional module placeholders. */
+  .stage-pane.stage-shell {
+    padding: 0;
+    gap: 0;
+  }
+
+  .stage-modules {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 22px 22px;
+    overflow-y: auto;
+  }
+
+  .stage-module {
+    border: 2px solid var(--ink);
+    background: var(--paper);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    position: relative;
+  }
+
+  /* Tonal hint on the left edge — preserves the workup vocabulary
+     (auto = ink rule, streaming = orange rule, static = soft rule). */
+  .stage-module[data-tone="auto"] {
+    border-left-width: 4px;
+  }
+
+  .stage-module[data-tone="streaming"] {
+    border-left: 4px solid var(--accent);
+  }
+
+  .stage-module[data-tone="static"] {
+    border-left: 4px solid var(--rule-soft);
+  }
+
+  .stage-module-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 6px;
+  }
+
+  .stage-module h3 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 16px;
+    line-height: 1.05;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .stage-module-tag {
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .stage-module-body {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.55;
   }
 
   .surface-loading,

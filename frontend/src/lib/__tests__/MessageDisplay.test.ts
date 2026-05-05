@@ -104,6 +104,9 @@ function makeStreamingStore(
     get activeToolCalls() {
       return activeToolCalls;
     },
+    get pendingApproval() {
+      return null;
+    },
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},

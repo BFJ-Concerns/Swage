@@ -12,9 +12,17 @@
   Per the same doc, bench cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
-  TODO(debt): The ▾ secondary menu on each card (bench-scoped settings) is
-  not yet wired — the settings overlay it would open doesn't exist. The
-  trigger renders disabled so the layout reflects the intended affordance.
+  TODO type=task priority=normal tags=ui,bench,settings
+  Wire the ▾ secondary menu on each bench card to a bench-scoped settings
+  overlay (workup view 04). Today the trigger renders disabled because
+  bench-scoped settings is not a route yet — the global settings overlay is
+  the only settings surface.
+  Why: workup view 04 expects a per-bench ▾ menu so the user can edit
+  bench-scoped configuration without entering the bench. Without it the
+  card has nowhere to put bench-scoped actions.
+  How to apply: add a `/settings/bench/:slug/...` route family, render the
+  same SettingsPage shell with bench-scoped pages, then bind the ▾ here.
+  ---
 -->
 <script lang="ts">
   import type { BenchStore } from "../stores/benches";
@@ -186,10 +194,22 @@
   </div>
 
   {#if selected}
-    <!-- Details panel: shown only after a single click. Currently only the
-         name and default flag are exposed by /api/benches; richer metadata
-         (last opened, conversation count, attached folders) will populate
-         this panel as the API gains those fields. -->
+    <!--
+      Details panel: shown only after a single click. The workup (view 04)
+      lists `about`, `workspace`, `last opened`, and `conversations`. Today
+      only slug + default + created_at are exposed; the rest are shells.
+
+      TODO type=task priority=normal tags=ui,bench,detail
+      Surface bench `about` (a short blurb), workspace attachment list,
+      last_opened_at, and per-bench conversation counts. The data lives in
+      the bench, attachments, and conversation tables; the response just
+      doesn't aggregate them yet.
+      Why: workup view 04 uses these to help the user decide whether to
+      open the bench without entering it.
+      How to apply: extend GET /api/benches/:id to include the
+      aggregates and replace the shell rows below.
+      ---
+    -->
     <aside class="bench-detail" aria-label="Bench detail">
       <header class="detail-head">
         <p class="eyebrow">Bench detail</p>
@@ -202,6 +222,14 @@
         <dd>{selected.is_default ? "yes" : "no"}</dd>
         <dt>Created</dt>
         <dd class="mono">{selected.created_at || "—"}</dd>
+        <dt>About</dt>
+        <dd class="shell">Workup blurb · backend not yet exposed.</dd>
+        <dt>Workspace</dt>
+        <dd class="shell">Attached folders · listing endpoint not yet exposed here.</dd>
+        <dt>Last opened</dt>
+        <dd class="shell">last_opened_at not yet persisted.</dd>
+        <dt>Conversations</dt>
+        <dd class="shell">Per-bench counts not yet aggregated.</dd>
       </dl>
     </aside>
   {/if}
@@ -538,6 +566,13 @@
   .detail-grid dd {
     margin: 0;
     color: var(--ink);
+  }
+
+  /* Shell rows in the bench detail — until the API aggregates the workup
+     fields, these read as muted text in the same dt/dd grid. */
+  .detail-grid dd.shell {
+    color: var(--ink-soft);
+    font-style: italic;
   }
 
   .mono {

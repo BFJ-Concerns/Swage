@@ -3,10 +3,35 @@
 // Manages browser history and maps URLs to active conversation state.
 // This is a minimal SPA router — no framework dependency needed.
 
+// Settings sub-pages reachable from the overlay nav. The first three are wired
+// to real backends (providers, generation presets, automation). The remainder
+// were added per the Riso workup (`riso-cyanotype.html`, view 06) and are
+// rendered as non-functional shells until backends exist — see the SettingsPage
+// motes for the gap on each page.
+//
+// TODO type=issue priority=normal tags=ui,settings
+// type: issue
+// Settings pages plugins/channels/nodes/voice/recovery/display/account land
+// in the URL but render as shells. Promote each to a task once its backend
+// is scoped (see `crates/swage-gateway/src/handlers.rs` for the existing
+// operator-side endpoints that some pages will eventually consume).
+// ---
+export type SettingsTab =
+  | "providers"
+  | "generation"
+  | "automation"
+  | "plugins"
+  | "channels"
+  | "nodes"
+  | "voice"
+  | "recovery"
+  | "display"
+  | "account";
+
 export interface Route {
   path: string;
   conversationId: string | null;
-  settingsTab: "providers" | "generation" | "automation" | null;
+  settingsTab: SettingsTab | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -46,12 +71,14 @@ export function parseRoute(pathname: string): Route {
   if (match) {
     return { path: pathname, conversationId: match[1], settingsTab: null, notFound: false };
   }
-  const settingsMatch = pathname.match(/^\/settings(?:\/(providers|generation|automation))?$/);
+  const settingsMatch = pathname.match(
+    /^\/settings(?:\/(providers|generation|automation|plugins|channels|nodes|voice|recovery|display|account))?$/,
+  );
   if (settingsMatch) {
     return {
       path: pathname,
       conversationId: null,
-      settingsTab: (settingsMatch[1] as Route["settingsTab"]) ?? "providers",
+      settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
       notFound: false,
     };
   }

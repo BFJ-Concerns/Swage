@@ -228,6 +228,35 @@
       </div>
     {/if}
 
+    <!--
+      Inline retry chip — workup view 07. Pinned to the assistant turn that's
+      currently retrying so the failure stays local rather than splashing
+      across the shell. Today the chip renders only as a placeholder when a
+      turn ends in error: the provider chain has no per-attempt events, so
+      we can't render the live "retry 3 of 5" state the workup specifies.
+
+      TODO type=task priority=normal tags=ui,retry,provider
+      Emit per-attempt provider events (`provider_retry_started`,
+      `provider_retry_settled`) so the chip can render real attempt
+      counts, the wait timer, and the active provider name. The retry
+      decorator already tracks attempts internally; surface them to the
+      WS observability channel.
+      Why: workup view 07 specifies an inline retry chip with
+      `WAIT 4s · provider · anthropic`; without per-attempt events the
+      chip is stuck showing placeholder copy.
+      How to apply: add a "retry" subscription to the WS layer, emit on
+      each attempt, and bind here.
+      ---
+    -->
+    {#if turnError}
+      <div class="inline-retry shell" role="status">
+        <span class="retry-mark">SHELL</span>
+        <span class="retry-label">
+          Inline retry chip — provider per-attempt events not yet wired.
+        </span>
+      </div>
+    {/if}
+
     <!-- ---- Live tool calls: updated in real-time as the agent works ---- -->
     <!-- isLive is true for calls still running (no result yet), false once done. -->
     {#if activeToolCalls.length > 0}
@@ -370,6 +399,43 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--ink-orange);
+  }
+
+  /* ---- Inline retry chip (workup view 07) -------------------------------- */
+
+  .inline-retry {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--paper);
+    border: 1px solid var(--accent);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink);
+    max-width: 80ch;
+  }
+
+  .retry-mark {
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--paper);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+  }
+
+  .retry-label {
+    color: var(--ink-soft);
+    text-transform: none;
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 12px;
+    letter-spacing: 0;
   }
 
   /* ---- Inline turn error -------------------------------------------------- */

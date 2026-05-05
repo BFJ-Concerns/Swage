@@ -87,6 +87,7 @@ function mockStreamingStore(): StreamingStore {
     get streamedContent() { return ""; },
     get turnError() { return null; },
     get activeToolCalls() { return []; },
+    get pendingApproval() { return null; },
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},

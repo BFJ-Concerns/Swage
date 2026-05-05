@@ -21,6 +21,9 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     get activeToolCalls() {
       return [];
     },
+    get pendingApproval() {
+      return null;
+    },
     handleServerEvent: vi.fn(),
     startTurn: vi.fn(),
     cancelTurn: vi.fn(),
