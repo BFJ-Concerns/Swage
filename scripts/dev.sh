@@ -76,6 +76,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# --- Build cache hygiene ----------------------------------------------------
+# Cap target/ at ~50 GiB by evicting least-recently-used artefacts. Time-based
+# sweeps don't help an actively-built workspace (every dep gets touched on every
+# build), so we cap by size instead. `--maxsize` takes megabytes.
+# Best-effort: skipped silently if cargo-sweep isn't installed (run
+# `cargo install cargo-sweep` to enable). Never fails the dev loop.
+if command -v cargo-sweep >/dev/null 2>&1; then
+    echo "==> Capping target/ at 50 GiB (cargo sweep --maxsize)"
+    cargo sweep --maxsize 50000 || true
+else
+    echo "==> Skipping cargo sweep (install with: cargo install cargo-sweep)"
+fi
+
 # --- Frontend deps ----------------------------------------------------------
 # `npm ci` is exact and reproducible but slow when nothing changed; only run
 # if node_modules is missing. The user can `npm ci` manually after a pull.
