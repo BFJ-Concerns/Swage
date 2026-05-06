@@ -87,7 +87,7 @@ use crate::{
         UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
         WorkspaceAttachmentService,
     },
-    settings::{SaveSettingsRequest, SettingsResponse},
+    settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     shared_reference::{
         CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
         SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
@@ -144,7 +144,25 @@ pub async fn discover_provider_models(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<crate::settings::ModelDiscoveryResponse>, ApiError> {
     Ok(Json(
-        crate::settings::discover_models(&state, provider_id, query.get("q").cloned()).await?,
+        crate::settings::discover_models(&state, provider_id, query.get("q").cloned(), None)
+            .await?,
+    ))
+}
+
+pub async fn discover_draft_provider_models(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(provider): Json<SaveProviderSettings>,
+) -> Result<Json<crate::settings::ModelDiscoveryResponse>, ApiError> {
+    Ok(Json(
+        crate::settings::discover_models(
+            &state,
+            provider_id,
+            query.get("q").cloned(),
+            Some(provider),
+        )
+        .await?,
     ))
 }
 

@@ -133,9 +133,16 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    let SaveSettingsRequest {
+        default_provider,
+        providers: requested_providers,
+        default_model,
+        models: requested_models,
+        generation_presets,
+    } = request;
 
     let mut providers = HashMap::new();
-    for (provider_id, provider) in request.providers {
+    for (provider_id, provider) in requested_providers {
         let secret_ref = persist_provider_key(state, &provider_id, &provider).await?;
         providers.insert(
             provider_id,
@@ -148,18 +155,17 @@ pub async fn save_settings(
         );
     }
 
-    let models = request
-        .models
-        .into_iter()
+    let models = requested_models
+        .iter()
         .map(|(id, model)| {
             (
-                id,
+                id.clone(),
                 swage_config::ModelEndpointConfig {
-                    provider_id: model.provider_id,
-                    model_id: model.model_id,
-                    aliases: model.aliases,
+                    provider_id: model.provider_id.clone(),
+                    model_id: model.model_id.clone(),
+                    aliases: model.aliases.clone(),
                     context_window: model.context_window,
-                    generation_preset: model.generation_preset,
+                    generation_preset: model.generation_preset.clone(),
                 },
             )
         })
@@ -173,16 +179,16 @@ pub async fn save_settings(
     }
     let mut partial = read_global_partial_config(&path).await?;
     partial.providers = Some(swage_config::merge::PartialProviderCatalogConfig {
-        default: Some(request.default_provider),
+        default: Some(default_provider.clone()),
         entries: Some(providers),
     });
     partial.models = Some(swage_config::merge::PartialModelCatalogConfig {
-        default: Some(request.default_model),
+        default: Some(default_model.clone()),
         default_model_id: None,
         entries: Some(models),
     });
     partial.generation = Some(swage_config::merge::PartialGenerationConfig {
-        presets: Some(request.generation_presets),
+        presets: Some(generation_presets.clone()),
     });
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
@@ -191,22 +197,40 @@ pub async fn save_settings(
         .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
 
     state.mark_restart_required();
-    Ok(load_settings(state).await)
+    let saved_providers = partial
+        .providers
+        .as_ref()
+        .and_then(|providers| providers.entries.as_ref())
+        .expect("settings save always writes provider entries");
+    Ok(settings_response_from_saved_config(
+        state,
+        default_provider,
+        saved_providers,
+        default_model,
+        requested_models,
+        generation_presets,
+    ))
 }
 
 pub async fn discover_models(
     state: &AppState,
     provider_id: String,
     query: Option<String>,
+    draft_provider: Option<SaveProviderSettings>,
 ) -> Result<ModelDiscoveryResponse, ApiError> {
-    let Some(provider) = state.config.providers.entries.get(&provider_id) else {
-        return Err(ApiError::not_found_str("provider", &provider_id));
+    let provider = match draft_provider {
+        Some(provider) => provider.into_endpoint_config(),
+        None => provider_for_discovery(state, &provider_id).await?,
     };
 
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
         swage_config::Protocol::OpenAi => {
-            known_models(&["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"])
+            if let Some(base_url) = provider.base_url.as_deref() {
+                discover_openai_compatible_models(base_url).await?
+            } else {
+                known_models(&["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"])
+            }
         }
         swage_config::Protocol::Anthropic => known_models(&[
             "claude-sonnet-4-20250514",
@@ -227,6 +251,74 @@ pub async fn discover_models(
         provider_id,
         models,
     })
+}
+
+impl SaveProviderSettings {
+    fn into_endpoint_config(self) -> swage_config::ProviderEndpointConfig {
+        swage_config::ProviderEndpointConfig {
+            protocol: self.protocol,
+            base_url: self.base_url,
+            api_key_secret_ref: self.api_key_secret_ref,
+            api_key_env: self.api_key_env,
+        }
+    }
+}
+
+fn settings_response_from_saved_config(
+    state: &AppState,
+    default_provider: String,
+    providers: &HashMap<String, swage_config::ProviderEndpointConfig>,
+    default_model: String,
+    models: HashMap<String, ModelSettings>,
+    generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
+) -> SettingsResponse {
+    let providers = providers
+        .iter()
+        .map(|(id, provider)| {
+            (
+                id.clone(),
+                ProviderSettings {
+                    protocol: provider.protocol.clone(),
+                    base_url: provider.base_url.clone(),
+                    api_key_secret_ref: provider.api_key_secret_ref.clone(),
+                    api_key_env: provider.api_key_env.clone(),
+                    has_credential: provider.api_key_secret_ref.is_some()
+                        || provider.api_key_env.is_some(),
+                },
+            )
+        })
+        .collect();
+
+    SettingsResponse {
+        providers,
+        default_provider,
+        models,
+        default_model,
+        generation_presets,
+        restart_required: true,
+        can_restart: state.managed_gateway,
+    }
+}
+
+async fn provider_for_discovery(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
+    if let Some(provider) = state.config.providers.entries.get(provider_id) {
+        return Ok(provider.clone());
+    }
+
+    if let Ok(path) = global_config_path() {
+        let partial = read_global_partial_config(&path).await?;
+        if let Some(providers) = partial.providers
+            && let Some(entries) = providers.entries
+            && let Some(provider) = entries.get(provider_id)
+        {
+            return Ok(provider.clone());
+        }
+    }
+
+    Err(ApiError::not_found_str("provider", provider_id))
 }
 
 pub fn restart_status(state: &AppState) -> RestartStatusResponse {
@@ -354,6 +446,86 @@ fn known_models(ids: &[&str]) -> Vec<DiscoveredModel> {
         .collect()
 }
 
+async fn discover_openai_compatible_models(
+    base_url: &str,
+) -> Result<Vec<DiscoveredModel>, ApiError> {
+    let client = reqwest::Client::new();
+    let mut last_error = None;
+
+    for url in openai_compatible_model_urls(base_url) {
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(format!("{url}: {error}"));
+                continue;
+            }
+        };
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            last_error = Some(format!("{url}: HTTP 404"));
+            continue;
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiError::validation(format!(
+                "model discovery failed: {url} returned HTTP {status}: {body}"
+            )));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|error| {
+            ApiError::validation(format!("model discovery response failed: {error}"))
+        })?;
+        return parse_openai_compatible_models(&body);
+    }
+
+    Err(ApiError::validation(format!(
+        "model discovery failed: {}",
+        last_error.unwrap_or_else(|| "no model endpoint candidates were available".to_string())
+    )))
+}
+
+fn openai_compatible_model_urls(base_url: &str) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Vec::new();
+    }
+
+    let mut urls = vec![format!("{base}/models")];
+    if !base.ends_with("/v1") {
+        urls.push(format!("{base}/v1/models"));
+    }
+    urls
+}
+
+fn parse_openai_compatible_models(
+    body: &serde_json::Value,
+) -> Result<Vec<DiscoveredModel>, ApiError> {
+    let models = body
+        .get("data")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_str()?.to_string();
+            Some(DiscoveredModel {
+                name: item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&id)
+                    .to_string(),
+                id,
+                context_window: item
+                    .get("context_length")
+                    .or_else(|| item.get("context_window"))
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok()),
+            })
+        })
+        .collect();
+    Ok(models)
+}
+
 async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> {
     let body: serde_json::Value = reqwest::Client::new()
         .get("https://openrouter.ai/api/v1/models")
@@ -390,4 +562,115 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
         })
         .collect();
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn openai_compatible_model_urls_accept_v1_and_plain_roots() {
+        assert_eq!(
+            openai_compatible_model_urls("http://127.0.0.1:8080/v1"),
+            vec!["http://127.0.0.1:8080/v1/models"]
+        );
+        assert_eq!(
+            openai_compatible_model_urls("http://127.0.0.1:8080"),
+            vec![
+                "http://127.0.0.1:8080/models",
+                "http://127.0.0.1:8080/v1/models"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_openai_compatible_models_reads_openai_shape() {
+        let models = parse_openai_compatible_models(&json!({
+            "data": [
+                { "id": "llama-3.2", "context_length": 8192 },
+                { "id": "tiny", "name": "Tiny Test", "context_window": 1024 }
+            ]
+        }))
+        .expect("models should parse");
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "llama-3.2");
+        assert_eq!(models[0].name, "llama-3.2");
+        assert_eq!(models[0].context_window, Some(8192));
+        assert_eq!(models[1].id, "tiny");
+        assert_eq!(models[1].name, "Tiny Test");
+        assert_eq!(models[1].context_window, Some(1024));
+    }
+
+    #[test]
+    fn settings_response_from_saved_config_echoes_secret_refs_without_raw_keys() {
+        let state = AppState {
+            storage: std::sync::Arc::new(crate::turn::tests::MockStorage::new())
+                as std::sync::Arc<dyn swage_storage::store::Storage>,
+            bench_store: std::sync::Arc::new(crate::turn::tests::MockStorage::new())
+                as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            provider: std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            voice_provider: std::sync::Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice unavailable in test",
+            )),
+            config: swage_config::ResolvedConfig::default(),
+            active_turns: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            active_connections: std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            tool_dispatcher: std::sync::Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
+            activity_tracker: std::sync::Arc::new(crate::lifecycle::ActivityTracker::new()),
+            broadcast: tokio::sync::broadcast::channel(16).0,
+            shutdown_signal: tokio_util::sync::CancellationToken::new(),
+            approval_channels: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            hook_registry: None,
+            channel_routes: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            presence: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::presence::PresenceRuntime::default(),
+            )),
+            execution_hosts: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::execution_host::ExecutionHostRuntime::default(),
+            )),
+            pairing_codes: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            secret_manager: std::sync::Arc::new(crate::secret::SecretManager::new(
+                std::sync::Arc::new(crate::turn::tests::MockStorage::new())
+                    as std::sync::Arc<dyn swage_storage::store::Storage>,
+            )),
+            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
+        };
+        let mut providers = HashMap::new();
+        providers.insert(
+            "llama-cpp".to_string(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                base_url: Some("http://127.0.0.1:8080/v1".to_string()),
+                api_key_secret_ref: Some("secret:abc".to_string()),
+                api_key_env: None,
+            },
+        );
+
+        let response = settings_response_from_saved_config(
+            &state,
+            "llama-cpp".to_string(),
+            &providers,
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let provider = response.providers.get("llama-cpp").expect("provider");
+        assert!(provider.has_credential);
+        assert_eq!(provider.api_key_secret_ref.as_deref(), Some("secret:abc"));
+        assert!(
+            serde_json::to_value(provider)
+                .expect("provider json")
+                .get("api_key")
+                .is_none()
+        );
+    }
 }

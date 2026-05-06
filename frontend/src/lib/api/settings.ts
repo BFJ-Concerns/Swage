@@ -1,4 +1,11 @@
-import type { GenerationPresetConfig, SettingsPayload, SettingsResponse, ModelDiscoveryResponse, RestartStatusResponse } from "../types";
+import type {
+  GenerationPresetConfig,
+  ModelDiscoveryResponse,
+  ProviderDiscoveryDraft,
+  RestartStatusResponse,
+  SettingsPayload,
+  SettingsResponse,
+} from "../types";
 
 async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
   const init: RequestInit = { method };
@@ -19,9 +26,14 @@ export async function saveSettings(payload: SettingsPayload): Promise<SettingsRe
   return (await request("/api/settings", "PUT", payload)).json() as Promise<SettingsResponse>;
 }
 
-export async function discoverModels(providerId: string, q = ""): Promise<ModelDiscoveryResponse> {
+export async function discoverModels(
+  providerId: string,
+  q = "",
+  provider?: ProviderDiscoveryDraft,
+): Promise<ModelDiscoveryResponse> {
   const query = q ? `?q=${encodeURIComponent(q)}` : "";
-  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/models${query}`))
+  const method = provider ? "POST" : "GET";
+  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/models${query}`, method, provider))
     .json() as Promise<ModelDiscoveryResponse>;
 }
 

@@ -50,6 +50,8 @@
   let compatibleDraft = $state<{ name: string; base_url: string } | null>(null);
   let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
+  let savedProviderIds = $state<Set<string>>(new Set());
+  let isPersisting = $state(false);
   let status = $state("");
   let error = $state<string | null>(null);
 
@@ -81,6 +83,7 @@
   onMount(async () => {
     try {
       settings = await fetchSettings();
+      savedProviderIds = new Set(Object.keys(settings.providers));
       selectedProvider = settings.default_provider || providerIds[0] || "";
       selectedPreset = presetIds[0] ?? "";
       if (selectedProvider) await loadModels();
@@ -90,10 +93,21 @@
   });
 
   async function loadModels(): Promise<void> {
-    if (!selectedProvider) return;
+    if (!settings || !selectedProvider) return;
+    const provider = settings.providers[selectedProvider];
+    if (!provider) return;
+    const discoveryDraft = savedProviderIds.has(selectedProvider)
+      ? undefined
+      : {
+          protocol: provider.protocol,
+          base_url: provider.base_url,
+          api_key_secret_ref: provider.api_key_secret_ref,
+          api_key_env: provider.api_key_env,
+        };
     try {
-      const response = await discoverModels(selectedProvider, modelQuery);
+      const response = await discoverModels(selectedProvider, modelQuery, discoveryDraft);
       discoveredModels = response.models;
+      error = null;
     } catch (err) {
       // Discovery failures are non-fatal — leave the chip row empty and
       // surface the error in the notice band so the user knows why.
@@ -302,30 +316,40 @@
     return Number.isFinite(value) ? value : null;
   }
 
-  async function persist(): Promise<void> {
-    if (!settings) return;
+  async function persist(options: { message?: string } = {}): Promise<boolean> {
+    if (!settings) return false;
     error = null;
     status = "";
     for (const [id, preset] of Object.entries(settings.generation_presets)) {
       if (!id.trim() || presetIsEmpty(preset)) {
         error = "Generation presets need a name and at least one parameter.";
-        return;
+        return false;
       }
       // Normalise NaN-from-empty-input to null so the wire format is valid.
       preset.max_tokens = nullableNumber(preset.max_tokens);
       preset.temperature = nullableNumber(preset.temperature);
     }
+    const providerToRestore = selectedProvider;
     try {
+      isPersisting = true;
       settings.default_provider = defaultModel?.provider_id ?? "";
       settings = await saveSettings(settings);
+      savedProviderIds = new Set(Object.keys(settings.providers));
+      if (providerToRestore && settings.providers[providerToRestore]) selectedProvider = providerToRestore;
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
-      status = settings.can_restart
-        ? "Saved. Restart the managed gateway to apply changes."
-        : "Saved. Restart the gateway manually to apply changes.";
+      status =
+        options.message ??
+        (settings.can_restart
+          ? "Saved. Restart the managed gateway to apply changes."
+          : "Saved. Restart the gateway manually to apply changes.");
+      return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to save settings.";
+      return false;
+    } finally {
+      isPersisting = false;
     }
   }
 
@@ -581,7 +605,9 @@
         <p class="sub">{heading.sub}</p>
       </div>
       <div class="head-actions">
-        <button type="button" class="btn primary" onclick={persist}>Save</button>
+        <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
+          {isPersisting ? "Saving..." : "Save"}
+        </button>
       </div>
     </div>
 
@@ -839,6 +865,7 @@
                 <button
                   type="button"
                   class="opt"
+                  disabled={isPersisting}
                   onclick={() => {
                     selectedProvider = id;
                     loadModels();

@@ -102,6 +102,8 @@ export interface ModelDiscoveryResponse {
   models: DiscoveredModel[];
 }
 
+export type ProviderDiscoveryDraft = Omit<ProviderSettings, "has_credential" | "api_key">;
+
 export interface RestartStatusResponse {
   restart_required: boolean;
   can_restart: boolean;

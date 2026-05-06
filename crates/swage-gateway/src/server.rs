@@ -397,7 +397,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/settings", put(handlers::save_settings))
         .route(
             "/api/settings/providers/{id}/models",
-            get(handlers::discover_provider_models),
+            get(handlers::discover_provider_models).post(handlers::discover_draft_provider_models),
         )
         .route(
             "/api/settings/restart-required",
