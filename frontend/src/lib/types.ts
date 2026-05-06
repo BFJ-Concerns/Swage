@@ -47,7 +47,7 @@ export interface UpdateWorkspaceTrustRequest {
   is_trusted: boolean;
 }
 
-export type ProviderProtocol = "OpenAi" | "Anthropic" | "Google" | "OpenRouter";
+export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter";
 
 export interface ProviderSettings {
   protocol: ProviderProtocol;

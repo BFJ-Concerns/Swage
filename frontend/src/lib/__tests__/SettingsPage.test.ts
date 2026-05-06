@@ -40,6 +40,16 @@ function buttonContaining(text: string): HTMLButtonElement {
   return button as HTMLButtonElement;
 }
 
+function clickDiscoveredModel(name: string): void {
+  const button = Array.from(document.querySelectorAll("button")).find(
+    (candidate) => candidate.title === `Add ${name}`,
+  );
+  if (!button) {
+    throw new Error(`Discovered model button not found: ${name}\n${document.body.textContent ?? ""}`);
+  }
+  (button as HTMLButtonElement).click();
+}
+
 function emptySettings(): SettingsResponse {
   return {
     providers: {},
@@ -95,7 +105,7 @@ describe("SettingsPage", () => {
 
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
     expect(settingsApi.discoverModels).toHaveBeenCalledWith("openai", "", {
-      protocol: "OpenAi",
+      protocol: "openai",
       base_url: null,
       api_key_secret_ref: null,
       api_key_env: null,
@@ -104,5 +114,31 @@ describe("SettingsPage", () => {
       "Save settings before discovering models for a new provider.",
     );
     expect(document.body.textContent).toContain("gpt-4.1-mini");
+  });
+
+  it("makes the first discovered model the default before saving", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    buttonContaining("Add provider").click();
+    await flushUi();
+    buttonContaining("OpenAI").click();
+    await flushUi();
+    buttonNamed("Refresh").click();
+    await flushUi();
+    clickDiscoveredModel("gpt-4.1-mini");
+    await flushUi();
+    buttonNamed("Save").click();
+    await flushUi();
+
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        default_model: "openai:gpt-4.1-mini",
+        default_provider: "openai",
+      }),
+    );
   });
 });

@@ -28,7 +28,7 @@ describe("settings api", () => {
   it("uses POST model discovery for draft providers", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ provider_id: "llama", models: [] }));
     const draft = {
-      protocol: "OpenAi" as const,
+      protocol: "openai" as const,
       base_url: "http://127.0.0.1:8080/v1",
       api_key_secret_ref: null,
       api_key_env: null,
@@ -41,5 +41,18 @@ describe("settings api", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(draft),
     });
+  });
+
+  it("includes server response text in request failures", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("unknown variant `OpenAi`", {
+        status: 422,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    );
+
+    await expect(discoverModels("llama")).rejects.toThrow(
+      "HTTP 422 from GET /api/settings/providers/llama/models: unknown variant `OpenAi`",
+    );
   });
 });

@@ -56,11 +56,11 @@
   let error = $state<string | null>(null);
 
   const PROVIDER_KINDS = [
-    { id: "OpenAi", label: "OpenAI", protocol: "OpenAi" },
-    { id: "Anthropic", label: "Anthropic", protocol: "Anthropic" },
-    { id: "Google", label: "Google", protocol: "Google" },
-    { id: "OpenRouter", label: "OpenRouter", protocol: "OpenRouter" },
-    { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "OpenAi" },
+    { id: "OpenAi", label: "OpenAI", protocol: "openai" },
+    { id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
+    { id: "Google", label: "Google", protocol: "google" },
+    { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
+    { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
   ] as const satisfies readonly ProviderKindDefinition[];
 
   const providerIds = $derived(Object.keys(settings?.providers ?? {}));
@@ -133,6 +133,8 @@
       context_window: model.context_window,
       generation_preset: null,
     };
+    settings.default_model ||= id;
+    settings.default_provider ||= selectedProvider;
   }
 
   function providerModels(providerId: string): [string, ModelSettings][] {
@@ -171,7 +173,7 @@
     if (!settings) return id;
     const provider = settings.providers[id];
     if (!provider) return id;
-    if (provider.protocol === "OpenAi" && provider.base_url) return "OpenAI compatible";
+    if (provider.protocol === "openai" && provider.base_url) return "OpenAI compatible";
     return PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol && kind.id !== "OpenAiCompatible")?.label ?? id;
   }
 
@@ -216,7 +218,7 @@
     const baseId = slugifyProviderName(compatibleDraft.name) || "openai-compatible";
     const id = nextProviderId(baseId);
     settings.providers[id] = {
-      protocol: "OpenAi",
+      protocol: "openai",
       base_url: baseUrl,
       api_key_secret_ref: null,
       api_key_env: null,
@@ -316,6 +318,17 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function normaliseDefaultModel(): void {
+    if (!settings) return;
+    if (settings.default_model && settings.models[settings.default_model]) {
+      settings.default_provider = settings.models[settings.default_model].provider_id;
+      return;
+    }
+    const replacement = Object.keys(settings.models)[0] ?? "";
+    settings.default_model = replacement;
+    settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
+  }
+
   async function persist(options: { message?: string } = {}): Promise<boolean> {
     if (!settings) return false;
     error = null;
@@ -332,7 +345,7 @@
     const providerToRestore = selectedProvider;
     try {
       isPersisting = true;
-      settings.default_provider = defaultModel?.provider_id ?? "";
+      normaliseDefaultModel();
       settings = await saveSettings(settings);
       savedProviderIds = new Set(Object.keys(settings.providers));
       if (providerToRestore && settings.providers[providerToRestore]) selectedProvider = providerToRestore;

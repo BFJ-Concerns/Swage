@@ -14,7 +14,22 @@ async function request(path: string, method = "GET", body?: unknown): Promise<Re
     init.body = JSON.stringify(body);
   }
   const response = await fetch(path, init);
-  if (!response.ok) throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const contentType = response.headers.get("Content-Type") ?? "";
+      if (contentType.includes("application/json")) {
+        const body = (await response.json()) as { message?: unknown };
+        if (typeof body.message === "string") detail = `: ${body.message}`;
+      } else {
+        const body = await response.text();
+        if (body.trim()) detail = `: ${body.trim()}`;
+      }
+    } catch {
+      detail = "";
+    }
+    throw new Error(`HTTP ${response.status} from ${method} ${path}${detail}`);
+  }
   return response;
 }
 
