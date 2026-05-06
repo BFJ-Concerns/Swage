@@ -65,16 +65,25 @@ cleanup() {
     trap - EXIT INT TERM
     echo
     echo "==> Stopping dev processes"
-    if [[ -n "$vite_pid" ]] && kill -0 "$vite_pid" 2>/dev/null; then
-        kill "$vite_pid" 2>/dev/null || true
-        wait "$vite_pid" 2>/dev/null || true
-    fi
-    if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" 2>/dev/null; then
-        kill "$gateway_pid" 2>/dev/null || true
-        wait "$gateway_pid" 2>/dev/null || true
-    fi
+    stop_process_tree "$vite_pid"
+    stop_process_tree "$gateway_pid"
 }
 trap cleanup EXIT INT TERM
+
+stop_process_tree() {
+    local pid="${1:-}"
+    [[ -n "$pid" ]] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+
+    local child
+    while read -r child; do
+        [[ -n "$child" ]] || continue
+        stop_process_tree "$child"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
 
 # --- Build cache hygiene ----------------------------------------------------
 # Cap target/ at ~50 GiB by evicting least-recently-used artefacts. Time-based
@@ -98,12 +107,15 @@ if [[ ! -d frontend/node_modules ]]; then
 fi
 
 # --- Gateway ----------------------------------------------------------------
+# Build before starting either long-running process so cargo's compile output
+# does not bury the live Vite URL and make the gateway port look authoritative.
+echo "==> Building gateway (cargo build, debug)"
+cargo build -p swage-gateway
+
 # --foreground keeps the gateway attached to this script so Ctrl-C kills it.
-# Cargo prints its progress to stderr; we leave both streams interleaved with
-# vite's output so the user can see compile errors and request logs together.
-echo "==> Starting gateway on port ${gateway_port} (cargo run, debug)"
+echo "==> Starting gateway API on port ${gateway_port} (debug binary)"
 (
-    cargo run -p swage-gateway -- \
+    SWAGE_DEV_FRONTEND_PORT="$vite_port" target/debug/swage \
         gateway start --foreground --port "$gateway_port"
 ) &
 gateway_pid=$!
@@ -111,23 +123,29 @@ gateway_pid=$!
 # --- Frontend dev server ----------------------------------------------------
 echo "==> Starting Vite dev server on ${vite_host}:${vite_port}"
 (
-    npm --prefix frontend run dev -- --host "$vite_host" --port "$vite_port"
+    npm --prefix frontend run dev -- --host "$vite_host" --port "$vite_port" --strictPort
 ) &
 vite_pid=$!
 
 # Best-effort LAN IP for printing the reachable URL.
 lan_ip=""
 if command -v hostname >/dev/null 2>&1; then
-    lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    # Some hostname implementations do not support -I. Keep this lookup
+    # genuinely best-effort so a missing LAN hint does not kill the dev loop.
+    lan_ip="$({ hostname -I 2>/dev/null || true; } | awk 'NF { print $1; exit }')"
+fi
+if [[ -z "$lan_ip" ]] && command -v ip >/dev/null 2>&1; then
+    lan_ip="$({ ip -o -4 route get 1.1.1.1 2>/dev/null || true; } | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
 fi
 
 echo
-echo "    Gateway: http://127.0.0.1:${gateway_port}"
-echo "    Web UI:  http://localhost:${vite_port}"
+echo "    Gateway API:       http://127.0.0.1:${gateway_port}"
+echo "    Web UI:            http://localhost:${vite_port}"
+echo "    Gateway UI route:  redirects to the live Vite UI"
 if [[ -n "$lan_ip" ]]; then
-    echo "    LAN UI:  http://${lan_ip}:${vite_port}"
+    echo "    LAN UI:            http://${lan_ip}:${vite_port}"
 else
-    echo "    LAN UI:  http://<this-machine-ip>:${vite_port}"
+    echo "    LAN UI:            http://<this-machine-ip>:${vite_port}"
 fi
 echo
 echo "    LAN exposure warning: the dev server has no authentication."

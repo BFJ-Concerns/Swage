@@ -7,7 +7,7 @@
 
 use axum::{
     body::Body,
-    http::{StatusCode, Uri, header},
+    http::{HeaderMap, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use rust_embed::Embed;
@@ -30,13 +30,17 @@ pub struct FrontendAssets;
 ///    from the file extension and path.
 /// 3. SPA fallback — any other unrecognised path serves `index.html` so that
 ///    direct navigation (e.g. refreshing /conversations/:id) loads the app.
-pub async fn serve_frontend(uri: Uri) -> Response {
+pub async fn serve_frontend(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path();
 
     // API paths that reach the fallback are genuinely missing routes.
     // Never substitute index.html — that would mask API 404s as 200 HTML.
     if path.starts_with("/api/") {
         return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if let Some(response) = dev_frontend_redirect(&headers, &uri) {
+        return response;
     }
 
     // Strip the leading slash for rust-embed key lookup (keys use bare paths).
@@ -106,4 +110,72 @@ fn dev_fallback() -> Response {
              or start the Vite dev server at http://localhost:5173 during development.",
         ))
         .unwrap()
+}
+
+/// Redirect browser routes from the gateway to Vite while `scripts/dev.sh` is
+/// supervising both processes. Without this, port 3000 can serve embedded
+/// `frontend/dist` assets from a previous build, which looks like a stale UI.
+fn dev_frontend_redirect(headers: &HeaderMap, uri: &Uri) -> Option<Response> {
+    let port = std::env::var("SWAGE_DEV_FRONTEND_PORT").ok()?;
+    redirect_to_dev_frontend(headers, uri, &port)
+}
+
+fn redirect_to_dev_frontend(headers: &HeaderMap, uri: &Uri, port: &str) -> Option<Response> {
+    if port.trim().is_empty() {
+        return None;
+    }
+
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(host_without_port)
+        .filter(|host| !host.is_empty())
+        .unwrap_or("localhost");
+
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let location = format!("http://{host}:{port}{path_and_query}");
+
+    Some(
+        Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, location)
+            .body(Body::empty())
+            .unwrap(),
+    )
+}
+
+fn host_without_port(host: &str) -> Option<&str> {
+    if host.starts_with('[') {
+        return host.find(']').map(|end| &host[..=end]).or(Some(host));
+    }
+
+    Some(host.split_once(':').map_or(host, |(name, _)| name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_redirect_preserves_host_path_and_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "192.0.2.30:3000".parse().unwrap());
+        let uri = "/conversations/abc?tab=chat".parse::<Uri>().unwrap();
+
+        let response = redirect_to_dev_frontend(&headers, &uri, "5173").unwrap();
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "http://192.0.2.30:5173/conversations/abc?tab=chat"
+        );
+    }
+
+    #[test]
+    fn dev_redirect_is_disabled_without_a_port() {
+        let headers = HeaderMap::new();
+        let uri = "/".parse::<Uri>().unwrap();
+
+        assert!(redirect_to_dev_frontend(&headers, &uri, "").is_none());
+    }
 }
