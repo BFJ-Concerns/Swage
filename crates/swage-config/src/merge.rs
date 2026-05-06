@@ -136,6 +136,9 @@ pub struct PartialPythonExecuteToolConfig {
 /// same as "not configured". In practice most callers set it to `Some(value)`
 /// or leave it as `None` (absent), so the outer option behaves like all other
 /// fields: absent means "don't override the base".
+// TODO Make output schema clearing match the documented cascade semantics
+// PartialOutputConfig.schema is only Option<Value>, so child config cannot distinguish absent from explicit None and cannot clear an inherited schema despite the comment saying it can.
+// ---
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialOutputConfig {
     /// JSON Schema to validate agent output against. `None` means "not

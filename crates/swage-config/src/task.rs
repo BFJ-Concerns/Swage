@@ -47,6 +47,9 @@ pub struct TaskDefinition {
 
     /// Tool permission overrides. When set, these replace the agent's base
     /// permissions entirely (replacement semantics, not merge).
+    // TODO Clarify or enforce whole-set task permission replacement
+    // A task that sets only one permission field still inherits the other base permission fields through PartialToolConfig merging, despite this contract saying task tool overrides replace the base permissions entirely.
+    // ---
     #[serde(default)]
     pub tool_allow: Option<Vec<String>>,
     #[serde(default)]

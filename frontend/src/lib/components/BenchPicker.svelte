@@ -119,6 +119,9 @@
   <header class="picker-head">
     <p class="eyebrow">Pick a bench</p>
     <h1 class="display">Choose where to work.</h1>
+    <!-- TODO Add folder selection and relink recovery to bench entry -->
+    <!-- Let operators choose or relink the folder a bench/session should work in before opening it, and show missing-folder state instead of relying on backend fallbacks. -->
+    <!-- --- -->
     <p class="lede">
       Each bench is a separate workspace — its own conversations, memory, and
       attached files. Click a card to preview, then open it.

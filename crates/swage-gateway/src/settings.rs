@@ -15,6 +15,21 @@ pub struct SettingsResponse {
     pub models: HashMap<String, ModelSettings>,
     pub default_model: String,
     pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
+    // TODO Add global tool permission controls to settings
+    // Extend the settings API, persistence, validation, and UI so operators can edit global allow, deny, bundle, and approval-gated tool rules from settings.
+    // ---
+    // TODO Add global approval defaults to settings
+    // Surface global HITL timeout and timeout-policy defaults in settings, including save validation and honest restart-required messaging.
+    // ---
+    // TODO Add global sandbox policy controls to settings
+    // Expose the global sandbox enabled policy in settings with persistence through the global config file.
+    // ---
+    // TODO Add global context assembly controls to settings
+    // Let operators edit global context assembly, timeout, and budget defaults from settings.
+    // ---
+    // TODO Add global workspace default controls to settings
+    // Surface the global workspace path default in settings while keeping bench workspace attachments and grants conceptually separate.
+    // ---
     pub restart_required: bool,
     pub can_restart: bool,
 }

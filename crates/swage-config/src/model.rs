@@ -127,6 +127,9 @@ impl ModelCatalogConfig {
 }
 
 /// Working directory for the agent workspace.
+// TODO Retire global workspace.path as an agent execution root
+// Replace this process-era default with app-level storage or scratch settings; bench and session execution roots should come from persisted workspace selections instead.
+// ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub path: String,
