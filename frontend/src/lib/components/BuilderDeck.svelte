@@ -614,6 +614,9 @@
       Select a bench before editing teams or extensions.
     </section>
   {:else}
+    <!-- TODO Replace builder workup shells with real stage modules -->
+    <!-- Replace the Builder diagram, inspector, and palette shells with real interactive modules. -->
+    <!-- --- -->
     <!--
       Workup module shells — the Riso workup (view 05) places three modules
       on the Builder stage: orchestration flow (real diagram), agent inspector,
@@ -621,8 +624,6 @@
       below; these shells preserve the workup vocabulary so the layout reads
       correctly until the diagrammatic modules exist.
 
-      TODO type=issue priority=normal tags=ui,builder,modules
-      type: issue
       The Builder stage modules below are non-functional — they describe
       what the workup specifies but no diagram, inspector, or palette
       component exists. The form-driven editor that follows is the live

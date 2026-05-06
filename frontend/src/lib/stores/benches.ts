@@ -11,6 +11,7 @@ import * as api from "../api/benches";
 export interface BenchStore {
   readonly benches: Bench[];
   readonly currentBench: Bench | null;
+  readonly recentBenches: Bench[];
   readonly isLoading: boolean;
   loadBenches(): Promise<void>;
   selectBench(id: string): Promise<void>;
@@ -19,15 +20,42 @@ export interface BenchStore {
 }
 
 export function createBenchStore(): BenchStore {
+  const RECENT_BENCHES_KEY = "swage:recent-benches";
+
   // Back the custom API with real Svelte stores so bench changes propagate
   // into mounted components after async actions complete.
   const benchesStore = writable<Bench[]>([]);
   const currentBenchStore = writable<Bench | null>(null);
+  const recentBenchIdsStore = writable<string[]>(readRecentBenchIds());
   const isLoadingStore = writable(false);
 
   const benchesState = fromStore(benchesStore);
   const currentBenchState = fromStore(currentBenchStore);
+  const recentBenchIdsState = fromStore(recentBenchIdsStore);
   const isLoadingState = fromStore(isLoadingStore);
+
+  function readRecentBenchIds(): string[] {
+    if (typeof localStorage === "undefined") return [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem(RECENT_BENCHES_KEY) ?? "[]") as unknown;
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeRecentBenchIds(ids: string[]): void {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(RECENT_BENCHES_KEY, JSON.stringify(ids));
+  }
+
+  function rememberBenchOpen(id: string): void {
+    recentBenchIdsStore.update((ids) => {
+      const next = [id, ...ids.filter((existing) => existing !== id)].slice(0, 8);
+      writeRecentBenchIds(next);
+      return next;
+    });
+  }
 
   return {
     // ---------------------------------------------------------------------------
@@ -40,6 +68,13 @@ export function createBenchStore(): BenchStore {
 
     get currentBench() {
       return currentBenchState.current;
+    },
+
+    get recentBenches() {
+      const benchesById = new Map(benchesState.current.map((bench) => [bench.id, bench]));
+      return recentBenchIdsState.current
+        .map((id) => benchesById.get(id))
+        .filter((bench): bench is Bench => Boolean(bench));
     },
 
     get isLoading() {
@@ -76,7 +111,12 @@ export function createBenchStore(): BenchStore {
       }
       // Selection is purely local — no extra round-trip needed since we
       // already have the full bench data from loadBenches.
-      currentBenchStore.set(found);
+      const opened: Bench = { ...found, last_opened_at: new Date().toISOString() };
+      benchesStore.update((items) =>
+        items.map((bench) => (bench.id === id ? opened : bench)),
+      );
+      currentBenchStore.set(opened);
+      rememberBenchOpen(id);
     },
 
     async createBench(name) {

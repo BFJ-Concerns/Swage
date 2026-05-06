@@ -86,6 +86,9 @@ function mockStreamingStore(): StreamingStore {
     get isStreaming() { return false; },
     get streamedContent() { return ""; },
     get turnError() { return null; },
+    get turnStartedAt() { return null; },
+    get lastInputTokens() { return null; },
+    get lastOutputTokens() { return null; },
     get activeToolCalls() { return []; },
     get pendingApproval() { return null; },
     handleServerEvent: () => {},
@@ -104,6 +107,7 @@ function mockBenchStore(): BenchStore {
     get currentBench() {
       return { id: "default", name: "default", is_default: true, slug: "default", created_at: "" };
     },
+    get recentBenches() { return []; },
     get isLoading() { return false; },
     loadBenches: async () => {},
     selectBench: async () => {},
@@ -322,6 +326,7 @@ describe("AppLayout: workbench shell", () => {
     const noBenchStore: BenchStore = {
       get benches() { return []; },
       get currentBench() { return null; },
+      get recentBenches() { return []; },
       get isLoading() { return false; },
       loadBenches: async () => {},
       selectBench: async () => {},

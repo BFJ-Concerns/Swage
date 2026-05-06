@@ -228,6 +228,9 @@
       </div>
     {/if}
 
+    <!-- TODO Emit provider retry events for inline retry chips -->
+    <!-- Surface retry attempt, wait timer, and provider name so workup view 07 can render live. -->
+    <!-- --- -->
     <!--
       Inline retry chip — workup view 07. Pinned to the assistant turn that's
       currently retrying so the failure stays local rather than splashing
@@ -235,7 +238,6 @@
       turn ends in error: the provider chain has no per-attempt events, so
       we can't render the live "retry 3 of 5" state the workup specifies.
 
-      TODO type=task priority=normal tags=ui,retry,provider
       Emit per-attempt provider events (`provider_retry_started`,
       `provider_retry_settled`) so the chip can render real attempt
       counts, the wait timer, and the active provider name. The retry

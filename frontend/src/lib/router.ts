@@ -8,14 +8,6 @@
 // were added per the Riso workup (`riso-cyanotype.html`, view 06) and are
 // rendered as non-functional shells until backends exist — see the SettingsPage
 // motes for the gap on each page.
-//
-// TODO type=issue priority=normal tags=ui,settings
-// type: issue
-// Settings pages plugins/channels/nodes/voice/recovery/display/account land
-// in the URL but render as shells. Promote each to a task once its backend
-// is scoped (see `crates/swage-gateway/src/handlers.rs` for the existing
-// operator-side endpoints that some pages will eventually consume).
-// ---
 export type SettingsTab =
   | "providers"
   | "generation"

@@ -12,6 +12,8 @@ export interface Bench {
   is_default: boolean;
   slug: string;
   created_at: string;
+  /** Client-side recency marker until the gateway persists last_opened_at. */
+  last_opened_at?: string | null;
 }
 
 /** Request body for creating a new bench. */
@@ -122,6 +124,8 @@ export interface ConversationDetail {
   created_at: string;
   last_activity: string;
   messages: MessageView[];
+  input_tokens?: number | null;
+  output_tokens?: number | null;
 }
 
 /** A single tool call recorded against a message. */

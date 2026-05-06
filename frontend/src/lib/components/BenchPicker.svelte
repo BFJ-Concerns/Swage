@@ -12,7 +12,6 @@
   Per the same doc, bench cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
-  TODO type=task priority=normal tags=ui,bench,settings
   Wire the ▾ secondary menu on each bench card to a bench-scoped settings
   overlay (workup view 04). Today the trigger renders disabled because
   bench-scoped settings is not a route yet — the global settings overlay is
@@ -24,9 +23,13 @@
   same SettingsPage shell with bench-scoped pages, then bind the ▾ here.
   ---
 -->
+<!-- TODO Add bench-scoped settings entry points -->
+<!-- Route bench card secondary menus to bench-scoped settings from workup view 04. -->
+<!-- --- -->
 <script lang="ts">
+  import { listBenchSessions, listBenchWorkspaces } from "../api/benches";
   import type { BenchStore } from "../stores/benches";
-  import type { Bench } from "../types";
+  import type { Bench, ConversationSummary, WorkspaceAttachment } from "../types";
 
   interface Props {
     benchStore?: BenchStore;
@@ -45,14 +48,46 @@
   let newName = $state("");
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
+  let selectedWorkspaces = $state<WorkspaceAttachment[]>([]);
+  let selectedConversations = $state<ConversationSummary[]>([]);
+  let detailError = $state<string | null>(null);
 
   const benches = $derived(benchStore?.benches ?? []);
   const selected = $derived(
     selectedId ? benches.find((b) => b.id === selectedId) ?? null : null,
   );
+  const selectedLastOpened = $derived(selected?.last_opened_at ?? null);
 
   function selectCard(bench: Bench): void {
     selectedId = bench.id;
+  }
+
+  $effect(() => {
+    const benchId = selected?.id;
+    if (!benchId) {
+      selectedWorkspaces = [];
+      selectedConversations = [];
+      detailError = null;
+      return;
+    }
+    void loadBenchDetail(benchId);
+  });
+
+  async function loadBenchDetail(benchId: string): Promise<void> {
+    detailError = null;
+    try {
+      const [workspaces, conversations] = await Promise.all([
+        listBenchWorkspaces(benchId),
+        listBenchSessions(benchId),
+      ]);
+      if (selected?.id !== benchId) return;
+      selectedWorkspaces = workspaces;
+      selectedConversations = conversations;
+    } catch (error) {
+      selectedWorkspaces = [];
+      selectedConversations = [];
+      detailError = error instanceof Error ? error.message : "Failed to load bench detail.";
+    }
   }
 
   async function openBench(id: string): Promise<void> {
@@ -194,22 +229,9 @@
   </div>
 
   {#if selected}
-    <!--
-      Details panel: shown only after a single click. The workup (view 04)
-      lists `about`, `workspace`, `last opened`, and `conversations`. Today
-      only slug + default + created_at are exposed; the rest are shells.
-
-      TODO type=task priority=normal tags=ui,bench,detail
-      Surface bench `about` (a short blurb), workspace attachment list,
-      last_opened_at, and per-bench conversation counts. The data lives in
-      the bench, attachments, and conversation tables; the response just
-      doesn't aggregate them yet.
-      Why: workup view 04 uses these to help the user decide whether to
-      open the bench without entering it.
-      How to apply: extend GET /api/benches/:id to include the
-      aggregates and replace the shell rows below.
-      ---
-    -->
+    <!-- TODO Add bench about text -->
+    <!-- Persist a short bench blurb so the picker preview can explain what the bench is for. -->
+    <!-- --- -->
     <aside class="bench-detail" aria-label="Bench detail">
       <header class="detail-head">
         <p class="eyebrow">Bench detail</p>
@@ -223,14 +245,27 @@
         <dt>Created</dt>
         <dd class="mono">{selected.created_at || "—"}</dd>
         <dt>About</dt>
-        <dd class="shell">Workup blurb · backend not yet exposed.</dd>
+        <dd class="shell">No bench blurb field yet.</dd>
         <dt>Workspace</dt>
-        <dd class="shell">Attached folders · listing endpoint not yet exposed here.</dd>
+        <dd>
+          {#if selectedWorkspaces.length > 0}
+            {#each selectedWorkspaces as workspace, index (workspace.id)}
+              <span class="workspace-line">
+                {workspace.label}{index < selectedWorkspaces.length - 1 ? ", " : ""}
+              </span>
+            {/each}
+          {:else}
+            none attached
+          {/if}
+        </dd>
         <dt>Last opened</dt>
-        <dd class="shell">last_opened_at not yet persisted.</dd>
+        <dd class="mono">{selectedLastOpened ?? "not opened this browser session"}</dd>
         <dt>Conversations</dt>
-        <dd class="shell">Per-bench counts not yet aggregated.</dd>
+        <dd>{selectedConversations.length}</dd>
       </dl>
+      {#if detailError}
+        <p class="detail-error">{detailError}</p>
+      {/if}
     </aside>
   {/if}
 </div>
@@ -568,11 +603,20 @@
     color: var(--ink);
   }
 
-  /* Shell rows in the bench detail — until the API aggregates the workup
-     fields, these read as muted text in the same dt/dd grid. */
+  /* Muted row for the one remaining bench-detail field the API does not expose. */
   .detail-grid dd.shell {
     color: var(--ink-soft);
     font-style: italic;
+  }
+
+  .workspace-line {
+    display: inline;
+  }
+
+  .detail-error {
+    margin: 0;
+    color: var(--ink-orange);
+    font-size: 12px;
   }
 
   .mono {

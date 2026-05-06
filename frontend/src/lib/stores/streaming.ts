@@ -26,6 +26,9 @@ export interface StreamingStore {
   readonly isStreaming: boolean;
   readonly streamedContent: string;
   readonly turnError: { code: string; message: string } | null;
+  readonly turnStartedAt: string | null;
+  readonly lastInputTokens: number | null;
+  readonly lastOutputTokens: number | null;
   // Live tool calls for the current turn. Populated as tool_start/tool_end
   // events arrive. Cleared when the turn completes normally. Preserved (for
   // display) when a turn ends in error or is cancelled.
@@ -79,6 +82,9 @@ export function createStreamingStore(
   const isStreamingStore = writable(false);
   const streamedContentStore = writable("");
   const turnErrorStore = writable<{ code: string; message: string } | null>(null);
+  const turnStartedAtStore = writable<string | null>(null);
+  const lastInputTokensStore = writable<number | null>(null);
+  const lastOutputTokensStore = writable<number | null>(null);
   // Tracks in-flight and completed tool calls for the current turn.
   const activeToolCallsStore = writable<ToolCallView[]>([]);
   // Currently active approval awaiting user decision; null when none.
@@ -87,6 +93,9 @@ export function createStreamingStore(
   const isStreamingState = fromStore(isStreamingStore);
   const streamedContentState = fromStore(streamedContentStore);
   const turnErrorState = fromStore(turnErrorStore);
+  const turnStartedAtState = fromStore(turnStartedAtStore);
+  const lastInputTokensState = fromStore(lastInputTokensStore);
+  const lastOutputTokensState = fromStore(lastOutputTokensStore);
   const activeToolCallsState = fromStore(activeToolCallsStore);
   const pendingApprovalState = fromStore(pendingApprovalStore);
 
@@ -125,6 +134,18 @@ export function createStreamingStore(
 
     get turnError(): { code: string; message: string } | null {
       return turnErrorState.current;
+    },
+
+    get turnStartedAt(): string | null {
+      return turnStartedAtState.current;
+    },
+
+    get lastInputTokens(): number | null {
+      return lastInputTokensState.current;
+    },
+
+    get lastOutputTokens(): number | null {
+      return lastOutputTokensState.current;
     },
 
     get activeToolCalls(): ToolCallView[] {
@@ -231,6 +252,9 @@ export function createStreamingStore(
           streamedContentStore.set("");
           turnErrorStore.set(null);
           isStreamingStore.set(false);
+          turnStartedAtStore.set(null);
+          lastInputTokensStore.set(event.input_tokens ?? null);
+          lastOutputTokensStore.set(event.output_tokens ?? null);
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
           break;
@@ -241,6 +265,7 @@ export function createStreamingStore(
           preservePartialResponse();
           turnErrorStore.set({ code: event.code, message: event.message });
           isStreamingStore.set(false);
+          turnStartedAtStore.set(null);
           // streamedContent is intentionally not cleared — it stays visible
           // alongside the error until the next startTurn clears it.
           // activeToolCalls are preserved so the UI can show what was
@@ -263,6 +288,7 @@ export function createStreamingStore(
               : `Structured output validation failed after ${event.attempts} attempts.`,
           });
           isStreamingStore.set(false);
+          turnStartedAtStore.set(null);
           break;
         }
 
@@ -271,6 +297,7 @@ export function createStreamingStore(
           // to read what was generated before they stopped it).
           preservePartialResponse();
           isStreamingStore.set(false);
+          turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
           break;
 
@@ -281,6 +308,7 @@ export function createStreamingStore(
           preservePartialResponse();
           turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           isStreamingStore.set(false);
+          turnStartedAtStore.set(null);
           break;
 
         case "approval_required":
@@ -335,6 +363,9 @@ export function createStreamingStore(
       streamedContentStore.set("");
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
+      lastInputTokensStore.set(null);
+      lastOutputTokensStore.set(null);
+      turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
 
       // Immediately record the user's message so the conversation history

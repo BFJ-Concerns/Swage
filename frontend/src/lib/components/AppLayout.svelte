@@ -15,6 +15,7 @@
   design once lens definitions are reshaped. Tracked: future UI cleanup.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import ConversationList from "./ConversationList.svelte";
   import BenchSelector from "./BenchSelector.svelte";
   import BenchPicker from "./BenchPicker.svelte";
@@ -52,6 +53,7 @@
     desktopRuntime?: DesktopRuntimeInfo | null;
     themeMode?: ThemeMode;
     onSelectTheme?: (mode: ThemeMode) => void;
+    activeModelContextWindow?: number | null;
     route?: Route;
     onNavigate?: (path: string) => void;
   }
@@ -73,6 +75,7 @@
     desktopRuntime,
     themeMode = "system",
     onSelectTheme,
+    activeModelContextWindow = null,
     route,
     onNavigate,
   }: Props = $props();
@@ -86,9 +89,11 @@
     availableLenses.find((lens) => lens.id === activeLens) ?? null,
   );
   const currentBench = $derived(benchStore?.currentBench ?? null);
+  const recentBenches = $derived(benchStore?.recentBenches ?? []);
   const conversationCount = $derived(conversationStore.conversations.length);
   const activeConversation = $derived(conversationStore.activeConversation);
   const settingsTab = $derived(route?.settingsTab ?? null);
+  let now = $state(Date.now());
 
   // Settings sub-pages — drives both the URL the page list links to and the
   // ix counter shown beside each entry. The list mirrors the Riso workup
@@ -96,15 +101,6 @@
   // Voice, Recovery, Display, Account. Pages whose backends don't exist yet
   // render shells (see SettingsPage.svelte) — the entries land here so the nav
   // looks complete and the routes resolve.
-  //
-  // TODO type=issue priority=normal tags=ui,settings
-  // type: issue
-  // Several settings entries route to non-functional shells (plugins,
-  // channels, nodes, voice, recovery, display, account). Promote each to a
-  // task once its underlying backend (or, for display, a preferences API)
-  // is scoped. The shell pages themselves carry per-page motes describing
-  // the gap.
-  // ---
   const SETTINGS_PAGES: ReadonlyArray<{
     id: NonNullable<typeof settingsTab>;
     label: string;
@@ -156,6 +152,46 @@
         ? { label: "Retrying", tone: "alert" }
         : { label: "Idle", tone: "idle" },
   );
+  const turnElapsedSeconds = $derived(
+    streamingStore.turnStartedAt
+      ? Math.max(0, Math.floor((now - Date.parse(streamingStore.turnStartedAt)) / 1000))
+      : 0,
+  );
+  const stampStateLabel = $derived(
+    streamingStore.isStreaming
+      ? `Working ${formatDuration(turnElapsedSeconds)}`
+      : stampState.label,
+  );
+  const tokenUsage = $derived(
+    (streamingStore.lastInputTokens ?? 0) + (streamingStore.lastOutputTokens ?? 0),
+  );
+  const tokenBudgetLabel = $derived(
+    activeModelContextWindow ? activeModelContextWindow.toLocaleString() : "budget unknown",
+  );
+  const tokenUsageLabel = $derived(
+    tokenUsage > 0
+      ? `${tokenUsage.toLocaleString()} / ${tokenBudgetLabel}`
+      : `— / ${tokenBudgetLabel}`,
+  );
+
+  onMount(() => {
+    const interval = window.setInterval(() => {
+      now = Date.now();
+    }, 1000);
+    return () => window.clearInterval(interval);
+  });
+
+  function formatDuration(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
+
+  async function openRecentBench(id: string): Promise<void> {
+    if (!benchStore) return;
+    await benchStore.selectBench(id);
+    onBenchChange?.();
+  }
 
   // The Builder lens carries a caret (workup view 05). Clicking the lens body
   // activates it; clicking the caret toggles the mode menu independently. The
@@ -171,6 +207,13 @@
     event.preventDefault();
     event.stopPropagation();
     builderModeOpen = !builderModeOpen;
+  }
+
+  async function openLensCreation(): Promise<void> {
+    const builderLens = availableLenses.find((lens) => isBuilderLens(lens.id));
+    if (!builderLens) return;
+    builderModeOpen = false;
+    await onSelectLens(builderLens.id);
   }
 
   $effect(() => {
@@ -238,33 +281,23 @@
         </div>
       {/each}
 
-      <!--
-        TODO type=task priority=normal tags=ui,lens,topbar
-        Wire the `+` affordance to the lens-creation flow. The button is
-        disabled today because no end-to-end path exists from the topbar to
-        a "create lens" action — lens creation lives inside the Builder
-        lens form. Workup view 01 keeps this affordance so the user can
-        always add a lens without diving into the Builder.
-        Why: the workup treats the `+` as ambient access to lens creation;
-        burying it inside Builder breaks the canonical state.
-        How to apply: when the Builder lens has a "create blank lens" RPC,
-        bind it here.
-        ---
-      -->
       <button
+        type="button"
         class="lens-add"
-        disabled
-        title="Add lens — not yet wired (placeholder per Riso workup view 01)"
+        disabled={!availableLenses.some((lens) => isBuilderLens(lens.id))}
+        onclick={openLensCreation}
+        title="Open Builder lens creation"
       >＋</button>
 
       {#if builderModeOpen && isBuilderLens(activeLens)}
+        <!-- TODO Wire the builder mode picker -->
+        <!-- Dispatch Team, Agent, Context, Lens, Skill, and Tool selections to real Builder stage modes. -->
+        <!-- --- -->
         <!--
           Builder mode menu, view 05 of the Riso workup. Listed entries
           mirror the workup exactly: Team / Agent / Context / Lens / Skill /
           Tool. None of them dispatch — see the mote below.
 
-          TODO type=issue priority=normal tags=ui,builder,mode-picker
-          type: issue
           The builder mode menu is non-functional. The gateway has no mode
           dispatcher: today the Builder lens always renders the same
           BuilderDeck regardless of intent. Each entry should swap the
@@ -311,22 +344,8 @@
           <span class="stamp-segment stamp-bench">Bench · {currentBench.name}</span>
           <span class="stamp-divider" aria-hidden="true">·</span>
           <span class="stamp-segment stamp-state" data-tone={stampState.tone}>
-            {stampState.label}
+            {stampStateLabel}
           </span>
-          <!--
-            TODO type=task priority=normal tags=ui,topbar,stamp
-            The workup stamp shows time-on-state (e.g. "TEAM LIVE 04:18",
-            "RETRY 3 / 5"). Today we have no aggregator that tracks how
-            long a turn has been busy or which retry attempt the provider
-            chain is on, so the stamp shows only a label.
-            Why: workup view 02/07 use the timer as the operator's primary
-            cue that work is in flight; without it the stamp reads the
-            same whether the agent is one second or one hour into a turn.
-            How to apply: emit per-attempt retry events from the provider
-            chain and a periodic "turn tick" event from the gateway, then
-            render alongside the state label here.
-            ---
-          -->
         {/if}
         {#if desktopRuntime}
           <span
@@ -423,25 +442,23 @@
       <div class="section">
         <div class="key">
           <span>Recent</span>
-          <!--
-            TODO type=task priority=normal tags=ui,bench,recent
-            The Recent list orders by `last_opened` per workup view 04. The
-            Bench API today exposes `created_at` but not `last_opened`, so
-            this section is a non-functional shell — the list isn't even
-            fetched until a bench is selected.
-            Why: workup view 04 puts a Recent list in the nav so the user
-            can re-enter their last bench in one click; without
-            last_opened, ordering would be arbitrary and misleading.
-            How to apply: persist `last_opened_at` on bench rows and
-            expose it on /api/benches; sort here by descending value.
-            ---
-          -->
-          <span class="shell-mark">SHELL</span>
         </div>
-        <p class="recent-shell-body">
-          Recent benches list (by last opened) lands here once the bench
-          API exposes `last_opened_at`.
-        </p>
+        {#if recentBenches.length > 0}
+          <div class="recent-list">
+            {#each recentBenches as bench (bench.id)}
+              <button
+                type="button"
+                class="recent-bench"
+                onclick={() => openRecentBench(bench.id)}
+              >
+                <span>{bench.name}</span>
+                <span class="recent-meta">{bench.slug}</span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="recent-shell-body">Open a bench once and it will stay here.</p>
+        {/if}
       </div>
       <div class="section picker-legend">
         <p class="eyebrow">Two-stage select</p>
@@ -491,25 +508,9 @@
         {:else}
           <MessageInput store={streamingStore} />
         {/if}
-        <!--
-          Conversation meta strip (workup view 01/02/05). The token count is
-          read from the streaming store once the gateway emits turn_complete;
-          before that there is no live count. The 200,000 budget is currently
-          a placeholder copied from the workup — see the mote below.
-
-          TODO type=task priority=normal tags=ui,conversation,tokens
-          Bind the token budget to the active model's context window. The
-          gateway already has the model record (settings.models[*].context_window);
-          surface that on the conversation API and read it here.
-          Why: workup view 01 shows `tokens · 4,820 / 200,000` — the budget
-          must reflect the active model, not a hard-coded number.
-          How to apply: extend the conversation detail response to include
-          `context_window`, then render `tokens / context_window`.
-          ---
-        -->
         <footer class="conv-meta" aria-hidden="false">
           <span class="conv-meta-tokens">
-            tokens · <span class="conv-meta-shell" title="Live token totals are not wired yet">—</span>
+            tokens · <span>{tokenUsageLabel}</span>
           </span>
           <span class="conv-meta-state" data-tone={stampState.tone}>
             ● {stampState.label}
@@ -564,6 +565,9 @@
           {/if}
         </section>
       {:else}
+        <!-- TODO Place lens modules on the stage -->
+        <!-- Drive the stage from real lens module placement instead of workup shell cards. -->
+        <!-- --- -->
         <!--
           No module placed by this lens. The Riso workup (view 01/02) puts
           stage modules on this side: shared reference (assistant default),
@@ -571,8 +575,6 @@
           None of these are wired today, so we render the catalogue as a
           column of non-functional shells so the chrome matches the workup.
 
-          TODO type=issue priority=normal tags=ui,stage,modules
-          type: issue
           The module catalogue is not yet wired to the lens runtime. The
           gateway exposes lens descriptors with `ui_modules` and the
           assistant-lens default, but no module placement happens on the
@@ -1229,6 +1231,44 @@
     line-height: 1.5;
   }
 
+  .recent-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .recent-bench {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 10px;
+    border: 1px solid var(--rule-soft);
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .recent-bench:hover {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .recent-meta {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .recent-bench:hover .recent-meta {
+    color: var(--paper);
+    opacity: 0.72;
+  }
+
   /* Legend block shown in the nav when no bench is selected. */
   .picker-legend {
     gap: 8px;
@@ -1338,8 +1378,7 @@
     color: var(--ink-soft);
   }
 
-  /* Conversation meta footer — workup view 01 places token / state below the
-     input. Token totals are not wired (see mote in markup). */
+  /* Conversation meta footer — workup view 01 places token / state below the input. */
   .conv-meta {
     display: flex;
     justify-content: space-between;
@@ -1353,11 +1392,6 @@
     text-transform: uppercase;
     color: var(--ink-soft);
     flex-shrink: 0;
-  }
-
-  .conv-meta-shell {
-    color: var(--ink-orange);
-    border-bottom: 1px dashed var(--accent);
   }
 
   .conv-meta-state {

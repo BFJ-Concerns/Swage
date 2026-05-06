@@ -13,6 +13,7 @@
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
   import { fetchLensRuntime, updateLensRuntime } from "./lib/api/lens";
+  import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
@@ -132,6 +133,7 @@
   let activeSurface = $state<LensSurface>("conversation");
   let availableLenses = $state<LensDescriptor[]>([]);
   let currentRoute = $state<Route>(router.currentRoute);
+  let activeModelContextWindow = $state<number | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
   // ---------------------------------------------------------------------------
@@ -301,7 +303,14 @@
         await conversationStore.loadConversations(benchId);
       }
 
-      await refreshLensRuntime();
+      const [settings] = await Promise.all([
+        fetchSettings().catch((error) => {
+          console.error("Failed to load model settings:", error);
+          return null;
+        }),
+        refreshLensRuntime(),
+      ]);
+      activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
 
       await router.init();
       currentRoute = router.currentRoute;
@@ -347,9 +356,10 @@
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}
-      onSelectTheme={setThemeMode}
-      route={currentRoute}
-      onNavigate={navigate}
+    onSelectTheme={setThemeMode}
+    {activeModelContextWindow}
+    route={currentRoute}
+    onNavigate={navigate}
     />
 
   {#if notFound}

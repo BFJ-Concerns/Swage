@@ -65,6 +65,9 @@ function mockBenchStore(): BenchStore {
     get currentBench() {
       return this.benches[0];
     },
+    get recentBenches() {
+      return [];
+    },
     get isLoading() {
       return false;
     },
