@@ -649,17 +649,17 @@ impl ResolvedConfig {
         if self.models.default.is_empty() {
             self.models.default = "default".to_string();
         }
-        let model =
-            self.models
-                .entries
-                .entry(self.models.default.clone())
-                .or_insert_with(|| ModelEndpointConfig {
-                    provider_id: String::new(),
-                    model_id: String::new(),
-                    aliases: Vec::new(),
-                    context_window: None,
-                    generation_preset: None,
-                });
+        let model = self
+            .models
+            .entries
+            .entry(self.models.default.clone())
+            .or_insert_with(|| ModelEndpointConfig {
+                provider_id: String::new(),
+                model_id: String::new(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            });
         model.model_id = model_id;
     }
 }

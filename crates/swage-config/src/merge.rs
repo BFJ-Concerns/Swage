@@ -556,17 +556,16 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         if model_catalog.default.is_empty() {
             model_catalog.default = "default".to_string();
         }
-        let model =
-            model_catalog
-                .entries
-                .entry(model_catalog.default.clone())
-                .or_insert_with(|| ModelEndpointConfig {
-                    provider_id: String::new(),
-                    model_id: String::new(),
-                    aliases: Vec::new(),
-                    context_window: None,
-                    generation_preset: None,
-                });
+        let model = model_catalog
+            .entries
+            .entry(model_catalog.default.clone())
+            .or_insert_with(|| ModelEndpointConfig {
+                provider_id: String::new(),
+                model_id: String::new(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            });
         model.model_id = model_id;
     }
 
