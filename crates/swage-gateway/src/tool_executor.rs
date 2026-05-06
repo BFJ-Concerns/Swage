@@ -4,8 +4,8 @@
 //!
 //! - **`SandboxedExecutor`** — routes tool calls through a bubblewrap sandbox.
 //! - **`GatewayExecutionStrategy`** — wraps an optional inner strategy and
-//!   upgrades the tool context for `python_execute` so nested tool execution
-//!   has access to the WebSocket sender without task-local state.
+//!   upgrades the tool context for host-side tools so storage and WebSocket
+//!   access are explicit rather than task-local.
 
 use std::sync::Arc;
 
@@ -134,15 +134,15 @@ impl ToolExecutionStrategy for SandboxedExecutor {
 }
 
 // ---------------------------------------------------------------------------
-// GatewayExecutionStrategy — explicit python_execute context + optional sandbox
+// GatewayExecutionStrategy — explicit host context + optional sandbox
 // ---------------------------------------------------------------------------
 
 /// Composite execution strategy for the gateway turn loop.
 ///
-/// Intercepts `python_execute` calls to provide an explicit context wrapper
-/// carrying the per-turn WebSocket sender. All other tools delegate unchanged
-/// to the optional inner strategy (typically `SandboxedExecutor`) or direct
-/// execution.
+/// Intercepts tools that require host execution to provide an explicit context
+/// wrapper carrying the per-turn WebSocket sender and storage. Other tools
+/// delegate unchanged to the optional inner strategy (typically
+/// `SandboxedExecutor`) or direct execution.
 pub struct GatewayExecutionStrategy {
     /// Optional inner strategy — e.g. `SandboxedExecutor` when sandbox is enabled.
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
@@ -208,7 +208,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             .await;
         }
 
-        if tool_name == "python_execute" {
+        if tool.requires_host_execution() {
             tool.execute(resolved_params, &gateway_ctx).await
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
@@ -362,6 +362,7 @@ mod tests {
 
     struct ObservingTool {
         output: Value,
+        requires_host_execution: bool,
         last_execution: Mutex<Option<ObservedExecution>>,
     }
 
@@ -371,6 +372,15 @@ mod tests {
         fn new(output: Value) -> Self {
             Self {
                 output,
+                requires_host_execution: false,
+                last_execution: Mutex::new(None),
+            }
+        }
+
+        fn host_only(output: Value) -> Self {
+            Self {
+                output,
+                requires_host_execution: true,
                 last_execution: Mutex::new(None),
             }
         }
@@ -388,6 +398,10 @@ mod tests {
 
         fn parameters(&self) -> Value {
             json!({"type": "object"})
+        }
+
+        fn requires_host_execution(&self) -> bool {
+            self.requires_host_execution
         }
 
         async fn execute(&self, _params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
@@ -546,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_strategy_executes_python_on_host_with_gateway_context() {
+    async fn gateway_strategy_executes_host_required_tools_with_gateway_context() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
         let storage: Arc<dyn swage_storage::store::Storage> =
@@ -559,7 +573,7 @@ mod tests {
             secret_manager,
             storage,
         );
-        let tool = ObservingTool::new(json!({"via": "tool"}));
+        let tool = ObservingTool::host_only(json!({"via": "tool"}));
         let turn_id =
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("valid UUID");
         let mut tool_ctx = ctx();
@@ -569,17 +583,17 @@ mod tests {
         let result = executor
             .execute(
                 &tool,
-                "python_execute",
+                "host_required",
                 &json!({"code": "print(1)"}),
                 &tool_ctx,
             )
             .await
-            .expect("python_execute should run on the host");
+            .expect("host-required tool should run on the host");
 
         assert_eq!(result, json!({"via": "tool"}));
         assert!(
             inner.last_call.lock().await.is_none(),
-            "python_execute should bypass the inner strategy",
+            "host-required tool should bypass the inner strategy",
         );
 
         let observed = tool
@@ -590,7 +604,7 @@ mod tests {
             .expect("tool should have been executed");
         assert!(
             observed.0,
-            "python_execute should receive GatewayToolContext"
+            "host-required tool should receive GatewayToolContext"
         );
         assert_eq!(observed.1.as_deref(), Some("call-123"));
         assert_eq!(observed.2, Some(turn_id));

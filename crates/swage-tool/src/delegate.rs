@@ -58,6 +58,10 @@ impl Tool for DelegateTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Parse required fields — the schema validator has already checked
         // these, but defensive parsing avoids panics if called directly.

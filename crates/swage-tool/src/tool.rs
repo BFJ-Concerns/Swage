@@ -62,6 +62,15 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Whether the tool must execute in the gateway process instead of the
+    /// sandbox child.
+    ///
+    /// Tools should opt in when they need gateway-only state, host networking,
+    /// or typed errors that the sandbox IPC layer cannot preserve.
+    fn requires_host_execution(&self) -> bool {
+        false
+    }
+
     /// Execute the tool with already-validated parameters.
     ///
     /// Returns the raw output `Value`; the framework wraps it into a

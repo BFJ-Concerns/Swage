@@ -60,6 +60,10 @@ impl Tool for PythonExecuteTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let code = params
             .get("code")

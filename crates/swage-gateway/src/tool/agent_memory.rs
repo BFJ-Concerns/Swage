@@ -80,6 +80,10 @@ impl Tool for AgentMemoryTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let operation =
             params["operation"]

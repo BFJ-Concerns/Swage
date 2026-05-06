@@ -58,6 +58,10 @@ impl Tool for UrlFetchTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let url = params["url"]
             .as_str()

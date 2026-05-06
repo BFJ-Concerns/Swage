@@ -62,6 +62,59 @@ async fn fallback_sandbox_real_binary_strips_credentials_from_child_env() {
 }
 
 #[tokio::test]
+async fn fallback_sandbox_real_binary_runs_workspace_tools() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(temp_dir.path().join("note.txt"), "hello from sandbox").unwrap();
+    let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
+
+    unsafe {
+        std::env::set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    }
+
+    sandbox.spawn_agent().await.unwrap();
+
+    let listed = sandbox
+        .execute_tool("file_list", json!({ "path": "." }))
+        .await
+        .unwrap();
+    assert!(
+        listed.output["output"]
+            .as_str()
+            .expect("file_list output should be text")
+            .contains("note.txt"),
+        "file_list should run inside the sandbox child, got: {}",
+        listed.output
+    );
+
+    let shell = sandbox
+        .execute_tool(
+            "shell",
+            json!({ "command": "printf '%s' \"$PWD\" && test -f note.txt" }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        shell.error.is_none(),
+        "shell should succeed inside the sandbox child, got error: {:?}",
+        shell.error
+    );
+    assert!(
+        shell.output["output"]
+            .as_str()
+            .expect("shell output should be text")
+            .contains(temp_dir.path().to_string_lossy().as_ref()),
+        "shell should run in the configured sandbox workspace, got: {}",
+        shell.output
+    );
+
+    sandbox.shutdown().await.unwrap();
+
+    unsafe {
+        std::env::remove_var("SWAGE_SANDBOX_AGENT_BINARY");
+    }
+}
+
+#[tokio::test]
 async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
     let temp_dir = tempfile::tempdir().unwrap();
     let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
