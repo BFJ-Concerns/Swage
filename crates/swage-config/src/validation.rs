@@ -19,6 +19,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "tools",
     "context",
     "pricing",
+    "generation",
     "observability",
     "output",
     "hitl",
@@ -51,6 +52,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing" => &["models"],
+        "generation" => &["presets"],
         "observability" => &["force_on"],
         "output" => &["schema", "max_retries"],
         "hitl" => &["timeout", "timeout_policy"],
@@ -136,6 +138,8 @@ fn check_field_type(
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
+        // generation.presets is a dynamic map of preset name → preset config.
+        ("generation", "presets") => ("table", matches!(value, Value::Table(_))),
         ("observability", "force_on") => ("boolean", matches!(value, Value::Boolean(_))),
         // [tools] permission fields — flat under [tools] in TOML
         ("tools", "allow") => ("array", matches!(value, Value::Array(_))),
@@ -929,6 +933,19 @@ mod tests {
             |p| matches!(&p.kind, ConfigProblemKind::UnknownSection { name } if name == "databse"),
         );
         assert!(found, "should report unknown section 'databse'");
+    }
+
+    #[test]
+    fn generation_presets_section_is_known() {
+        let toml = r#"
+[generation.presets.fast]
+max_tokens = 1024
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.is_empty(),
+            "generation presets should pass schema validation: {problems:?}"
+        );
     }
 
     #[test]

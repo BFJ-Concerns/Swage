@@ -422,6 +422,44 @@ url = "sqlite://test.db"
     );
 }
 
+/// Generation presets are a first-class config section; settings saves may
+/// write them, so startup validation must accept them on the next launch.
+#[test]
+fn generation_presets_load_cleanly() {
+    let config = r#"
+[providers]
+default = "openai"
+
+[providers.entries.openai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+
+[models]
+default = "openai:gpt-4.1-mini"
+
+[models.entries."openai:gpt-4.1-mini"]
+provider_id = "openai"
+model_id = "gpt-4.1-mini"
+generation_preset = "short"
+
+[generation.presets.short]
+max_tokens = 1024
+temperature = 0.2
+"#;
+
+    let tmp = build_skeleton(Some(config), "mybench", None, "assistant", None);
+    let resolved = load_resolved_config_from(tmp.path(), "mybench", "assistant")
+        .expect("generation presets should be accepted by startup validation");
+
+    let preset = resolved
+        .generation
+        .presets
+        .get("short")
+        .expect("preset should resolve");
+    assert_eq!(preset.max_tokens, Some(1024));
+    assert_eq!(preset.temperature, Some(0.2));
+}
+
 /// Multiple errors in one file are all reported.
 #[test]
 fn multiple_errors_all_reported() {

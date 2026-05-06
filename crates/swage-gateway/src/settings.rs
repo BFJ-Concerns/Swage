@@ -187,9 +187,13 @@ pub async fn save_settings(
         default_model_id: None,
         entries: Some(models),
     });
-    partial.generation = Some(swage_config::merge::PartialGenerationConfig {
-        presets: Some(generation_presets.clone()),
-    });
+    partial.generation = if generation_presets.is_empty() {
+        None
+    } else {
+        Some(swage_config::merge::PartialGenerationConfig {
+            presets: Some(generation_presets.clone()),
+        })
+    };
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     tokio::fs::write(&path, body)
