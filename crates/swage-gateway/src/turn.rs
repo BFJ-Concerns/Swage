@@ -339,14 +339,6 @@ async fn request_sandbox_degradation_approval(
     Ok(outcome)
 }
 
-/// Tools that read from the filesystem and require a `read` workspace grant.
-const WORKSPACE_READ_TOOLS: &[&str] = &["file_read", "file_list", "file_search"];
-
-/// Tools that mutate the filesystem or execute arbitrary code, requiring a
-/// `write` workspace grant. `shell` and `python_execute` are included because
-/// either can write paths or otherwise mutate host state.
-const WORKSPACE_WRITE_TOOLS: &[&str] = &["file_write", "shell", "python_execute"];
-
 /// Distilled view of which permission grants the bench has actually accepted
 /// across its trusted workspace attachments. Untrusted attachments contribute
 /// nothing.
@@ -366,7 +358,8 @@ pub(crate) struct TrustedWorkspacePath {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) permissions: WorkspacePermissionSummary,
-    pub(crate) paths: Vec<TrustedWorkspacePath>,
+    pub(crate) active_workspace: Option<TrustedWorkspacePath>,
+    pub(crate) attachments: Vec<TrustedWorkspacePath>,
 }
 
 /// Inspect the bench's workspace attachments and derive which permission
@@ -377,7 +370,7 @@ pub(crate) async fn summarise_trusted_workspace_permissions(
     storage: &Arc<dyn swage_storage::store::Storage>,
     bench_id: Uuid,
 ) -> WorkspacePermissionSummary {
-    load_trusted_workspace_policy(storage, bench_id)
+    load_trusted_workspace_policy(storage, bench_id, None)
         .await
         .permissions
 }
@@ -385,6 +378,7 @@ pub(crate) async fn summarise_trusted_workspace_permissions(
 pub(crate) async fn load_trusted_workspace_policy(
     storage: &Arc<dyn swage_storage::store::Storage>,
     bench_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
 ) -> TrustedWorkspacePolicy {
     let attachments = match storage.list_workspace_attachments_by_bench(bench_id).await {
         Ok(list) => list,
@@ -399,28 +393,52 @@ pub(crate) async fn load_trusted_workspace_policy(
     };
 
     let mut policy = TrustedWorkspacePolicy::default();
-    for attachment in attachments.into_iter().filter(|a| a.is_trusted) {
+    let default_workspace_attachment_id = active_workspace_attachment_id.or_else(|| {
+        attachments
+            .iter()
+            .find(|attachment| attachment.is_default && !attachment.is_missing)
+            .map(|attachment| attachment.id)
+    });
+
+    for attachment in attachments.into_iter().filter(|a| !a.is_missing) {
         let mut can_read = false;
         let mut can_write = false;
         for permission in &attachment.permissions {
             match permission.as_str() {
                 "read" => {
-                    policy.permissions.has_read = true;
+                    if attachment.is_trusted {
+                        policy.permissions.has_read = true;
+                    }
                     can_read = true;
                 }
                 "write" => {
-                    policy.permissions.has_write = true;
+                    if attachment.is_trusted {
+                        policy.permissions.has_write = true;
+                    }
                     can_write = true;
                 }
                 _ => {}
             }
         }
+        let path = PathBuf::from(if attachment.canonical_path.is_empty() {
+            attachment.path
+        } else {
+            attachment.canonical_path
+        });
+        let grant = TrustedWorkspacePath {
+            path,
+            can_read,
+            can_write,
+        };
+        if Some(attachment.id) == default_workspace_attachment_id {
+            policy.active_workspace = Some(grant);
+            continue;
+        }
+        if !attachment.is_trusted {
+            continue;
+        }
         if can_read || can_write {
-            policy.paths.push(TrustedWorkspacePath {
-                path: PathBuf::from(attachment.path),
-                can_read,
-                can_write,
-            });
+            policy.attachments.push(grant);
         }
     }
     policy
@@ -429,35 +447,11 @@ pub(crate) async fn load_trusted_workspace_policy(
 fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
-    workspace_grants: Option<WorkspacePermissionSummary>,
 ) -> PermissionConfig {
     let mut deny = config.tools.permissions.deny.clone();
     for entry in &startup_config.tools.permissions.deny {
         if !deny.contains(entry) {
             deny.push(entry.clone());
-        }
-    }
-
-    // Fold trusted workspace grants into the deny list. The user's accepted
-    // workspace attachments are the boundary: without a `read` grant, no
-    // filesystem-reading tool may run; without a `write` grant, no tool that
-    // mutates the host (file_write, shell, python_execute) may run. When the
-    // caller has no bench context (delegation startup, topology runs) the
-    // workspace gate is left to the resolved config alone.
-    if let Some(grants) = workspace_grants {
-        if !grants.has_read {
-            for tool in WORKSPACE_READ_TOOLS {
-                if !deny.iter().any(|entry| entry == tool) {
-                    deny.push((*tool).to_string());
-                }
-            }
-        }
-        if !grants.has_write {
-            for tool in WORKSPACE_WRITE_TOOLS {
-                if !deny.iter().any(|entry| entry == tool) {
-                    deny.push((*tool).to_string());
-                }
-            }
         }
     }
 
@@ -546,6 +540,7 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
     pub(crate) agent_config: &'a AgentConfig,
     pub(crate) session_metadata: Option<&'a serde_json::Value>,
     pub(crate) bench_id: Option<Uuid>,
+    pub(crate) active_workspace_attachment_id: Option<Uuid>,
     pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
 }
 
@@ -558,20 +553,24 @@ fn build_sandbox_config(
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
-    let mut builder = swage_sandbox::SandboxConfig::builder()
-        .working_directory(&working_directory)
-        .read_write_mount(&working_directory)
-        .landlock_write_path(&working_directory);
+    let mut builder = swage_sandbox::SandboxConfig::builder().working_directory(&working_directory);
 
-    for allowed_path in &agent_config.allowed_paths {
-        let path = sandbox_path(allowed_path);
-        if path != working_directory {
-            builder = builder.read_only_mount(&path).landlock_read_path(&path);
-        }
+    let active_grant = workspace_policy
+        .and_then(|policy| policy.active_workspace.as_ref())
+        .filter(|grant| sandbox_path(&grant.path) == working_directory);
+    let active_can_write = active_grant.is_none_or(|grant| grant.can_write);
+    if active_can_write {
+        builder = builder
+            .read_write_mount(&working_directory)
+            .landlock_write_path(&working_directory);
+    } else {
+        builder = builder
+            .read_only_mount(&working_directory)
+            .landlock_read_path(&working_directory);
     }
 
     if let Some(policy) = workspace_policy {
-        for grant in &policy.paths {
+        for grant in &policy.attachments {
             let path = sandbox_path(&grant.path);
             match path.try_exists() {
                 Ok(true) => {}
@@ -654,19 +653,16 @@ pub(crate) async fn build_gateway_dispatcher(
     agent_config: &AgentConfig,
     session_metadata: Option<&serde_json::Value>,
     bench_id: Option<Uuid>,
+    active_workspace_attachment_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
     let workspace_policy = match bench_id {
-        Some(id) => Some(load_trusted_workspace_policy(&state.storage, id).await),
+        Some(id) => Some(
+            load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
+        ),
         None => None,
     };
-    let permissions = build_permission_config(
-        config,
-        &state.config,
-        workspace_policy
-            .as_ref()
-            .map(|policy| policy.permissions.clone()),
-    );
+    let permissions = build_permission_config(config, &state.config);
 
     let dispatcher = ToolDispatcher::new(
         state.tool_dispatcher.registry().clone(),
@@ -713,6 +709,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
         agent_config,
         session_metadata,
         bench_id,
+        active_workspace_attachment_id,
         ws_tx,
     } = request;
 
@@ -722,6 +719,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
         agent_config,
         session_metadata,
         bench_id,
+        active_workspace_attachment_id,
         ws_tx.clone(),
     )
     .await
@@ -742,6 +740,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
                 agent_config,
                 session_metadata,
                 bench_id,
+                active_workspace_attachment_id,
                 ws_tx,
             )
             .await
@@ -756,8 +755,23 @@ pub(crate) fn build_agent_config(
     output_schema_override: Option<serde_json::Value>,
 ) -> AgentConfig {
     let workspace_root = crate::tool::workspace::resolve_workspace_root(config);
-    let mut agent_config =
-        AgentConfig::new(agent_id).with_workspace(&workspace_root, vec![workspace_root.clone()]);
+    build_agent_config_with_workspace(
+        agent_id,
+        config,
+        output_schema_override,
+        &workspace_root,
+        vec![workspace_root.clone()],
+    )
+}
+
+pub(crate) fn build_agent_config_with_workspace(
+    agent_id: String,
+    config: &swage_config::ResolvedConfig,
+    output_schema_override: Option<serde_json::Value>,
+    workspace_root: &Path,
+    allowed_paths: Vec<PathBuf>,
+) -> AgentConfig {
+    let mut agent_config = AgentConfig::new(agent_id).with_workspace(workspace_root, allowed_paths);
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
@@ -775,6 +789,46 @@ pub(crate) fn build_agent_config(
         agent_config.generation_metadata = preset.metadata.clone();
     }
     agent_config
+}
+
+fn managed_scratch_workspace(bench_id: Uuid, session_id: Uuid) -> PathBuf {
+    let base = swage_config::discovery::resolve_root().unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|home| PathBuf::from(home).join(".swage"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("swage"))
+    });
+    base.join("scratch")
+        .join("benches")
+        .join(bench_id.to_string())
+        .join("sessions")
+        .join(session_id.to_string())
+}
+
+fn agent_workspace_from_policy(
+    policy: &TrustedWorkspacePolicy,
+    bench_id: Uuid,
+    session_id: Uuid,
+) -> (PathBuf, Vec<PathBuf>) {
+    let workspace_root = policy
+        .active_workspace
+        .as_ref()
+        .map(|grant| grant.path.clone())
+        .unwrap_or_else(|| managed_scratch_workspace(bench_id, session_id));
+    if let Err(error) = std::fs::create_dir_all(&workspace_root) {
+        tracing::warn!(
+            path = %workspace_root.display(),
+            %error,
+            "failed to create managed turn workspace"
+        );
+    }
+
+    let mut allowed_paths = vec![workspace_root.clone()];
+    for grant in &policy.attachments {
+        if grant.can_read || grant.can_write {
+            allowed_paths.push(grant.path.clone());
+        }
+    }
+    (workspace_root, allowed_paths)
 }
 
 pub(crate) fn load_session_config(
@@ -920,6 +974,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 agent_config: &target_agent_config,
                 session_metadata: None,
                 bench_id: Some(bench_id),
+                active_workspace_attachment_id: None,
                 ws_tx: silent_ws_tx,
             },
             "delegated turn",
@@ -1344,8 +1399,21 @@ pub(crate) async fn process_turn_with_existing_turn(
         serde_json::json!({ "error": "serialisation failed" })
     });
 
-    let agent_config =
-        build_agent_config(session.agent_id.clone(), &config, output_schema_override);
+    let workspace_policy = load_trusted_workspace_policy(
+        &state.storage,
+        bench_id,
+        session.active_workspace_attachment_id,
+    )
+    .await;
+    let (workspace_root, allowed_paths) =
+        agent_workspace_from_policy(&workspace_policy, bench_id, session.id);
+    let agent_config = build_agent_config_with_workspace(
+        session.agent_id.clone(),
+        &config,
+        output_schema_override,
+        &workspace_root,
+        allowed_paths,
+    );
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is
@@ -1357,6 +1425,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &agent_config,
         session.metadata.as_ref(),
         Some(bench_id),
+        session.active_workspace_attachment_id,
         ws_tx.clone(),
     )
     .await
@@ -1414,6 +1483,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 &agent_config,
                 session.metadata.as_ref(),
                 Some(bench_id),
+                session.active_workspace_attachment_id,
                 ws_tx.clone(),
             )
             .await
@@ -2754,6 +2824,7 @@ pub(crate) mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 metadata: session.metadata,
+                active_workspace_attachment_id: session.active_workspace_attachment_id,
             };
             self.db.lock().await.sessions.insert(s.id, s.clone());
             Ok(s)
@@ -2801,6 +2872,24 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn set_session_active_workspace(
+            &self,
+            id: Uuid,
+            workspace_id: Option<Uuid>,
+        ) -> Result<Session, StorageError> {
+            let mut db = self.db.lock().await;
+            let session = db
+                .sessions
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "session".to_string(),
+                    id: id.to_string(),
+                })?;
+            session.active_workspace_attachment_id = workspace_id;
+            session.updated_at = chrono::Utc::now();
+            Ok(session.clone())
+        }
+
         async fn find_session_by_channel_origin(
             &self,
             integration: &str,
@@ -2839,7 +2928,10 @@ pub(crate) mod tests {
                 id: Uuid::new_v4(),
                 bench_id: workspace.bench_id,
                 label: workspace.label,
-                path: workspace.path,
+                path: workspace.path.clone(),
+                canonical_path: workspace.path,
+                is_missing: false,
+                is_default: false,
                 permissions: workspace.permissions,
                 is_trusted: workspace.is_trusted,
                 created_at: now,
@@ -2893,6 +2985,52 @@ pub(crate) mod tests {
             workspace.is_trusted = is_trusted;
             workspace.updated_at = chrono::Utc::now();
             Ok(workspace.clone())
+        }
+
+        async fn set_workspace_missing_state(
+            &self,
+            id: Uuid,
+            is_missing: bool,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            let mut db = self.db.lock().await;
+            let workspace =
+                db.workspace_attachments
+                    .get_mut(&id)
+                    .ok_or_else(|| StorageError::NotFound {
+                        entity: "workspace_attachment".to_string(),
+                        id: id.to_string(),
+                    })?;
+            workspace.is_missing = is_missing;
+            workspace.updated_at = chrono::Utc::now();
+            Ok(workspace.clone())
+        }
+
+        async fn set_bench_default_workspace(
+            &self,
+            bench_id: Uuid,
+            workspace_id: Option<Uuid>,
+        ) -> Result<(), StorageError> {
+            let mut db = self.db.lock().await;
+            if let Some(workspace_id) = workspace_id {
+                let workspace = db.workspace_attachments.get(&workspace_id).ok_or_else(|| {
+                    StorageError::NotFound {
+                        entity: "workspace_attachment".to_string(),
+                        id: workspace_id.to_string(),
+                    }
+                })?;
+                if workspace.bench_id != bench_id {
+                    return Err(StorageError::ConstraintViolation(format!(
+                        "workspace attachment {workspace_id} does not belong to bench {bench_id}"
+                    )));
+                }
+            }
+            for workspace in db.workspace_attachments.values_mut() {
+                if workspace.bench_id == bench_id {
+                    workspace.is_default = Some(workspace.id) == workspace_id;
+                    workspace.updated_at = chrono::Utc::now();
+                }
+            }
+            Ok(())
         }
 
         async fn delete_workspace_attachment(&self, id: Uuid) -> Result<bool, StorageError> {
@@ -3023,6 +3161,7 @@ pub(crate) mod tests {
                 base_url: host.base_url,
                 shared_token: host.shared_token,
                 workspace_root: host.workspace_root,
+                workspace_roots: host.workspace_roots,
                 capabilities: host.capabilities,
                 registered_at: chrono::Utc::now(),
             };
@@ -5148,6 +5287,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -5219,6 +5359,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -5360,6 +5501,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -5684,6 +5826,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -5758,6 +5901,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -6023,6 +6167,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -6371,6 +6516,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -6602,6 +6748,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("session");
@@ -6735,6 +6882,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("session");
@@ -6876,6 +7024,52 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn process_turn_stream_request_inherits_global_permissions_without_workspace_grants() {
+        let chunks = vec![
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (provider, captured_request) = CapturingProvider::new(chunks);
+        let (storage, session_id) = make_storage_with_session().await;
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkspaceGatedReadTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
+
+        let req = captured_request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("provider request should be captured");
+        assert_eq!(req.tool_definitions.len(), 1);
+        assert_eq!(req.tool_definitions[0]["name"], "file_read");
+    }
+
+    #[tokio::test]
     async fn text_only_turn_still_works_with_tool_registry() {
         let (state, session_id) = make_state_with_tools(vec![vec![
             StreamChunk::Delta {
@@ -6946,6 +7140,28 @@ pub(crate) mod tests {
         }
     }
 
+    struct WorkspaceGatedReadTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for WorkspaceGatedReadTool {
+        fn name(&self) -> &str {
+            "file_read"
+        }
+        fn description(&self) -> &str {
+            "Represents a workspace-read tool in agent-facing schema tests"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
     #[tokio::test]
     async fn tool_context_working_directory_is_passed_during_tool_execution() {
         let storage = Arc::new(MockStorage::new());
@@ -6964,6 +7180,7 @@ pub(crate) mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .expect("create session");
@@ -7416,11 +7633,8 @@ pub(crate) mod tests {
 
     /// Convenience for invoking the private build_permission_config from tests
     /// without having to repeat the full ResolvedConfig wiring.
-    fn build_permission_config_for_test(
-        config: &swage_config::ResolvedConfig,
-        workspace_grants: Option<WorkspacePermissionSummary>,
-    ) -> PermissionConfig {
-        super::build_permission_config(config, config, workspace_grants)
+    fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> PermissionConfig {
+        super::build_permission_config(config, config)
     }
 
     #[tokio::test]
@@ -7530,7 +7744,12 @@ pub(crate) mod tests {
                 has_read: true,
                 has_write: true,
             },
-            paths: vec![
+            active_workspace: Some(TrustedWorkspacePath {
+                path: working_directory.clone(),
+                can_read: true,
+                can_write: true,
+            }),
+            attachments: vec![
                 TrustedWorkspacePath {
                     path: existing_workspace.clone(),
                     can_read: true,
@@ -7570,74 +7789,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn permission_config_unchanged_when_workspace_grants_absent() {
-        let config = swage_config::ResolvedConfig::default();
-        let policy = build_permission_config_for_test(&config, None);
+    fn agent_workspace_uses_active_workspace_and_attachment_grants() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let active_workspace = temp_dir.path().join("active");
+        let attachment_workspace = temp_dir.path().join("attachment");
+        std::fs::create_dir_all(&active_workspace).unwrap();
+        std::fs::create_dir_all(&attachment_workspace).unwrap();
 
-        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
-            assert!(
-                !policy.deny.iter().any(|entry| entry == tool),
-                "no workspace gate must apply when caller passes None: {tool} should not be denied"
-            );
-        }
-    }
-
-    #[test]
-    fn permission_config_denies_all_workspace_tools_when_no_grants() {
-        let config = swage_config::ResolvedConfig::default();
-        let policy =
-            build_permission_config_for_test(&config, Some(WorkspacePermissionSummary::default()));
-
-        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
-            assert!(
-                policy.deny.iter().any(|entry| entry == tool),
-                "{tool} should be denied when bench has no trusted workspace grants"
-            );
-        }
-    }
-
-    #[test]
-    fn permission_config_allows_read_tools_when_only_read_granted() {
-        let config = swage_config::ResolvedConfig::default();
-        let policy = build_permission_config_for_test(
-            &config,
-            Some(WorkspacePermissionSummary {
-                has_read: true,
-                has_write: false,
-            }),
-        );
-
-        for tool in WORKSPACE_READ_TOOLS {
-            assert!(
-                !policy.deny.iter().any(|entry| entry == tool),
-                "{tool} should be permitted when bench grants read"
-            );
-        }
-        for tool in WORKSPACE_WRITE_TOOLS {
-            assert!(
-                policy.deny.iter().any(|entry| entry == tool),
-                "{tool} should still be denied without a write grant"
-            );
-        }
-    }
-
-    #[test]
-    fn permission_config_adds_no_extra_denies_when_full_grants_present() {
-        let config = swage_config::ResolvedConfig::default();
-        let policy = build_permission_config_for_test(
-            &config,
-            Some(WorkspacePermissionSummary {
+        let policy = TrustedWorkspacePolicy {
+            permissions: WorkspacePermissionSummary {
                 has_read: true,
                 has_write: true,
+            },
+            active_workspace: Some(TrustedWorkspacePath {
+                path: active_workspace.clone(),
+                can_read: true,
+                can_write: true,
             }),
-        );
+            attachments: vec![TrustedWorkspacePath {
+                path: attachment_workspace.clone(),
+                can_read: true,
+                can_write: false,
+            }],
+        };
 
-        for tool in WORKSPACE_READ_TOOLS.iter().chain(WORKSPACE_WRITE_TOOLS) {
-            assert!(
-                !policy.deny.iter().any(|entry| entry == tool),
-                "{tool} should not be denied when bench grants both read and write"
-            );
-        }
+        let (workspace_root, allowed_paths) =
+            agent_workspace_from_policy(&policy, Uuid::new_v4(), Uuid::new_v4());
+
+        assert_eq!(workspace_root, active_workspace);
+        assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);
+    }
+
+    #[test]
+    fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing() {
+        let config = swage_config::ResolvedConfig::default();
+        let policy = build_permission_config_for_test(&config);
+
+        assert!(
+            policy.deny.is_empty(),
+            "missing bench workspace grants must inherit global permissions rather than denying"
+        );
     }
 
     #[test]
@@ -7645,18 +7836,14 @@ pub(crate) mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.deny = vec!["file_write".into()];
 
-        let policy =
-            build_permission_config_for_test(&config, Some(WorkspacePermissionSummary::default()));
+        let policy = build_permission_config_for_test(&config);
 
         let file_write_count = policy
             .deny
             .iter()
             .filter(|entry| entry.as_str() == "file_write")
             .count();
-        assert_eq!(
-            file_write_count, 1,
-            "file_write should appear once in deny even when both config and workspace gate it"
-        );
+        assert_eq!(file_write_count, 1, "file_write should appear once in deny");
     }
 
     /// The build_assembly_elements helper constructs the correct elements for

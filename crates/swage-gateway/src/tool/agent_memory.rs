@@ -524,6 +524,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -647,6 +648,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

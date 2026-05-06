@@ -1750,6 +1750,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             },
         );
 

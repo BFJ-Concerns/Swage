@@ -67,6 +67,18 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "034_one_in_flight_turn_per_thread",
             CREATE_ONE_IN_FLIGHT_TURN_INDEX,
         ),
+        (
+            "035_workspace_attachment_canonical_state",
+            ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE,
+        ),
+        (
+            "036_workspace_attachment_activation",
+            ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
+        ),
+        (
+            "037_execution_host_workspace_roots",
+            ADD_EXECUTION_HOST_WORKSPACE_ROOTS,
+        ),
     ]
 }
 
@@ -91,6 +103,10 @@ const CREATE_EXECUTION_HOST_TABLE: &str = "
         capabilities_json TEXT NOT NULL,
         registered_at     TEXT NOT NULL
     );
+";
+
+const ADD_EXECUTION_HOST_WORKSPACE_ROOTS: &str = "
+    ALTER TABLE execution_hosts ADD COLUMN workspace_roots_json TEXT NOT NULL DEFAULT '[]';
 ";
 
 const CREATE_CHANNEL_LINK_TABLE: &str = "
@@ -830,6 +846,30 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_tool_calls_turn_id  ON tool_calls(turn_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id  ON tool_calls(call_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_agent_id ON tool_calls(agent_id);
+";
+
+const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "
+    ALTER TABLE workspace_attachments
+        ADD COLUMN canonical_path TEXT NOT NULL DEFAULT '';
+    UPDATE workspace_attachments
+        SET canonical_path = path
+        WHERE canonical_path = '';
+    ALTER TABLE workspace_attachments
+        ADD COLUMN is_missing INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_canonical_path
+        ON workspace_attachments(bench_id, canonical_path);
+";
+
+const ADD_WORKSPACE_ATTACHMENT_ACTIVATION: &str = "
+    ALTER TABLE workspace_attachments
+        ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_bench
+        ON workspace_attachments(bench_id)
+        WHERE is_default = 1;
+    ALTER TABLE sessions
+        ADD COLUMN active_workspace_attachment_id TEXT REFERENCES workspace_attachments(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_sessions_active_workspace_attachment_id
+        ON sessions(active_workspace_attachment_id);
 ";
 
 /// Additive migration: validated structured output from schema validation.

@@ -167,10 +167,24 @@ impl ToolDispatcher {
 
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
-    /// Delegates to `ToolRegistry::generate_schemas` — each entry has `name`,
-    /// `description`, and `parameters` fields.
+    /// Only tools that the dispatcher would permit the agent to invoke are
+    /// advertised to the model. Tools behind `require_approval` stay visible:
+    /// the model may request them, but execution will pause for human approval
+    /// before the tool runs.
     pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
-        self.registry.generate_schemas()
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|name| check_permission(&self.permissions, name).is_ok())
+            .filter_map(|name| self.registry.get(name))
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "parameters": tool.parameters(),
+                })
+            })
+            .collect()
     }
 
     /// Run the tool invocation pipeline for a single call.
@@ -411,6 +425,34 @@ mod tests {
         }
     }
 
+    struct HiddenTool;
+
+    #[async_trait]
+    impl Tool for HiddenTool {
+        fn name(&self) -> &str {
+            "hidden"
+        }
+
+        fn description(&self) -> &str {
+            "Should not be advertised when permissions deny it."
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Ok(json!({}))
+        }
+    }
+
     fn make_dispatcher(tool_name: &str, allow: bool, debug_mode: bool) -> ToolDispatcher {
         let mut registry = ToolRegistry::new();
         registry
@@ -440,6 +482,96 @@ mod tests {
 
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
+    }
+
+    #[test]
+    fn tool_definitions_include_allowed_tools() {
+        let dispatcher = make_dispatcher("echo", true, false);
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
+    }
+
+    #[test]
+    fn tool_definitions_exclude_denied_tools() {
+        let dispatcher = make_dispatcher("echo", false, false);
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert!(
+            definitions.is_empty(),
+            "default-denied tools must not be advertised to the model"
+        );
+    }
+
+    #[test]
+    fn tool_definitions_keep_require_approval_tools_visible() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
+    }
+
+    #[test]
+    fn tool_definitions_do_not_expose_explicitly_denied_tools() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("echo registration should succeed");
+        registry
+            .register(Arc::new(HiddenTool))
+            .expect("hidden registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec!["hidden".into()],
+            bundles: HashMap::new(),
+            require_approval: vec![],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let names: Vec<_> = dispatcher
+            .tool_definitions()
+            .into_iter()
+            .map(|definition| definition["name"].as_str().unwrap().to_owned())
+            .collect();
+
+        assert_eq!(names, vec!["echo"]);
     }
 
     // -- Happy path ----------------------------------------------------------

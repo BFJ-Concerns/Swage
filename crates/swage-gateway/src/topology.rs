@@ -435,6 +435,7 @@ impl TopologyExecutor {
                     bench_id: team.bench_id,
                     agent_id: team.entry_agent_id.clone(),
                     metadata: None,
+                    active_workspace_attachment_id: None,
                 })
                 .await?
                 .id),
@@ -732,6 +733,7 @@ async fn execute_agent_node(
             agent_config: &agent_config,
             session_metadata: None,
             bench_id: Some(bench.id),
+            active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
         },
         "topology agent node",

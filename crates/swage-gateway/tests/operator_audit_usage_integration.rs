@@ -122,6 +122,7 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
             bench_id: bench.id,
             agent_id: "gateway".into(),
             metadata: Some(json!({"label": "Ops session"})),
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();

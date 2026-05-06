@@ -297,6 +297,9 @@ pub struct WorkspaceAttachment {
     pub bench_id: Uuid,
     pub label: String,
     pub path: String,
+    pub canonical_path: String,
+    pub is_missing: bool,
+    pub is_default: bool,
     pub permissions: Vec<String>,
     pub is_trusted: bool,
     pub created_at: DateTime<Utc>,
@@ -316,6 +319,7 @@ pub struct Session {
     /// This stays outside prompt and WebSocket transport surfaces unless a
     /// caller explicitly reads it through storage or a higher-level API.
     pub metadata: Option<serde_json::Value>,
+    pub active_workspace_attachment_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -329,6 +333,7 @@ pub struct ExecutionHostRegistration {
     pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
 }
@@ -1862,6 +1867,7 @@ pub struct NewSession {
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
     pub metadata: Option<serde_json::Value>,
+    pub active_workspace_attachment_id: Option<Uuid>,
 }
 
 /// Input for persisting or replacing an execution host registration.
@@ -1873,6 +1879,7 @@ pub struct NewExecutionHostRegistration {
     pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
 }
 
@@ -2659,6 +2666,7 @@ mod tests {
             bench_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -2676,6 +2684,7 @@ mod tests {
             bench_id: Uuid::new_v4(),
             agent_id: "builder-agent".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         };
         assert_eq!(ns.agent_id, "builder-agent");
     }

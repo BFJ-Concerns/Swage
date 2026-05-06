@@ -3,23 +3,19 @@
 //! Creates parent directories as needed. Validates the target path stays
 //! within the workspace root before writing.
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::validate_new_path;
+use crate::tool::workspace::resolve_new_context_path;
 
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
-pub struct FileWriteTool {
-    pub workspace_root: PathBuf,
-}
+pub struct FileWriteTool;
 
 #[async_trait]
 impl Tool for FileWriteTool {
@@ -48,7 +44,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let path_str = params["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidParameters {
@@ -65,16 +61,14 @@ impl Tool for FileWriteTool {
             })?
             .to_string();
 
-        // Validate the target path. The file may not exist yet.
-        let resolved = validate_new_path(&self.workspace_root, &path_str).map_err(|msg| {
-            ToolError::ExecutionFailed {
+        let resolved =
+            resolve_new_context_path(ctx, &path_str).map_err(|msg| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: msg,
-            }
-        })?;
+            })?;
 
         // Create parent directories so the write doesn't fail on a missing tree.
-        if let Some(parent) = resolved.parent() {
+        if let Some(parent) = resolved.path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
@@ -85,7 +79,7 @@ impl Tool for FileWriteTool {
 
         let byte_count = content.len();
 
-        tokio::fs::write(&resolved, content.as_bytes())
+        tokio::fs::write(&resolved.path, content.as_bytes())
             .await
             .map_err(|e| {
                 let message = match e.kind() {
@@ -115,20 +109,21 @@ mod tests {
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileWriteTool {
-        FileWriteTool {
-            workspace_root: dir.path().to_path_buf(),
-        }
+        let _ = dir;
+        FileWriteTool
     }
 
-    fn ctx() -> MockToolContext {
-        MockToolContext::new("agent-test", "sess-test")
+    fn ctx(dir: &TempDir) -> MockToolContext {
+        let mut ctx = MockToolContext::new("agent-test", "sess-test");
+        ctx.working_directory = dir.path().to_path_buf();
+        ctx
     }
 
     #[tokio::test]
     async fn creates_new_file() {
         let dir = TempDir::new().unwrap();
         let val = tool(&dir)
-            .execute(json!({ "path": "new.txt", "content": "hello" }), &ctx())
+            .execute(json!({ "path": "new.txt", "content": "hello" }), &ctx(&dir))
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().contains("5 bytes"));
@@ -145,7 +140,7 @@ mod tests {
         tool(&dir)
             .execute(
                 json!({ "path": "existing.txt", "content": "new content" }),
-                &ctx(),
+                &ctx(&dir),
             )
             .await
             .unwrap();
@@ -161,7 +156,7 @@ mod tests {
         tool(&dir)
             .execute(
                 json!({ "path": "a/b/c/file.txt", "content": "deep" }),
-                &ctx(),
+                &ctx(&dir),
             )
             .await
             .unwrap();
@@ -174,7 +169,7 @@ mod tests {
         let err = tool(&dir)
             .execute(
                 json!({ "path": "../../etc/passwd", "content": "bad" }),
-                &ctx(),
+                &ctx(&dir),
             )
             .await
             .unwrap_err();
@@ -193,7 +188,7 @@ mod tests {
         let err = tool(&dir)
             .execute(
                 json!({ "path": "link/escape.txt", "content": "bad" }),
-                &ctx(),
+                &ctx(&dir),
             )
             .await
             .unwrap_err();
@@ -206,7 +201,7 @@ mod tests {
     async fn returns_error_for_missing_path_argument() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "content": "hello" }), &ctx())
+            .execute(json!({ "content": "hello" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
@@ -217,7 +212,7 @@ mod tests {
     async fn returns_error_for_missing_content_argument() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "path": "file.txt" }), &ctx())
+            .execute(json!({ "path": "file.txt" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));

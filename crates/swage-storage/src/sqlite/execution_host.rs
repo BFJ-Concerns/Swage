@@ -22,9 +22,16 @@ fn parse_capabilities(json: &str) -> rusqlite::Result<Vec<String>> {
     })
 }
 
+fn parse_workspace_roots(json: &str) -> rusqlite::Result<Vec<String>> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
 fn row_to_execution_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionHostRegistration> {
-    let registered_at: String = row.get(7)?;
-    let capabilities_json: String = row.get(6)?;
+    let registered_at: String = row.get(8)?;
+    let capabilities_json: String = row.get(7)?;
+    let workspace_roots_json: String = row.get(6)?;
     Ok(ExecutionHostRegistration {
         host_id: row.get(0)?,
         label: row.get(1)?,
@@ -32,6 +39,7 @@ fn row_to_execution_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionH
         base_url: row.get(3)?,
         shared_token: row.get(4)?,
         workspace_root: row.get(5)?,
+        workspace_roots: parse_workspace_roots(&workspace_roots_json)?,
         capabilities: parse_capabilities(&capabilities_json)?,
         registered_at: parse_dt(&registered_at)?,
     })
@@ -48,17 +56,20 @@ impl ExecutionHostStore for SqliteStorage {
             let registered_at_str = registered_at.to_rfc3339();
             let capabilities_json = serde_json::to_string(&host.capabilities)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let workspace_roots_json = serde_json::to_string(&host.workspace_roots)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
             conn.execute(
                 "INSERT INTO execution_hosts
-                 (host_id, label, kind, base_url, shared_token, workspace_root, capabilities_json, registered_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 (host_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(host_id) DO UPDATE SET
                      label = excluded.label,
                      kind = excluded.kind,
                      base_url = excluded.base_url,
                      shared_token = excluded.shared_token,
                      workspace_root = excluded.workspace_root,
+                     workspace_roots_json = excluded.workspace_roots_json,
                      capabilities_json = excluded.capabilities_json,
                      registered_at = excluded.registered_at",
                 params![
@@ -68,6 +79,7 @@ impl ExecutionHostStore for SqliteStorage {
                     &host.base_url,
                     &host.shared_token,
                     &host.workspace_root,
+                    &workspace_roots_json,
                     &capabilities_json,
                     &registered_at_str,
                 ],
@@ -80,6 +92,7 @@ impl ExecutionHostStore for SqliteStorage {
                 base_url: host.base_url,
                 shared_token: host.shared_token,
                 workspace_root: host.workspace_root,
+                workspace_roots: host.workspace_roots,
                 capabilities: host.capabilities,
                 registered_at,
             })
@@ -90,7 +103,7 @@ impl ExecutionHostStore for SqliteStorage {
     async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT host_id, label, kind, base_url, shared_token, workspace_root, capabilities_json, registered_at
+                "SELECT host_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at
                  FROM execution_hosts ORDER BY registered_at ASC, host_id ASC",
             )?;
             let rows = stmt.query_map([], row_to_execution_host)?;
@@ -131,6 +144,7 @@ mod tests {
                 base_url: "http://127.0.0.1:4000".into(),
                 shared_token: "secret-a".into(),
                 workspace_root: "/tmp/a".into(),
+                workspace_roots: vec!["/tmp/a".into(), "/mnt/shared".into()],
                 capabilities: vec!["shell".into()],
             })
             .await
@@ -145,6 +159,7 @@ mod tests {
                 base_url: "http://127.0.0.1:5000".into(),
                 shared_token: "secret-b".into(),
                 workspace_root: "/tmp/b".into(),
+                workspace_roots: vec!["/tmp/b".into()],
                 capabilities: vec!["host_identity".into()],
             })
             .await
@@ -155,6 +170,7 @@ mod tests {
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].label.as_deref(), Some("Node A2"));
         assert_eq!(hosts[0].workspace_root, "/tmp/b");
+        assert_eq!(hosts[0].workspace_roots, vec!["/tmp/b"]);
         assert_eq!(hosts[0].capabilities, vec!["host_identity"]);
     }
 
@@ -180,6 +196,7 @@ mod tests {
                         "conversation": "alice"
                     }
                 })),
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

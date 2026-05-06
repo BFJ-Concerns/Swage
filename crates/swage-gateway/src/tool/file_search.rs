@@ -12,14 +12,13 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{is_binary_content, truncate_output, validate_path};
+use crate::tool::workspace::{is_binary_content, resolve_context_path, truncate_output};
 
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
 pub struct FileSearchTool {
-    pub workspace_root: PathBuf,
     pub max_output_bytes: usize,
 }
 
@@ -62,7 +61,7 @@ impl Tool for FileSearchTool {
         })
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let pattern = params["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidParameters {
@@ -72,18 +71,21 @@ impl Tool for FileSearchTool {
             .to_lowercase();
 
         // Optional subdirectory — default to workspace root.
-        let search_root = match params["path"].as_str() {
-            Some(sub) => validate_path(&self.workspace_root, sub).map_err(|msg| {
-                ToolError::ExecutionFailed {
+        let resolved = match params["path"].as_str() {
+            Some(sub) => {
+                resolve_context_path(ctx, sub).map_err(|msg| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
                     message: msg,
-                }
+                })?
+            }
+            None => resolve_context_path(ctx, ".").map_err(|msg| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: msg,
             })?,
-            None => self.workspace_root.clone(),
         };
 
         // Collect matches by walking the tree synchronously.
-        let matches = search_tree(&search_root, &self.workspace_root, &pattern);
+        let matches = search_tree(&resolved.path, &resolved.root, &pattern);
 
         if matches.is_empty() {
             return Ok(json!({"output": format!("No matches found for pattern: {pattern}")}));
@@ -169,21 +171,23 @@ mod tests {
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileSearchTool {
+        let _ = dir;
         FileSearchTool {
-            workspace_root: dir.path().to_path_buf(),
             max_output_bytes: 1_000_000,
         }
     }
 
     fn tool_with_limit(dir: &TempDir, limit: usize) -> FileSearchTool {
+        let _ = dir;
         FileSearchTool {
-            workspace_root: dir.path().to_path_buf(),
             max_output_bytes: limit,
         }
     }
 
-    fn ctx() -> MockToolContext {
-        MockToolContext::new("agent-test", "sess-test")
+    fn ctx(dir: &TempDir) -> MockToolContext {
+        let mut ctx = MockToolContext::new("agent-test", "sess-test");
+        ctx.working_directory = dir.path().to_path_buf();
+        ctx
     }
 
     #[tokio::test]
@@ -191,7 +195,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"Hello world\nfoo bar\n").unwrap();
         let val = tool(&dir)
-            .execute(json!({ "pattern": "hello" }), &ctx())
+            .execute(json!({ "pattern": "hello" }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -204,7 +208,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"UPPERCASE match here\n").unwrap();
         let val = tool(&dir)
-            .execute(json!({ "pattern": "uppercase" }), &ctx())
+            .execute(json!({ "pattern": "uppercase" }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -216,7 +220,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"nothing relevant\n").unwrap();
         let val = tool(&dir)
-            .execute(json!({ "pattern": "xyzzy_no_match" }), &ctx())
+            .execute(json!({ "pattern": "xyzzy_no_match" }), &ctx(&dir))
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().contains("No matches"));
@@ -228,7 +232,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), b"foo in a\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), b"foo in b\n").unwrap();
         let val = tool(&dir)
-            .execute(json!({ "pattern": "foo" }), &ctx())
+            .execute(json!({ "pattern": "foo" }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -245,7 +249,7 @@ mod tests {
         std::fs::write(dir.path().join("outside.txt"), b"target pattern\n").unwrap();
 
         let val = tool(&dir)
-            .execute(json!({ "pattern": "target", "path": "sub" }), &ctx())
+            .execute(json!({ "pattern": "target", "path": "sub" }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -259,7 +263,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("binary.bin"), b"\x00\x01\x02pattern\x03").unwrap();
         let val = tool(&dir)
-            .execute(json!({ "pattern": "pattern" }), &ctx())
+            .execute(json!({ "pattern": "pattern" }), &ctx(&dir))
             .await
             .unwrap();
         assert!(!val["output"].as_str().unwrap().contains("binary.bin"));
@@ -271,7 +275,7 @@ mod tests {
         let content: String = (1..=50).map(|i| format!("match line {i}\n")).collect();
         std::fs::write(dir.path().join("big.txt"), content.as_bytes()).unwrap();
         let val = tool_with_limit(&dir, 50)
-            .execute(json!({ "pattern": "match" }), &ctx())
+            .execute(json!({ "pattern": "match" }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -286,7 +290,7 @@ mod tests {
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "pattern": "x", "path": "../../etc" }), &ctx())
+            .execute(json!({ "pattern": "x", "path": "../../etc" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("outside"), "got: {err}");

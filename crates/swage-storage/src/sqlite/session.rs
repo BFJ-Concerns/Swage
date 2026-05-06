@@ -18,14 +18,19 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
     let bench_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
     let metadata_json: Option<String> = row.get(3)?;
-    let created: String = row.get(4)?;
-    let updated: String = row.get(5)?;
+    let active_workspace_attachment_id: Option<String> = row.get(4)?;
+    let created: String = row.get(5)?;
+    let updated: String = row.get(6)?;
 
     Ok(Session {
         id: parse_uuid(&id)?,
         bench_id: parse_uuid(&bench_id)?,
         agent_id,
         metadata: parse_metadata(metadata_json.as_deref())?,
+        active_workspace_attachment_id: active_workspace_attachment_id
+            .as_deref()
+            .map(parse_uuid)
+            .transpose()?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
@@ -86,13 +91,16 @@ impl SessionStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO sessions (id, bench_id, agent_id, metadata_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                "INSERT INTO sessions (id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 params![
                     id.to_string(),
                     session.bench_id.to_string(),
                     &session.agent_id,
                     &metadata_json,
+                    session
+                        .active_workspace_attachment_id
+                        .map(|id| id.to_string()),
                     &now_str
                 ],
             )?;
@@ -102,6 +110,7 @@ impl SessionStore for SqliteStorage {
                 bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
+                active_workspace_attachment_id: session.active_workspace_attachment_id,
                 created_at: now,
                 updated_at: now,
             })
@@ -112,7 +121,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 row_to_session,
@@ -125,7 +134,7 @@ impl SessionStore for SqliteStorage {
     async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE bench_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -142,7 +151,7 @@ impl SessionStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE agent_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -175,6 +184,40 @@ impl SessionStore for SqliteStorage {
         .await
     }
 
+    async fn set_session_active_workspace(
+        &self,
+        id: Uuid,
+        workspace_id: Option<Uuid>,
+    ) -> Result<Session, StorageError> {
+        let affected = self
+            .with_conn(move |conn| {
+                let now_str = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE sessions
+                     SET active_workspace_attachment_id = ?2, updated_at = ?3
+                     WHERE id = ?1",
+                    params![
+                        id.to_string(),
+                        workspace_id.map(|workspace_id| workspace_id.to_string()),
+                        now_str
+                    ],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            });
+        }
+        self.get_session(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })
+    }
+
     async fn find_session_by_channel_origin(
         &self,
         integration: &str,
@@ -186,7 +229,7 @@ impl SessionStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, bench_id, agent_id, metadata_json, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions
                  WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
                    AND json_extract(metadata_json, '$.channel_origin.account') = ?2
@@ -204,8 +247,8 @@ impl SessionStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::NewBench;
-    use crate::store::BenchStore;
+    use crate::model::{NewBench, NewWorkspaceAttachment};
+    use crate::store::{BenchStore, WorkspaceAttachmentStore};
 
     use super::*;
 
@@ -229,6 +272,7 @@ mod tests {
                 bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -248,6 +292,7 @@ mod tests {
                 bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -258,6 +303,7 @@ mod tests {
                 bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -277,6 +323,7 @@ mod tests {
                 bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -293,6 +340,7 @@ mod tests {
                 bench_id,
                 agent_id: "my-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -316,6 +364,7 @@ mod tests {
                 bench_id,
                 agent_id: "my-agent".to_string(),
                 metadata: Some(metadata.clone()),
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -324,6 +373,39 @@ mod tests {
 
         let fetched = storage.get_session(session.id).await.unwrap().unwrap();
         assert_eq!(fetched.metadata, Some(metadata));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_active_workspace_round_trips_and_updates() {
+        let (storage, bench_id) = make_storage_with_bench().await;
+        let workspace = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                bench_id,
+                label: "repo".to_string(),
+                path: "/tmp/swage-test-repo".to_string(),
+                permissions: vec!["read".to_string(), "write".to_string()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id,
+                agent_id: "my-agent".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: Some(workspace.id),
+            })
+            .await
+            .unwrap();
+
+        let fetched = storage.get_session(session.id).await.unwrap().unwrap();
+        assert_eq!(fetched.active_workspace_attachment_id, Some(workspace.id));
+
+        let updated = storage
+            .set_session_active_workspace(session.id, None)
+            .await
+            .unwrap();
+        assert_eq!(updated.active_workspace_attachment_id, None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -336,6 +418,7 @@ mod tests {
                 bench_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -344,6 +427,7 @@ mod tests {
                 bench_id,
                 agent_id: "beta".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -352,6 +436,7 @@ mod tests {
                 bench_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -385,6 +470,7 @@ mod tests {
                 bench_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

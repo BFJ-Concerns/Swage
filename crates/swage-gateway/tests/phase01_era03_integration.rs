@@ -12,7 +12,7 @@
 //! | `hook_events_fire_for_gateway_initiated_turns` | Hook firing proof | agent streaming (141x) + gateway delegation (6dy5) |
 //! | `streaming_tokens_arrive_through_agent_delegation` | Streaming parity proof | agent events (5r3s) + agent streaming (141x) + gateway delegation (6dy5) |
 //! | `sandbox_routes_through_execution_strategy` | Sandbox strategy proof | execution strategy (4gwe) + sandbox executor (get2) + gateway delegation (6dy5) |
-//! | `workspace_gate_denies_file_read_without_trusted_attachment` | Workspace gate denial | turn permission build + workspace attachment store |
+//! | `missing_workspace_grants_inherit_global_permissions` | Missing workspace grant inheritance | turn permission build + workspace attachment store |
 //! | `workspace_gate_allows_file_read_with_trusted_read_attachment` | Workspace gate release | turn permission build + workspace attachment store |
 
 use std::net::SocketAddr;
@@ -654,14 +654,12 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     );
 }
 
-/// A bench with no trusted workspace attachment denies file_read at dispatch.
+/// A bench with no trusted workspace attachment inherits global permissions.
 ///
-/// Proves: the workspace permission gate folded into build_permission_config
-/// during the wuje fix denies workspace-tools when no trusted attachment grants
-/// the relevant permission, even if the resolved config would otherwise allow
-/// the tool.
+/// Proves: missing bench-level workspace grants are absence of local config,
+/// not an implicit deny override. Explicit global or bench denies still deny.
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_gate_denies_file_read_without_trusted_attachment() {
+async fn missing_workspace_grants_inherit_global_permissions() {
     let provider = MockProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
@@ -675,7 +673,7 @@ async fn workspace_gate_denies_file_read_without_trusted_attachment() {
         ],
         vec![
             StreamChunk::Delta {
-                content: "denied".into(),
+                content: "ok".into(),
             },
             StreamChunk::Done {
                 finish_reason: Some(FinishReason::Stop),
@@ -710,20 +708,15 @@ async fn workspace_gate_denies_file_read_without_trusted_attachment() {
         .find(|e| e["type"] == "tool_end")
         .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
     assert_eq!(
-        tool_end["status"], "error",
-        "file_read must be denied without a trusted workspace; events: {events:?}"
-    );
-    let result_text = tool_end["result"].as_str().unwrap_or("");
-    assert!(
-        result_text.contains("denied") || result_text.contains("permission"),
-        "denial reason should mention permissions; got: {result_text}"
+        tool_end["status"], "success",
+        "missing workspace grants should inherit global allow-all permissions; events: {events:?}"
     );
 }
 
-/// A bench with a trusted read-grant workspace allows file_read to dispatch.
+/// A bench with a trusted read-grant workspace still allows file_read.
 ///
-/// Proves: a trusted attachment carrying the "read" permission folds into
-/// build_permission_config and lifts the workspace gate for read-side tools.
+/// Proves: trusted attachments remain compatible with the inherited global
+/// allow-all policy; they are not required to unlock tool visibility.
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
     let provider = MockProvider::new(vec![

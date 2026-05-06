@@ -376,6 +376,7 @@ async fn ensure_session_for_origin(
                         "conversation": origin.conversation
                     }
                 })),
+                active_workspace_attachment_id: None,
             })
             .await?;
         state
@@ -418,6 +419,7 @@ async fn ensure_session_for_origin(
                     "conversation": origin.conversation
                 }
             })),
+            active_workspace_attachment_id: None,
         })
         .await?;
     state

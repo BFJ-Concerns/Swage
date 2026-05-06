@@ -234,6 +234,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
                 .unwrap()
                 .reference,
             workspace_root: "/srv/docker".into(),
+            workspace_roots: vec![],
             capabilities: vec!["shell".into()],
         },
     )

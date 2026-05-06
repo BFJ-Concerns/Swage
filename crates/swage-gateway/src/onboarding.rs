@@ -114,6 +114,7 @@ pub struct RecoverySessionRecord {
     pub bench_id: Uuid,
     pub agent_id: String,
     pub metadata: Option<serde_json::Value>,
+    pub active_workspace_attachment_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +151,8 @@ pub struct RecoveryExecutionHostRecord {
     pub base_url: String,
     pub shared_token_secret_ref: String,
     pub workspace_root: String,
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
 }
 
@@ -204,6 +207,11 @@ fn map_execution_host_response(
         kind: host.kind.to_string(),
         base_url: host.base_url,
         workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+        workspace_roots: host
+            .workspace_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
         capabilities: host.capabilities,
         registered_at: host.registered_at,
     }
@@ -241,6 +249,7 @@ pub async fn create_channel_link(
             bench_id: bench.id,
             agent_id: agent_id.clone(),
             metadata: Some(metadata),
+            active_workspace_attachment_id: None,
         })
         .await?;
     state
@@ -335,6 +344,7 @@ pub async fn redeem_node_pairing_code(
             base_url: request.base_url,
             shared_token_secret_ref: request.shared_token_secret_ref,
             workspace_root: request.workspace_root,
+            workspace_roots: vec![],
             capabilities: request.capabilities,
         },
     )
@@ -393,6 +403,7 @@ pub async fn export_gateway_recovery_bundle(
                 bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
+                active_workspace_attachment_id: session.active_workspace_attachment_id,
             })
             .collect(),
         secrets: {
@@ -440,6 +451,7 @@ pub async fn export_gateway_recovery_bundle(
                 base_url: host.base_url,
                 shared_token_secret_ref: host.shared_token,
                 workspace_root: host.workspace_root,
+                workspace_roots: host.workspace_roots,
                 capabilities: host.capabilities,
             })
             .collect(),
@@ -516,6 +528,7 @@ pub async fn import_gateway_recovery_bundle(
                 })?,
                 agent_id: session.agent_id.clone(),
                 metadata: session.metadata,
+                active_workspace_attachment_id: None,
             })
             .await?;
         state
@@ -581,6 +594,7 @@ pub async fn import_gateway_recovery_bundle(
                 base_url: host.base_url,
                 shared_token_secret_ref: host.shared_token_secret_ref,
                 workspace_root: host.workspace_root,
+                workspace_roots: host.workspace_roots,
                 capabilities: host.capabilities,
             },
         )

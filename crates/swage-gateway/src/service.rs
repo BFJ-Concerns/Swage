@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -148,12 +152,14 @@ impl ConversationService {
     /// a thread_id to attach turns and messages to.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, GatewayError> {
         let bench = self.bench_store.get_or_create_default().await?;
+        let active_workspace_attachment_id = self.default_workspace_for_bench(bench.id).await?;
         let session = self
             .storage
             .create_session(NewSession {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id,
             })
             .await?;
 
@@ -328,6 +334,7 @@ impl ConversationService {
             .get(bench_id)
             .await?
             .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        let active_workspace_attachment_id = self.default_workspace_for_bench(bench_id).await?;
 
         let session = self
             .storage
@@ -335,6 +342,7 @@ impl ConversationService {
                 bench_id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id,
             })
             .await?;
 
@@ -497,6 +505,19 @@ impl ConversationService {
         }
         Ok(false)
     }
+
+    async fn default_workspace_for_bench(
+        &self,
+        bench_id: Uuid,
+    ) -> Result<Option<Uuid>, GatewayError> {
+        Ok(self
+            .storage
+            .list_workspace_attachments_by_bench(bench_id)
+            .await?
+            .into_iter()
+            .find(|workspace| workspace.is_default && !workspace.is_missing)
+            .map(|workspace| workspace.id))
+    }
 }
 
 fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> ToolCallView {
@@ -555,6 +576,10 @@ pub struct BenchListResponse {
 pub struct CreateWorkspaceAttachmentRequest {
     pub path: String,
     pub label: Option<String>,
+    #[serde(default)]
+    pub set_as_default: bool,
+    #[serde(default)]
+    pub active_session_id: Option<Uuid>,
     #[serde(default = "default_workspace_permissions")]
     pub permissions: Vec<String>,
     #[serde(default)]
@@ -572,6 +597,9 @@ pub struct WorkspaceAttachmentResponse {
     pub bench_id: Uuid,
     pub label: String,
     pub path: String,
+    pub canonical_path: String,
+    pub is_missing: bool,
+    pub is_default: bool,
     pub permissions: Vec<String>,
     pub is_trusted: bool,
     pub created_at: DateTime<Utc>,
@@ -788,8 +816,12 @@ impl WorkspaceAttachmentService {
             .storage
             .list_workspace_attachments_by_bench(bench_id)
             .await?;
+        let mut refreshed = Vec::with_capacity(workspaces.len());
+        for workspace in workspaces {
+            refreshed.push(self.refresh_workspace_missing_state(workspace).await?);
+        }
         Ok(WorkspaceAttachmentListResponse {
-            workspaces: workspaces.into_iter().map(workspace_to_response).collect(),
+            workspaces: refreshed.into_iter().map(workspace_to_response).collect(),
         })
     }
 
@@ -805,17 +837,23 @@ impl WorkspaceAttachmentService {
                 "workspace path must not be empty".into(),
             ));
         }
-        if !std::path::Path::new(path).exists() {
+        if !Path::new(path).exists() {
             return Err(GatewayError::ValidationError(format!(
                 "workspace path '{path}' does not exist on disk"
             )));
         }
+        let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+            GatewayError::ValidationError(format!(
+                "workspace path '{path}' could not be resolved: {error}"
+            ))
+        })?;
+        let canonical_path = canonical_path.to_string_lossy().into_owned();
 
         let label = req
             .label
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
-                std::path::Path::new(path)
+                Path::new(&canonical_path)
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("workspace")
@@ -832,11 +870,28 @@ impl WorkspaceAttachmentService {
             .create_workspace_attachment(NewWorkspaceAttachment {
                 bench_id,
                 label,
-                path: path.to_string(),
+                path: canonical_path,
                 permissions,
                 is_trusted: req.is_trusted,
             })
             .await?;
+        if req.set_as_default {
+            self.storage
+                .set_bench_default_workspace(bench_id, Some(workspace.id))
+                .await?;
+        }
+        if let Some(session_id) = req.active_session_id {
+            self.ensure_session_belongs_to_bench(bench_id, session_id)
+                .await?;
+            self.storage
+                .set_session_active_workspace(session_id, Some(workspace.id))
+                .await?;
+        }
+        let workspace = self
+            .storage
+            .get_workspace_attachment(workspace.id)
+            .await?
+            .ok_or_else(|| GatewayError::ValidationError("created workspace disappeared".into()))?;
         Ok(workspace_to_response(workspace))
     }
 
@@ -895,6 +950,43 @@ impl WorkspaceAttachmentService {
         }
         Ok(())
     }
+
+    async fn ensure_session_belongs_to_bench(
+        &self,
+        bench_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), GatewayError> {
+        let session = self
+            .storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+        if session.bench_id != bench_id {
+            return Err(GatewayError::ValidationError(format!(
+                "session {session_id} does not belong to bench {bench_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn refresh_workspace_missing_state(
+        &self,
+        workspace: WorkspaceAttachment,
+    ) -> Result<WorkspaceAttachment, GatewayError> {
+        let check_path = if workspace.canonical_path.is_empty() {
+            &workspace.path
+        } else {
+            &workspace.canonical_path
+        };
+        let is_missing = !Path::new(check_path).exists();
+        if workspace.is_missing == is_missing {
+            return Ok(workspace);
+        }
+        Ok(self
+            .storage
+            .set_workspace_missing_state(workspace.id, is_missing)
+            .await?)
+    }
 }
 
 fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {
@@ -903,6 +995,9 @@ fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentR
         bench_id: workspace.bench_id,
         label: workspace.label,
         path: workspace.path,
+        canonical_path: workspace.canonical_path,
+        is_missing: workspace.is_missing,
+        is_default: workspace.is_default,
         permissions: workspace.permissions,
         is_trusted: workspace.is_trusted,
         created_at: workspace.created_at,
@@ -1662,6 +1757,7 @@ mod tests {
     use uuid::Uuid;
 
     use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
+    use swage_storage::sqlite::SqliteStorage;
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -1672,6 +1768,211 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             storage as Arc<dyn BenchStore>,
         )
+    }
+
+    async fn make_workspace_service() -> (WorkspaceAttachmentService, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("default bench should exist");
+        let service = WorkspaceAttachmentService::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn BenchStore>,
+        );
+        (service, bench.id)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_workspace_persists_canonical_path() {
+        let (service, bench_id) = make_workspace_service().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("actual");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        let non_canonical = workspace.join("..").join("actual");
+
+        let response = service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: non_canonical.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("workspace should attach");
+
+        assert_eq!(
+            response.path,
+            workspace
+                .canonicalize()
+                .expect("canonical workspace")
+                .to_string_lossy()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_workspaces_persists_missing_folder_state() {
+        let (service, bench_id) = make_workspace_service().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("actual");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+
+        let attached = service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: workspace.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("workspace should attach");
+        assert!(!attached.is_missing);
+
+        std::fs::remove_dir(&workspace).expect("workspace dir should be removable");
+
+        let list = service
+            .list_workspaces(bench_id)
+            .await
+            .expect("workspaces should list");
+        assert_eq!(list.workspaces.len(), 1);
+        assert!(list.workspaces[0].is_missing);
+
+        let stored = service
+            .storage
+            .get_workspace_attachment(attached.id)
+            .await
+            .expect("workspace lookup")
+            .expect("workspace should still exist");
+        assert!(stored.is_missing);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_workspace_can_become_bench_default() {
+        let (service, bench_id) = make_workspace_service().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("default");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+
+        let response = service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: workspace.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: true,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("workspace should attach");
+
+        assert!(response.is_default);
+        let stored = service
+            .storage
+            .get_workspace_attachment(response.id)
+            .await
+            .expect("workspace lookup")
+            .expect("workspace should exist");
+        assert!(stored.is_default);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_workspace_can_become_session_active_workspace() {
+        let (service, bench_id) = make_workspace_service().await;
+        let session = service
+            .storage
+            .create_session(NewSession {
+                bench_id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session should create");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("session");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+
+        let response = service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: workspace.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: Some(session.id),
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("workspace should attach");
+
+        let session = service
+            .storage
+            .get_session(session.id)
+            .await
+            .expect("session lookup")
+            .expect("session should exist");
+        assert_eq!(session.active_workspace_attachment_id, Some(response.id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_workspace_rejects_duplicate_canonical_path() {
+        let (service, bench_id) = make_workspace_service().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("actual");
+        let symlink = temp.path().join("alias");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::os::unix::fs::symlink(&workspace, &symlink).expect("workspace symlink");
+
+        service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: workspace.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("first attachment should succeed");
+
+        let error = service
+            .attach_workspace(
+                bench_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: symlink.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect_err("canonical duplicate should be rejected");
+
+        assert!(matches!(
+            error,
+            GatewayError::Storage(StorageError::ConstraintViolation(_))
+        ));
     }
 
     // -----------------------------------------------------------------------

@@ -3,23 +3,19 @@
 //! Returns entries sorted with directories first, then files, each
 //! alphabetically. Validates the target path stays within the workspace root.
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::validate_path;
+use crate::tool::workspace::resolve_context_path;
 
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
-pub struct FileListTool {
-    pub workspace_root: PathBuf,
-}
+pub struct FileListTool;
 
 #[async_trait]
 impl Tool for FileListTool {
@@ -44,7 +40,7 @@ impl Tool for FileListTool {
         })
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let path_str = params["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidParameters {
@@ -53,15 +49,14 @@ impl Tool for FileListTool {
             })?
             .to_string();
 
-        let resolved = validate_path(&self.workspace_root, &path_str).map_err(|msg| {
-            ToolError::ExecutionFailed {
+        let resolved =
+            resolve_context_path(ctx, &path_str).map_err(|msg| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: msg,
-            }
-        })?;
+            })?;
 
         // Verify the resolved path is a directory.
-        match tokio::fs::metadata(&resolved).await {
+        match tokio::fs::metadata(&resolved.path).await {
             Ok(meta) if !meta.is_dir() => {
                 return Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
@@ -88,7 +83,7 @@ impl Tool for FileListTool {
 
         // Read directory entries.
         let mut read_dir =
-            tokio::fs::read_dir(&resolved)
+            tokio::fs::read_dir(&resolved.path)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
@@ -146,13 +141,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileListTool {
-        FileListTool {
-            workspace_root: dir.path().to_path_buf(),
-        }
+        let _ = dir;
+        FileListTool
     }
 
-    fn ctx() -> MockToolContext {
-        MockToolContext::new("agent-test", "sess-test")
+    fn ctx(dir: &TempDir) -> MockToolContext {
+        let mut ctx = MockToolContext::new("agent-test", "sess-test");
+        ctx.working_directory = dir.path().to_path_buf();
+        ctx
     }
 
     #[tokio::test]
@@ -162,7 +158,7 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), b"hello").unwrap();
 
         let val = tool(&dir)
-            .execute(json!({ "path": "." }), &ctx())
+            .execute(json!({ "path": "." }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -177,7 +173,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("zzz")).unwrap();
 
         let val = tool(&dir)
-            .execute(json!({ "path": "." }), &ctx())
+            .execute(json!({ "path": "." }), &ctx(&dir))
             .await
             .unwrap();
         let output = val["output"].as_str().unwrap();
@@ -192,7 +188,7 @@ mod tests {
         std::fs::write(dir.path().join("data.txt"), b"12345").unwrap();
 
         let val = tool(&dir)
-            .execute(json!({ "path": "." }), &ctx())
+            .execute(json!({ "path": "." }), &ctx(&dir))
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().contains("5 bytes"));
@@ -205,7 +201,7 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
 
         let val = tool(&dir)
-            .execute(json!({ "path": "empty" }), &ctx())
+            .execute(json!({ "path": "empty" }), &ctx(&dir))
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().contains("empty"));
@@ -215,7 +211,7 @@ mod tests {
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "path": "../../etc" }), &ctx())
+            .execute(json!({ "path": "../../etc" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("outside"), "got: {err}");
@@ -225,7 +221,7 @@ mod tests {
     async fn error_on_missing_directory() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
-            .execute(json!({ "path": "nonexistent" }), &ctx())
+            .execute(json!({ "path": "nonexistent" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(
@@ -239,7 +235,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), b"").unwrap();
         let err = tool(&dir)
-            .execute(json!({ "path": "file.txt" }), &ctx())
+            .execute(json!({ "path": "file.txt" }), &ctx(&dir))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Not a directory"), "got: {err}");

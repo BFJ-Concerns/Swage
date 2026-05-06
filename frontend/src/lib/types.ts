@@ -31,6 +31,9 @@ export interface WorkspaceAttachment {
   bench_id: string;
   label: string;
   path: string;
+  canonical_path: string;
+  is_missing: boolean;
+  is_default: boolean;
   permissions: string[];
   is_trusted: boolean;
   created_at: string;
@@ -39,6 +42,8 @@ export interface WorkspaceAttachment {
 export interface CreateWorkspaceAttachmentRequest {
   path: string;
   label?: string;
+  set_as_default?: boolean;
+  active_session_id?: string;
   permissions?: string[];
   is_trusted?: boolean;
 }

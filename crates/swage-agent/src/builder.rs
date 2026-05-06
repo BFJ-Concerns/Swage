@@ -105,17 +105,7 @@ impl AgentBuilder {
             .storage
             .ok_or_else(|| AgentError::InvalidConfig("storage is required".into()))?;
 
-        // Validate the config values themselves.
-        if config.agent_id.is_empty() {
-            return Err(AgentError::InvalidConfig(
-                "agent_id must not be empty".into(),
-            ));
-        }
-        if config.max_tool_rounds < 1 {
-            return Err(AgentError::InvalidConfig(
-                "max_tool_rounds must be at least 1".into(),
-            ));
-        }
+        config.validate()?;
 
         Ok(Agent {
             config,
@@ -193,7 +183,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn valid_config() -> AgentConfig {
-        let mut config = AgentConfig::new("test-agent");
+        let mut config = AgentConfig::new("test-agent").with_workspace("/tmp/swage-test", vec![]);
         config.compaction_threshold = CompactionThreshold::TokenCount(50_000);
         config
     }

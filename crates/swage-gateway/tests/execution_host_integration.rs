@@ -370,6 +370,7 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         base_url: node.base_url.clone(),
         shared_token_secret_ref,
         workspace_root: node_workspace.path().to_string_lossy().into_owned(),
+        workspace_roots: vec![],
         capabilities: vec!["host_identity".to_string()],
     };
     register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
@@ -427,6 +428,7 @@ async fn run_transport_backend_round_trip(
         base_url: backend.base_url.clone(),
         shared_token_secret_ref,
         workspace_root: workspace.path().to_string_lossy().into_owned(),
+        workspace_roots: vec![],
         capabilities: vec!["host_identity".to_string()],
     };
     register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
@@ -494,6 +496,7 @@ async fn registered_remote_execution_host_survives_restart() {
             base_url: backend.base_url.clone(),
             shared_token_secret_ref,
             workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
             capabilities: vec!["host_identity".to_string()],
         },
     )

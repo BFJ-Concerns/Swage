@@ -956,6 +956,11 @@ pub async fn register_execution_host(
             kind: host.kind.to_string(),
             base_url: host.base_url,
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: host
+                .workspace_roots
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             capabilities: host.capabilities,
             registered_at: host.registered_at,
         }),
@@ -2047,6 +2052,7 @@ async fn execute_external_delegate_message(
             agent_config: &target_agent_config,
             session_metadata: None,
             bench_id: Some(bench_id),
+            active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
         },
         "external delegated turn",
@@ -3620,6 +3626,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3628,6 +3635,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3675,6 +3683,7 @@ mod tests {
                 bench_id: bench_a.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3683,6 +3692,7 @@ mod tests {
                 bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3691,6 +3701,7 @@ mod tests {
                 bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
