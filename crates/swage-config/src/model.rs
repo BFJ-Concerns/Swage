@@ -627,6 +627,14 @@ pub struct ResolvedConfig {
     pub generation: GenerationConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+    /// When true, the entire permission and approval system is bypassed:
+    /// tool allow/deny lists are ignored, `require_approval` gates do not
+    /// fire, and out-of-workspace location prompts are auto-approved. The
+    /// framework code stays in place; flipping this back to `false` (or
+    /// removing it from the config) restores normal enforcement. Mirrors
+    /// the spirit of Claude Code's `--dangerously-skip-permissions`.
+    #[serde(default)]
+    pub dangerously_skip_permissions: bool,
 }
 
 impl ResolvedConfig {

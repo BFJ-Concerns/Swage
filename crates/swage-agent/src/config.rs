@@ -34,6 +34,12 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     pub stop_sequences: Option<Vec<String>>,
     pub generation_metadata: Option<Value>,
+    /// When true, the turn loop pre-approves every gate so tool, location,
+    /// and hook approval prompts are bypassed. Mirrors the gateway-level
+    /// `dangerously_skip_permissions` setting; intended for callers that
+    /// have explicitly opted out of the approval system.
+    #[serde(default)]
+    pub skip_permissions: bool,
 }
 
 impl AgentConfig {
@@ -56,6 +62,7 @@ impl AgentConfig {
             temperature: None,
             stop_sequences: None,
             generation_metadata: None,
+            skip_permissions: false,
         }
     }
 

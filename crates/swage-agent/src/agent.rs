@@ -162,6 +162,13 @@ impl Agent {
             .await?;
 
         let mut approval_scope = TurnApprovalScope::default();
+        // Permissions disabled at the gateway: pre-approve every gate this
+        // turn. Each gate (tool, location, hook) consults `should_skip_gate`
+        // and falls through to `dispatch_approved`, so a single flip here
+        // quiets all approval prompts without disturbing the framework.
+        if self.config.skip_permissions {
+            approval_scope.approve_remaining_gates();
+        }
 
         let assembled_context = if crate::compaction::exceeds_threshold(
             &request.assembled_context,

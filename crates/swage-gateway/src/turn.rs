@@ -450,6 +450,18 @@ fn build_permission_config(
     bench_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> PermissionConfig {
+    // Top-level escape hatch: when permissions are disabled at the gateway,
+    // hand the dispatcher a fully open config. The framework remains intact
+    // so flipping the flag back restores normal enforcement.
+    if config.dangerously_skip_permissions || startup_config.dangerously_skip_permissions {
+        return PermissionConfig {
+            allow: vec!["*".into()],
+            deny: Vec::new(),
+            bundles: std::collections::HashMap::new(),
+            require_approval: Vec::new(),
+        };
+    }
+
     let mut deny = config.tools.permissions.deny.clone();
     for entry in &startup_config.tools.permissions.deny {
         if !deny.contains(entry) {
@@ -822,6 +834,7 @@ pub(crate) fn build_agent_config_with_workspace(
     allowed_paths: Vec<PathBuf>,
 ) -> AgentConfig {
     let mut agent_config = AgentConfig::new(agent_id).with_workspace(workspace_root, allowed_paths);
+    agent_config.skip_permissions = config.dangerously_skip_permissions;
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }

@@ -26,6 +26,10 @@ const KNOWN_SECTIONS: &[&str] = &[
     "communication",
 ];
 
+/// Top-level scalar keys (i.e. fields that live above any [section] header).
+/// These are recognised alongside `KNOWN_SECTIONS` during validation.
+const KNOWN_TOP_LEVEL_SCALARS: &[(&str, &str)] = &[("dangerously_skip_permissions", "boolean")];
+
 /// Valid field names for each known section.
 fn known_fields_for(section: &str) -> &'static [&'static str] {
     match section {
@@ -786,6 +790,27 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
 
     // Phase 2: schema and semantics
     for (section_name, section_value) in &table {
+        // Top-level scalar keys (above any [section] header) live in the
+        // same iteration as section tables. Recognise them first so they
+        // don't trip the unknown-section check.
+        if let Some((_, expected_type)) = KNOWN_TOP_LEVEL_SCALARS
+            .iter()
+            .find(|(name, _)| name == section_name)
+        {
+            let actual_type = toml_type_name(section_value);
+            if actual_type != *expected_type {
+                problems.push(make_problem(
+                    file_path,
+                    Some(section_name.clone()),
+                    ConfigProblemKind::TypeError {
+                        expected: (*expected_type).to_string(),
+                        found: actual_type.to_string(),
+                    },
+                ));
+            }
+            continue;
+        }
+
         if !KNOWN_SECTIONS.contains(&section_name.as_str()) {
             problems.push(make_problem(
                 file_path,

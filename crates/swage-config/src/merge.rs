@@ -204,6 +204,10 @@ pub struct PartialConfig {
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
     pub generation: Option<PartialGenerationConfig>,
+    /// Top-level bypass for the permission and approval system.
+    /// Mirrors `ResolvedConfig::dangerously_skip_permissions`.
+    #[serde(default)]
+    pub dangerously_skip_permissions: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +328,7 @@ impl From<ResolvedConfig> for PartialConfig {
                     Some(r.generation.presets)
                 },
             }),
+            dangerously_skip_permissions: Some(r.dangerously_skip_permissions),
         }
     }
 }
@@ -514,6 +519,9 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 presets: Some(presets),
             }
         }),
+        dangerously_skip_permissions: overlay
+            .dangerously_skip_permissions
+            .or(base.dangerously_skip_permissions),
     }
 }
 
@@ -712,6 +720,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
+        dangerously_skip_permissions: partial.dangerously_skip_permissions.unwrap_or(false),
     }
 }
 
