@@ -717,12 +717,19 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
         );
         let mut config = swage_config::ResolvedConfig::default();
-        config
-            .models
-            .entries
-            .get_mut(&config.models.default)
-            .expect("default model entry")
-            .provider_id = "missing-provider".to_string();
+        // Wire up a default model that points at a provider id absent from
+        // the catalogue — exactly the misconfiguration this test exercises.
+        config.models.default = "default".to_string();
+        config.models.entries.insert(
+            "default".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "missing-provider".to_string(),
+                model_id: "any-model".to_string(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            },
+        );
 
         let provider = create_provider(&config, &secret_manager).await;
         let result = provider
