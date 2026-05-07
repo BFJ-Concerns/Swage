@@ -12,7 +12,9 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{is_binary_content, resolve_context_path, truncate_output};
+use crate::tool::workspace::{
+    is_binary_content, location_approval_error, resolve_context_path, truncate_output,
+};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -61,6 +63,10 @@ impl Tool for FileSearchTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let pattern = params["pattern"]
             .as_str()
@@ -72,16 +78,10 @@ impl Tool for FileSearchTool {
 
         // Optional subdirectory — default to workspace root.
         let resolved = match params["path"].as_str() {
-            Some(sub) => {
-                resolve_context_path(ctx, sub).map_err(|msg| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: msg,
-                })?
-            }
-            None => resolve_context_path(ctx, ".").map_err(|msg| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: msg,
-            })?,
+            Some(sub) => resolve_context_path(ctx, sub)
+                .map_err(|_| location_approval_error(self.name(), ctx, sub, "read"))?,
+            None => resolve_context_path(ctx, ".")
+                .map_err(|_| location_approval_error(self.name(), ctx, ".", "read"))?,
         };
 
         // Collect matches by walking the tree synchronously.
@@ -293,6 +293,12 @@ mod tests {
             .execute(json!({ "pattern": "x", "path": "../../etc" }), &ctx(&dir))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {err}");
+        assert!(
+            matches!(
+                err,
+                ToolError::RequiresLocationApproval { ref access, .. } if access == "read"
+            ),
+            "got: {err}"
+        );
     }
 }

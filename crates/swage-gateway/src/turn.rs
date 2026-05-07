@@ -447,6 +447,8 @@ pub(crate) async fn load_trusted_workspace_policy(
 fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
+    bench_id: Option<Uuid>,
+    session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> PermissionConfig {
     let mut deny = config.tools.permissions.deny.clone();
     for entry in &startup_config.tools.permissions.deny {
@@ -459,12 +461,37 @@ fn build_permission_config(
         allow: config.tools.permissions.allow.clone(),
         deny,
         bundles: config.tools.permissions.bundles.clone(),
-        require_approval: config
-            .tools
-            .permissions
-            .require_approval
-            .iter()
-            .map(|entry| match entry {
+        require_approval: expand_require_approval_entries(config)
+            .into_iter()
+            .filter(|entry| {
+                !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
+                    bench_id: None,
+                    kind: swage_storage::model::ApprovalKind::Tool,
+                    name: entry.tool_name.clone(),
+                    access: None,
+                }) && !bench_id.is_some_and(|bench_id| {
+                    session_approval_grants.contains(&crate::state::ApprovalGrantKey {
+                        bench_id: Some(bench_id),
+                        kind: swage_storage::model::ApprovalKind::Tool,
+                        name: entry.tool_name.clone(),
+                        access: None,
+                    })
+                })
+            })
+            .collect(),
+    }
+}
+
+fn expand_require_approval_entries(
+    config: &swage_config::ResolvedConfig,
+) -> Vec<ToolRequireApprovalEntry> {
+    config
+        .tools
+        .permissions
+        .require_approval
+        .iter()
+        .flat_map(|entry| {
+            let approval_entry = match entry {
                 swage_config::model::RequireApprovalEntry::Simple(tool_name) => {
                     ToolRequireApprovalEntry {
                         tool_name: tool_name.clone(),
@@ -485,9 +512,26 @@ fn build_permission_config(
                             .unwrap_or_else(|| config.hitl.timeout_policy.clone()),
                     ),
                 },
-            })
-            .collect(),
-    }
+            };
+
+            match config
+                .tools
+                .permissions
+                .bundles
+                .get(&approval_entry.tool_name)
+            {
+                Some(bundle_tools) => bundle_tools
+                    .iter()
+                    .map(|tool_name| ToolRequireApprovalEntry {
+                        tool_name: tool_name.clone(),
+                        timeout_secs: approval_entry.timeout_secs,
+                        timeout_policy: approval_entry.timeout_policy.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                None => vec![approval_entry],
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct SandboxGuard {
@@ -662,7 +706,13 @@ pub(crate) async fn build_gateway_dispatcher(
         ),
         None => None,
     };
-    let permissions = build_permission_config(config, &state.config);
+    let session_approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let permissions =
+        build_permission_config(config, &state.config, bench_id, &session_approval_grants);
 
     let dispatcher = ToolDispatcher::new(
         state.tool_dispatcher.registry().clone(),
@@ -829,6 +879,23 @@ fn agent_workspace_from_policy(
         }
     }
     (workspace_root, allowed_paths)
+}
+
+fn append_approved_location_paths(
+    allowed_paths: &mut Vec<PathBuf>,
+    grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
+    bench_id: Uuid,
+) {
+    for grant in grants
+        .iter()
+        .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.bench_id.is_none() || grant.bench_id == Some(bench_id))
+    {
+        let path = PathBuf::from(&grant.name);
+        if !allowed_paths.contains(&path) {
+            allowed_paths.push(path);
+        }
+    }
 }
 
 pub(crate) fn load_session_config(
@@ -1405,8 +1472,14 @@ pub(crate) async fn process_turn_with_existing_turn(
         session.active_workspace_attachment_id,
     )
     .await;
-    let (workspace_root, allowed_paths) =
+    let (workspace_root, mut allowed_paths) =
         agent_workspace_from_policy(&workspace_policy, bench_id, session.id);
+    let session_approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    append_approved_location_paths(&mut allowed_paths, &session_approval_grants, bench_id);
     let agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
@@ -5324,6 +5397,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -5395,6 +5471,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -5536,6 +5615,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -5866,6 +5948,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -5941,6 +6026,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -6211,6 +6299,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -6816,6 +6907,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -6916,6 +7010,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -6987,6 +7084,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -7239,6 +7339,9 @@ pub(crate) mod tests {
             },
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -7634,7 +7737,34 @@ pub(crate) mod tests {
     /// Convenience for invoking the private build_permission_config from tests
     /// without having to repeat the full ResolvedConfig wiring.
     fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> PermissionConfig {
-        super::build_permission_config(config, config)
+        super::build_permission_config(config, config, None, &std::collections::HashSet::new())
+    }
+
+    #[test]
+    fn bench_scoped_approval_grant_only_removes_gate_for_matching_bench() {
+        let matching_bench_id = Uuid::new_v4();
+        let other_bench_id = Uuid::new_v4();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_write".into(),
+            )];
+
+        let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+            bench_id: Some(matching_bench_id),
+            kind: swage_storage::model::ApprovalKind::Tool,
+            name: "file_write".into(),
+            access: None,
+        }]);
+
+        let matching =
+            super::build_permission_config(&config, &config, Some(matching_bench_id), &grants);
+        let other = super::build_permission_config(&config, &config, Some(other_bench_id), &grants);
+        let no_bench = super::build_permission_config(&config, &config, None, &grants);
+
+        assert!(matching.require_approval.is_empty());
+        assert_eq!(other.require_approval.len(), 1);
+        assert_eq!(no_bench.require_approval.len(), 1);
     }
 
     #[tokio::test]

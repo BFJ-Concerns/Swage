@@ -74,17 +74,53 @@ describe("operator actions", () => {
     });
   });
 
-  it("approves a pending action for the current turn", async () => {
+  it("approves a pending action for the current session", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 200));
 
-    await approvePendingAction("approval-1", "approved in test", "turn");
+    await approvePendingAction("approval-1", "approved in test", "session");
 
     expect(fetch).toHaveBeenCalledWith("/api/approvals/approval-1", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         decision: "approved",
-        scope: "turn",
+        scope: "session",
+        reason: "approved in test",
+      }),
+    });
+  });
+
+  it("approves a pending action permanently", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 200));
+
+    await approvePendingAction("approval-1", "approved in test", "permanent");
+
+    expect(fetch).toHaveBeenCalledWith("/api/approvals/approval-1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: "approved",
+        scope: "permanent",
+        reason: "approved in test",
+      }),
+    });
+  });
+
+  it("approves a pending action permanently and globally", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 200));
+
+    await approvePendingAction(
+      "approval-1",
+      "approved in test",
+      "permanent_global",
+    );
+
+    expect(fetch).toHaveBeenCalledWith("/api/approvals/approval-1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: "approved",
+        scope: "permanent_global",
         reason: "approved in test",
       }),
     });

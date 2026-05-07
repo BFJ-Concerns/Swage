@@ -1015,6 +1015,14 @@ async fn dispatch_client_message(
             } else {
                 swage_storage::ApprovalState::Rejected
             };
+            let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
+                tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
+                let _ = tx.send(ServerEvent::Error {
+                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    message: "Failed to record approval decision.".to_string(),
+                });
+                return;
+            };
             match state
                 .storage
                 .update_approval_state(approval_uuid, new_state, reason.as_deref())
@@ -1052,20 +1060,28 @@ async fn dispatch_client_message(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = channels.remove(&approval_uuid) {
-                    let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
-                        tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
-                        let _ = tx.send(ServerEvent::Error {
-                            code: error_codes::INTERNAL_ERROR.to_string(),
-                            message: "Failed to record approval decision.".to_string(),
-                        });
-                        return;
-                    };
                     let _ = sender.send(swage_agent::ApprovalDecision {
                         decision: decision_value,
                         scope,
                         reason: reason.clone(),
                     });
                 }
+            }
+
+            if let Err(error) = crate::approval_scope::apply_approval_scope(
+                &state,
+                &approval,
+                decision_value,
+                scope,
+            )
+            .await
+            {
+                tracing::error!(%session_id, %approval_uuid, err = %error.0, "approval scope update failed");
+                let _ = tx.send(ServerEvent::Error {
+                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    message: "Failed to save approval scope.".to_string(),
+                });
+                return;
             }
 
             // Step 6: Broadcast confirmation to the client.
@@ -1716,6 +1732,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -1776,6 +1795,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(

@@ -6,6 +6,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use swage_config::ResolvedConfig;
+use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 // ---------------------------------------------------------------------------
@@ -31,13 +32,29 @@ pub struct ResolvedToolPath {
     pub path: PathBuf,
 }
 
+pub fn location_approval_error(
+    tool_name: &str,
+    ctx: &dyn ToolContext,
+    requested: &str,
+    access: &str,
+) -> ToolError {
+    let path = approval_root_for_request(ctx, requested).unwrap_or_else(|| requested.to_string());
+    ToolError::RequiresLocationApproval {
+        name: tool_name.to_string(),
+        path,
+        access: access.to_string(),
+        timeout_secs: None,
+        timeout_policy: None,
+    }
+}
+
 /// Resolves a tool path against the current turn's workspace roots.
 ///
 /// Relative paths are interpreted from `ctx.working_directory()`. Absolute
 /// paths are accepted only when they remain inside the working directory or one
-/// of `ctx.allowed_paths()`. The sandbox is still the final authority for
-/// read/write permissions; this helper keeps unsandboxed and pre-sandbox checks
-/// aligned with the runtime workspace, not the gateway startup directory.
+/// of `ctx.allowed_paths()`. Built-in file tools use this resolver as their
+/// runtime permission boundary so location approvals can take effect without
+/// rebuilding a sandbox mount set mid-turn.
 pub fn resolve_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
@@ -246,6 +263,23 @@ fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(root)
+}
+
+fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<String> {
+    let raw = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        ctx.working_directory().join(requested)
+    };
+    let normalised = normalise_path(&raw);
+    if normalised.is_dir() {
+        normalised.canonicalize().ok()
+    } else {
+        normalised
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+    }
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn resolve_existing_prefix(path: &Path, requested: &str) -> Result<PathBuf, String> {

@@ -1348,11 +1348,13 @@ impl FromStr for ApprovalState {
 ///
 /// Determines which of the optional `tool_*` / `hook_name` fields on
 /// `ApprovalRequest` are populated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     /// Approval was triggered by a tool dispatch gate.
     Tool,
+    /// Approval was triggered by a filesystem location gate.
+    Location,
     /// Approval was triggered by a hook outcome.
     Hook,
 }
@@ -1361,6 +1363,7 @@ impl std::fmt::Display for ApprovalKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             ApprovalKind::Tool => "tool",
+            ApprovalKind::Location => "location",
             ApprovalKind::Hook => "hook",
         };
         write!(f, "{s}")
@@ -1373,6 +1376,7 @@ impl FromStr for ApprovalKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "tool" => Ok(ApprovalKind::Tool),
+            "location" => Ok(ApprovalKind::Location),
             "hook" => Ok(ApprovalKind::Hook),
             other => Err(format!("unknown approval kind: {other}")),
         }
@@ -1445,6 +1449,13 @@ impl NewApprovalRequest {
                 if self.hook_name.is_some() {
                     return Err(StorageError::ConstraintViolation(
                         "tool approvals must not set hook_name".into(),
+                    ));
+                }
+            }
+            ApprovalKind::Location => {
+                if self.context.is_none() {
+                    return Err(StorageError::ConstraintViolation(
+                        "location approvals require context".into(),
                     ));
                 }
             }

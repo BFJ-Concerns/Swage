@@ -9,7 +9,7 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::resolve_new_context_path;
+use crate::tool::workspace::{location_approval_error, resolve_new_context_path};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -44,6 +44,10 @@ impl Tool for FileWriteTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let path_str = params["path"]
             .as_str()
@@ -61,11 +65,8 @@ impl Tool for FileWriteTool {
             })?
             .to_string();
 
-        let resolved =
-            resolve_new_context_path(ctx, &path_str).map_err(|msg| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: msg,
-            })?;
+        let resolved = resolve_new_context_path(ctx, &path_str)
+            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "write"))?;
 
         // Create parent directories so the write doesn't fail on a missing tree.
         if let Some(parent) = resolved.path.parent() {
@@ -173,7 +174,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {err}");
+        assert!(
+            matches!(
+                err,
+                ToolError::RequiresLocationApproval { ref access, .. } if access == "write"
+            ),
+            "got: {err}"
+        );
     }
 
     #[cfg(unix)]
@@ -193,7 +200,13 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("outside"), "got: {err}");
+        assert!(
+            matches!(
+                err,
+                ToolError::RequiresLocationApproval { ref access, .. } if access == "write"
+            ),
+            "got: {err}"
+        );
         assert!(!outside.path().join("escape.txt").exists());
     }
 

@@ -192,7 +192,7 @@ pub async fn save_settings(
             ApiError::validation(format!("failed to create config directory: {error}"))
         })?;
     }
-    let mut partial = read_global_partial_config(&path).await?;
+    let mut partial = read_partial_config(&path).await?;
     partial.providers = Some(swage_config::merge::PartialProviderCatalogConfig {
         default: Some(default_provider.clone()),
         entries: Some(providers),
@@ -229,6 +229,131 @@ pub async fn save_settings(
         requested_models,
         generation_presets,
     ))
+}
+
+pub(crate) async fn persist_permanent_tool_approval_for_bench(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    bench: &swage_storage::model::Bench,
+    tool_name: &str,
+) -> Result<(), ApiError> {
+    let path = bench_config_path(&bench.slug)?;
+    persist_permanent_tool_approval_to_path(state, config, tool_name, path).await
+}
+
+pub(crate) async fn persist_permanent_tool_approval_globally(
+    state: &AppState,
+    tool_name: &str,
+) -> Result<(), ApiError> {
+    let path = global_config_path()?;
+    persist_permanent_tool_approval_to_path(state, &state.config, tool_name, path).await
+}
+
+async fn persist_permanent_tool_approval_to_path(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    tool_name: &str,
+    path: PathBuf,
+) -> Result<(), ApiError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ApiError::validation(format!("failed to create config directory: {error}"))
+        })?;
+    }
+
+    let mut partial = read_partial_config(&path).await?;
+    let tools = partial.tools.get_or_insert_with(Default::default);
+    tools.require_approval = Some(require_approval_entries_without_tool(config, tool_name));
+
+    let body = toml::to_string_pretty(&partial)
+        .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
+    tokio::fs::write(&path, body)
+        .await
+        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
+
+    state.mark_restart_required();
+    Ok(())
+}
+
+fn bench_config_path(bench_slug: &str) -> Result<PathBuf, ApiError> {
+    let root = swage_config::discovery::resolve_root()
+        .map_err(|problem| ApiError::validation(problem.to_string()))?;
+    Ok(root.join("benches").join(bench_slug).join("config.toml"))
+}
+
+fn require_approval_entries_without_tool(
+    config: &swage_config::ResolvedConfig,
+    tool_name: &str,
+) -> Vec<swage_config::model::RequireApprovalEntry> {
+    config
+        .tools
+        .permissions
+        .require_approval
+        .iter()
+        .flat_map(|entry| match entry {
+            swage_config::model::RequireApprovalEntry::Simple(name)
+                if config
+                    .tools
+                    .permissions
+                    .bundles
+                    .get(name)
+                    .is_some_and(|bundle_tools| {
+                        bundle_tools.iter().any(|tool| tool == tool_name)
+                    }) =>
+            {
+                config.tools.permissions.bundles[name]
+                    .iter()
+                    .filter(|bundle_tool| bundle_tool.as_str() != tool_name)
+                    .map(|bundle_tool| {
+                        swage_config::model::RequireApprovalEntry::Simple(bundle_tool.clone())
+                    })
+                    .collect::<Vec<_>>()
+            }
+            swage_config::model::RequireApprovalEntry::Simple(name) if name == tool_name => vec![],
+            swage_config::model::RequireApprovalEntry::Simple(name) => {
+                vec![swage_config::model::RequireApprovalEntry::Simple(
+                    name.clone(),
+                )]
+            }
+            swage_config::model::RequireApprovalEntry::WithOptions {
+                tool,
+                timeout,
+                timeout_policy,
+            } if config
+                .tools
+                .permissions
+                .bundles
+                .get(tool)
+                .is_some_and(|bundle_tools| bundle_tools.iter().any(|tool| tool == tool_name)) =>
+            {
+                config.tools.permissions.bundles[tool]
+                    .iter()
+                    .filter(|bundle_tool| bundle_tool.as_str() != tool_name)
+                    .map(
+                        |bundle_tool| swage_config::model::RequireApprovalEntry::WithOptions {
+                            tool: bundle_tool.clone(),
+                            timeout: *timeout,
+                            timeout_policy: timeout_policy.clone(),
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            }
+            swage_config::model::RequireApprovalEntry::WithOptions { tool, .. }
+                if tool == tool_name =>
+            {
+                vec![]
+            }
+            swage_config::model::RequireApprovalEntry::WithOptions {
+                tool,
+                timeout,
+                timeout_policy,
+            } => vec![swage_config::model::RequireApprovalEntry::WithOptions {
+                tool: tool.clone(),
+                timeout: *timeout,
+                timeout_policy: timeout_policy.clone(),
+            }],
+        })
+        .collect()
 }
 
 pub async fn discover_models(
@@ -328,7 +453,7 @@ async fn provider_for_discovery(
     }
 
     if let Ok(path) = global_config_path() {
-        let partial = read_global_partial_config(&path).await?;
+        let partial = read_partial_config(&path).await?;
         if let Some(providers) = partial.providers
             && let Some(entries) = providers.entries
             && let Some(provider) = entries.get(provider_id)
@@ -442,7 +567,7 @@ fn global_config_path() -> Result<PathBuf, ApiError> {
     Ok(root.join("config.toml"))
 }
 
-async fn read_global_partial_config(
+async fn read_partial_config(
     path: &std::path::Path,
 ) -> Result<swage_config::PartialConfig, ApiError> {
     if !path.exists() {
@@ -645,6 +770,9 @@ mod tests {
             broadcast: tokio::sync::broadcast::channel(16).0,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             hook_registry: None,
             channel_routes: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             presence: std::sync::Arc::new(tokio::sync::Mutex::new(

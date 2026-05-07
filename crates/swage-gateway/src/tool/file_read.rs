@@ -9,7 +9,9 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{is_binary_content, resolve_context_path, truncate_output};
+use crate::tool::workspace::{
+    is_binary_content, location_approval_error, resolve_context_path, truncate_output,
+};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -42,6 +44,10 @@ impl Tool for FileReadTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let path_str = params["path"]
             .as_str()
@@ -51,11 +57,8 @@ impl Tool for FileReadTool {
             })?
             .to_string();
 
-        let resolved =
-            resolve_context_path(ctx, &path_str).map_err(|msg| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: msg,
-            })?;
+        let resolved = resolve_context_path(ctx, &path_str)
+            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read"))?;
 
         // Read raw bytes from disk.
         let bytes = tokio::fs::read(&resolved.path).await.map_err(|e| {
@@ -139,7 +142,13 @@ mod tests {
             .execute(json!({ "path": "../../../etc/passwd" }), &ctx(&dir))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("outside"), "got: {err}");
+        assert!(
+            matches!(
+                err,
+                ToolError::RequiresLocationApproval { ref access, .. } if access == "read"
+            ),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

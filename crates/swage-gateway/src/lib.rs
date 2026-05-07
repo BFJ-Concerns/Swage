@@ -40,6 +40,7 @@
 //! [`shutdown::recover_orphaned_turns`] runs at startup to mark turns left
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
+pub mod approval_scope;
 pub mod assets;
 pub mod attachment;
 pub mod audit;

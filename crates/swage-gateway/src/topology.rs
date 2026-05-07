@@ -1252,6 +1252,9 @@ mod tests {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(

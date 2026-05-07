@@ -922,7 +922,7 @@ mod tests {
         let event = ClientEvent::ApprovalDecision {
             approval_id: "abc-123".to_string(),
             decision: "approved".to_string(),
-            scope: Some("turn".to_string()),
+            scope: Some("session".to_string()),
             reason: Some("looks good".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(v["type"], "approval_decision");
         assert_eq!(v["approval_id"], "abc-123");
         assert_eq!(v["decision"], "approved");
-        assert_eq!(v["scope"], "turn");
+        assert_eq!(v["scope"], "session");
         assert_eq!(v["reason"], "looks good");
     }
 

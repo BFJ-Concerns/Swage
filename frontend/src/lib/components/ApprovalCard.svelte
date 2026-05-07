@@ -1,10 +1,6 @@
 <!--
   Approval card — replaces the message input while a turn is gated on a
-  human-in-the-loop approval. Mirrors riso-cyanotype.html, view 03.
-
-  Allow once / Allow turn / Deny are wired to /api/approvals/:id. The
-  turn-scoped action applies only to later approval gates in the same live
-  turn; it does not create broader session approval memory.
+  human-in-the-loop approval.
 -->
 <script lang="ts">
   import { approvePendingAction, rejectPendingAction } from "../api/operator";
@@ -16,17 +12,38 @@
 
   let { approval }: Props = $props();
 
-  let busy = $state<"allow" | "allow-turn" | "deny" | null>(null);
-  let error = $state<string | null>(null);
+  type ApprovalAction =
+    | "allow"
+    | "allow-session"
+    | "allow-permanent"
+    | "allow-global"
+    | "deny";
 
-  async function decide(action: "allow" | "allow-turn" | "deny"): Promise<void> {
+  let busy = $state<ApprovalAction | null>(null);
+  let error = $state<string | null>(null);
+  let permanentMenuOpen = $state(false);
+
+  async function decide(action: ApprovalAction): Promise<void> {
     busy = action;
     error = null;
+    permanentMenuOpen = false;
     try {
       if (action === "allow") {
         await approvePendingAction(approval.approval_id, "approval card");
-      } else if (action === "allow-turn") {
-        await approvePendingAction(approval.approval_id, "approval card", "turn");
+      } else if (action === "allow-session") {
+        await approvePendingAction(approval.approval_id, "approval card", "session");
+      } else if (action === "allow-permanent") {
+        await approvePendingAction(
+          approval.approval_id,
+          "approval card",
+          "permanent",
+        );
+      } else if (action === "allow-global") {
+        await approvePendingAction(
+          approval.approval_id,
+          "approval card",
+          "permanent_global",
+        );
       } else {
         await rejectPendingAction(approval.approval_id, "approval card");
       }
@@ -66,12 +83,49 @@
     <button
       type="button"
       class="btn"
-      onclick={() => decide("allow-turn")}
+      onclick={() => decide("allow-session")}
       disabled={busy !== null}
-      title="Allow the rest of this turn"
+      title="Allow matching approvals until the gateway exits"
     >
-      {busy === "allow-turn" ? "Allowing…" : "Allow turn"}
+      {busy === "allow-session" ? "Allowing…" : "Allow for this session"}
     </button>
+
+    <div class="split-action">
+      <button
+        type="button"
+        class="btn split-main"
+        onclick={() => decide("allow-permanent")}
+        disabled={busy !== null}
+        title="Persist this tool as allowed for this bench"
+      >
+        {busy === "allow-permanent" ? "Allowing…" : "Allow permanently"}
+      </button>
+      <button
+        type="button"
+        class="btn split-caret"
+        onclick={() => (permanentMenuOpen = !permanentMenuOpen)}
+        disabled={busy !== null}
+        aria-haspopup="menu"
+        aria-expanded={permanentMenuOpen}
+        title="More permanent approval scopes"
+      >
+        ▾
+      </button>
+      {#if permanentMenuOpen}
+        <div class="scope-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            class="menu-item"
+            onclick={() => decide("allow-global")}
+          >
+            {busy === "allow-global"
+              ? "Allowing…"
+              : "Allow permanently globally"}
+          </button>
+        </div>
+      {/if}
+    </div>
 
     <button
       type="button"
@@ -86,10 +140,8 @@
 
 <style>
   /*
-    Approval card vocabulary mirrors the workup: ink frame, fluoro-orange
-    head badge, three buttons stacked on the right. Sits flush with the
-    conversation pane edges so the input slot it replaces stays the same
-    size.
+    Sits flush with the conversation pane edges so the input slot it replaces
+    stays the same size.
   */
   .approval-card {
     margin: 12px 22px 18px;
@@ -216,4 +268,50 @@
     border-color: var(--accent);
   }
 
+  .split-action {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .split-main {
+    border-right: 0;
+  }
+
+  .split-caret {
+    width: 34px;
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .scope-menu {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 6px);
+    min-width: 236px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    z-index: 3;
+    box-shadow: 4px 4px 0 var(--accent);
+  }
+
+  .menu-item {
+    width: 100%;
+    padding: 9px 12px;
+    border: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-display);
+    font-size: 13px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-align: left;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .menu-item:hover {
+    background: var(--ink);
+    color: var(--paper);
+  }
 </style>

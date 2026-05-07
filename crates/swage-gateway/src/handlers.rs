@@ -2266,6 +2266,18 @@ pub async fn decide_approval(
         ApprovalDecisionValue::Rejected => ApprovalOutcome::Rejected,
     };
 
+    let approval = state
+        .storage
+        .get_approval(approval_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("approval", approval_id))?;
+    if approval.state != swage_storage::model::ApprovalState::Pending {
+        return Err(ApiError::conflict(
+            "approval request has already been resolved".to_string(),
+        ));
+    }
+
     // Try to fire the oneshot channel for this approval.
     let sender = state
         .approval_channels
@@ -2288,6 +2300,13 @@ pub async fn decide_approval(
             };
 
             if tx.send(decision).is_ok() {
+                crate::approval_scope::apply_approval_scope(
+                    &state,
+                    &approval,
+                    req.decision,
+                    req.scope,
+                )
+                .await?;
                 // Agent received the decision via the live channel.
                 Ok((
                     StatusCode::OK,
@@ -2304,14 +2323,23 @@ pub async fn decide_approval(
                     .update_approval_state(approval_id, new_state, req.reason.as_deref())
                     .await
                 {
-                    Ok(true) => Ok((
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "approval_id": approval_id,
-                            "decision": outcome.as_str(),
-                            "note": "agent timed out; decision persisted to storage",
-                        })),
-                    )),
+                    Ok(true) => {
+                        crate::approval_scope::apply_approval_scope(
+                            &state,
+                            &approval,
+                            req.decision,
+                            req.scope,
+                        )
+                        .await?;
+                        Ok((
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "approval_id": approval_id,
+                                "decision": outcome.as_str(),
+                                "note": "agent timed out; decision persisted to storage",
+                            })),
+                        ))
+                    }
                     Ok(false) => Err(ApiError::conflict(format!(
                         "approval {approval_id} already resolved"
                     ))),
@@ -2346,6 +2374,13 @@ pub async fn decide_approval(
                         .await
                     {
                         Ok(true) => {
+                            crate::approval_scope::apply_approval_scope(
+                                &state,
+                                &a,
+                                req.decision,
+                                req.scope,
+                            )
+                            .await?;
                             let note = match state
                                 .storage
                                 .update_turn_state(
@@ -2549,6 +2584,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -4389,6 +4427,9 @@ def build_topology():
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(

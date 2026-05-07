@@ -33,8 +33,12 @@ impl ApprovalDecision {
 pub enum ApprovalDecisionScope {
     /// Approve only the pending request.
     Once,
-    /// Approve this request and any later approval gates in the same turn.
-    Turn,
+    /// Approve this request and later matching gates until the gateway exits.
+    Session,
+    /// Approve this request and persist the matching tool as ungated.
+    Permanent,
+    /// Approve this request and persist the matching tool as globally ungated.
+    PermanentGlobal,
 }
 
 impl Default for ApprovalDecisionScope {

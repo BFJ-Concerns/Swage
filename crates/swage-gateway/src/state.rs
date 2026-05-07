@@ -16,7 +16,10 @@ use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
-use swage_storage::store::{BenchStore, Storage};
+use swage_storage::{
+    model::{ApprovalKind, ApprovalRequest},
+    store::{BenchStore, Storage},
+};
 
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
@@ -82,6 +85,11 @@ pub struct AppState {
     /// decision. A plain std mutex is sufficient here — the critical section is a
     /// single HashMap operation with no async work under the lock.
     pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
+    /// Runtime-only approval grants created by "allow for this session".
+    ///
+    /// These are intentionally process-local: they affect newly built turn
+    /// dispatchers until the gateway exits, without rewriting user config.
+    pub session_approval_grants: Arc<Mutex<HashSet<ApprovalGrantKey>>>,
     /// Optional lifecycle hooks honoured by gateway-owned execution paths.
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
@@ -134,6 +142,7 @@ impl AppState {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
@@ -154,6 +163,46 @@ impl AppState {
 
     pub fn restart_required(&self) -> bool {
         self.restart_required.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalGrantKey {
+    pub bench_id: Option<Uuid>,
+    pub kind: ApprovalKind,
+    pub name: String,
+    pub access: Option<String>,
+}
+
+impl ApprovalGrantKey {
+    pub fn from_approval(approval: &ApprovalRequest) -> Option<Self> {
+        let name = match approval.kind {
+            ApprovalKind::Tool => approval.tool_name.clone(),
+            ApprovalKind::Hook => approval.hook_name.clone(),
+            ApprovalKind::Location => None,
+        }?;
+
+        Some(Self {
+            bench_id: None,
+            kind: approval.kind.clone(),
+            name,
+            access: None,
+        })
+    }
+}
+
+impl ApprovalGrantKey {
+    pub fn location(
+        bench_id: Option<Uuid>,
+        path: impl Into<String>,
+        access: impl Into<String>,
+    ) -> Self {
+        Self {
+            bench_id,
+            kind: ApprovalKind::Location,
+            name: path.into(),
+            access: Some(access.into()),
+        }
     }
 }
 
@@ -189,6 +238,7 @@ mod tests {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry: None,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
