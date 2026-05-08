@@ -570,10 +570,10 @@
         <!-- --- -->
         <!--
           No module placed by this lens. The Riso workup (view 01/02) puts
-          stage modules on this side: shared reference (assistant default),
-          active team + log tail + release notes (when a team is running).
-          None of these are wired today, so we render the catalogue as a
-          column of non-functional shells so the chrome matches the workup.
+          stage modules on this side: shared reference (assistant default)
+          and active team state when a team is running. Neither is wired today,
+          so we render the catalogue as non-functional shells so the chrome
+          matches the workup.
 
           The module catalogue is not yet wired to the lens runtime. The
           gateway exposes lens descriptors with `ui_modules` and the
@@ -617,29 +617,6 @@
               </p>
             </article>
 
-            <article class="stage-module" data-tone="streaming">
-              <header class="stage-module-head">
-                <h3>Live log tail</h3>
-                <span class="stage-module-tag">SHELL</span>
-              </header>
-              <p class="stage-module-body">
-                Workup view 02 — streaming output across all running agents.
-                No aggregator on the gateway today; per-agent token streams
-                exist but there is no merged tail.
-              </p>
-            </article>
-
-            <article class="stage-module" data-tone="static">
-              <header class="stage-module-head">
-                <h3>Release notes draft</h3>
-                <span class="stage-module-tag">SHELL</span>
-              </header>
-              <p class="stage-module-body">
-                Workup view 02 — collaboratively edited document module. No
-                document concept exists yet; benches store files but there
-                is no live "shared draft" abstraction.
-              </p>
-            </article>
           </div>
         </section>
       {/if}
