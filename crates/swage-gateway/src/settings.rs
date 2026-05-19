@@ -495,9 +495,13 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
             "default provider does not exist".to_string(),
         ));
     }
-    if !(request.default_model.is_empty() && request.models.is_empty())
-        && !request.models.contains_key(&request.default_model)
-    {
+    if request.default_model.is_empty() {
+        if !request.models.is_empty() {
+            return Err(ApiError::validation(
+                "default model does not exist".to_string(),
+            ));
+        }
+    } else if !request.models.contains_key(&request.default_model) {
         return Err(ApiError::validation(
             "default model does not exist".to_string(),
         ));

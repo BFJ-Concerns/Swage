@@ -28,10 +28,11 @@ impl ApprovalDecision {
 }
 
 /// How widely an approval decision should apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecisionScope {
     /// Approve only the pending request.
+    #[default]
     Once,
     /// Approve this request and later matching gates until the gateway exits.
     Session,
@@ -39,12 +40,6 @@ pub enum ApprovalDecisionScope {
     Permanent,
     /// Approve this request and persist the matching tool as globally ungated.
     PermanentGlobal,
-}
-
-impl Default for ApprovalDecisionScope {
-    fn default() -> Self {
-        Self::Once
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

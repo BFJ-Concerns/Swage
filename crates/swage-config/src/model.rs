@@ -56,20 +56,11 @@ impl Default for ProviderEndpointConfig {
 }
 
 /// Configured LLM providers keyed by provider id.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProviderCatalogConfig {
     pub default: String,
     #[serde(default)]
     pub entries: HashMap<String, ProviderEndpointConfig>,
-}
-
-impl Default for ProviderCatalogConfig {
-    fn default() -> Self {
-        Self {
-            default: String::new(),
-            entries: HashMap::new(),
-        }
-    }
 }
 
 impl ProviderCatalogConfig {
@@ -79,7 +70,7 @@ impl ProviderCatalogConfig {
 }
 
 /// Model identity and metadata separate from provider connection settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelEndpointConfig {
     pub provider_id: String,
     pub model_id: String,
@@ -91,33 +82,12 @@ pub struct ModelEndpointConfig {
     pub generation_preset: Option<String>,
 }
 
-impl Default for ModelEndpointConfig {
-    fn default() -> Self {
-        Self {
-            provider_id: String::new(),
-            model_id: String::new(),
-            aliases: Vec::new(),
-            context_window: None,
-            generation_preset: None,
-        }
-    }
-}
-
 /// Configured LLM models keyed by app-level model id.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelCatalogConfig {
     pub default: String,
     #[serde(default)]
     pub entries: HashMap<String, ModelEndpointConfig>,
-}
-
-impl Default for ModelCatalogConfig {
-    fn default() -> Self {
-        Self {
-            default: String::new(),
-            entries: HashMap::new(),
-        }
-    }
 }
 
 impl ModelCatalogConfig {

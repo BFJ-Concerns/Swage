@@ -131,19 +131,16 @@ pub struct PartialPythonExecuteToolConfig {
 
 /// Partial mirror of `OutputConfig`. Each field is independently overridable.
 ///
-/// `schema` uses `Option<Option<serde_json::Value>>` so that a layer can
-/// explicitly set schema to `None` (disabling it) without being treated the
-/// same as "not configured". In practice most callers set it to `Some(value)`
-/// or leave it as `None` (absent), so the outer option behaves like all other
-/// fields: absent means "don't override the base".
-// TODO Make output schema clearing match the documented cascade semantics
-// PartialOutputConfig.schema is only Option<Value>, so child config cannot distinguish absent from explicit None and cannot clear an inherited schema despite the comment saying it can.
-// ---
+/// `schema` uses a double-option to distinguish "field not present" (outer
+/// `None`) from "field explicitly cleared" (`Some(None)`) from "field set to a
+/// schema" (`Some(Some(value))`). The outer option controls inheritance; the
+/// inner mirrors the `Option<Value>` in the resolved type.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialOutputConfig {
-    /// JSON Schema to validate agent output against. `None` means "not
-    /// configured at this level" — base value wins.
-    pub schema: Option<serde_json::Value>,
+    /// JSON Schema to validate agent output against. Outer `None` means "not
+    /// configured at this level"; `Some(None)` actively clears an inherited
+    /// schema.
+    pub schema: Option<Option<serde_json::Value>>,
     /// Override for the maximum number of validation-retry attempts.
     pub max_retries: Option<u32>,
 }
@@ -284,7 +281,7 @@ impl From<ResolvedConfig> for PartialConfig {
                 require_approval: Some(r.tools.permissions.require_approval),
             }),
             output: Some(PartialOutputConfig {
-                schema: r.output.schema,
+                schema: Some(r.output.schema),
                 max_retries: Some(r.output.max_retries),
             }),
             hitl: Some(PartialHitlConfig {
@@ -671,7 +668,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let do_ = OutputConfig::default();
             let o = partial.output.unwrap_or_default();
             OutputConfig {
-                schema: o.schema.or(do_.schema),
+                schema: o.schema.unwrap_or(do_.schema),
                 max_retries: o.max_retries.unwrap_or(do_.max_retries),
             }
         },
@@ -1356,10 +1353,38 @@ mod tests {
     }
 
     #[test]
+    fn output_config_explicit_none_clears_inherited_schema() {
+        let global = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(Some(serde_json::json!({"type": "object"}))),
+                max_retries: Some(5),
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(None),
+                max_retries: None,
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_chain(vec![global, agent]));
+        assert!(
+            resolved.output.schema.is_none(),
+            "explicit None should clear an inherited output schema"
+        );
+        assert_eq!(
+            resolved.output.max_retries, 5,
+            "clearing schema should not clear unrelated output fields"
+        );
+    }
+
+    #[test]
     fn output_config_three_level_chain_agent_schema_wins() {
         let global = PartialConfig {
             output: Some(PartialOutputConfig {
-                schema: Some(serde_json::json!({"type": "string"})),
+                schema: Some(Some(serde_json::json!({"type": "string"}))),
                 max_retries: Some(5),
             }),
             ..Default::default()
@@ -1373,7 +1398,7 @@ mod tests {
         };
         let agent = PartialConfig {
             output: Some(PartialOutputConfig {
-                schema: Some(serde_json::json!({"type": "object"})),
+                schema: Some(Some(serde_json::json!({"type": "object"}))),
                 max_retries: Some(1),
             }),
             ..Default::default()
