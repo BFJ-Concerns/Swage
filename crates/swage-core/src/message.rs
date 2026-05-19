@@ -82,6 +82,14 @@ pub enum ContentPart {
 /// The `content_blocks` field holds Anthropic-specific JSON blocks used when
 /// representing tool_use/tool_result pairs in the conversation history — these
 /// are built by `crate::tool::build_tool_round_messages`.
+// TODO Make ChatMessage cross-field invariants type-level
+// Public fields plus convenience constructors let callers build a
+// ChatMessage where (role, content, content_blocks, tool_call_id,
+// tool_calls) are mutually inconsistent — e.g. tool_call_id set on a
+// non-Tool role, or both content and content_blocks populated. Convert
+// to a sealed enum with one variant per role, or hide the fields and
+// expose constructors that enforce the cross-field rules.
+// ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Provider-independent message identifier.
