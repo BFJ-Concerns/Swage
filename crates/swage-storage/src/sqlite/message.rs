@@ -589,10 +589,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn invalid_stored_role_returns_explicit_error() {
+    async fn invalid_stored_role_is_rejected_by_schema() {
         let (storage, _, thread_id) = make_thread().await;
         let now = Utc::now().to_rfc3339();
-        storage
+        let error = storage
             .with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
@@ -602,12 +602,12 @@ mod tests {
                 Ok(())
             })
             .await
-            .unwrap();
+            .expect_err("invalid stored role should fail closed");
 
-        let error = storage
-            .list_messages_by_thread(thread_id)
-            .await
-            .expect_err("invalid stored role should fail");
-        assert!(error.to_string().contains("unknown chat role: bogus"));
+        assert!(
+            error
+                .to_string()
+                .contains("messages.role must be one of system, user, assistant, tool")
+        );
     }
 }

@@ -882,7 +882,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn invalid_stored_node_kind_returns_explicit_error() {
+    async fn invalid_stored_node_kind_is_rejected_by_schema() {
         let storage = SqliteStorage::in_memory().unwrap();
         let bench = storage.get_or_create_default().await.unwrap();
         let session = storage
@@ -917,7 +917,7 @@ mod tests {
             .await
             .unwrap();
         let now = Utc::now().to_rfc3339();
-        storage
+        let error = storage
             .with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, agent_id, task_name, state, input_json, output_json, error_message, created_at, completed_at)
@@ -927,16 +927,12 @@ mod tests {
                 Ok(())
             })
             .await
-            .unwrap();
+            .expect_err("invalid stored node kind should fail closed");
 
-        let error = storage
-            .list_node_executions_by_run(run.id)
-            .await
-            .expect_err("invalid stored node kind should fail");
         assert!(
-            error
-                .to_string()
-                .contains("unknown topology node kind: bogus")
+            error.to_string().contains(
+                "node_executions.node_kind must be one of llm, deterministic, continuation"
+            )
         );
     }
 }
