@@ -32,6 +32,7 @@ import type {
   OperatorOverview,
   Bench,
   ServerEvent,
+  WorkspaceAttachment,
 } from "../lib/types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -77,7 +78,12 @@ const websocketHarness = vi.hoisted(() => {
 vi.mock("../lib/api/benches", () => ({
   listBenches: vi.fn(),
   createBench: vi.fn(),
+  updateBench: vi.fn(),
   deleteBench: vi.fn(),
+  listBenchWorkspaces: vi.fn(),
+  attachBenchWorkspace: vi.fn(),
+  detachBenchWorkspace: vi.fn(),
+  listBenchSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/conversations", () => ({
@@ -127,8 +133,27 @@ function makeBench(overrides: Partial<Bench> = {}): Bench {
   return {
     id: "proj-default",
     name: "default",
+    description: "",
     slug: "default",
     is_default: true,
+    created_at: "2026-04-07T12:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeWorkspaceAttachment(
+  overrides: Partial<WorkspaceAttachment> = {},
+): WorkspaceAttachment {
+  return {
+    id: "workspace-1",
+    bench_id: "proj-default",
+    label: "Codebase",
+    path: "/missing/codebase",
+    canonical_path: "/missing/codebase",
+    is_missing: false,
+    is_default: true,
+    permissions: ["read", "write"],
+    is_trusted: true,
     created_at: "2026-04-07T12:00:00Z",
     ...overrides,
   };
@@ -282,6 +307,24 @@ function setPath(path: string): void {
   window.history.replaceState(null, "", path);
 }
 
+/**
+ * Open a bench from the picker. Swage now lands on the bench picker on entry
+ * (Progress.md, workup view 04), so tests that need a bench open must go
+ * through it. Double-clicking a card triggers `openBench` in BenchPicker.
+ */
+async function openBenchFromPicker(name: string): Promise<void> {
+  const card = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+  ).find((el) => el.textContent?.includes(name));
+
+  if (!card) {
+    throw new Error(`Bench card with name "${name}" not found in picker`);
+  }
+
+  flushSync(() => card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await settleUi();
+}
+
 describe("App", () => {
   let component: MountedComponent | undefined;
 
@@ -298,6 +341,11 @@ describe("App", () => {
     vi.mocked(materialsApi.listBenchMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
+    // BenchPicker fetches workspace/session detail on card selection — return
+    // empty arrays by default so the picker renders without errors. Individual
+    // tests can override these mocks if they exercise the detail panel.
+    vi.mocked(benchesApi.listBenchWorkspaces).mockResolvedValue([]);
+    vi.mocked(benchesApi.listBenchSessions).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -373,6 +421,9 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // The app lands on the bench picker — open the default bench so the
+    // top bar (which holds the desktop shell stamp) renders.
+    await openBenchFromPicker("default");
 
     // The riso shell condenses runtime context into a top-bar "stamp": the
     // managed/remote token replaces the older verbose "Desktop shell" panel.
@@ -396,6 +447,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so ConversationList (and its "New" button) renders.
+    await openBenchFromPicker(defaultBench.name);
 
     const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
@@ -484,6 +537,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so the lens tabs render in the top bar.
+    await openBenchFromPicker(defaultBench.name);
 
     // Lens tabs sit in the top bar with class .lens. We look for the lens
     // whose title resolves to "Operator" (after stripping the trailing "lens"
@@ -520,6 +575,10 @@ describe("App", () => {
     );
 
     component = mount(App, { target: document.body });
+    await settleUi();
+    // Open the bench so the builder lens runtime is fetched and the deck
+    // gets placed on the stage.
+    await openBenchFromPicker(defaultBench.name);
     await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
@@ -529,6 +588,62 @@ describe("App", () => {
     expect(document.body.textContent).toContain("Workbench");
     // Operator overview is no longer pre-fetched on mount — the rail that
     // displayed it was dropped. The operator lens loads its own data.
+  });
+
+  it("shows missing bench workspaces and relinks them before opening", async () => {
+    const defaultBench = makeBench({ name: "Workbench" });
+    const missingWorkspace = makeWorkspaceAttachment({ is_missing: true });
+    const relinkedWorkspace = makeWorkspaceAttachment({
+      path: "/srv/workbench",
+      canonical_path: "/srv/workbench",
+      is_missing: false,
+    });
+
+    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(benchesApi.listBenchWorkspaces)
+      .mockResolvedValueOnce([missingWorkspace])
+      .mockResolvedValueOnce([relinkedWorkspace]);
+    vi.mocked(benchesApi.detachBenchWorkspace).mockResolvedValueOnce(undefined);
+    vi.mocked(benchesApi.attachBenchWorkspace).mockResolvedValueOnce(relinkedWorkspace);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const card = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+    ).find((el) => el.textContent?.includes(defaultBench.name));
+    expect(card).toBeDefined();
+    flushSync(() => card!.click());
+    await waitForText("Missing folder");
+
+    const relinkInput = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Replacement path for Codebase"]',
+    );
+    expect(relinkInput).toBeDefined();
+    flushSync(() => {
+      relinkInput!.value = "/srv/workbench";
+      relinkInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const relinkButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Relink"));
+    expect(relinkButton).toBeDefined();
+    flushSync(() => relinkButton!.click());
+    await waitForText("Workspace relinked.");
+
+    expect(benchesApi.detachBenchWorkspace).toHaveBeenCalledWith(
+      defaultBench.id,
+      missingWorkspace.id,
+    );
+    expect(benchesApi.attachBenchWorkspace).toHaveBeenCalledWith(defaultBench.id, {
+      path: "/srv/workbench",
+      label: "Codebase",
+      permissions: ["read", "write"],
+      is_trusted: true,
+      set_as_default: true,
+    });
   });
 
   // The right-hand WorkbenchRail (materials / shared references / operator
@@ -546,6 +661,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so the lens tabs render in the top bar.
+    await openBenchFromPicker(defaultBench.name);
 
     const builderLens = Array.from(
       document.querySelectorAll(".topbar .lens"),

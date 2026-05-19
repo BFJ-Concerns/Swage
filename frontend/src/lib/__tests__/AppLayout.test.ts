@@ -102,10 +102,24 @@ function mockStreamingStore(): StreamingStore {
 function mockBenchStore(): BenchStore {
   return {
     get benches() {
-      return [{ id: "default", name: "default", is_default: true, slug: "default", created_at: "" }];
+      return [{
+        id: "default",
+        name: "default",
+        description: "",
+        is_default: true,
+        slug: "default",
+        created_at: "",
+      }];
     },
     get currentBench() {
-      return { id: "default", name: "default", is_default: true, slug: "default", created_at: "" };
+      return {
+        id: "default",
+        name: "default",
+        description: "",
+        is_default: true,
+        slug: "default",
+        created_at: "",
+      };
     },
     get recentBenches() { return []; },
     get isLoading() { return false; },

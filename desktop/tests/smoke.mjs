@@ -28,6 +28,7 @@ function createMockGateway() {
   const bench = {
     id: "bench-default",
     name: "Default",
+    description: "Smoke-test bench",
     slug: "default",
     is_default: true,
     created_at: "2026-04-17T12:00:00Z",
@@ -387,10 +388,12 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
+  await page.getByRole("button", { name: /default/i }).click();
+  await page.getByRole("button", { name: "Open bench", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page
-    .getByPlaceholder("Send a message… (Shift+Enter for a new line)")
+    .getByPlaceholder("Send a message — Shift+Enter for a new line")
     .fill("Hello from smoke");
   await page.getByRole("button", { name: /send/i }).click();
   await page.getByText("Desktop shell echoed: Hello from smoke").waitFor();
@@ -446,8 +449,7 @@ async function runElectronSmoke(baseUrl) {
     console.log("electron smoke: first window");
     await window.waitForLoadState("domcontentloaded");
     console.log("electron smoke: domcontentloaded");
-    await createConversationAndWaitForReply(window, "Desktop shell");
-    await window.getByText("Remote gateway", { exact: true }).waitFor();
+    await createConversationAndWaitForReply(window, "REMOTE");
   } finally {
     await electronApp.close();
     console.log("electron smoke: done");

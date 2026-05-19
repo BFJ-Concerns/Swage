@@ -56,6 +56,7 @@ function mockBenchStore(): BenchStore {
         {
           id: "bench-1",
           name: "Builder Bench",
+          description: "",
           is_default: false,
           slug: "builder-bench",
           created_at: "2026-01-01T00:00:00Z",

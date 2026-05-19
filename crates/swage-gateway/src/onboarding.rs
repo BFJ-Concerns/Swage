@@ -7,7 +7,8 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_storage::{
     ChannelLink, HeartbeatStatus, NewChannelLink, NewHeartbeat, NewScheduledJob, NewSession,
-    NewThread, NewWorkspaceAttachment, ScheduledJobKind, ScheduledJobStatus, model::Bench,
+    NewThread, NewWorkspaceAttachment, ScheduledJobKind, ScheduledJobStatus,
+    model::{Bench, BenchSlug},
 };
 
 use crate::{
@@ -381,7 +382,7 @@ pub async fn export_gateway_recovery_bundle(
             .map(|bench| RecoveryBenchRecord {
                 id: bench.id,
                 name: bench.name,
-                slug: bench.slug,
+                slug: bench.slug.to_string(),
                 is_default: bench.is_default,
             })
             .collect(),
@@ -674,11 +675,12 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
 }
 
 async fn import_bench(state: &AppState, bench: RecoveryBenchRecord) -> Result<Bench, GatewayError> {
+    let slug = BenchSlug::new(bench.slug).map_err(GatewayError::ValidationError)?;
     if bench.is_default {
         let default_bench = state.bench_store.get_or_create_default().await?;
         state
             .bench_store
-            .update(default_bench.id, Some(bench.name), Some(bench.slug))
+            .update(default_bench.id, Some(bench.name), None, Some(slug))
             .await
             .map_err(Into::into)
     } else {
@@ -686,7 +688,7 @@ async fn import_bench(state: &AppState, bench: RecoveryBenchRecord) -> Result<Be
             .bench_store
             .create(swage_storage::NewBench {
                 name: bench.name,
-                slug: bench.slug,
+                slug,
             })
             .await
             .map_err(Into::into)

@@ -23,6 +23,7 @@ function makeBench(id: string, name: string) {
   return {
     id,
     name,
+    description: "",
     is_default: name === "default",
     slug: name.toLowerCase().replace(/\s+/g, "-"),
     created_at: "2026-01-01T00:00:00Z",

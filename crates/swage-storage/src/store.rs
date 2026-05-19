@@ -5,8 +5,8 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, ChannelLink,
-    ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, BenchSlug,
+    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
     ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit,
     LensPreference, LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelLink,
@@ -42,7 +42,8 @@ pub trait BenchStore: Send + Sync {
         &self,
         id: Uuid,
         name: Option<String>,
-        slug: Option<String>,
+        description: Option<String>,
+        slug: Option<BenchSlug>,
     ) -> Result<Bench, StorageError>;
     /// Delete a bench and cascade its sessions.
     ///
@@ -974,6 +975,7 @@ mod tests {
             _: Uuid,
             _: Option<String>,
             _: Option<String>,
+            _: Option<BenchSlug>,
         ) -> Result<Bench, StorageError> {
             unimplemented!()
         }

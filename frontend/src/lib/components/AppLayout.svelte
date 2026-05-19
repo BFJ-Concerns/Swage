@@ -1412,17 +1412,13 @@
   }
 
   /* Tonal hint on the left edge — preserves the workup vocabulary
-     (auto = ink rule, streaming = orange rule, static = soft rule). */
+     (auto = ink rule, streaming = orange rule). */
   .stage-module[data-tone="auto"] {
     border-left-width: 4px;
   }
 
   .stage-module[data-tone="streaming"] {
     border-left: 4px solid var(--accent);
-  }
-
-  .stage-module[data-tone="static"] {
-    border-left: 4px solid var(--rule-soft);
   }
 
   .stage-module-head {

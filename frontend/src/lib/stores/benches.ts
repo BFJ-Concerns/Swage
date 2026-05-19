@@ -91,12 +91,9 @@ export function createBenchStore(): BenchStore {
         const benches = await api.listBenches();
         benchesStore.set(benches);
 
-        // Auto-select the default bench on load. The default bench is
-        // identified by name so it works regardless of its generated ID.
-        const defaultBench = benches.find((p) => p.is_default);
-        if (defaultBench) {
-          currentBenchStore.set(defaultBench);
-        }
+        // Deliberately leave currentBench null. The user lands on the bench
+        // picker (Progress.md, workup view 04) and chooses where to work —
+        // auto-selecting a bench would skip past it.
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
         isLoadingStore.set(false);

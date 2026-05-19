@@ -12,9 +12,9 @@ use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
     model::{
-        EdgeEvaluation, NewBench, NewSession, NewTeam, NewThread, NewWorkspaceAttachment,
-        NodeExecution, NodeRetry, Team, TeamAgentDefinition, TeamTaskDefinition, ThreadBranch,
-        TopologyRun, TurnState, WorkspaceAttachment,
+        BenchSlug, EdgeEvaluation, NewBench, NewSession, NewTeam, NewThread,
+        NewWorkspaceAttachment, NodeExecution, NodeRetry, Team, TeamAgentDefinition,
+        TeamTaskDefinition, ThreadBranch, TopologyRun, TurnState, WorkspaceAttachment,
     },
     store::{BenchStore, Storage},
 };
@@ -548,12 +548,15 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
 #[derive(Debug, Deserialize)]
 pub struct CreateBenchRequest {
     pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Request body for partially updating a bench.
 #[derive(Debug, Deserialize)]
 pub struct UpdateBenchRequest {
     pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 /// API response for a single bench.
@@ -561,6 +564,7 @@ pub struct UpdateBenchRequest {
 pub struct BenchResponse {
     pub id: Uuid,
     pub name: String,
+    pub description: String,
     pub is_default: bool,
     pub slug: String,
     pub created_at: DateTime<Utc>,
@@ -618,22 +622,19 @@ fn default_workspace_permissions() -> Vec<String> {
 ///
 /// - Lowercases the name
 /// - Replaces spaces with hyphens
-/// - Strips any character that is neither alphanumeric nor a hyphen
+/// - Strips any character that is neither ASCII alphanumeric nor a hyphen
 pub fn slugify(name: &str) -> String {
     name.to_lowercase()
         .replace(' ', "-")
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
 }
 
-fn validate_bench_slug(slug: &str) -> Result<(), GatewayError> {
-    if slug.is_empty() || !slug.chars().any(|c| c.is_ascii_alphanumeric()) {
-        return Err(GatewayError::ValidationError(
-            "name must contain at least one ASCII letter or digit".into(),
-        ));
-    }
-    Ok(())
+fn validate_bench_slug(slug: &str) -> Result<BenchSlug, GatewayError> {
+    BenchSlug::new(slug).map_err(|_| {
+        GatewayError::ValidationError("name must contain at least one ASCII letter or digit".into())
+    })
 }
 
 /// Returns the base directory for all bench data: `~/.swage/benches/`.
@@ -677,8 +678,7 @@ impl BenchService {
             )));
         }
 
-        let slug = slugify(&req.name);
-        validate_bench_slug(&slug)?;
+        let slug = validate_bench_slug(&slugify(&req.name))?;
 
         // Create the bench directory: ~/.swage/benches/{slug}/memory/
         if let Some(base) = benches_base_dir() {
@@ -687,7 +687,7 @@ impl BenchService {
             // Non-fatal: best-effort directory creation.
             if let Err(error) = std::fs::create_dir_all(&memory_dir) {
                 tracing::warn!(
-                    slug,
+                %slug,
                     path = %memory_dir.display(),
                     %error,
                     "failed to create bench memory directory"
@@ -702,6 +702,18 @@ impl BenchService {
                 slug,
             })
             .await?;
+        if !req.description.trim().is_empty() {
+            return Ok(bench_to_response(
+                self.bench_store
+                    .update(
+                        bench.id,
+                        None,
+                        Some(req.description.trim().to_string()),
+                        None,
+                    )
+                    .await?,
+            ));
+        }
 
         Ok(bench_to_response(bench))
     }
@@ -744,15 +756,14 @@ impl BenchService {
         let new_slug = match req.name.as_deref() {
             Some(name) => {
                 let slug = slugify(name);
-                validate_bench_slug(&slug)?;
-                Some(slug)
+                Some(validate_bench_slug(&slug)?)
             }
             None => None,
         };
 
         let bench = self
             .bench_store
-            .update(id, req.name, new_slug)
+            .update(id, req.name, req.description, new_slug)
             .await
             .map_err(|e| match e {
                 swage_core::StorageError::NotFound { id: ref eid, .. } => {
@@ -787,8 +798,9 @@ fn bench_to_response(p: swage_storage::model::Bench) -> BenchResponse {
     BenchResponse {
         id: p.id,
         name: p.name,
+        description: p.description,
         is_default: p.is_default,
-        slug: p.slug,
+        slug: p.slug.to_string(),
         created_at: p.created_at,
     }
 }

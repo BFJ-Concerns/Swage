@@ -61,6 +61,17 @@
     try {
       activeSurface = "conversation";
       await conversationStore.selectConversation(id);
+
+      // A deep-linked conversation may belong to a bench other than the one
+      // currently in scope (or none, on first load). Bring the bench into
+      // scope so the nav, conversation list, and lens runtime reflect it.
+      const conv = conversationStore.activeConversation;
+      if (conv && benchStore.currentBench?.id !== conv.bench_id) {
+        await benchStore.selectBench(conv.bench_id);
+        await conversationStore.loadConversations(conv.bench_id);
+        await refreshLensRuntime("conversation");
+      }
+
       connectionStore.connectTo(id);
       // router is declared below but will be initialised before this is called.
       router.navigate(`/conversations/${id}`);
@@ -293,25 +304,21 @@
 
   onMount(async () => {
     try {
-      // 1. Load benches — auto-selects the default bench.
+      // 1. Load the bench list. We deliberately do not auto-select — the user
+      //    lands on the bench picker and chooses where to work.
       await benchStore.loadBenches();
 
-      // 2. Load conversations for the selected bench. router.init() may call
-      //    selectAndNavigate, which relies on the list being populated.
-      const benchId = benchStore.currentBench?.id;
-      if (benchId) {
-        await conversationStore.loadConversations(benchId);
-      }
-
-      const [settings] = await Promise.all([
-        fetchSettings().catch((error) => {
-          console.error("Failed to load model settings:", error);
-          return null;
-        }),
-        refreshLensRuntime(),
-      ]);
+      // 2. Fetch global model settings. Bench-scoped data (conversations,
+      //    lens runtime) loads when a bench is opened — either via the
+      //    picker or by a deep-linked conversation that selects its bench.
+      const settings = await fetchSettings().catch((error) => {
+        console.error("Failed to load model settings:", error);
+        return null;
+      });
       activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
 
+      // 3. Apply the URL. If it points at a conversation, selectAndNavigate
+      //    will bring its bench into scope along the way.
       await router.init();
       currentRoute = router.currentRoute;
 

@@ -59,6 +59,7 @@ afterEach(() => {
 const sampleBench = {
   id: "proj-1",
   name: "My Bench",
+  description: "",
   is_default: false,
   slug: "my-bench",
   created_at: "2026-01-01T00:00:00Z",
@@ -174,20 +175,24 @@ describe("getBench", () => {
 describe("updateBench", () => {
   it("sends PUT /api/benches/:id with JSON body and returns the updated bench", async () => {
     const fetchMock = vi.mocked(fetch);
-    const updated = { ...sampleBench, name: "Renamed" };
+    const updated = { ...sampleBench, name: "Renamed", description: "Ops bench" };
     fetchMock.mockResolvedValueOnce(mockResponse(updated));
 
-    const result = await updateBench("proj-1", { name: "Renamed" });
+    const result = await updateBench("proj-1", {
+      name: "Renamed",
+      description: "Ops bench",
+    });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/benches/proj-1",
       expect.objectContaining({
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Renamed" }),
+        body: JSON.stringify({ name: "Renamed", description: "Ops bench" }),
       }),
     );
     expect(result.name).toBe("Renamed");
+    expect(result.description).toBe("Ops bench");
   });
 
   it("throws on non-2xx response", async () => {

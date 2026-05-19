@@ -9,6 +9,7 @@
 export interface Bench {
   id: string;
   name: string;
+  description: string;
   is_default: boolean;
   slug: string;
   created_at: string;
@@ -19,11 +20,13 @@ export interface Bench {
 /** Request body for creating a new bench. */
 export interface CreateBenchRequest {
   name: string;
+  description?: string;
 }
 
 /** Request body for updating an existing bench. All fields are optional. */
 export interface UpdateBenchRequest {
   name?: string;
+  description?: string;
 }
 
 export interface WorkspaceAttachment {

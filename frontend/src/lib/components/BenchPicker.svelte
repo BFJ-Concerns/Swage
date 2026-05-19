@@ -27,7 +27,13 @@
 <!-- Route bench card secondary menus to bench-scoped settings from workup view 04. -->
 <!-- --- -->
 <script lang="ts">
-  import { listBenchSessions, listBenchWorkspaces } from "../api/benches";
+  import {
+    attachBenchWorkspace,
+    detachBenchWorkspace,
+    listBenchSessions,
+    listBenchWorkspaces,
+    updateBench,
+  } from "../api/benches";
   import type { BenchStore } from "../stores/benches";
   import type { Bench, ConversationSummary, WorkspaceAttachment } from "../types";
 
@@ -51,6 +57,17 @@
   let selectedWorkspaces = $state<WorkspaceAttachment[]>([]);
   let selectedConversations = $state<ConversationSummary[]>([]);
   let detailError = $state<string | null>(null);
+  let aboutDraft = $state("");
+  let isSavingAbout = $state(false);
+  let aboutNotice = $state<string | null>(null);
+  let workspacePathDraft = $state("");
+  let workspaceLabelDraft = $state("");
+  let workspaceCanWrite = $state(true);
+  let workspaceIsTrusted = $state(false);
+  let isAttachingWorkspace = $state(false);
+  let workspaceNotice = $state<string | null>(null);
+  let relinkDrafts = $state<Record<string, string>>({});
+  let relinkingWorkspaceId = $state<string | null>(null);
 
   const benches = $derived(benchStore?.benches ?? []);
   const selected = $derived(
@@ -60,6 +77,9 @@
 
   function selectCard(bench: Bench): void {
     selectedId = bench.id;
+    aboutDraft = bench.description ?? "";
+    aboutNotice = null;
+    workspaceNotice = null;
   }
 
   $effect(() => {
@@ -68,8 +88,16 @@
       selectedWorkspaces = [];
       selectedConversations = [];
       detailError = null;
+      aboutDraft = "";
+      aboutNotice = null;
+      workspacePathDraft = "";
+      workspaceLabelDraft = "";
+      workspaceNotice = null;
+      relinkDrafts = {};
+      relinkingWorkspaceId = null;
       return;
     }
+    aboutDraft = selected.description ?? "";
     void loadBenchDetail(benchId);
   });
 
@@ -83,6 +111,9 @@
       if (selected?.id !== benchId) return;
       selectedWorkspaces = workspaces;
       selectedConversations = conversations;
+      relinkDrafts = Object.fromEntries(
+        workspaces.map((workspace) => [workspace.id, relinkDrafts[workspace.id] ?? ""]),
+      );
     } catch (error) {
       selectedWorkspaces = [];
       selectedConversations = [];
@@ -113,15 +144,97 @@
       isCreating = false;
     }
   }
+
+  async function saveBenchAbout(): Promise<void> {
+    if (!selected || !benchStore) return;
+    isSavingAbout = true;
+    detailError = null;
+    aboutNotice = null;
+    try {
+      const updated = await updateBench(selected.id, { description: aboutDraft.trim() });
+      await benchStore.loadBenches();
+      selectedId = updated.id;
+      aboutDraft = updated.description;
+      aboutNotice = "Saved.";
+    } catch (error) {
+      detailError = error instanceof Error ? error.message : "Failed to save bench about text.";
+    } finally {
+      isSavingAbout = false;
+    }
+  }
+
+  function workspacePermissions(): string[] {
+    return workspaceCanWrite ? ["read", "write"] : ["read"];
+  }
+
+  function workspacePermissionLabel(workspace: WorkspaceAttachment): string {
+    if (workspace.permissions.includes("write")) return "read/write";
+    if (workspace.permissions.includes("read")) return "read only";
+    return "no file grants";
+  }
+
+  async function attachWorkspace(event: Event): Promise<void> {
+    event.preventDefault();
+    if (!selected || !workspacePathDraft.trim()) return;
+
+    isAttachingWorkspace = true;
+    detailError = null;
+    workspaceNotice = null;
+    try {
+      await attachBenchWorkspace(selected.id, {
+        path: workspacePathDraft.trim(),
+        label: workspaceLabelDraft.trim() || undefined,
+        permissions: workspacePermissions(),
+        is_trusted: workspaceIsTrusted,
+        set_as_default: selectedWorkspaces.length === 0,
+      });
+      workspacePathDraft = "";
+      workspaceLabelDraft = "";
+      await loadBenchDetail(selected.id);
+      workspaceNotice = "Workspace attached.";
+    } catch (error) {
+      detailError = error instanceof Error ? error.message : "Failed to attach workspace.";
+    } finally {
+      isAttachingWorkspace = false;
+    }
+  }
+
+  function setRelinkDraft(workspaceId: string, value: string): void {
+    relinkDrafts = { ...relinkDrafts, [workspaceId]: value };
+  }
+
+  async function relinkWorkspace(workspace: WorkspaceAttachment): Promise<void> {
+    if (!selected) return;
+    const replacementPath = relinkDrafts[workspace.id]?.trim();
+    if (!replacementPath) return;
+
+    relinkingWorkspaceId = workspace.id;
+    detailError = null;
+    workspaceNotice = null;
+    try {
+      await detachBenchWorkspace(selected.id, workspace.id);
+      await attachBenchWorkspace(selected.id, {
+        path: replacementPath,
+        label: workspace.label,
+        permissions: workspace.permissions,
+        is_trusted: workspace.is_trusted,
+        set_as_default: workspace.is_default,
+      });
+      setRelinkDraft(workspace.id, "");
+      await loadBenchDetail(selected.id);
+      workspaceNotice = "Workspace relinked.";
+    } catch (error) {
+      detailError = error instanceof Error ? error.message : "Failed to relink workspace.";
+    } finally {
+      relinkingWorkspaceId = null;
+    }
+  }
 </script>
 
 <div class="picker">
   <header class="picker-head">
     <p class="eyebrow">Pick a bench</p>
     <h1 class="display">Choose where to work.</h1>
-    <!-- TODO Add folder selection and relink recovery to bench entry -->
-    <!-- Let operators choose or relink the folder a bench/session should work in before opening it, and show missing-folder state instead of relying on backend fallbacks. -->
-    <!-- --- -->
     <p class="lede">
       Each bench is a separate workspace — its own conversations, memory, and
       attached files. Click a card to preview, then open it.
@@ -232,9 +345,6 @@
   </div>
 
   {#if selected}
-    <!-- TODO Add bench about text -->
-    <!-- Persist a short bench blurb so the picker preview can explain what the bench is for. -->
-    <!-- --- -->
     <aside class="bench-detail" aria-label="Bench detail">
       <header class="detail-head">
         <p class="eyebrow">Bench detail</p>
@@ -248,18 +358,118 @@
         <dt>Created</dt>
         <dd class="mono">{selected.created_at || "—"}</dd>
         <dt>About</dt>
-        <dd class="shell">No bench blurb field yet.</dd>
+        <dd>
+          <textarea
+            class="about-input"
+            bind:value={aboutDraft}
+            rows="3"
+            aria-label="Bench about text"
+            placeholder="What is this bench for?"
+          ></textarea>
+          <div class="about-actions">
+            <button
+              type="button"
+              class="save-about"
+              onclick={saveBenchAbout}
+              disabled={isSavingAbout || aboutDraft.trim() === (selected.description ?? "")}
+            >
+              {isSavingAbout ? "Saving..." : "Save about"}
+            </button>
+            {#if aboutNotice}
+              <span class="about-notice">{aboutNotice}</span>
+            {/if}
+          </div>
+        </dd>
         <dt>Workspace</dt>
         <dd>
-          {#if selectedWorkspaces.length > 0}
-            {#each selectedWorkspaces as workspace, index (workspace.id)}
-              <span class="workspace-line">
-                {workspace.label}{index < selectedWorkspaces.length - 1 ? ", " : ""}
-              </span>
-            {/each}
-          {:else}
-            none attached
-          {/if}
+          <div class="workspace-panel">
+            {#if selectedWorkspaces.length > 0}
+              <div class="workspace-list">
+                {#each selectedWorkspaces as workspace (workspace.id)}
+                  <article class:missing={workspace.is_missing} class="workspace-row">
+                    <div class="workspace-main">
+                      <strong>{workspace.label}</strong>
+                      <span class="workspace-path">{workspace.path}</span>
+                      <span class="workspace-meta">
+                        {workspacePermissionLabel(workspace)}
+                        · {workspace.is_trusted ? "trusted" : "approval required"}
+                        {workspace.is_default ? " · default" : ""}
+                      </span>
+                    </div>
+                    {#if workspace.is_missing}
+                      <div class="missing-workspace">
+                        <span class="missing-label">Missing folder</span>
+                        <div class="relink-row">
+                          <input
+                            type="text"
+                            value={relinkDrafts[workspace.id] ?? ""}
+                            placeholder="/new/path/to/folder"
+                            aria-label={`Replacement path for ${workspace.label}`}
+                            oninput={(event) =>
+                              setRelinkDraft(workspace.id, event.currentTarget.value)}
+                          />
+                          <button
+                            type="button"
+                            class="save-about"
+                            onclick={() => relinkWorkspace(workspace)}
+                            disabled={
+                              relinkingWorkspaceId === workspace.id ||
+                              !(relinkDrafts[workspace.id] ?? "").trim()
+                            }
+                          >
+                            {relinkingWorkspaceId === workspace.id ? "Relinking..." : "Relink"}
+                          </button>
+                        </div>
+                      </div>
+                    {/if}
+                  </article>
+                {/each}
+              </div>
+            {:else}
+              <p class="empty-workspace">none attached</p>
+            {/if}
+
+            <form class="workspace-form" onsubmit={attachWorkspace}>
+              <label>
+                <span>Folder path</span>
+                <input
+                  type="text"
+                  bind:value={workspacePathDraft}
+                  placeholder="/home/user/Documents/Code/Repos/Tools/Swage"
+                  autocomplete="off"
+                />
+              </label>
+              <label>
+                <span>Label</span>
+                <input
+                  type="text"
+                  bind:value={workspaceLabelDraft}
+                  placeholder="optional"
+                  autocomplete="off"
+                />
+              </label>
+              <div class="workspace-options">
+                <label>
+                  <input type="checkbox" bind:checked={workspaceCanWrite} />
+                  <span>write access</span>
+                </label>
+                <label>
+                  <input type="checkbox" bind:checked={workspaceIsTrusted} />
+                  <span>trusted</span>
+                </label>
+              </div>
+              <button
+                type="submit"
+                class="save-about"
+                disabled={isAttachingWorkspace || !workspacePathDraft.trim()}
+              >
+                {isAttachingWorkspace ? "Attaching..." : "Attach folder"}
+              </button>
+            </form>
+            {#if workspaceNotice}
+              <p class="about-notice">{workspaceNotice}</p>
+            {/if}
+          </div>
         </dd>
         <dt>Last opened</dt>
         <dd class="mono">{selectedLastOpened ?? "not opened this browser session"}</dd>
@@ -606,14 +816,179 @@
     color: var(--ink);
   }
 
-  /* Muted row for the one remaining bench-detail field the API does not expose. */
-  .detail-grid dd.shell {
-    color: var(--ink-soft);
-    font-style: italic;
+  .workspace-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
 
-  .workspace-line {
-    display: inline;
+  .workspace-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .workspace-row {
+    border: 1px solid var(--ink);
+    padding: 10px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    background: rgba(255, 248, 238, 0.42);
+  }
+
+  .workspace-row.missing {
+    border-style: dashed;
+    background: rgba(240, 106, 58, 0.08);
+  }
+
+  .workspace-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .workspace-main strong {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 18px;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .workspace-path {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .workspace-meta,
+  .missing-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .missing-workspace,
+  .workspace-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .relink-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .workspace-form {
+    border-top: 1px dotted var(--ink);
+    padding-top: 10px;
+  }
+
+  .workspace-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .workspace-form label span {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .workspace-form input[type="text"],
+  .relink-row input {
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 7px 9px;
+    font: inherit;
+    font-size: 12.5px;
+  }
+
+  .workspace-form input:focus,
+  .relink-row input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .workspace-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .workspace-options label {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .empty-workspace {
+    margin: 0;
+  }
+
+  .about-input {
+    width: 100%;
+    min-height: 72px;
+    resize: vertical;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 8px 10px;
+    font: inherit;
+    line-height: 1.45;
+  }
+
+  .about-input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .about-actions {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .save-about {
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--paper);
+    padding: 6px 10px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .save-about:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .about-notice {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
   }
 
   .detail-error {
