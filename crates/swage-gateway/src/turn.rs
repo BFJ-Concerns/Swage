@@ -30,11 +30,15 @@ use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
+use swage_tool::tool::Tool;
 
 use crate::skill::SkillManager;
 use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
 use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
+
+type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
+
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
 // delegation updates, and in-process routing between running agents.
@@ -494,6 +498,52 @@ fn build_permission_config(
     }
 }
 
+fn build_gateway_advertisement_filter(
+    execution_host: Option<&crate::execution_host::RegisteredExecutionHost>,
+    agent_config: &AgentConfig,
+) -> Option<Arc<GatewayToolAdvertisementFilter>> {
+    let host = execution_host?;
+    if host.kind == crate::execution_host::ExecutionHostKind::Local {
+        return None;
+    }
+
+    let capabilities = host.capabilities.clone();
+    let has_shared_token = host.shared_token_secret_ref.is_some();
+    let context_in_host_workspace =
+        agent_config_within_execution_host_workspaces(agent_config, &host.workspace_roots);
+
+    Some(Arc::new(move |tool: &dyn Tool| {
+        has_shared_token
+            && context_in_host_workspace
+            && capabilities
+                .iter()
+                .any(|capability| capability == tool.name())
+    }))
+}
+
+fn agent_config_within_execution_host_workspaces(
+    agent_config: &AgentConfig,
+    workspace_roots: &[PathBuf],
+) -> bool {
+    let canonical_roots = workspace_roots
+        .iter()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+        .collect::<Vec<_>>();
+
+    path_within_execution_host_workspace(&agent_config.working_directory, &canonical_roots)
+        && agent_config
+            .allowed_paths
+            .iter()
+            .all(|path| path_within_execution_host_workspace(path, &canonical_roots))
+}
+
+fn path_within_execution_host_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    workspace_roots
+        .iter()
+        .any(|root| candidate.starts_with(root))
+}
+
 fn expand_require_approval_entries(
     config: &swage_config::ResolvedConfig,
 ) -> Vec<ToolRequireApprovalEntry> {
@@ -748,6 +798,12 @@ pub(crate) async fn build_gateway_dispatcher(
 
     let execution_host =
         crate::execution_host::resolve_execution_host(state, session_metadata).await;
+    let advertisement_filter =
+        build_gateway_advertisement_filter(execution_host.as_ref(), agent_config);
+    let dispatcher = match advertisement_filter {
+        Some(filter) => dispatcher.with_advertisement_filter(filter),
+        None => dispatcher,
+    };
 
     Ok(GatewayDispatcherBuild {
         dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
@@ -2031,16 +2087,17 @@ pub(crate) mod tests {
     use swage_storage::{
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
-            Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, Bench, ChannelLink,
-            EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState,
-            Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
-            NewBackgroundJob, NewBench, NewChannelLink, NewEdgeEvaluation,
-            NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun, NewMaterial, NewMessage,
-            NewNodeExecution, NewNodeRetry, NewScheduledJob, NewScheduledRun, NewSession, NewTeam,
-            NewThread, NewToolCall, NewTopologyRun, NewTurn, NewWorkspaceAttachment, NodeExecution,
-            NodeExecutionState, NodeRetry, ScheduledJob, ScheduledRun, ScheduledRunState, Session,
-            Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-            TurnState, UpdateHeartbeat, UpdateScheduledJob, WorkspaceAttachment,
+            Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, Bench, BenchSlug,
+            ChannelLink, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
+            HeartbeatRunState, Material, MaterialStatus, Message, NewAgentMessage,
+            NewApprovalRequest, NewAttachment, NewBackgroundJob, NewBench, NewChannelLink,
+            NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
+            NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewScheduledJob,
+            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+            NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, ScheduledJob,
+            ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord,
+            TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
+            WorkspaceAttachment,
         },
         store::{
             ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore, ChannelLinkStore,
@@ -2434,6 +2491,7 @@ pub(crate) mod tests {
             let p = Bench {
                 id: Uuid::new_v4(),
                 name: bench.name,
+                description: String::new(),
                 is_default: false,
                 slug: bench.slug,
                 created_at: chrono::Utc::now(),
@@ -2473,8 +2531,9 @@ pub(crate) mod tests {
             let bench = Bench {
                 id: Uuid::new_v4(),
                 name: "default".to_string(),
+                description: String::new(),
                 is_default: true,
-                slug: "default".to_string(),
+                slug: "default".into(),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -2503,7 +2562,8 @@ pub(crate) mod tests {
             &self,
             id: Uuid,
             name: Option<String>,
-            slug: Option<String>,
+            description: Option<String>,
+            slug: Option<BenchSlug>,
         ) -> Result<Bench, StorageError> {
             let mut db = self.db.lock().await;
             match db.benches.get_mut(&id) {
@@ -2514,6 +2574,9 @@ pub(crate) mod tests {
                 Some(p) => {
                     if let Some(n) = name {
                         p.name = n;
+                    }
+                    if let Some(d) = description {
+                        p.description = d;
                     }
                     if let Some(s) = slug {
                         p.slug = s;
@@ -6979,7 +7042,7 @@ pub(crate) mod tests {
             &*storage,
             swage_storage::model::NewBench {
                 name: "Test Config Bench".to_string(),
-                slug: "test-config-resolution-no-bench-toml".to_string(),
+                slug: "test-config-resolution-no-bench-toml".into(),
             },
         )
         .await
@@ -7275,6 +7338,62 @@ pub(crate) mod tests {
         }
     }
 
+    fn registered_remote_host(
+        capabilities: Vec<String>,
+        workspace_roots: Vec<std::path::PathBuf>,
+    ) -> crate::execution_host::RegisteredExecutionHost {
+        crate::execution_host::RegisteredExecutionHost {
+            host_id: "node-a".into(),
+            label: None,
+            kind: crate::execution_host::ExecutionHostKind::AttachedNode,
+            base_url: Some("http://127.0.0.1:32001".into()),
+            shared_token_secret_ref: Some("secret://execution-host/node-a".into()),
+            workspace_root: workspace_roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
+            workspace_roots,
+            capabilities,
+            registered_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn gateway_advertisement_filter_hides_tools_absent_from_remote_host_capabilities() {
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let agent_config = AgentConfig::new("agent")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let host = registered_remote_host(
+            vec!["other_tool".into()],
+            vec![workspace.path().to_path_buf()],
+        );
+        let filter = build_gateway_advertisement_filter(Some(&host), &agent_config)
+            .expect("remote host should produce an advertisement filter");
+
+        assert!(
+            !filter(&WorkingDirReadTool),
+            "tools the selected remote host cannot execute must not be advertised"
+        );
+    }
+
+    #[test]
+    fn gateway_advertisement_filter_keeps_remote_capability_with_matching_workspace() {
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let agent_config = AgentConfig::new("agent")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let host = registered_remote_host(
+            vec!["working_dir_read".into()],
+            vec![workspace.path().to_path_buf()],
+        );
+        let filter = build_gateway_advertisement_filter(Some(&host), &agent_config)
+            .expect("remote host should produce an advertisement filter");
+
+        assert!(
+            filter(&WorkingDirReadTool),
+            "remote-capable tools inside the host workspace should remain advertised"
+        );
+    }
+
     #[tokio::test]
     async fn tool_context_working_directory_is_passed_during_tool_execution() {
         let storage = Arc::new(MockStorage::new());
@@ -7282,7 +7401,7 @@ pub(crate) mod tests {
             &*storage,
             NewBench {
                 name: "my-bench".to_string(),
-                slug: "my-bench".to_string(),
+                slug: "my-bench".into(),
             },
         )
         .await

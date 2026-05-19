@@ -22,6 +22,8 @@ use crate::registry::ToolRegistry;
 use crate::tool::Tool;
 use crate::validation::validate_tool_schema;
 
+type ToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
+
 // ---------------------------------------------------------------------------
 // ToolExecutionStrategy
 // ---------------------------------------------------------------------------
@@ -95,6 +97,13 @@ pub struct ToolDispatcher {
     /// Optional strategy for executing tools at step 6.
     /// When `None`, tools are executed directly via `tool.execute()`.
     execution_strategy: Option<Arc<dyn ToolExecutionStrategy>>,
+    /// Optional caller-supplied effective-state filter for advertised tools.
+    ///
+    /// The dispatcher owns the common permission pipeline, but callers such as
+    /// the gateway may know about additional execution gates. This filter lets
+    /// `tool_definitions` advertise the same broad tool surface that dispatch
+    /// can actually execute for the current turn.
+    advertisement_filter: Option<Arc<ToolAdvertisementFilter>>,
 }
 
 impl ToolDispatcher {
@@ -115,6 +124,7 @@ impl ToolDispatcher {
             leak_detector,
             debug_mode,
             execution_strategy: None,
+            advertisement_filter: None,
         }
     }
 
@@ -143,6 +153,7 @@ impl ToolDispatcher {
             leak_detector: Arc::new(LeakDetector::default()),
             debug_mode: false,
             execution_strategy: None,
+            advertisement_filter: None,
         }
     }
 
@@ -165,6 +176,17 @@ impl ToolDispatcher {
         self
     }
 
+    /// Add an effective-state filter for tool advertisement.
+    ///
+    /// The normal permission resolver still runs first. The filter is for
+    /// broader per-turn gates that are known before model invocation, such as
+    /// remote execution host capabilities. Approval-gated tools should return
+    /// `true` here; approval is an allowed-but-paused state, not a denial.
+    pub fn with_advertisement_filter(mut self, filter: Arc<ToolAdvertisementFilter>) -> Self {
+        self.advertisement_filter = Some(filter);
+        self
+    }
+
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
     /// Only tools that the dispatcher would permit the agent to invoke are
@@ -177,6 +199,11 @@ impl ToolDispatcher {
             .into_iter()
             .filter(|name| check_permission(&self.permissions, name).is_ok())
             .filter_map(|name| self.registry.get(name))
+            .filter(|tool| {
+                self.advertisement_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter(tool.as_ref()))
+            })
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name(),
@@ -572,6 +599,19 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["echo"]);
+    }
+
+    #[test]
+    fn tool_definitions_apply_effective_advertisement_filter_after_permissions() {
+        let dispatcher = make_dispatcher("echo", true, false)
+            .with_advertisement_filter(Arc::new(|tool: &dyn Tool| tool.name() != "echo"));
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert!(
+            definitions.is_empty(),
+            "effective-state filters should hide tools that broader dispatch gates cannot run"
+        );
     }
 
     // -- Happy path ----------------------------------------------------------
