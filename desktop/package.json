@@ -8,8 +8,8 @@
     "test": "npm --prefix ../frontend run build && node ./tests/smoke.mjs"
   },
   "devDependencies": {
-    "electron": "^41.3.0",
-    "playwright": "^1.59.1",
-    "ws": "^8.20.0"
+    "electron": "^42.1.0",
+    "playwright": "^1.60.0",
+    "ws": "^8.20.1"
   }
 }
