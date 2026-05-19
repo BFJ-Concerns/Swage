@@ -1068,13 +1068,9 @@ async fn dispatch_client_message(
                 }
             }
 
-            if let Err(error) = crate::approval_scope::apply_approval_scope(
-                &state,
-                &approval,
-                decision_value,
-                scope,
-            )
-            .await
+            if let Err(error) =
+                crate::approval_scope::apply_approval_scope(state, &approval, decision_value, scope)
+                    .await
             {
                 tracing::error!(%session_id, %approval_uuid, err = %error.0, "approval scope update failed");
                 let _ = tx.send(ServerEvent::Error {
