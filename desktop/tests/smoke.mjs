@@ -396,7 +396,10 @@ async function createConversationAndWaitForReply(page, expectedRuntimeText) {
     .getByPlaceholder("Send a message — Shift+Enter for a new line")
     .fill("Hello from smoke");
   await page.getByRole("button", { name: /send/i }).click();
-  await page.getByText("Desktop shell echoed: Hello from smoke").waitFor();
+  await page
+    .getByLabel("Conversation messages")
+    .getByText("Desktop shell echoed: Hello from smoke")
+    .waitFor();
 
   if (expectedRuntimeText) {
     await page.getByText(expectedRuntimeText, { exact: true }).waitFor();
