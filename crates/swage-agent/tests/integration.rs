@@ -168,6 +168,7 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Bench, Sessi
             bench_id: bench.id,
             agent_id: agent_id.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .expect("session");
@@ -181,6 +182,10 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Bench, Sessi
     .await
     .expect("thread");
     (storage, bench, session, thread)
+}
+
+fn resolved_config(agent_id: &str) -> AgentConfig {
+    AgentConfig::new(agent_id).with_workspace("/tmp/swage-agent-test", vec![])
 }
 
 fn test_request(
@@ -232,7 +237,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
         },
     ]]));
     let agent = AgentBuilder::new()
-        .config(AgentConfig::new("agent-a"))
+        .config(resolved_config("agent-a"))
         .provider(provider)
         .storage(storage.clone())
         .build()
@@ -305,7 +310,7 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
             finish_reason: Some(FinishReason::Stop),
         },
     ]]));
-    let mut config = AgentConfig::new("agent-a");
+    let mut config = resolved_config("agent-a");
     config.compaction_threshold = swage_agent::CompactionThreshold::MessageCount(3);
     let agent = AgentBuilder::new()
         .config(config)
@@ -339,7 +344,7 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
 async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
     let (storage, bench, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(CompactionStreamingProvider::new(vec![]));
-    let mut config = AgentConfig::new("agent-a");
+    let mut config = resolved_config("agent-a");
     config.compaction_threshold = swage_agent::CompactionThreshold::MessageCount(0);
     let agent = AgentBuilder::new()
         .config(config)
@@ -402,7 +407,7 @@ async fn streaming_turn_reuses_existing_pending_turn() {
         },
     ]]));
     let agent = AgentBuilder::new()
-        .config(AgentConfig::new("agent-a"))
+        .config(resolved_config("agent-a"))
         .provider(provider)
         .storage(storage.clone())
         .build()
@@ -457,7 +462,7 @@ async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
     })));
 
     let agent = AgentBuilder::new()
-        .config(AgentConfig::new("agent-a"))
+        .config(resolved_config("agent-a"))
         .provider(provider)
         .storage(storage.clone())
         .hook_registry(Arc::new(hook_registry))
@@ -517,7 +522,7 @@ async fn output_schema_retry_reuses_streaming_runtime() {
             },
         ],
     ]));
-    let config = AgentConfig::new("agent-a").with_output_schema(
+    let config = resolved_config("agent-a").with_output_schema(
         json!({
             "type": "object",
             "properties": {

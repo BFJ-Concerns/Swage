@@ -155,6 +155,7 @@ impl DelegationExecutor {
                 bench_id,
                 agent_id: target_agent_id.clone(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await?;
         let thread = ThreadStore::create(

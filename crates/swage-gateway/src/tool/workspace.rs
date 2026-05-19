@@ -6,6 +6,8 @@
 
 use std::path::{Component, Path, PathBuf};
 use swage_config::ResolvedConfig;
+use swage_core::ToolError;
+use swage_tool::context::ToolContext;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -22,6 +24,90 @@ pub fn resolve_workspace_root(config: &ResolvedConfig) -> PathBuf {
     // (e.g. the configured path doesn't exist), fall back to current dir.
     raw.canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedToolPath {
+    pub root: PathBuf,
+    pub path: PathBuf,
+}
+
+pub fn location_approval_error(
+    tool_name: &str,
+    ctx: &dyn ToolContext,
+    requested: &str,
+    access: &str,
+) -> ToolError {
+    let path = approval_root_for_request(ctx, requested).unwrap_or_else(|| requested.to_string());
+    ToolError::RequiresLocationApproval {
+        name: tool_name.to_string(),
+        path,
+        access: access.to_string(),
+        timeout_secs: None,
+        timeout_policy: None,
+    }
+}
+
+/// Resolves a tool path against the current turn's workspace roots.
+///
+/// Relative paths are interpreted from `ctx.working_directory()`. Absolute
+/// paths are accepted only when they remain inside the working directory or one
+/// of `ctx.allowed_paths()`. Built-in file tools use this resolver as their
+/// runtime permission boundary so location approvals can take effect without
+/// rebuilding a sandbox mount set mid-turn.
+pub fn resolve_context_path(
+    ctx: &dyn ToolContext,
+    requested: &str,
+) -> Result<ResolvedToolPath, String> {
+    let working_directory = canonical_existing_root(ctx.working_directory())?;
+    let allowed_roots = context_roots(ctx)?;
+
+    if Path::new(requested).is_absolute() {
+        let mut last_error = None;
+        for root in allowed_roots {
+            match validate_path(&root, requested) {
+                Ok(path) => return Ok(ResolvedToolPath { root, path }),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        return Err(
+            last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}"))
+        );
+    }
+
+    let path = validate_path(&working_directory, requested)?;
+    Ok(ResolvedToolPath {
+        root: working_directory,
+        path,
+    })
+}
+
+/// Resolves a not-yet-created tool path against the runtime workspace roots.
+pub fn resolve_new_context_path(
+    ctx: &dyn ToolContext,
+    requested: &str,
+) -> Result<ResolvedToolPath, String> {
+    let working_directory = canonical_existing_root(ctx.working_directory())?;
+    let allowed_roots = context_roots(ctx)?;
+
+    if Path::new(requested).is_absolute() {
+        let mut last_error = None;
+        for root in allowed_roots {
+            match validate_new_path(&root, requested) {
+                Ok(path) => return Ok(ResolvedToolPath { root, path }),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        return Err(
+            last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}"))
+        );
+    }
+
+    let path = validate_new_path(&working_directory, requested)?;
+    Ok(ResolvedToolPath {
+        root: working_directory,
+        path,
+    })
 }
 
 /// Validates that `requested` resolves to a path inside `workspace_root`.
@@ -153,6 +239,47 @@ fn normalise_path(path: &Path) -> PathBuf {
     }
 
     stack.iter().collect()
+}
+
+fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
+    let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
+    for path in ctx.allowed_paths() {
+        let root = canonical_existing_root(path)?;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
+fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
+    let root = path
+        .canonicalize()
+        .map_err(|error| format!("Workspace root is unavailable: {}: {error}", path.display()))?;
+    if !root.is_dir() {
+        return Err(format!(
+            "Workspace root is not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(root)
+}
+
+fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<String> {
+    let raw = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        ctx.working_directory().join(requested)
+    };
+    let normalised = normalise_path(&raw);
+    if normalised.is_dir() {
+        normalised.canonicalize().ok()
+    } else {
+        normalised
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+    }
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn resolve_existing_prefix(path: &Path, requested: &str) -> Result<PathBuf, String> {

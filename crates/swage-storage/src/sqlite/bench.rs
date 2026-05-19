@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{Bench, NewBench};
+use crate::model::{Bench, BenchSlug, NewBench};
 use crate::sqlite::SqliteStorage;
 use crate::store::BenchStore;
 
@@ -16,15 +16,17 @@ use crate::store::BenchStore;
 fn row_to_bench(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bench> {
     let id: String = row.get(0)?;
     // Column order:
-    // id(0), name(1), is_default(2), slug(3), created_at(4), updated_at(5)
-    let created: String = row.get(4)?;
-    let updated: String = row.get(5)?;
+    // id(0), name(1), description(2), is_default(3), slug(4), created_at(5), updated_at(6)
+    let created: String = row.get(5)?;
+    let updated: String = row.get(6)?;
+    let slug: String = row.get(4)?;
 
     Ok(Bench {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
-        is_default: row.get::<_, i64>(2)? != 0,
-        slug: row.get(3)?,
+        description: row.get(2)?,
+        is_default: row.get::<_, i64>(3)? != 0,
+        slug: parse_slug(&slug)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
@@ -44,6 +46,12 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+fn parse_slug(s: &str) -> rusqlite::Result<BenchSlug> {
+    BenchSlug::new(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // BenchStore
 // ---------------------------------------------------------------------------
@@ -57,14 +65,15 @@ impl BenchStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO benches (id, name, is_default, slug, created_at, updated_at)
-                 VALUES (?1, ?2, 0, ?3, ?4, ?4)",
-                params![id.to_string(), &bench.name, &bench.slug, &now_str],
+                "INSERT INTO benches (id, name, description, is_default, slug, created_at, updated_at)
+                 VALUES (?1, ?2, '', 0, ?3, ?4, ?4)",
+                params![id.to_string(), &bench.name, bench.slug.as_str(), &now_str],
             )?;
 
             Ok(Bench {
                 id,
                 name: bench.name,
+                description: String::new(),
                 is_default: false,
                 slug: bench.slug,
                 created_at: now,
@@ -77,7 +86,7 @@ impl BenchStore for SqliteStorage {
     async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, name, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_default, slug, created_at, updated_at
                  FROM benches WHERE id = ?1",
                 params![id.to_string()],
                 row_to_bench,
@@ -92,7 +101,7 @@ impl BenchStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_default, slug, created_at, updated_at
                  FROM benches WHERE name = ?1",
                 params![&name],
                 row_to_bench,
@@ -106,7 +115,7 @@ impl BenchStore for SqliteStorage {
         if let Some(bench) = self
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT id, name, is_default, slug, created_at, updated_at
+                    "SELECT id, name, description, is_default, slug, created_at, updated_at
                      FROM benches
                      WHERE is_default = 1",
                     [],
@@ -125,14 +134,15 @@ impl BenchStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO benches (id, name, is_default, slug, created_at, updated_at)
-                 VALUES (?1, 'default', 1, 'default', ?2, ?2)",
+                "INSERT INTO benches (id, name, description, is_default, slug, created_at, updated_at)
+                 VALUES (?1, 'default', '', 1, 'default', ?2, ?2)",
                 params![id.to_string(), &now_str],
             )?;
 
             Ok(Bench {
                 id,
                 name: "default".into(),
+                description: String::new(),
                 is_default: true,
                 slug: "default".into(),
                 created_at: now,
@@ -145,7 +155,7 @@ impl BenchStore for SqliteStorage {
     async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_default, slug, created_at, updated_at
                  FROM benches ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_bench)?;
@@ -158,7 +168,7 @@ impl BenchStore for SqliteStorage {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_default, slug, created_at, updated_at
                  FROM benches WHERE slug = ?1",
                 params![&slug],
                 row_to_bench,
@@ -172,7 +182,8 @@ impl BenchStore for SqliteStorage {
         &self,
         id: Uuid,
         name: Option<String>,
-        slug: Option<String>,
+        description: Option<String>,
+        slug: Option<BenchSlug>,
     ) -> Result<Bench, StorageError> {
         // Pre-flight: verify the bench exists.
         if self.get(id).await?.is_none() {
@@ -191,14 +202,21 @@ impl BenchStore for SqliteStorage {
             conn.execute(
                 "UPDATE benches
                  SET name           = COALESCE(?2, name),
-                     slug           = COALESCE(?3, slug),
-                     updated_at     = ?4
+                     description    = COALESCE(?3, description),
+                     slug           = COALESCE(?4, slug),
+                     updated_at     = ?5
                  WHERE id = ?1",
-                params![id_str, name, slug, now],
+                params![
+                    id_str,
+                    name,
+                    description,
+                    slug.as_ref().map(BenchSlug::as_str),
+                    now
+                ],
             )?;
 
             conn.query_row(
-                "SELECT id, name, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_default, slug, created_at, updated_at
                  FROM benches WHERE id = ?1",
                 params![id_str],
                 row_to_bench,
@@ -322,6 +340,7 @@ mod tests {
             .update(
                 default_bench.id,
                 Some("Operations".into()),
+                None,
                 Some("operations".into()),
             )
             .await
@@ -420,12 +439,38 @@ mod tests {
             .unwrap();
 
         let updated = storage
-            .update(created.id, Some("New Name".into()), Some("new-name".into()))
+            .update(
+                created.id,
+                Some("New Name".into()),
+                None,
+                Some("new-name".into()),
+            )
             .await
             .unwrap();
 
         assert_eq!(updated.name, "New Name");
         assert_eq!(updated.slug, "new-name");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_changes_description() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let created = storage
+            .create(NewBench {
+                name: "Documented".into(),
+                slug: "documented".into(),
+            })
+            .await
+            .unwrap();
+
+        let updated = storage
+            .update(created.id, None, Some("Operations bench".into()), None)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.description, "Operations bench");
+        let fetched = storage.get(created.id).await.unwrap().expect("bench");
+        assert_eq!(fetched.description, "Operations bench");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -439,7 +484,7 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = storage.update(created.id, None, None).await.unwrap();
+        let updated = storage.update(created.id, None, None, None).await.unwrap();
 
         assert_eq!(updated.name, "Stable");
         assert_eq!(updated.slug, "stable");
@@ -449,7 +494,9 @@ mod tests {
     async fn update_errors_for_unknown_id() {
         let storage = SqliteStorage::in_memory().unwrap();
         let nonexistent = Uuid::new_v4();
-        let result = storage.update(nonexistent, Some("X".into()), None).await;
+        let result = storage
+            .update(nonexistent, Some("X".into()), None, None)
+            .await;
         assert!(
             result.is_err(),
             "update on unknown id should return an error"

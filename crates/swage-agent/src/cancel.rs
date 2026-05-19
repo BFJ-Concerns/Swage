@@ -457,6 +457,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: agent_id.to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -561,6 +562,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -702,6 +704,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -714,6 +717,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

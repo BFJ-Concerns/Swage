@@ -101,8 +101,20 @@ function makeStreamingStore(
     get turnError() {
       return null;
     },
+    get turnStartedAt() {
+      return null;
+    },
+    get lastInputTokens() {
+      return null;
+    },
+    get lastOutputTokens() {
+      return null;
+    },
     get activeToolCalls() {
       return activeToolCalls;
+    },
+    get pendingApproval() {
+      return null;
     },
     handleServerEvent: () => {},
     startTurn: () => {},

@@ -422,34 +422,26 @@ fn build_tool_dispatcher(
         Tool, agent_memory::AgentMemoryTool, file_list::FileListTool, file_read::FileReadTool,
         file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool,
         plugin::discover_plugin_tools, python_execute::PythonExecuteTool, shell::ShellTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool, workspace::resolve_workspace_root,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
-    let workspace_root = resolve_workspace_root(config);
     let max_output = config.tools.max_output_bytes;
     let shell_timeout = Duration::from_secs(config.tools.shell_timeout_secs);
 
     let base_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ShellTool {
-            workspace_root: workspace_root.clone(),
             timeout: shell_timeout,
             max_output_bytes: max_output,
         }),
         Arc::new(FileReadTool {
-            workspace_root: workspace_root.clone(),
             max_output_bytes: max_output,
         }),
-        Arc::new(FileWriteTool {
-            workspace_root: workspace_root.clone(),
-        }),
+        Arc::new(FileWriteTool),
         Arc::new(FileSearchTool {
-            workspace_root: workspace_root.clone(),
             max_output_bytes: max_output,
         }),
-        Arc::new(FileListTool {
-            workspace_root: workspace_root.clone(),
-        }),
+        Arc::new(FileListTool),
         Arc::new(WebSearchTool {
             provider_config: config.tools.search.clone(),
         }),
@@ -509,9 +501,8 @@ fn build_tool_dispatcher(
     }
 
     info!(
-        "Registered {} tool(s), workspace root: {}",
-        all_tools.len(),
-        workspace_root.display(),
+        "Registered {} tool(s); workspace roots will be resolved from each tool context",
+        all_tools.len()
     );
 
     crate::tool::ToolDispatcher::allow_all(all_tools)
@@ -726,12 +717,19 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
         );
         let mut config = swage_config::ResolvedConfig::default();
-        config
-            .models
-            .entries
-            .get_mut(&config.models.default)
-            .expect("default model entry")
-            .provider_id = "missing-provider".to_string();
+        // Wire up a default model that points at a provider id absent from
+        // the catalogue — exactly the misconfiguration this test exercises.
+        config.models.default = "default".to_string();
+        config.models.entries.insert(
+            "default".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "missing-provider".to_string(),
+                model_id: "any-model".to_string(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            },
+        );
 
         let provider = create_provider(&config, &secret_manager).await;
         let result = provider
@@ -790,6 +788,7 @@ mod tests {
             model_id: "claude-test".into(),
             aliases: Vec::new(),
             context_window: None,
+            generation_preset: None,
         };
 
         let config = resolve_provider_config(&provider, &model, &secret_manager)

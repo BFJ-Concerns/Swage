@@ -312,6 +312,17 @@ pub enum ToolError {
         timeout_policy: Option<ApprovalTimeoutPolicy>,
     },
 
+    /// Tool requested access to a filesystem location that is not currently
+    /// granted to this turn.
+    #[error("tool {name} requires {access} approval for location {path}")]
+    RequiresLocationApproval {
+        name: String,
+        path: String,
+        access: String,
+        timeout_secs: Option<u64>,
+        timeout_policy: Option<ApprovalTimeoutPolicy>,
+    },
+
     /// Tool requests delegation to another agent.
     ///
     /// Returned by the delegate tool to signal that the agent turn loop should
@@ -355,6 +366,7 @@ impl ToolError {
             ToolError::PermissionDenied { .. } => false,
             // Approval is a distinct control flow — not a transient failure.
             ToolError::RequiresApproval { .. } => false,
+            ToolError::RequiresLocationApproval { .. } => false,
             // Delegation is control flow — the agent handles it.
             ToolError::RequiresDelegation { .. } => false,
         }

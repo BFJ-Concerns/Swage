@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use chrono::{DateTime, Utc};
@@ -13,7 +16,10 @@ use swage_agent::ApprovalDecision;
 use swage_config::ResolvedConfig;
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
-use swage_storage::store::{BenchStore, Storage};
+use swage_storage::{
+    model::{ApprovalKind, ApprovalRequest},
+    store::{BenchStore, Storage},
+};
 
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
@@ -79,6 +85,11 @@ pub struct AppState {
     /// decision. A plain std mutex is sufficient here — the critical section is a
     /// single HashMap operation with no async work under the lock.
     pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
+    /// Runtime-only approval grants created by "allow for this session".
+    ///
+    /// These are intentionally process-local: they affect newly built turn
+    /// dispatchers until the gateway exits, without rewriting user config.
+    pub session_approval_grants: Arc<Mutex<HashSet<ApprovalGrantKey>>>,
     /// Optional lifecycle hooks honoured by gateway-owned execution paths.
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
@@ -93,6 +104,10 @@ pub struct AppState {
     pub secret_manager: Arc<SecretManager>,
     /// Capability surface used to gate attachment and media workflows.
     pub workflow_capabilities: WorkflowCapabilities,
+    /// True after persisted global settings differ from this running process.
+    pub restart_required: Arc<AtomicBool>,
+    /// Whether this process can restart itself via the desktop/runtime wrapper.
+    pub managed_gateway: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +142,7 @@ impl AppState {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
@@ -134,6 +150,58 @@ impl AppState {
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             workflow_capabilities,
+            restart_required: Arc::new(AtomicBool::new(false)),
+            managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+        }
+    }
+
+    pub fn mark_restart_required(&self) {
+        self.restart_required.store(true, Ordering::SeqCst);
+    }
+
+    pub fn restart_required(&self) -> bool {
+        self.restart_required.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalGrantKey {
+    pub bench_id: Option<Uuid>,
+    pub kind: ApprovalKind,
+    pub name: String,
+    pub access: Option<String>,
+}
+
+impl ApprovalGrantKey {
+    pub fn from_approval(approval: &ApprovalRequest) -> Option<Self> {
+        let name = match approval.kind {
+            ApprovalKind::Tool => approval.tool_name.clone(),
+            ApprovalKind::Hook => approval.hook_name.clone(),
+            ApprovalKind::Location => None,
+        }?;
+
+        Some(Self {
+            bench_id: None,
+            kind: approval.kind.clone(),
+            name,
+            access: None,
+        })
+    }
+}
+
+impl ApprovalGrantKey {
+    pub fn location(
+        bench_id: Option<Uuid>,
+        path: impl Into<String>,
+        access: impl Into<String>,
+    ) -> Self {
+        Self {
+            bench_id,
+            kind: ApprovalKind::Location,
+            name: path.into(),
+            access: Some(access.into()),
         }
     }
 }
@@ -170,6 +238,7 @@ mod tests {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
+            session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry: None,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
@@ -179,6 +248,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         }
     }
 
@@ -218,6 +289,7 @@ mod tests {
         sender
             .send(ApprovalDecision {
                 decision: ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Once,
                 reason: None,
             })
             .unwrap();

@@ -33,6 +33,21 @@ use crate::message::{OutboundMessage, TurnRequest};
 // Agent struct
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+pub(crate) struct TurnApprovalScope {
+    approves_remaining_gates: bool,
+}
+
+impl TurnApprovalScope {
+    fn approve_remaining_gates(&mut self) {
+        self.approves_remaining_gates = true;
+    }
+
+    fn should_skip_gate(&self) -> bool {
+        self.approves_remaining_gates
+    }
+}
+
 /// A single-agent runtime that processes messages through an LLM.
 pub struct Agent {
     pub(crate) config: AgentConfig,
@@ -146,6 +161,15 @@ impl Agent {
             .update_state(thread_id, ThreadState::Processing)
             .await?;
 
+        let mut approval_scope = TurnApprovalScope::default();
+        // Permissions disabled at the gateway: pre-approve every gate this
+        // turn. Each gate (tool, location, hook) consults `should_skip_gate`
+        // and falls through to `dispatch_approved`, so a single flip here
+        // quiets all approval prompts without disturbing the framework.
+        if self.config.skip_permissions {
+            approval_scope.approve_remaining_gates();
+        }
+
         let assembled_context = if crate::compaction::exceeds_threshold(
             &request.assembled_context,
             &self.config.compaction_threshold,
@@ -176,10 +200,10 @@ impl Agent {
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            stop_sequences: self.config.stop_sequences.clone(),
+            metadata: self.config.generation_metadata.clone(),
             tool_definitions: self
                 .tool_dispatcher
                 .as_ref()
@@ -277,43 +301,61 @@ impl Agent {
                         context,
                         timeout,
                     }) => {
-                        // Hook-driven approval gate.
-                        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
-                        let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
-                            DEFAULT_APPROVAL_TIMEOUT_SECS,
-                        ));
-                        match self
-                            .handle_approval_gate(
+                        if approval_scope.should_skip_gate() {
+                            // A broader approval decision covers later gates
+                            // within this still-running turn.
+                            self.dispatch_tool_call(
+                                call,
                                 &execution,
-                                swage_storage::model::ApprovalKind::Hook,
-                                Some(call.name.clone()),
-                                Some(call.arguments.clone()),
-                                None,
-                                prompt,
-                                context,
-                                gate_timeout,
-                                swage_core::ApprovalTimeoutPolicy::default(),
+                                &llm_request.messages,
                                 &event_tx,
                                 &cancel_token,
+                                &mut approval_scope,
                             )
                             .await?
-                        {
-                            ApprovalGateOutcome::Approved => {
-                                // Approved — proceed with normal dispatch.
-                                self.dispatch_tool_call(
-                                    call,
+                        } else {
+                            // Hook-driven approval gate.
+                            use crate::approval::{
+                                ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                            };
+                            let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
+                                DEFAULT_APPROVAL_TIMEOUT_SECS,
+                            ));
+                            match self
+                                .handle_approval_gate(
                                     &execution,
-                                    &llm_request.messages,
+                                    swage_storage::model::ApprovalKind::Hook,
+                                    Some(call.name.clone()),
+                                    Some(call.arguments.clone()),
+                                    None,
+                                    prompt,
+                                    context,
+                                    gate_timeout,
+                                    swage_core::ApprovalTimeoutPolicy::default(),
                                     &event_tx,
                                     &cancel_token,
+                                    &mut approval_scope,
                                 )
                                 .await?
-                            }
-                            ApprovalGateOutcome::Rejected { feedback } => {
-                                (feedback, true, "rejected".to_string())
-                            }
-                            ApprovalGateOutcome::Interrupted => {
-                                return Err(AgentError::Cancelled);
+                            {
+                                ApprovalGateOutcome::Approved => {
+                                    // Approved — proceed with normal dispatch.
+                                    self.dispatch_tool_call(
+                                        call,
+                                        &execution,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                    )
+                                    .await?
+                                }
+                                ApprovalGateOutcome::Rejected { feedback } => {
+                                    (feedback, true, "rejected".to_string())
+                                }
+                                ApprovalGateOutcome::Interrupted => {
+                                    return Err(AgentError::Cancelled);
+                                }
                             }
                         }
                     }
@@ -324,6 +366,7 @@ impl Agent {
                             &llm_request.messages,
                             &event_tx,
                             &cancel_token,
+                            &mut approval_scope,
                         )
                         .await?
                     }
@@ -766,6 +809,18 @@ impl Agent {
 // Tool dispatch helper — used by process_turn_streaming
 // ---------------------------------------------------------------------------
 
+fn tool_dispatch_result(
+    result: Result<ToolOutput, swage_core::ToolError>,
+) -> Result<(String, bool, String), AgentError> {
+    match result {
+        Ok(output) => {
+            let result_str = serde_json::to_string(&output.result).unwrap_or_default();
+            Ok((result_str, false, "success".to_string()))
+        }
+        Err(error) => Ok((error.to_string(), true, "error".to_string())),
+    }
+}
+
 impl Agent {
     async fn race_tool_dispatch<F>(
         &self,
@@ -804,6 +859,132 @@ impl Agent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_location_approval_and_dispatch(
+        &self,
+        dispatcher: &ToolDispatcher,
+        call: &ToolCall,
+        execution: &TurnExecutionContext,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
+        ctx: &AgentToolContext,
+        path: String,
+        access: String,
+        timeout_secs: Option<u64>,
+        timeout_policy: Option<swage_core::ApprovalTimeoutPolicy>,
+        skip_tool_permission_gate: bool,
+        dispatch_started_at: std::time::Instant,
+    ) -> Result<(String, bool, String), AgentError> {
+        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+
+        let gate_timeout =
+            std::time::Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS));
+        let policy = timeout_policy.unwrap_or_default();
+        let prompt = format!("Approval required to {access} location: {path}");
+        let context = serde_json::json!({
+            "path": path.clone(),
+            "access": access.clone(),
+            "tool_name": call.name.clone(),
+        });
+        let mut approved_ctx = ctx.clone();
+        approved_ctx
+            .allowed_paths
+            .push(std::path::PathBuf::from(&path));
+
+        if approval_scope.should_skip_gate() {
+            let result = if skip_tool_permission_gate {
+                self.race_tool_dispatch(
+                    dispatcher.dispatch_approved(
+                        &call.name,
+                        call.arguments.clone(),
+                        &approved_ctx,
+                        &self.config.agent_id,
+                    ),
+                    call,
+                    execution,
+                    event_tx,
+                    cancel_token,
+                    dispatch_started_at,
+                )
+                .await?
+            } else {
+                self.race_tool_dispatch(
+                    dispatcher.dispatch(
+                        &call.name,
+                        call.arguments.clone(),
+                        &approved_ctx,
+                        &self.config.agent_id,
+                    ),
+                    call,
+                    execution,
+                    event_tx,
+                    cancel_token,
+                    dispatch_started_at,
+                )
+                .await?
+            };
+            return tool_dispatch_result(result);
+        }
+
+        match self
+            .handle_approval_gate(
+                execution,
+                swage_storage::model::ApprovalKind::Location,
+                Some(call.name.clone()),
+                Some(call.arguments.clone()),
+                None,
+                prompt,
+                Some(context),
+                gate_timeout,
+                policy,
+                event_tx,
+                cancel_token,
+                approval_scope,
+            )
+            .await?
+        {
+            ApprovalGateOutcome::Approved => {
+                let result = if skip_tool_permission_gate {
+                    self.race_tool_dispatch(
+                        dispatcher.dispatch_approved(
+                            &call.name,
+                            call.arguments.clone(),
+                            &approved_ctx,
+                            &self.config.agent_id,
+                        ),
+                        call,
+                        execution,
+                        event_tx,
+                        cancel_token,
+                        dispatch_started_at,
+                    )
+                    .await?
+                } else {
+                    self.race_tool_dispatch(
+                        dispatcher.dispatch(
+                            &call.name,
+                            call.arguments.clone(),
+                            &approved_ctx,
+                            &self.config.agent_id,
+                        ),
+                        call,
+                        execution,
+                        event_tx,
+                        cancel_token,
+                        dispatch_started_at,
+                    )
+                    .await?
+                };
+                tool_dispatch_result(result)
+            }
+            ApprovalGateOutcome::Rejected { feedback } => {
+                Ok((feedback, true, "rejected".to_string()))
+            }
+            ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
+        }
+    }
+
     /// Dispatch a single tool call through the dispatcher, handling the
     /// config-driven approval gate when `RequiresApproval` is returned.
     ///
@@ -817,6 +998,7 @@ impl Agent {
         current_context: &[ChatMessage],
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
     ) -> Result<(String, bool, String), AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
@@ -872,57 +1054,63 @@ impl Agent {
                 timeout_policy,
             }) => {
                 // Config-driven approval gate.
-                use crate::approval::{
-                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                    approval_request_fingerprint,
-                };
+                use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
                 let gate_timeout = std::time::Duration::from_secs(
                     timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
                 );
                 let policy = timeout_policy.unwrap_or_default();
                 let prompt = format!("Approval required to execute tool: {}", call.name);
-                let request_fingerprint = approval_request_fingerprint(&call.arguments);
 
-                match self
-                    .storage
-                    .has_approval_memory(execution.session_id, &call.name, &request_fingerprint)
-                    .await
-                {
-                    Ok(true) => {
-                        match self
-                            .race_tool_dispatch(
-                                dispatcher.dispatch_approved(
-                                    &call.name,
-                                    call.arguments.clone(),
-                                    &ctx,
-                                    &self.config.agent_id,
-                                ),
-                                call,
-                                execution,
-                                event_tx,
-                                cancel_token,
-                                dispatch_started_at,
-                            )
-                            .await?
-                        {
-                            Ok(output) => {
-                                let result_str =
-                                    serde_json::to_string(&output.result).unwrap_or_default();
-                                return Ok((result_str, false, "success".to_string()));
-                            }
-                            Err(e) => {
-                                return Ok((e.to_string(), true, "error".to_string()));
-                            }
+                if approval_scope.should_skip_gate() {
+                    match self
+                        .race_tool_dispatch(
+                            dispatcher.dispatch_approved(
+                                &call.name,
+                                call.arguments.clone(),
+                                &ctx,
+                                &self.config.agent_id,
+                            ),
+                            call,
+                            execution,
+                            event_tx,
+                            cancel_token,
+                            dispatch_started_at,
+                        )
+                        .await?
+                    {
+                        Ok(output) => {
+                            let result_str =
+                                serde_json::to_string(&output.result).unwrap_or_default();
+                            return Ok((result_str, false, "success".to_string()));
                         }
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            session_id = %execution.session_id,
-                            tool = %call.name,
-                            "failed to read approval memory; falling back to explicit approval"
-                        );
+                        Err(swage_core::ToolError::RequiresLocationApproval {
+                            path,
+                            access,
+                            timeout_secs,
+                            timeout_policy,
+                            ..
+                        }) => {
+                            return self
+                                .handle_location_approval_and_dispatch(
+                                    dispatcher,
+                                    call,
+                                    execution,
+                                    event_tx,
+                                    cancel_token,
+                                    approval_scope,
+                                    &ctx,
+                                    path,
+                                    access,
+                                    timeout_secs,
+                                    timeout_policy,
+                                    true,
+                                    dispatch_started_at,
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            return Ok((e.to_string(), true, "error".to_string()));
+                        }
                     }
                 }
 
@@ -939,6 +1127,7 @@ impl Agent {
                         policy,
                         event_tx,
                         cancel_token,
+                        &mut *approval_scope,
                     )
                     .await?
                 {
@@ -965,6 +1154,30 @@ impl Agent {
                                     serde_json::to_string(&output.result).unwrap_or_default();
                                 Ok((result_str, false, "success".to_string()))
                             }
+                            Err(swage_core::ToolError::RequiresLocationApproval {
+                                path,
+                                access,
+                                timeout_secs,
+                                timeout_policy,
+                                ..
+                            }) => {
+                                self.handle_location_approval_and_dispatch(
+                                    dispatcher,
+                                    call,
+                                    execution,
+                                    event_tx,
+                                    cancel_token,
+                                    approval_scope,
+                                    &ctx,
+                                    path,
+                                    access,
+                                    timeout_secs,
+                                    timeout_policy,
+                                    true,
+                                    dispatch_started_at,
+                                )
+                                .await
+                            }
                             Err(e) => Ok((e.to_string(), true, "error".to_string())),
                         }
                     }
@@ -976,6 +1189,30 @@ impl Agent {
                         Err(AgentError::Cancelled)
                     }
                 }
+            }
+            Err(swage_core::ToolError::RequiresLocationApproval {
+                path,
+                access,
+                timeout_secs,
+                timeout_policy,
+                ..
+            }) => {
+                self.handle_location_approval_and_dispatch(
+                    dispatcher,
+                    call,
+                    execution,
+                    event_tx,
+                    cancel_token,
+                    approval_scope,
+                    &ctx,
+                    path,
+                    access,
+                    timeout_secs,
+                    timeout_policy,
+                    false,
+                    dispatch_started_at,
+                )
+                .await
             }
             // --- Tool-as-delegation: the LLM invoked the delegate tool ---
             Err(swage_core::ToolError::RequiresDelegation {
@@ -1151,6 +1388,7 @@ impl Agent {
         timeout_policy: swage_core::ApprovalTimeoutPolicy,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
         use swage_storage::model::{ApprovalState, NewApprovalRequest};
@@ -1254,25 +1492,13 @@ impl Agent {
                 .await
             }
             GateResult::Decision(d) if d.is_approved() => {
-                if kind == swage_storage::model::ApprovalKind::Tool
-                    && let (Some(tool_name), Some(tool_arguments)) =
-                        (tool_name.as_ref(), tool_arguments.as_ref())
-                    && let Ok(Some(thread)) = self.storage.get(execution.thread_id).await
-                {
-                    let request_fingerprint =
-                        crate::approval::approval_request_fingerprint(tool_arguments);
-                    if let Err(error) = self
-                        .storage
-                        .remember_approval(thread.session_id, tool_name, &request_fingerprint)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            session_id = %thread.session_id,
-                            tool = %tool_name,
-                            "failed to persist session approval memory"
-                        );
-                    }
+                if matches!(
+                    d.scope,
+                    crate::approval::ApprovalDecisionScope::Session
+                        | crate::approval::ApprovalDecisionScope::Permanent
+                        | crate::approval::ApprovalDecisionScope::PermanentGlobal
+                ) {
+                    approval_scope.approve_remaining_gates();
                 }
 
                 self.resume_after_approval_decision(

@@ -614,6 +614,64 @@
       Select a bench before editing teams or extensions.
     </section>
   {:else}
+    <!-- TODO Replace builder workup shells with real stage modules -->
+    <!-- Replace the Builder diagram, inspector, and palette shells with real interactive modules. -->
+    <!-- --- -->
+    <!--
+      Workup module shells — the Riso workup (view 05) places three modules
+      on the Builder stage: orchestration flow (real diagram), agent inspector,
+      tool palette. The actual implementation today is the form-driven editor
+      below; these shells preserve the workup vocabulary so the layout reads
+      correctly until the diagrammatic modules exist.
+
+      The Builder stage modules below are non-functional — they describe
+      what the workup specifies but no diagram, inspector, or palette
+      component exists. The form-driven editor that follows is the live
+      authoring surface.
+      Why: workup view 05 expects an interactive flow diagram with an
+      inspector and palette panel; without them, the lens reads as a
+      data-entry form rather than an authoring surface.
+      How to apply: build a flow-diagram component bound to the team
+      topology shared reference (`SharedReferenceStudio` already covers
+      part of this), an agent inspector bound to the selected node, and
+      a tool palette bound to the registry. Promote each to a task once
+      the components are scoped.
+      ---
+    -->
+    <section class="workup-shell-row" aria-label="Builder workup shells">
+      <article class="workup-shell-card" data-tone="span">
+        <header class="workup-shell-head">
+          <h3>Orchestration flow</h3>
+          <span class="workup-shell-tag">SHELL · workup view 05</span>
+        </header>
+        <p class="workup-shell-body">
+          The workup places an editable flow diagram here (agents, edges,
+          triggers). The form-driven team editor below is the live surface
+          today; the diagrammatic component is not yet built.
+        </p>
+      </article>
+      <article class="workup-shell-card">
+        <header class="workup-shell-head">
+          <h3>Agent inspector</h3>
+          <span class="workup-shell-tag">SHELL</span>
+        </header>
+        <p class="workup-shell-body">
+          Inspector for the selected agent (model, scope, prompt, tools).
+          Definitions exist server-side; the inspector module isn't built.
+        </p>
+      </article>
+      <article class="workup-shell-card">
+        <header class="workup-shell-head">
+          <h3>Tool palette</h3>
+          <span class="workup-shell-tag">SHELL</span>
+        </header>
+        <p class="workup-shell-body">
+          Tools available to the selected agent. The tool registry exists; a
+          palette component bound to the active agent does not.
+        </p>
+      </article>
+    </section>
+
     <section class="builder-grid">
       <article class="builder-card conversational-card">
         <div class="card-heading">
@@ -1018,81 +1076,101 @@
 </section>
 
 <style>
+  /*
+    Riso/cyanotype builder deck. Flat ink-bordered panels, mono kickers,
+    Bebas Neue display headings, fluoro accent for primary actions and
+    hot states. No rounded corners, no soft shadows.
+  */
+
   .builder-deck {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 16px;
     padding: 22px;
     min-height: 0;
     overflow: auto;
-    background:
-      radial-gradient(circle at top left, rgba(251, 191, 36, 0.12), transparent 34%),
-      linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(245, 240, 231, 0.96));
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
   }
 
   .builder-hero {
     display: grid;
     grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.95fr);
-    gap: 18px;
+    gap: 16px;
     align-items: stretch;
   }
 
   .hero-copy,
   .status-board,
   .builder-card {
-    border: 1px solid rgba(120, 53, 15, 0.12);
-    border-radius: 24px;
-    background:
-      linear-gradient(180deg, rgba(255, 252, 246, 0.96), rgba(248, 244, 235, 0.94));
-    box-shadow:
-      0 24px 50px rgba(120, 53, 15, 0.06),
-      inset 0 1px 0 rgba(255, 255, 255, 0.78);
+    border: 2px solid var(--ink);
+    background: var(--paper);
   }
 
   .hero-copy {
-    padding: 28px;
+    padding: 24px 26px;
   }
 
   .eyebrow,
-  .section-kicker {
-    margin: 0 0 8px;
-    font-size: 0.78rem;
-    letter-spacing: 0.14em;
+  .section-kicker,
+  .label {
+    margin: 0 0 6px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
-    color: #9a3412;
-    font-weight: 700;
+    color: var(--ink-soft);
   }
 
   .section-kicker {
     margin-bottom: 4px;
   }
 
+  .label {
+    color: var(--ink);
+  }
+
   h1 {
     margin: 0;
-    font-size: clamp(2rem, 3vw, 3rem);
-    line-height: 1.02;
-    color: #1f2937;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(2rem, 3vw, 2.6rem);
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink);
   }
 
   h2,
   h3 {
     margin: 0;
-    color: #111827;
+    font-family: var(--font-display);
+    font-weight: 400;
+    line-height: 1.05;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
   }
+
+  h2 { font-size: 18px; }
+  h3 { font-size: 16px; }
 
   .lede,
   .section-copy {
-    margin: 14px 0 0;
-    max-width: 44rem;
-    font-size: 0.98rem;
-    line-height: 1.6;
-    color: #4b5563;
+    margin: 12px 0 0;
+    max-width: 50ch;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
   }
 
   .status-board {
     display: grid;
-    gap: 12px;
-    padding: 18px;
+    gap: 0;
+    padding: 16px 18px;
   }
 
   .status-card,
@@ -1100,62 +1178,132 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 14px 16px;
-    border-radius: 18px;
-    background: rgba(255, 255, 255, 0.74);
-    border: 1px solid rgba(148, 163, 184, 0.18);
+    padding: 10px 0;
+    border-bottom: 1px dotted var(--rule-soft);
+    background: transparent;
   }
 
-  .label {
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #9a3412;
+  .status-card:last-child,
+  .list-item:last-child {
+    border-bottom: none;
   }
 
   strong {
-    font-size: 1.02rem;
-    color: #111827;
+    font-size: 14px;
+    color: var(--ink);
+    font-weight: 600;
   }
 
   .meta,
   .muted-note,
   .list-item span {
-    color: #6b7280;
-    font-size: 0.86rem;
+    color: var(--ink-soft);
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   .mono,
   code {
-    font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
   }
 
   .empty-state {
-    padding: 28px;
-    border-radius: 24px;
-    border: 1px dashed rgba(120, 53, 15, 0.2);
-    color: #7c2d12;
-    background: rgba(255, 251, 235, 0.72);
+    padding: 22px;
+    border: 2px dashed var(--rule-soft);
+    color: var(--ink-soft);
+    background: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
   }
 
   .builder-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 18px;
+    gap: 16px;
+  }
+
+  /* Non-functional shell row — workup view 05 stage modules above the live
+     form-driven editor. */
+  .workup-shell-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .workup-shell-card {
+    border: 2px dashed var(--accent);
+    background: var(--paper);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .workup-shell-card[data-tone="span"] {
+    grid-column: 1 / -1;
+    border-style: solid;
+  }
+
+  .workup-shell-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 6px;
+  }
+
+  .workup-shell-card h3 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 16px;
+    line-height: 1.05;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .workup-shell-tag {
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .workup-shell-body {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 1100px) {
+    .workup-shell-row {
+      grid-template-columns: 1fr;
+    }
   }
 
   .builder-card {
-    padding: 20px;
+    padding: 18px 20px;
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
 
   .conversational-card {
-    background:
-      radial-gradient(circle at top right, rgba(180, 83, 9, 0.12), transparent 28%),
-      linear-gradient(180deg, rgba(255, 250, 240, 0.98), rgba(248, 242, 232, 0.95));
+    /* No tinted gradient — riso surfaces are flat. The accent rule below
+       distinguishes the conversational card from neighbours. */
+    border-top: 4px solid var(--accent);
   }
 
   .extension-card {
@@ -1167,28 +1315,40 @@
     justify-content: space-between;
     gap: 12px;
     align-items: start;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--ink);
   }
 
   .chip {
     display: inline-flex;
     align-items: center;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: rgba(154, 52, 18, 0.1);
-    color: #7c2d12;
-    font-size: 0.78rem;
-    font-weight: 700;
+    padding: 4px 8px;
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+  }
+
+  .chip.subtle {
+    border-color: var(--rule-soft);
+    color: var(--ink-soft);
   }
 
   label {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    color: #374151;
-    font-size: 0.88rem;
-    font-weight: 600;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 
   input,
@@ -1200,11 +1360,21 @@
   input,
   textarea,
   select {
-    padding: 11px 12px;
-    border-radius: 14px;
-    border: 1px solid rgba(148, 163, 184, 0.32);
-    background: rgba(255, 255, 255, 0.88);
-    color: #111827;
+    padding: 9px 10px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  input:focus,
+  textarea:focus,
+  select:focus {
+    outline: none;
+    background: rgba(240, 106, 58, 0.06);
   }
 
   textarea {
@@ -1215,49 +1385,78 @@
   .inline-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
   }
 
   button {
-    border: 1px solid rgba(154, 52, 18, 0.16);
-    border-radius: 999px;
-    padding: 10px 14px;
-    background: rgba(255, 255, 255, 0.82);
-    color: #6b7280;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 7px 14px;
+    font-family: var(--font-display);
+    font-size: 14px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     cursor: pointer;
-    font-weight: 600;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   button.primary,
   button.activeChoice,
   .approve-btn {
-    background: #1f2937;
-    color: #fffaf0;
-    border-color: #1f2937;
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
+  }
+
+  button.primary:hover:not(:disabled),
+  button.activeChoice:hover:not(:disabled),
+  .approve-btn:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
   }
 
   .feedback {
     margin: 0;
-    padding: 10px 12px;
-    border-radius: 14px;
-    font-size: 0.88rem;
+    padding: 8px 12px;
+    border-left: 3px solid var(--ink);
+    background: rgba(14, 59, 102, 0.06);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 
   .feedback.error {
-    background: rgba(254, 226, 226, 0.8);
-    color: #991b1b;
+    border-left-color: var(--accent);
+    background: rgba(240, 106, 58, 0.1);
+    color: var(--ink-orange);
   }
 
   .feedback.success {
-    background: rgba(220, 252, 231, 0.8);
-    color: #166534;
+    border-left-color: var(--ink);
+    background: rgba(14, 59, 102, 0.08);
+    color: var(--ink);
   }
 
   .item-list,
   .stack {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
 
   .authoring-columns {
@@ -1271,9 +1470,8 @@
     flex-direction: column;
     gap: 10px;
     padding: 14px;
-    border-radius: 18px;
-    background: rgba(120, 53, 15, 0.04);
-    border: 1px solid rgba(120, 53, 15, 0.08);
+    background: rgba(14, 59, 102, 0.04);
+    border: 1px solid var(--rule-soft);
   }
 
   .subheading {
@@ -1281,12 +1479,16 @@
     justify-content: space-between;
     gap: 12px;
     align-items: center;
-    color: #6b7280;
-    font-size: 0.85rem;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 
   .compact-list {
-    max-height: 160px;
+    max-height: 200px;
     overflow: auto;
   }
 
@@ -1297,10 +1499,9 @@
   }
 
   .proposal-summary {
-    padding: 14px 16px;
-    border-radius: 18px;
-    background: rgba(120, 53, 15, 0.05);
-    border: 1px solid rgba(120, 53, 15, 0.12);
+    padding: 12px 14px;
+    background: rgba(240, 106, 58, 0.08);
+    border-left: 3px solid var(--accent);
   }
 
   .list-item {
@@ -1317,20 +1518,22 @@
   }
 
   .reviewed-operation.blocked {
-    border-color: rgba(153, 27, 27, 0.16);
-    background: rgba(254, 242, 242, 0.9);
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    background: rgba(240, 106, 58, 0.06);
   }
 
   .diagnostic-list {
     margin: 10px 0 0;
     padding-left: 18px;
-    color: #7c2d12;
-    font-size: 0.88rem;
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
   }
 
   .diagnostic-list.compact {
     margin-top: 6px;
-    font-size: 0.82rem;
+    font-size: 11px;
   }
 
   .approve-btn {
@@ -1354,19 +1557,19 @@
     justify-content: flex-end;
   }
 
-  .chip.subtle {
-    background: rgba(15, 23, 42, 0.08);
-    color: #334155;
-  }
-
   .operator-shell {
     min-height: 0;
   }
 
   .operator-shell-state {
-    padding: 18px;
-    color: #7c2d12;
-    font-weight: 600;
+    padding: 14px 18px;
+    border: 1px dashed var(--accent);
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
   }
 
   @media (max-width: 1100px) {

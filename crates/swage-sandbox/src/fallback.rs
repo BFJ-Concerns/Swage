@@ -134,6 +134,13 @@ impl Sandbox for FallbackSandbox {
         cmd.arg("--sandbox-mode");
         // Tell the agent where to connect.
         cmd.env("SWAGE_IPC_SOCKET", socket_path.as_os_str());
+        let config_json =
+            serde_json::to_string(&self.config).map_err(|error| SandboxError::SpawnFailed {
+                message: format!(
+                    "failed to serialise sandbox config for child workspace setup: {error}"
+                ),
+            })?;
+        cmd.env("SWAGE_SANDBOX_CONFIG_JSON", config_json);
 
         // Strip provider API keys — the agent gets completions via IPC proxy,
         // never directly from providers.

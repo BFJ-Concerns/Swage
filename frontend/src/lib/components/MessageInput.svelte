@@ -51,26 +51,29 @@
   }
 </script>
 
-<div class="message-input">
+<!--
+  Riso input bar: navy "WRITE" label block on the left, paper-coloured field
+  in the middle, fluoro orange "SEND" block on the right. Translucent orange
+  offset shadow underneath when the bar is active.
+-->
+<div class="message-input" class:disabled={!store}>
+  <span class="input-label" aria-hidden="true">Write</span>
   <textarea
     bind:this={textarea}
     bind:value={content}
-    placeholder="Send a message… (Shift+Enter for a new line)"
+    placeholder="Send a message — Shift+Enter for a new line"
     rows="1"
     onkeydown={handleKeydown}
+    aria-label="Message"
   ></textarea>
 
   {#if store?.isStreaming}
-    <!--
-      Stop replaces Send during streaming. The button is always enabled —
-      stopping a running turn is always a valid action.
-    -->
-    <button class="stop-btn" onclick={() => store!.cancelTurn()}>
-      ■ Stop
+    <button class="action stop" onclick={() => store!.cancelTurn()}>
+      Stop
     </button>
   {:else}
     <button
-      class="send-btn"
+      class="action send"
       onclick={send}
       disabled={!content.trim() || !store}
     >
@@ -81,80 +84,102 @@
 
 <style>
   .message-input {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
-    padding: 12px 16px;
-    border-top: 1px solid #e0e0e0;
-    background: #fff;
-    /* Anchored to the bottom of the conversation area — flex handles this
-       from AppLayout.svelte's column layout. */
+    /* Padding lives on the conversation pane — the bar itself sits flush. */
+    margin: 12px 22px 18px;
+    border: 2px solid var(--ink);
+    background: var(--paper);
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    align-items: stretch;
+    position: relative;
     flex-shrink: 0;
+    isolation: isolate;
   }
 
-  /* -------------------------------------------------------------------------
-     Textarea
-  ------------------------------------------------------------------------- */
+  /* Translucent orange offset — the riso "second pass". */
+  .message-input::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--accent);
+    transform: translate(var(--offset), var(--offset));
+    z-index: -1;
+    mix-blend-mode: var(--shadow-blend);
+    opacity: var(--shadow-opacity);
+    pointer-events: none;
+  }
+
+  .message-input.disabled {
+    opacity: 0.5;
+  }
+
+  /* Left-hand block: navy fill with cream display label. */
+  .input-label {
+    background: var(--ink);
+    color: var(--paper);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-size: 18px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
 
   textarea {
-    flex: 1;
-    resize: none;
-    border: 1px solid #d0d0d0;
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-family: inherit;
-    font-size: 0.9375rem;
-    line-height: 1.5;
-    /* min/max control the auto-grow range. */
-    min-height: 40px;
+    border: none;
+    background: transparent;
+    padding: 12px 14px;
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    min-height: 44px;
     max-height: 160px;
-    /* Scrollbar only appears once content exceeds max-height. */
-    overflow-y: auto;
+    resize: none;
     outline: none;
+    overflow-y: auto;
+  }
+
+  textarea::placeholder {
+    color: rgba(14, 59, 102, 0.5);
+    font-style: italic;
   }
 
   textarea:focus {
-    border-color: #6366f1;
-    box-shadow: 0 0 0 2px rgb(99 102 241 / 0.15);
+    background: rgba(240, 106, 58, 0.04);
   }
 
-  /* -------------------------------------------------------------------------
-     Action buttons
-  ------------------------------------------------------------------------- */
-
-  .send-btn,
-  .stop-btn {
-    padding: 8px 16px;
+  /* Right-hand block: fluoro orange fill with cream display label.
+     Stop replaces Send during streaming — same geometry, redder fill. */
+  .action {
+    padding: 0 18px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: var(--font-display);
+    font-size: 16px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     border: none;
-    border-radius: 8px;
-    font-size: 0.875rem;
-    font-weight: 500;
     cursor: pointer;
-    /* Align with the bottom of the textarea, however tall it grows. */
-    align-self: flex-end;
+    display: flex;
+    align-items: center;
+    border-left: 1px solid rgba(255, 248, 238, 0.2);
   }
 
-  .send-btn {
-    background: #1a1a1a;
-    color: #fff;
+  .action.stop {
+    background: var(--ink);
   }
 
-  .send-btn:hover:not(:disabled) {
-    background: #333;
+  .action.send:hover:not(:disabled),
+  .action.stop:hover {
+    filter: brightness(0.92);
   }
 
-  .send-btn:disabled {
+  .action:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  .stop-btn {
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fca5a5;
-  }
-
-  .stop-btn:hover {
-    background: #fecaca;
   }
 </style>

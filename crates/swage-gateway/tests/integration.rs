@@ -495,6 +495,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             bench_id: bench.id,
             agent_id: "gateway".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();
@@ -524,6 +525,7 @@ async fn startup_recovery_marks_orphaned_turns() {
             bench_id: bench.id,
             agent_id: "gateway".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();

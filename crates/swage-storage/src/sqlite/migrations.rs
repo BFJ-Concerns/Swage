@@ -67,6 +67,23 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "034_one_in_flight_turn_per_thread",
             CREATE_ONE_IN_FLIGHT_TURN_INDEX,
         ),
+        (
+            "035_workspace_attachment_canonical_state",
+            ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE,
+        ),
+        (
+            "036_workspace_attachment_activation",
+            ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
+        ),
+        (
+            "037_execution_host_workspace_roots",
+            ADD_EXECUTION_HOST_WORKSPACE_ROOTS,
+        ),
+        (
+            "038_constrain_message_and_topology_enums",
+            CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS,
+        ),
+        ("039_bench_description", ADD_BENCH_DESCRIPTION),
     ]
 }
 
@@ -91,6 +108,10 @@ const CREATE_EXECUTION_HOST_TABLE: &str = "
         capabilities_json TEXT NOT NULL,
         registered_at     TEXT NOT NULL
     );
+";
+
+const ADD_EXECUTION_HOST_WORKSPACE_ROOTS: &str = "
+    ALTER TABLE execution_hosts ADD COLUMN workspace_roots_json TEXT NOT NULL DEFAULT '[]';
 ";
 
 const CREATE_CHANNEL_LINK_TABLE: &str = "
@@ -794,7 +815,7 @@ const COMPLETE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
         id           TEXT    NOT NULL PRIMARY KEY,
         thread_id    TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        role         TEXT    NOT NULL,
+        role         TEXT    NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
         content      TEXT    NOT NULL,
         position     INTEGER NOT NULL,
         agent_id     TEXT    NOT NULL,
@@ -830,6 +851,35 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_tool_calls_turn_id  ON tool_calls(turn_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id  ON tool_calls(call_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_agent_id ON tool_calls(agent_id);
+";
+
+const ADD_BENCH_DESCRIPTION: &str = "
+    ALTER TABLE benches
+        ADD COLUMN description TEXT NOT NULL DEFAULT '';
+";
+
+const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "
+    ALTER TABLE workspace_attachments
+        ADD COLUMN canonical_path TEXT NOT NULL DEFAULT '';
+    UPDATE workspace_attachments
+        SET canonical_path = path
+        WHERE canonical_path = '';
+    ALTER TABLE workspace_attachments
+        ADD COLUMN is_missing INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_canonical_path
+        ON workspace_attachments(bench_id, canonical_path);
+";
+
+const ADD_WORKSPACE_ATTACHMENT_ACTIVATION: &str = "
+    ALTER TABLE workspace_attachments
+        ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_bench
+        ON workspace_attachments(bench_id)
+        WHERE is_default = 1;
+    ALTER TABLE sessions
+        ADD COLUMN active_workspace_attachment_id TEXT REFERENCES workspace_attachments(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_sessions_active_workspace_attachment_id
+        ON sessions(active_workspace_attachment_id);
 ";
 
 /// Additive migration: validated structured output from schema validation.
@@ -1078,7 +1128,7 @@ const CREATE_TOPOLOGY_TRACE: &str = "
         id               TEXT NOT NULL PRIMARY KEY,
         topology_run_id  TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
         node_id          TEXT NOT NULL,
-        node_kind        TEXT NOT NULL,
+        node_kind        TEXT NOT NULL CHECK (node_kind IN ('llm', 'deterministic', 'continuation')),
         agent_id         TEXT,
         task_name        TEXT,
         state            TEXT NOT NULL DEFAULT 'pending',
@@ -1118,6 +1168,40 @@ const CREATE_TOPOLOGY_TRACE: &str = "
     );
 
     CREATE INDEX IF NOT EXISTS idx_node_retries_execution_id ON node_retries(node_execution_id);
+";
+
+/// Existing SQLite tables cannot gain `CHECK` constraints through `ALTER
+/// TABLE`, so already-migrated databases get equivalent write-boundary
+/// triggers. Fresh databases also receive the triggers; they are redundant
+/// with the table checks but keep enforcement consistent across installs.
+const CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS: &str = "
+    CREATE TRIGGER IF NOT EXISTS trg_messages_role_valid_insert
+        BEFORE INSERT ON messages
+        WHEN NEW.role NOT IN ('system', 'user', 'assistant', 'tool')
+    BEGIN
+        SELECT RAISE(ABORT, 'messages.role must be one of system, user, assistant, tool');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_messages_role_valid_update
+        BEFORE UPDATE OF role ON messages
+        WHEN NEW.role NOT IN ('system', 'user', 'assistant', 'tool')
+    BEGIN
+        SELECT RAISE(ABORT, 'messages.role must be one of system, user, assistant, tool');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_insert
+        BEFORE INSERT ON node_executions
+        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
+    BEGIN
+        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_update
+        BEFORE UPDATE OF node_kind ON node_executions
+        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
+    BEGIN
+        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
+    END;
 ";
 
 /// Session-scoped memory for approved tool requests.
@@ -1660,6 +1744,31 @@ mod tests {
     }
 
     #[test]
+    fn messages_role_rejects_unknown_values() {
+        let conn = open_migrated();
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, thread_id, role, content, position, agent_id, created_at)
+             VALUES (?1, ?2, 'assistant', 'ok', 0, 'agent-test', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), thread_id, now],
+        )
+        .expect("known role should insert");
+
+        let result = conn.execute(
+            "INSERT INTO messages
+             (id, thread_id, role, content, position, agent_id, created_at)
+             VALUES (?1, ?2, 'moderator', 'bad', 1, 'agent-test', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), thread_id, now],
+        );
+        assert!(result.is_err(), "unknown messages.role should fail closed");
+    }
+
+    #[test]
     fn tool_calls_agent_id_column_exists() {
         let conn = open_migrated();
         let col_count: i64 = conn
@@ -1986,6 +2095,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
             .expect("node_retries table should exist after migration");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn node_executions_node_kind_rejects_unknown_values() {
+        let conn = open_migrated();
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let team_id = uuid::Uuid::new_v4().to_string();
+
+        conn.execute(
+            "INSERT INTO teams (id, bench_id, name, description, entry_agent_id, members, created_at, updated_at)
+             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
+            rusqlite::params![team_id, bench_id, now],
+        )
+        .expect("insert team");
+
+        let run_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
+             VALUES (?1, ?2, ?3, 'running', ?4)",
+            rusqlite::params![run_id, team_id, session_id, now],
+        )
+        .expect("insert topology run");
+
+        conn.execute(
+            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
+             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
+        )
+        .expect("known node kind should insert");
+
+        let result = conn.execute(
+            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
+             VALUES (?1, ?2, 'review', 'map_reduce', 'running', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
+        );
+        assert!(
+            result.is_err(),
+            "unknown node_executions.node_kind should fail closed"
+        );
     }
 
     #[test]

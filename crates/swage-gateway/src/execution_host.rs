@@ -70,6 +70,7 @@ pub struct RegisteredExecutionHost {
     pub base_url: Option<String>,
     pub shared_token_secret_ref: Option<String>,
     pub workspace_root: PathBuf,
+    pub workspace_roots: Vec<PathBuf>,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
 }
@@ -86,6 +87,7 @@ pub struct ExecutionHostResponse {
     pub kind: String,
     pub base_url: Option<String>,
     pub workspace_root: String,
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
 }
@@ -104,6 +106,8 @@ pub struct RegisterExecutionHostRequest {
     pub base_url: String,
     pub shared_token_secret_ref: String,
     pub workspace_root: String,
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
@@ -131,20 +135,22 @@ struct TransportBackedHostState {
     shared_token: String,
     dispatcher: Arc<ToolDispatcher>,
     capabilities: Vec<String>,
-    workspace_root: PathBuf,
+    workspace_roots: Vec<PathBuf>,
 }
 
 pub fn make_local_execution_host(
     config: &swage_config::ResolvedConfig,
     dispatcher: &ToolDispatcher,
 ) -> RegisteredExecutionHost {
+    let workspace_root = resolve_workspace_root(config);
     RegisteredExecutionHost {
         host_id: LOCAL_EXECUTION_HOST_ID.to_string(),
         label: Some("Local machine".to_string()),
         kind: ExecutionHostKind::Local,
         base_url: None,
         shared_token_secret_ref: None,
-        workspace_root: resolve_workspace_root(config),
+        workspace_root: workspace_root.clone(),
+        workspace_roots: vec![workspace_root],
         capabilities: dispatcher
             .registry()
             .list()
@@ -165,13 +171,17 @@ pub async fn register_remote_execution_host(
     state: &AppState,
     request: RegisterExecutionHostRequest,
 ) -> Result<RegisteredExecutionHost, swage_core::GatewayError> {
+    let workspace_root = PathBuf::from(&request.workspace_root);
+    let workspace_roots =
+        normalise_workspace_roots(workspace_root.clone(), request.workspace_roots);
     let host = RegisteredExecutionHost {
         host_id: request.host_id,
         label: request.label.clone(),
         kind: ExecutionHostKind::from_str(&request.kind).unwrap_or(ExecutionHostKind::AttachedNode),
         base_url: Some(request.base_url),
         shared_token_secret_ref: Some(request.shared_token_secret_ref),
-        workspace_root: PathBuf::from(request.workspace_root),
+        workspace_root,
+        workspace_roots,
         capabilities: request.capabilities,
         registered_at: Utc::now(),
     };
@@ -185,6 +195,11 @@ pub async fn register_remote_execution_host(
             base_url: host.base_url.clone().unwrap_or_default(),
             shared_token: host.shared_token_secret_ref.clone().unwrap_or_default(),
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: host
+                .workspace_roots
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             capabilities: host.capabilities.clone(),
         })
         .await
@@ -223,7 +238,11 @@ pub async fn restore_registered_execution_hosts(
                     .unwrap_or(ExecutionHostKind::AttachedNode),
                 base_url: Some(host.base_url),
                 shared_token_secret_ref: Some(host.shared_token),
-                workspace_root: PathBuf::from(host.workspace_root),
+                workspace_root: PathBuf::from(&host.workspace_root),
+                workspace_roots: normalise_workspace_roots(
+                    PathBuf::from(&host.workspace_root),
+                    host.workspace_roots,
+                ),
                 capabilities: host.capabilities,
                 registered_at: host.registered_at,
             },
@@ -245,6 +264,11 @@ pub async fn list_execution_hosts(state: &AppState) -> ExecutionHostListResponse
             kind: host.kind.to_string(),
             base_url: host.base_url,
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: host
+                .workspace_roots
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             capabilities: host.capabilities,
             registered_at: host.registered_at,
         })
@@ -333,7 +357,7 @@ pub async fn execute_on_remote_host(
         });
     }
 
-    if !context_within_workspace(ctx, &host.workspace_root) {
+    if !context_within_workspaces(ctx, &host.workspace_roots) {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
@@ -417,21 +441,35 @@ pub async fn execute_on_remote_host(
     Ok(payload.output)
 }
 
-fn context_within_workspace(ctx: &dyn ToolContext, workspace_root: &Path) -> bool {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+fn context_within_workspaces(ctx: &dyn ToolContext, workspace_roots: &[PathBuf]) -> bool {
+    let canonical_roots = workspace_roots
+        .iter()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+        .collect::<Vec<_>>();
 
-    path_within_workspace(ctx.working_directory(), &canonical_root)
+    path_within_any_workspace(ctx.working_directory(), &canonical_roots)
         && ctx
             .allowed_paths()
             .iter()
-            .all(|path| path_within_workspace(path, &canonical_root))
+            .all(|path| path_within_any_workspace(path, &canonical_roots))
 }
 
-fn path_within_workspace(path: &Path, workspace_root: &Path) -> bool {
+fn path_within_any_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
     let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    candidate.starts_with(workspace_root)
+    workspace_roots
+        .iter()
+        .any(|root| candidate.starts_with(root))
+}
+
+fn normalise_workspace_roots(primary: PathBuf, roots: Vec<String>) -> Vec<PathBuf> {
+    let mut normalised = vec![primary];
+    for root in roots {
+        let path = PathBuf::from(root);
+        if !normalised.contains(&path) {
+            normalised.push(path);
+        }
+    }
+    normalised
 }
 
 async fn remote_host_execute_tool(
@@ -456,7 +494,7 @@ async fn remote_host_execute_tool(
         ));
     }
 
-    if !context_within_workspace(&request.context, &state.workspace_root) {
+    if !context_within_workspaces(&request.context, &state.workspace_roots) {
         return Err((
             StatusCode::FORBIDDEN,
             format!(
@@ -504,7 +542,7 @@ pub async fn spawn_transport_backed_host(
         shared_token,
         dispatcher: Arc::new(dispatcher),
         capabilities,
-        workspace_root,
+        workspace_roots: vec![workspace_root],
     };
     let router = Router::new()
         .route("/api/node/execute-tool", post(remote_host_execute_tool))
@@ -578,6 +616,7 @@ mod tests {
                 "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
             ),
             workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
             capabilities: vec!["host_identity".to_string()],
             registered_at: Utc::now(),
         }
@@ -594,7 +633,30 @@ mod tests {
             call_id: None,
             turn_id: None,
         };
-        assert!(!context_within_workspace(&ctx, Path::new("/tmp/workspace")));
+        assert!(!context_within_workspaces(
+            &ctx,
+            &[PathBuf::from("/tmp/workspace")]
+        ));
+    }
+
+    #[test]
+    fn context_within_workspaces_accepts_advertised_attachment_root() {
+        let ctx = MockToolContext {
+            agent_id: "gateway".to_string(),
+            session_id: "session".to_string(),
+            working_directory: PathBuf::from("/tmp/workspace"),
+            allowed_paths: vec![PathBuf::from("/mnt/shared")],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+        assert!(context_within_workspaces(
+            &ctx,
+            &[
+                PathBuf::from("/tmp/workspace"),
+                PathBuf::from("/mnt/shared")
+            ]
+        ));
     }
 
     #[test]
@@ -663,6 +725,7 @@ mod tests {
                 "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
             ),
             workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
             capabilities: vec!["echo".to_string()],
             registered_at: Utc::now(),
         };
@@ -700,6 +763,7 @@ mod tests {
                 "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
             ),
             workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
             capabilities: vec!["shell".to_string()],
             registered_at: Utc::now(),
         };

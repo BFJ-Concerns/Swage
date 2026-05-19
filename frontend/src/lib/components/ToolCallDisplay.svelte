@@ -192,37 +192,33 @@
 </div>
 
 <style>
-  /* ---- Root container ----------------------------------------------------- */
+  /*
+    Tool calls render in the riso "tool" voice: dashed orange ink, mono type,
+    no bubble background. The dashed left rule signals "the system speaks".
+  */
 
   .tool-call {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 0.8125rem;
-    border: 1px solid #e5e7eb;
-    background: #fafafa;
-    /* Compact: takes less vertical space than a message bubble. */
+    padding: 6px 0 6px 12px;
+    border-left: 3px dashed var(--accent);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink-orange);
     max-width: 100%;
   }
 
-  /* State-specific borders and backgrounds. */
-
-  .tool-call.in-progress {
-    border-color: #bfdbfe;
-    background: #eff6ff;
-  }
-
   .tool-call.completed {
-    border-color: #bbf7d0;
-    background: #f0fdf4;
+    color: var(--ink);
+    border-left-color: var(--ink);
+    border-left-style: dashed;
   }
 
-  /* Visually distinct error state — different border and background colour. */
   .tool-call.error {
-    border-color: #fca5a5;
-    background: #fff1f2;
+    /* Solid orange rule signals failure. */
+    border-left-style: solid;
   }
 
   /* ---- Header row --------------------------------------------------------- */
@@ -230,62 +226,57 @@
   .tool-header {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     flex-wrap: wrap;
+    font-weight: 500;
+    letter-spacing: 0.04em;
   }
 
   .tool-name {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    font-weight: 600;
-    color: #374151;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 500;
   }
 
   .args-summary {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    color: #6b7280;
-    /* Truncate long paths or commands rather than wrapping the header. */
+    color: var(--ink-soft);
+    font-weight: 400;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 40ch;
+    max-width: 48ch;
+    /* Args summary inherits the mono family from .tool-call. */
   }
 
   /* ---- Status icons and indicators --------------------------------------- */
 
   .status-icon {
-    font-size: 0.75rem;
+    font-size: 11px;
     flex-shrink: 0;
   }
 
   .status-icon.success {
-    color: #16a34a;
+    color: var(--ink);
   }
 
   .status-icon.error-icon {
-    color: #dc2626;
+    color: var(--accent);
   }
 
-  /* Pulsing dot for in-progress calls — draws the eye without alarming. */
+  /* Pulsing pip for in-progress calls — square not round, in keeping with
+     the rest of the riso vocabulary. */
   .pulse {
     display: inline-block;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #3b82f6;
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
     flex-shrink: 0;
     animation: pulse 1.4s ease-in-out infinite;
   }
 
   @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    50% {
-      opacity: 0.4;
-      transform: scale(0.85);
-    }
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
   }
 
   /* ---- Duration and elapsed counter -------------------------------------- */
@@ -293,8 +284,9 @@
   .duration,
   .elapsed {
     margin-left: auto;
-    color: #9ca3af;
-    font-size: 0.75rem;
+    color: var(--ink-soft);
+    font-size: 10px;
+    letter-spacing: 0.08em;
     flex-shrink: 0;
   }
 
@@ -308,20 +300,19 @@
 
   .result-content {
     margin: 0;
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-    background: rgba(0, 0, 0, 0.04);
-    border-radius: 4px;
-    padding: 6px 8px;
-    /* Cap height so a huge result doesn't swamp the conversation. */
+    background: var(--paper-deep);
+    color: var(--ink);
+    padding: 8px 10px;
+    border-left: 2px solid var(--ink);
     max-height: 300px;
     overflow-y: auto;
   }
 
-  /* Collapsed: the preview pre has no height cap — it shows only a few lines. */
   .result-preview {
     max-height: none;
   }
@@ -329,20 +320,22 @@
   /* ---- Truncation notice -------------------------------------------------- */
 
   .truncated-notice {
-    font-size: 0.7rem;
-    color: #d97706;
-    font-style: italic;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-orange);
   }
 
-  /* ---- Sub-calls (tools invoked within python_execute or similar) --------- */
+  /* ---- Sub-calls ---------------------------------------------------------- */
 
   .sub-calls {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    /* Visual indentation: left border draws the eye to the nesting relationship. */
-    padding-left: 12px;
-    border-left: 2px solid #e5e7eb;
+    padding-left: 14px;
+    border-left: 2px dotted var(--rule-soft);
     margin-top: 4px;
   }
 
@@ -350,17 +343,21 @@
 
   .toggle-btn {
     align-self: flex-start;
-    padding: 1px 8px;
-    font-size: 0.75rem;
-    border-radius: 4px;
-    cursor: pointer;
+    padding: 3px 10px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     background: transparent;
-    border: 1px solid #d1d5db;
-    color: #6b7280;
+    border: 1px solid var(--ink);
+    color: var(--ink);
+    cursor: pointer;
   }
 
   .toggle-btn:hover {
-    background: #f3f4f6;
-    color: #374151;
+    background: var(--ink);
+    color: var(--paper);
   }
 </style>

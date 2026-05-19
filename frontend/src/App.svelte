@@ -13,12 +13,14 @@
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
   import { fetchLensRuntime, updateLensRuntime } from "./lib/api/lens";
+  import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
   import { createStreamingStore } from "./lib/stores/streaming";
   import { createBenchStore } from "./lib/stores/benches";
   import { createRouter } from "./lib/router";
+  import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
 
@@ -59,6 +61,17 @@
     try {
       activeSurface = "conversation";
       await conversationStore.selectConversation(id);
+
+      // A deep-linked conversation may belong to a bench other than the one
+      // currently in scope (or none, on first load). Bring the bench into
+      // scope so the nav, conversation list, and lens runtime reflect it.
+      const conv = conversationStore.activeConversation;
+      if (conv && benchStore.currentBench?.id !== conv.bench_id) {
+        await benchStore.selectBench(conv.bench_id);
+        await conversationStore.loadConversations(conv.bench_id);
+        await refreshLensRuntime("conversation");
+      }
+
       connectionStore.connectTo(id);
       // router is declared below but will be initialised before this is called.
       router.navigate(`/conversations/${id}`);
@@ -130,7 +143,67 @@
   let activeLens = $state<AppLens>("assistant");
   let activeSurface = $state<LensSurface>("conversation");
   let availableLenses = $state<LensDescriptor[]>([]);
+  let currentRoute = $state<Route>(router.currentRoute);
+  let activeModelContextWindow = $state<number | null>(null);
   const desktopRuntime = getDesktopRuntime();
+
+  // ---------------------------------------------------------------------------
+  // Theme — light (riso) / dark (cyanotype) / system
+  // ---------------------------------------------------------------------------
+  // The chosen mode is what the user picked in the toggle; the resolved theme
+  // is what's actually painted (system mode resolves through the OS preference).
+
+  // Type lives in a shared module so child components type their props the
+  // same way without round-tripping through a Svelte instance script.
+  type ThemeMode = import("./lib/theme").ThemeMode;
+  const THEME_KEY = "swage:theme";
+
+  function readStoredTheme(): ThemeMode {
+    if (typeof localStorage === "undefined") return "system";
+    const value = localStorage.getItem(THEME_KEY);
+    return value === "light" || value === "dark" || value === "system" ? value : "system";
+  }
+
+  let themeMode = $state<ThemeMode>(readStoredTheme());
+
+  function resolveTheme(mode: ThemeMode): "theme-riso" | "theme-cyanotype" {
+    if (mode === "light") return "theme-riso";
+    if (mode === "dark") return "theme-cyanotype";
+    // System: follow the OS preference. matchMedia is unavailable in some
+    // headless test environments, so fall back to light.
+    if (typeof window === "undefined" || !window.matchMedia) return "theme-riso";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "theme-cyanotype"
+      : "theme-riso";
+  }
+
+  function applyTheme(mode: ThemeMode): void {
+    const next = resolveTheme(mode);
+    document.body.classList.remove("theme-riso", "theme-cyanotype");
+    document.body.classList.add(next);
+  }
+
+  function setThemeMode(mode: ThemeMode): void {
+    themeMode = mode;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(THEME_KEY, mode);
+    }
+    applyTheme(mode);
+  }
+
+  onMount(() => {
+    applyTheme(themeMode);
+
+    // Re-resolve when the OS theme changes, but only while in "system" mode —
+    // an explicit light/dark choice should stick regardless of OS toggle.
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (themeMode === "system") applyTheme("system");
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  });
 
   function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
     return availableLenses.find((lens) => lens.id === lensId);
@@ -175,6 +248,11 @@
     if (id) connectionStore.connectTo(id);
   }
 
+  function navigate(path: string): void {
+    router.navigate(path);
+    currentRoute = router.currentRoute;
+  }
+
   async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
     const benchId = benchStore.currentBench?.id;
     if (!benchId) return;
@@ -215,6 +293,7 @@
       connectionStore.disconnect();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
+      currentRoute = router.currentRoute;
       // Load the new bench's conversations.
       await conversationStore.loadConversations(benchId);
       await refreshLensRuntime("conversation");
@@ -225,19 +304,23 @@
 
   onMount(async () => {
     try {
-      // 1. Load benches — auto-selects the default bench.
+      // 1. Load the bench list. We deliberately do not auto-select — the user
+      //    lands on the bench picker and chooses where to work.
       await benchStore.loadBenches();
 
-      // 2. Load conversations for the selected bench. router.init() may call
-      //    selectAndNavigate, which relies on the list being populated.
-      const benchId = benchStore.currentBench?.id;
-      if (benchId) {
-        await conversationStore.loadConversations(benchId);
-      }
+      // 2. Fetch global model settings. Bench-scoped data (conversations,
+      //    lens runtime) loads when a bench is opened — either via the
+      //    picker or by a deep-linked conversation that selects its bench.
+      const settings = await fetchSettings().catch((error) => {
+        console.error("Failed to load model settings:", error);
+        return null;
+      });
+      activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
 
-      await refreshLensRuntime();
-
+      // 3. Apply the URL. If it points at a conversation, selectAndNavigate
+      //    will bring its bench into scope along the way.
       await router.init();
+      currentRoute = router.currentRoute;
 
       // Snapshot the not-found flag — set by the router if the URL pointed
       // at a conversation that no longer exists on the server.
@@ -279,7 +362,12 @@
     onRefreshLenses={refreshLensRuntime}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
-  />
+    {themeMode}
+    onSelectTheme={setThemeMode}
+    {activeModelContextWindow}
+    route={currentRoute}
+    onNavigate={navigate}
+    />
 
   {#if notFound}
     <!--
@@ -303,11 +391,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #999;
-    font-size: 0.9rem;
+    background: var(--paper);
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
   }
 
   /* ---- Error screen --------------------------------------------------------- */
+  /*
+    Riso treatment: paper background, navy display heading, mono detail line,
+    flat ink-bordered Retry button.
+  */
 
   .error-screen {
     width: 100%;
@@ -316,38 +414,54 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 12px;
+    padding: 32px;
+    background: var(--paper);
+    color: var(--ink);
   }
 
   .error-heading {
-    font-weight: 600;
-    color: #333;
-    font-size: 1rem;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 32px;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink);
     margin: 0;
   }
 
   .error-detail {
-    color: #666;
-    font-size: 0.875rem;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
     margin: 0;
   }
 
   .error-screen button {
-    margin-top: 12px;
-    padding: 8px 20px;
-    border: 1px solid #d0d0d0;
-    border-radius: 8px;
-    background: #fff;
-    font-size: 0.875rem;
+    margin-top: 8px;
+    padding: 8px 18px;
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-display);
+    font-size: 16px;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     cursor: pointer;
   }
 
   .error-screen button:hover {
-    background: #f5f5f5;
+    background: var(--ink);
+    color: var(--paper);
   }
 
   /* ---- Not-found notice ----------------------------------------------------- */
-  /* Fixed banner at the bottom — visible over the layout without displacing it. */
+  /* Fluoro-orange bar pinned to the bottom — keys with the alert banner. */
 
   .not-found-notice {
     position: fixed;
@@ -358,13 +472,15 @@
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    background: #fff8e1;
-    border: 1px solid #ffe082;
-    border-radius: 8px;
-    font-size: 0.875rem;
-    color: #5d4037;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 0.1);
-    /* Keep above the layout content. */
+    background: var(--accent);
+    color: var(--paper);
+    border: 2px solid var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     z-index: 100;
   }
 
@@ -372,13 +488,14 @@
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 0.8rem;
-    color: #8d6e63;
-    padding: 0;
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-size: 14px;
     line-height: 1;
+    padding: 0;
   }
 
   .dismiss:hover {
-    color: #5d4037;
+    opacity: 0.7;
   }
 </style>

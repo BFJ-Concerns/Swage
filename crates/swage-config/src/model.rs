@@ -47,29 +47,20 @@ pub struct ProviderEndpointConfig {
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
-            protocol: Protocol::Anthropic,
+            protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
-            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+            api_key_env: None,
             base_url: None,
         }
     }
 }
 
 /// Configured LLM providers keyed by provider id.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProviderCatalogConfig {
     pub default: String,
     #[serde(default)]
     pub entries: HashMap<String, ProviderEndpointConfig>,
-}
-
-impl Default for ProviderCatalogConfig {
-    fn default() -> Self {
-        Self {
-            default: "anthropic".to_string(),
-            entries: HashMap::from([("anthropic".to_string(), ProviderEndpointConfig::default())]),
-        }
-    }
 }
 
 impl ProviderCatalogConfig {
@@ -79,7 +70,7 @@ impl ProviderCatalogConfig {
 }
 
 /// Model identity and metadata separate from provider connection settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelEndpointConfig {
     pub provider_id: String,
     pub model_id: String,
@@ -87,34 +78,16 @@ pub struct ModelEndpointConfig {
     pub aliases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-}
-
-impl Default for ModelEndpointConfig {
-    fn default() -> Self {
-        Self {
-            provider_id: "anthropic".to_string(),
-            model_id: "claude-sonnet-4-20250514".to_string(),
-            aliases: Vec::new(),
-            context_window: None,
-        }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_preset: Option<String>,
 }
 
 /// Configured LLM models keyed by app-level model id.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelCatalogConfig {
     pub default: String,
     #[serde(default)]
     pub entries: HashMap<String, ModelEndpointConfig>,
-}
-
-impl Default for ModelCatalogConfig {
-    fn default() -> Self {
-        Self {
-            default: "sonnet".to_string(),
-            entries: HashMap::from([("sonnet".to_string(), ModelEndpointConfig::default())]),
-        }
-    }
 }
 
 impl ModelCatalogConfig {
@@ -124,6 +97,9 @@ impl ModelCatalogConfig {
 }
 
 /// Working directory for the agent workspace.
+// TODO Retire global workspace.path as an agent execution root
+// Replace this process-era default with app-level storage or scratch settings; bench and session execution roots should come from persisted workspace selections instead.
+// ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub path: String,
@@ -551,6 +527,40 @@ impl Default for CommunicationConfig {
     }
 }
 
+/// Named generation parameters that can be applied to provider requests.
+///
+/// Empty presets are invalid at the settings API boundary. The config type is
+/// permissive so older or hand-written files can still be loaded and repaired
+/// through settings rather than making the whole gateway unusable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerationPresetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_sequences: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl GenerationPresetConfig {
+    pub fn is_empty(&self) -> bool {
+        self.max_tokens.is_none()
+            && self.temperature.is_none()
+            && self.stop_sequences.is_empty()
+            && self.metadata.is_none()
+    }
+}
+
+/// Global generation preset catalogue. `None` is intentionally not represented
+/// here; it is a built-in UI/runtime selection meaning provider defaults.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    #[serde(default)]
+    pub presets: HashMap<String, GenerationPresetConfig>,
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -583,8 +593,18 @@ pub struct ResolvedConfig {
     /// Inter-agent communication settings — context transfer policy.
     /// Defaults to no communication (context transfer mode = none).
     pub communication: CommunicationConfig,
+    /// Named generation parameter presets available to model entries.
+    pub generation: GenerationConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+    /// When true, the entire permission and approval system is bypassed:
+    /// tool allow/deny lists are ignored, `require_approval` gates do not
+    /// fire, and out-of-workspace location prompts are auto-approved. The
+    /// framework code stays in place; flipping this back to `false` (or
+    /// removing it from the config) restores normal enforcement. Mirrors
+    /// the spirit of Claude Code's `--dangerously-skip-permissions`.
+    #[serde(default)]
+    pub dangerously_skip_permissions: bool,
 }
 
 impl ResolvedConfig {
@@ -603,13 +623,25 @@ impl ResolvedConfig {
     pub fn default_provider_protocol(&self) -> Protocol {
         self.default_provider_endpoint()
             .map(|provider| provider.protocol.clone())
-            .unwrap_or_default()
+            .unwrap_or(Protocol::OpenAi)
     }
 
     pub fn set_default_model_id(&mut self, model_id: String) {
-        if let Some(model) = self.models.entries.get_mut(&self.models.default) {
-            model.model_id = model_id;
+        if self.models.default.is_empty() {
+            self.models.default = "default".to_string();
         }
+        let model = self
+            .models
+            .entries
+            .entry(self.models.default.clone())
+            .or_insert_with(|| ModelEndpointConfig {
+                provider_id: String::new(),
+                model_id: String::new(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            });
+        model.model_id = model_id;
     }
 }
 
@@ -674,9 +706,11 @@ mod tests {
         let cfg = ResolvedConfig::default();
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.port, 3000);
-        assert_eq!(cfg.providers.default, "anthropic");
-        assert_eq!(cfg.models.default, "sonnet");
-        assert_eq!(cfg.default_model_id(), "claude-sonnet-4-20250514");
+        assert_eq!(cfg.providers.default, "");
+        assert!(cfg.providers.entries.is_empty());
+        assert_eq!(cfg.models.default, "");
+        assert!(cfg.models.entries.is_empty());
+        assert_eq!(cfg.default_model_id(), "");
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.logging.level, LogLevel::Info);

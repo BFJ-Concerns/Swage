@@ -36,6 +36,7 @@ function makeBench(
   return {
     id,
     name,
+    description: "",
     is_default: extra.is_default ?? false,
     slug: extra.slug ?? name.toLowerCase().replace(/\s+/g, "-"),
     created_at: "2026-01-01T00:00:00Z",
@@ -94,7 +95,7 @@ describe("loadBenches", () => {
     expect(store.benches[0].id).toBe("proj-a");
   });
 
-  it("auto-selects the bench flagged as default on load", async () => {
+  it("does not auto-select any bench — the user lands on the picker", async () => {
     const store = createBenchStore();
     vi.mocked(api.listBenches).mockResolvedValueOnce([
       benchA,
@@ -104,8 +105,9 @@ describe("loadBenches", () => {
 
     await store.loadBenches();
 
-    expect(store.currentBench?.name).toBe("default");
-    expect(store.currentBench?.id).toBe("proj-default");
+    // Even when a default bench exists, leave currentBench null so the
+    // bench picker is shown on entry (Progress.md, workup view 04).
+    expect(store.currentBench).toBeNull();
   });
 
   it("leaves currentBench null when no bench is flagged as default", async () => {

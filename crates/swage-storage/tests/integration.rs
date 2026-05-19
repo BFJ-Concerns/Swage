@@ -49,6 +49,7 @@ async fn create_full_hierarchy(
             bench_id,
             agent_id: agent_id.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .expect("create session");
@@ -306,6 +307,7 @@ async fn thread_state_machine_enforced() {
             bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();
@@ -400,6 +402,7 @@ async fn turn_recovery_finds_pending_and_processing() {
             bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();
@@ -523,6 +526,7 @@ async fn messages_ordered_within_thread() {
             bench_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();

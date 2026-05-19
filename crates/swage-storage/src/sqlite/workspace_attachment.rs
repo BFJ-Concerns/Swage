@@ -49,18 +49,21 @@ fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceAttach
     let id: String = row.get(0)?;
     let bench_id: String = row.get(1)?;
     let permissions_json: String = row.get(4)?;
-    let created_at: String = row.get(6)?;
-    let updated_at: String = row.get(7)?;
+    let created_at: String = row.get(9)?;
+    let updated_at: String = row.get(10)?;
 
     Ok(WorkspaceAttachment {
         id: parse_uuid(0, id)?,
         bench_id: parse_uuid(1, bench_id)?,
         label: row.get(2)?,
         path: row.get(3)?,
+        canonical_path: row.get(6)?,
+        is_missing: row.get::<_, i64>(7)? != 0,
+        is_default: row.get::<_, i64>(8)? != 0,
         permissions: parse_permissions(permissions_json)?,
         is_trusted: row.get::<_, i64>(5)? != 0,
-        created_at: parse_dt(6, created_at)?,
-        updated_at: parse_dt(7, updated_at)?,
+        created_at: parse_dt(9, created_at)?,
+        updated_at: parse_dt(10, updated_at)?,
     })
 }
 
@@ -78,8 +81,8 @@ impl WorkspaceAttachmentStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO workspace_attachments (
-                    id, bench_id, label, path, permissions_json, is_trusted, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    id, bench_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?4, 0, 0, ?7, ?7)",
                 params![
                     id.to_string(),
                     workspace.bench_id.to_string(),
@@ -95,7 +98,10 @@ impl WorkspaceAttachmentStore for SqliteStorage {
                 id,
                 bench_id: workspace.bench_id,
                 label: workspace.label,
-                path: workspace.path,
+                path: workspace.path.clone(),
+                canonical_path: workspace.path,
+                is_missing: false,
+                is_default: false,
                 permissions: workspace.permissions,
                 is_trusted: workspace.is_trusted,
                 created_at: now,
@@ -111,7 +117,7 @@ impl WorkspaceAttachmentStore for SqliteStorage {
     ) -> Result<Option<WorkspaceAttachment>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, bench_id, label, path, permissions_json, is_trusted, created_at, updated_at
+                "SELECT id, bench_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
                  FROM workspace_attachments
                  WHERE id = ?1",
                 params![id.to_string()],
@@ -128,7 +134,7 @@ impl WorkspaceAttachmentStore for SqliteStorage {
     ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
         self.with_conn(move |conn| {
             let mut statement = conn.prepare(
-                "SELECT id, bench_id, label, path, permissions_json, is_trusted, created_at, updated_at
+                "SELECT id, bench_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
                  FROM workspace_attachments
                  WHERE bench_id = ?1
                  ORDER BY created_at ASC, label ASC",
@@ -170,6 +176,86 @@ impl WorkspaceAttachmentStore for SqliteStorage {
                 entity: "workspace_attachment".to_string(),
                 id: id.to_string(),
             })
+    }
+
+    async fn set_workspace_missing_state(
+        &self,
+        id: Uuid,
+        is_missing: bool,
+    ) -> Result<WorkspaceAttachment, StorageError> {
+        let affected = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workspace_attachments
+                     SET is_missing = ?2, updated_at = ?3
+                     WHERE id = ?1",
+                    params![
+                        id.to_string(),
+                        if is_missing { 1 } else { 0 },
+                        Utc::now().to_rfc3339()
+                    ],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "workspace_attachment".to_string(),
+                id: id.to_string(),
+            });
+        }
+        self.get_workspace_attachment(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "workspace_attachment".to_string(),
+                id: id.to_string(),
+            })
+    }
+
+    async fn set_bench_default_workspace(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Option<Uuid>,
+    ) -> Result<(), StorageError> {
+        let workspace_id = workspace_id.map(|id| id.to_string());
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            if let Some(ref workspace_id) = workspace_id {
+                let found_bench: Option<String> = tx
+                    .query_row(
+                        "SELECT bench_id FROM workspace_attachments WHERE id = ?1",
+                        params![workspace_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match found_bench {
+                    Some(found_bench) if found_bench == bench_id.to_string() => {}
+                    Some(_) => {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "workspace does not belong to bench".to_string(),
+                        ));
+                    }
+                    None => return Err(rusqlite::Error::QueryReturnedNoRows),
+                }
+            }
+
+            tx.execute(
+                "UPDATE workspace_attachments
+                 SET is_default = 0, updated_at = ?2
+                 WHERE bench_id = ?1",
+                params![bench_id.to_string(), Utc::now().to_rfc3339()],
+            )?;
+            if let Some(workspace_id) = workspace_id {
+                tx.execute(
+                    "UPDATE workspace_attachments
+                     SET is_default = 1, updated_at = ?2
+                     WHERE id = ?1",
+                    params![workspace_id, Utc::now().to_rfc3339()],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn delete_workspace_attachment(&self, id: Uuid) -> Result<bool, StorageError> {

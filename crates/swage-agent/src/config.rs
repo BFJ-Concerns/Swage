@@ -23,10 +23,23 @@ pub struct AgentConfig {
     /// Maximum number of validation retry attempts when output doesn't match
     /// the schema. 0 means no retries — first failure is final.
     pub max_output_retries: u32,
+    /// Whether `working_directory` came from a caller-resolved execution scope.
+    pub has_resolved_workspace: bool,
     /// Working directory exposed to tools executed within this agent.
     pub working_directory: PathBuf,
     /// Gateway-governed allowed path roots for tool execution.
     pub allowed_paths: Vec<PathBuf>,
+    /// Optional generation controls loaded from the selected global preset.
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub generation_metadata: Option<Value>,
+    /// When true, the turn loop pre-approves every gate so tool, location,
+    /// and hook approval prompts are bypassed. Mirrors the gateway-level
+    /// `dangerously_skip_permissions` setting; intended for callers that
+    /// have explicitly opted out of the approval system.
+    #[serde(default)]
+    pub skip_permissions: bool,
 }
 
 impl AgentConfig {
@@ -42,8 +55,14 @@ impl AgentConfig {
             metadata: HashMap::new(),
             output_schema: None,
             max_output_retries: 3,
-            working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            has_resolved_workspace: false,
+            working_directory: PathBuf::new(),
             allowed_paths: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            generation_metadata: None,
+            skip_permissions: false,
         }
     }
 
@@ -65,6 +84,7 @@ impl AgentConfig {
     ) -> Self {
         self.working_directory = working_directory.into();
         self.allowed_paths = allowed_paths;
+        self.has_resolved_workspace = true;
         self
     }
 
@@ -83,6 +103,16 @@ impl AgentConfig {
         if self.max_tool_rounds == 0 {
             return Err(crate::AgentError::InvalidConfig(
                 "max_tool_rounds must be at least 1".into(),
+            ));
+        }
+        if !self.has_resolved_workspace {
+            return Err(crate::AgentError::InvalidConfig(
+                "working_directory must be resolved with AgentConfig::with_workspace".into(),
+            ));
+        }
+        if !self.working_directory.is_absolute() {
+            return Err(crate::AgentError::InvalidConfig(
+                "working_directory must be absolute".into(),
             ));
         }
         // Compile the output schema eagerly to catch malformed schemas at
@@ -110,13 +140,14 @@ mod tests {
             CompactionThreshold::MessageCount(100)
         );
         assert!(config.metadata.is_empty());
-        assert!(config.working_directory.is_absolute());
+        assert!(!config.has_resolved_workspace);
+        assert_eq!(config.working_directory, PathBuf::new());
         assert!(config.allowed_paths.is_empty());
     }
 
     #[test]
     fn validate_accepts_valid_config() {
-        let config = AgentConfig::new("valid-agent");
+        let config = AgentConfig::new("valid-agent").with_workspace("/tmp/swage-test", vec![]);
         assert!(config.validate().is_ok());
     }
 
@@ -125,6 +156,22 @@ mod tests {
         let config = AgentConfig::new("");
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::AgentError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn validate_rejects_unresolved_workspace() {
+        let config = AgentConfig::new("agent");
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::AgentError::InvalidConfig(_)));
+        assert!(err.to_string().contains("working_directory"));
+    }
+
+    #[test]
+    fn validate_rejects_relative_workspace() {
+        let config = AgentConfig::new("agent").with_workspace("relative", vec![]);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::AgentError::InvalidConfig(_)));
+        assert!(err.to_string().contains("absolute"));
     }
 
     #[test]
@@ -163,7 +210,9 @@ mod tests {
             },
             "required": ["result"]
         });
-        let config = AgentConfig::new("test").with_output_schema(schema, 2);
+        let config = AgentConfig::new("test")
+            .with_workspace("/tmp/swage-test", vec![])
+            .with_output_schema(schema, 2);
         assert!(config.validate().is_ok());
     }
 
@@ -173,7 +222,9 @@ mod tests {
         let schema = serde_json::json!({
             "type": "not-a-real-type"
         });
-        let config = AgentConfig::new("test").with_output_schema(schema, 1);
+        let config = AgentConfig::new("test")
+            .with_workspace("/tmp/swage-test", vec![])
+            .with_output_schema(schema, 1);
         let err = config.validate().unwrap_err();
         match &err {
             crate::AgentError::InvalidConfig(msg) => {
@@ -188,8 +239,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_config_without_output_schema() {
-        // Backward compatibility — no schema means no schema validation.
-        let config = AgentConfig::new("test");
+        let config = AgentConfig::new("test").with_workspace("/tmp/swage-test", vec![]);
         assert!(config.validate().is_ok());
     }
 }

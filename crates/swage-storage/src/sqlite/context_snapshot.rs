@@ -127,6 +127,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

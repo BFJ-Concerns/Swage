@@ -9,19 +9,24 @@
 export interface Bench {
   id: string;
   name: string;
+  description: string;
   is_default: boolean;
   slug: string;
   created_at: string;
+  /** Client-side recency marker until the gateway persists last_opened_at. */
+  last_opened_at?: string | null;
 }
 
 /** Request body for creating a new bench. */
 export interface CreateBenchRequest {
   name: string;
+  description?: string;
 }
 
 /** Request body for updating an existing bench. All fields are optional. */
 export interface UpdateBenchRequest {
   name?: string;
+  description?: string;
 }
 
 export interface WorkspaceAttachment {
@@ -29,6 +34,9 @@ export interface WorkspaceAttachment {
   bench_id: string;
   label: string;
   path: string;
+  canonical_path: string;
+  is_missing: boolean;
+  is_default: boolean;
   permissions: string[];
   is_trusted: boolean;
   created_at: string;
@@ -37,12 +45,77 @@ export interface WorkspaceAttachment {
 export interface CreateWorkspaceAttachmentRequest {
   path: string;
   label?: string;
+  set_as_default?: boolean;
+  active_session_id?: string;
   permissions?: string[];
   is_trusted?: boolean;
 }
 
 export interface UpdateWorkspaceTrustRequest {
   is_trusted: boolean;
+}
+
+export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter";
+
+export interface ProviderSettings {
+  protocol: ProviderProtocol;
+  base_url?: string | null;
+  api_key_secret_ref?: string | null;
+  api_key_env?: string | null;
+  has_credential: boolean;
+  api_key?: string;
+}
+
+export interface ModelSettings {
+  provider_id: string;
+  model_id: string;
+  aliases: string[];
+  context_window?: number | null;
+  generation_preset?: string | null;
+}
+
+export interface GenerationPresetConfig {
+  max_tokens?: number | null;
+  temperature?: number | null;
+  stop_sequences: string[];
+  metadata?: unknown | null;
+}
+
+export interface SettingsResponse {
+  providers: Record<string, ProviderSettings>;
+  default_provider: string;
+  models: Record<string, ModelSettings>;
+  default_model: string;
+  generation_presets: Record<string, GenerationPresetConfig>;
+  restart_required: boolean;
+  can_restart: boolean;
+}
+
+export interface SettingsPayload {
+  providers: Record<string, ProviderSettings>;
+  default_provider: string;
+  models: Record<string, ModelSettings>;
+  default_model: string;
+  generation_presets: Record<string, GenerationPresetConfig>;
+}
+
+export interface DiscoveredModel {
+  id: string;
+  name: string;
+  context_window?: number | null;
+}
+
+export interface ModelDiscoveryResponse {
+  provider_id: string;
+  models: DiscoveredModel[];
+}
+
+export type ProviderDiscoveryDraft = Omit<ProviderSettings, "has_credential" | "api_key">;
+
+export interface RestartStatusResponse {
+  restart_required: boolean;
+  can_restart: boolean;
+  guidance: string;
 }
 
 /** Compact conversation entry for the list view. */
@@ -61,6 +134,8 @@ export interface ConversationDetail {
   created_at: string;
   last_activity: string;
   messages: MessageView[];
+  input_tokens?: number | null;
+  output_tokens?: number | null;
 }
 
 /** A single tool call recorded against a message. */

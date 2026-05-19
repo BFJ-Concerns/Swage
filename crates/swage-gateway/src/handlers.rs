@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -86,6 +87,7 @@ use crate::{
         UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
         WorkspaceAttachmentService,
     },
+    settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     shared_reference::{
         CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
         SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
@@ -123,6 +125,57 @@ pub async fn workflow_capabilities(
 /// `GET /api/voice/capabilities` — inspect voice support for the current runtime.
 pub async fn voice_capabilities(State(state): State<AppState>) -> Json<VoiceCapabilitiesResponse> {
     Json(crate::voice::voice_capabilities(&state).await)
+}
+
+pub async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
+    Json(crate::settings::load_settings(&state).await)
+}
+
+pub async fn save_settings(
+    State(state): State<AppState>,
+    Json(request): Json<SaveSettingsRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    Ok(Json(crate::settings::save_settings(&state, request).await?))
+}
+
+pub async fn discover_provider_models(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<crate::settings::ModelDiscoveryResponse>, ApiError> {
+    Ok(Json(
+        crate::settings::discover_models(&state, provider_id, query.get("q").cloned(), None)
+            .await?,
+    ))
+}
+
+pub async fn discover_draft_provider_models(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(provider): Json<SaveProviderSettings>,
+) -> Result<Json<crate::settings::ModelDiscoveryResponse>, ApiError> {
+    Ok(Json(
+        crate::settings::discover_models(
+            &state,
+            provider_id,
+            query.get("q").cloned(),
+            Some(provider),
+        )
+        .await?,
+    ))
+}
+
+pub async fn restart_status(
+    State(state): State<AppState>,
+) -> Json<crate::settings::RestartStatusResponse> {
+    Json(crate::settings::restart_status(&state))
+}
+
+pub async fn restart_gateway(
+    State(state): State<AppState>,
+) -> Result<Json<crate::settings::RestartStatusResponse>, ApiError> {
+    Ok(Json(crate::settings::restart_gateway(&state).await?))
 }
 
 /// `POST /api/voice/transcriptions` — turn uploaded audio bytes into text.
@@ -903,6 +956,11 @@ pub async fn register_execution_host(
             kind: host.kind.to_string(),
             base_url: host.base_url,
             workspace_root: host.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: host
+                .workspace_roots
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             capabilities: host.capabilities,
             registered_at: host.registered_at,
         }),
@@ -1994,6 +2052,7 @@ async fn execute_external_delegate_message(
             agent_config: &target_agent_config,
             session_metadata: None,
             bench_id: Some(bench_id),
+            active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
         },
         "external delegated turn",
@@ -2185,6 +2244,8 @@ impl ApprovalOutcome {
 #[derive(Debug, Deserialize)]
 pub struct ApprovalDecisionRequest {
     pub decision: ApprovalDecisionValue,
+    #[serde(default)]
+    pub scope: swage_agent::approval::ApprovalDecisionScope,
     pub reason: Option<String>,
 }
 
@@ -2205,6 +2266,18 @@ pub async fn decide_approval(
         ApprovalDecisionValue::Rejected => ApprovalOutcome::Rejected,
     };
 
+    let approval = state
+        .storage
+        .get_approval(approval_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("approval", approval_id))?;
+    if approval.state != swage_storage::model::ApprovalState::Pending {
+        return Err(ApiError::conflict(
+            "approval request has already been resolved".to_string(),
+        ));
+    }
+
     // Try to fire the oneshot channel for this approval.
     let sender = state
         .approval_channels
@@ -2222,10 +2295,18 @@ pub async fn decide_approval(
         Some(tx) => {
             let decision = ApprovalDecision {
                 decision: req.decision,
+                scope: req.scope,
                 reason: req.reason.clone(),
             };
 
             if tx.send(decision).is_ok() {
+                crate::approval_scope::apply_approval_scope(
+                    &state,
+                    &approval,
+                    req.decision,
+                    req.scope,
+                )
+                .await?;
                 // Agent received the decision via the live channel.
                 Ok((
                     StatusCode::OK,
@@ -2242,14 +2323,23 @@ pub async fn decide_approval(
                     .update_approval_state(approval_id, new_state, req.reason.as_deref())
                     .await
                 {
-                    Ok(true) => Ok((
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "approval_id": approval_id,
-                            "decision": outcome.as_str(),
-                            "note": "agent timed out; decision persisted to storage",
-                        })),
-                    )),
+                    Ok(true) => {
+                        crate::approval_scope::apply_approval_scope(
+                            &state,
+                            &approval,
+                            req.decision,
+                            req.scope,
+                        )
+                        .await?;
+                        Ok((
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "approval_id": approval_id,
+                                "decision": outcome.as_str(),
+                                "note": "agent timed out; decision persisted to storage",
+                            })),
+                        ))
+                    }
                     Ok(false) => Err(ApiError::conflict(format!(
                         "approval {approval_id} already resolved"
                     ))),
@@ -2284,6 +2374,13 @@ pub async fn decide_approval(
                         .await
                     {
                         Ok(true) => {
+                            crate::approval_scope::apply_approval_scope(
+                                &state,
+                                &a,
+                                req.decision,
+                                req.scope,
+                            )
+                            .await?;
                             let note = match state
                                 .storage
                                 .update_turn_state(
@@ -2487,6 +2584,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -2497,6 +2597,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (build_router(state), storage)
     }
@@ -3562,6 +3664,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3570,6 +3673,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3617,6 +3721,7 @@ mod tests {
                 bench_id: bench_a.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3625,6 +3730,7 @@ mod tests {
                 bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -3633,6 +3739,7 @@ mod tests {
                 bench_id: bench_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -4320,6 +4427,9 @@ def build_topology():
             broadcast: broadcast_tx,
             shutdown_signal: shutdown_signal.clone(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -4330,6 +4440,8 @@ def build_topology():
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }

@@ -5,8 +5,8 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, ChannelLink,
-    ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, BenchSlug,
+    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
     ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit,
     LensPreference, LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelLink,
@@ -42,7 +42,8 @@ pub trait BenchStore: Send + Sync {
         &self,
         id: Uuid,
         name: Option<String>,
-        slug: Option<String>,
+        description: Option<String>,
+        slug: Option<BenchSlug>,
     ) -> Result<Bench, StorageError>;
     /// Delete a bench and cascade its sessions.
     ///
@@ -74,6 +75,18 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         is_trusted: bool,
     ) -> Result<WorkspaceAttachment, StorageError>;
 
+    async fn set_workspace_missing_state(
+        &self,
+        id: Uuid,
+        is_missing: bool,
+    ) -> Result<WorkspaceAttachment, StorageError>;
+
+    async fn set_bench_default_workspace(
+        &self,
+        bench_id: Uuid,
+        workspace_id: Option<Uuid>,
+    ) -> Result<(), StorageError>;
+
     async fn delete_workspace_attachment(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
@@ -90,6 +103,11 @@ pub trait SessionStore: Send + Sync {
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn set_session_active_workspace(
+        &self,
+        id: Uuid,
+        workspace_id: Option<Uuid>,
+    ) -> Result<Session, StorageError>;
     /// Find a session whose metadata records the given external channel origin.
     async fn find_session_by_channel_origin(
         &self,
@@ -957,6 +975,7 @@ mod tests {
             _: Uuid,
             _: Option<String>,
             _: Option<String>,
+            _: Option<BenchSlug>,
         ) -> Result<Bench, StorageError> {
             unimplemented!()
         }
@@ -983,6 +1002,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn set_session_active_workspace(
+            &self,
+            _: Uuid,
+            _: Option<Uuid>,
+        ) -> Result<Session, StorageError> {
             unimplemented!()
         }
         async fn find_session_by_channel_origin(
@@ -1243,6 +1269,22 @@ mod tests {
             _: Uuid,
             _: bool,
         ) -> Result<WorkspaceAttachment, StorageError> {
+            unimplemented!()
+        }
+
+        async fn set_workspace_missing_state(
+            &self,
+            _: Uuid,
+            _: bool,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            unimplemented!()
+        }
+
+        async fn set_bench_default_workspace(
+            &self,
+            _: Uuid,
+            _: Option<Uuid>,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
 

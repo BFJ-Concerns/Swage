@@ -273,11 +273,90 @@ impl FromStr for TurnState {
     }
 }
 
+/// Filesystem-safe identifier for a bench directory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BenchSlug(String);
+
+impl BenchSlug {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty()
+            || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            || !value.chars().any(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(
+                "bench slug must contain ASCII letters or digits and may only use hyphens"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BenchSlug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for BenchSlug {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for BenchSlug {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<std::path::Path> for BenchSlug {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(self.as_str())
+    }
+}
+
+impl FromStr for BenchSlug {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for BenchSlug {
+    fn from(value: &str) -> Self {
+        Self::new(value).expect("bench slug literals must be valid")
+    }
+}
+
+impl From<String> for BenchSlug {
+    fn from(value: String) -> Self {
+        Self::new(value).expect("bench slug strings must be valid")
+    }
+}
+
+impl PartialEq<&str> for BenchSlug {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 /// A bench groups conversations and provides configuration scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bench {
     pub id: Uuid,
     pub name: String,
+    /// Short operator-authored summary shown in bench pickers and previews.
+    pub description: String,
     /// True for the single built-in fallback bench.
     ///
     /// This is structural identity, not presentation. The bench may be
@@ -285,7 +364,7 @@ pub struct Bench {
     pub is_default: bool,
     /// Filesystem-safe identifier used for the bench's directory under
     /// `~/.swage/benches/{slug}/`.
-    pub slug: String,
+    pub slug: BenchSlug,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -297,6 +376,9 @@ pub struct WorkspaceAttachment {
     pub bench_id: Uuid,
     pub label: String,
     pub path: String,
+    pub canonical_path: String,
+    pub is_missing: bool,
+    pub is_default: bool,
     pub permissions: Vec<String>,
     pub is_trusted: bool,
     pub created_at: DateTime<Utc>,
@@ -316,6 +398,7 @@ pub struct Session {
     /// This stays outside prompt and WebSocket transport surfaces unless a
     /// caller explicitly reads it through storage or a higher-level API.
     pub metadata: Option<serde_json::Value>,
+    pub active_workspace_attachment_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -329,6 +412,7 @@ pub struct ExecutionHostRegistration {
     pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
 }
@@ -1343,11 +1427,13 @@ impl FromStr for ApprovalState {
 ///
 /// Determines which of the optional `tool_*` / `hook_name` fields on
 /// `ApprovalRequest` are populated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     /// Approval was triggered by a tool dispatch gate.
     Tool,
+    /// Approval was triggered by a filesystem location gate.
+    Location,
     /// Approval was triggered by a hook outcome.
     Hook,
 }
@@ -1356,6 +1442,7 @@ impl std::fmt::Display for ApprovalKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             ApprovalKind::Tool => "tool",
+            ApprovalKind::Location => "location",
             ApprovalKind::Hook => "hook",
         };
         write!(f, "{s}")
@@ -1368,6 +1455,7 @@ impl FromStr for ApprovalKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "tool" => Ok(ApprovalKind::Tool),
+            "location" => Ok(ApprovalKind::Location),
             "hook" => Ok(ApprovalKind::Hook),
             other => Err(format!("unknown approval kind: {other}")),
         }
@@ -1440,6 +1528,13 @@ impl NewApprovalRequest {
                 if self.hook_name.is_some() {
                     return Err(StorageError::ConstraintViolation(
                         "tool approvals must not set hook_name".into(),
+                    ));
+                }
+            }
+            ApprovalKind::Location => {
+                if self.context.is_none() {
+                    return Err(StorageError::ConstraintViolation(
+                        "location approvals require context".into(),
                     ));
                 }
             }
@@ -1841,7 +1936,7 @@ pub struct NewNodeRetry {
 pub struct NewBench {
     pub name: String,
     /// Filesystem-safe identifier for the bench directory.
-    pub slug: String,
+    pub slug: BenchSlug,
 }
 
 /// Input for attaching a workspace to a bench.
@@ -1862,6 +1957,7 @@ pub struct NewSession {
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
     pub metadata: Option<serde_json::Value>,
+    pub active_workspace_attachment_id: Option<Uuid>,
 }
 
 /// Input for persisting or replacing an execution host registration.
@@ -1873,6 +1969,7 @@ pub struct NewExecutionHostRegistration {
     pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
+    pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
 }
 
@@ -2189,8 +2286,9 @@ mod tests {
         let bench = Bench {
             id,
             name: "my-bench".to_string(),
+            description: String::new(),
             is_default: false,
-            slug: "my-bench".to_string(),
+            slug: "my-bench".into(),
             created_at: now,
             updated_at: now,
         };
@@ -2205,9 +2303,17 @@ mod tests {
     fn new_bench_slug_field_present() {
         let np = NewBench {
             name: "test".to_string(),
-            slug: "test".to_string(),
+            slug: "test".into(),
         };
         assert_eq!(np.slug, "test");
+    }
+
+    #[test]
+    fn bench_slug_rejects_values_without_ascii_alphanumerics() {
+        assert!(BenchSlug::new("").is_err());
+        assert!(BenchSlug::new("!!! --- ___").is_err());
+        assert!(BenchSlug::new("bench/escape").is_err());
+        assert!(BenchSlug::new("bench-01").is_ok());
     }
 
     // --- Topology trace models ---
@@ -2659,6 +2765,7 @@ mod tests {
             bench_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -2676,6 +2783,7 @@ mod tests {
             bench_id: Uuid::new_v4(),
             agent_id: "builder-agent".to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         };
         assert_eq!(ns.agent_id, "builder-agent");
     }

@@ -23,6 +23,7 @@ function makeBench(id: string, name: string) {
   return {
     id,
     name,
+    description: "",
     is_default: name === "default",
     slug: name.toLowerCase().replace(/\s+/g, "-"),
     created_at: "2026-01-01T00:00:00Z",
@@ -37,6 +38,7 @@ function mockBenchStore(overrides: Partial<BenchStore> = {}): BenchStore {
   return {
     get benches() { return [defaultBench, benchA]; },
     get currentBench() { return defaultBench; },
+    get recentBenches() { return []; },
     get isLoading() { return false; },
     loadBenches: vi.fn(),
     selectBench: vi.fn().mockResolvedValue(undefined),

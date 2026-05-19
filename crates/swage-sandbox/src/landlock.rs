@@ -89,6 +89,19 @@ const WRITE_ALLOWED_BASE: u64 = READ_ALLOWED
     | ACCESS_FS_REMOVE_FILE
     | ACCESS_FS_REMOVE_DIR;
 
+/// Read/execute paths required for sandboxed process tools to start ordinary
+/// system commands such as `/bin/sh`. Writes remain limited to the configured
+/// workspace paths and `/tmp`.
+const SYSTEM_EXECUTION_READ_PATHS: &[&str] = &[
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/usr/bin",
+    "/usr/lib",
+    "/usr/lib64",
+    "/etc/ld.so.cache",
+];
+
 // ---------------------------------------------------------------------------
 // Kernel ABI structs
 //
@@ -152,10 +165,15 @@ pub struct LandlockRuleset {
 impl LandlockRuleset {
     /// Builds a ruleset from a [`SandboxConfig`].
     ///
-    /// Automatically adds `working_directory` and `/tmp` to the write-allowed
-    /// set so the agent can function normally in its workspace.
+    /// Automatically adds the system binary/library paths needed to execute
+    /// commands, plus `working_directory` and `/tmp` to the write-allowed set
+    /// so the agent can function normally in its workspace.
     pub fn new(config: &SandboxConfig) -> Self {
-        let read_paths = config.landlock_read_paths.clone();
+        let mut read_paths: Vec<PathBuf> = SYSTEM_EXECUTION_READ_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        read_paths.extend(config.landlock_read_paths.iter().cloned());
 
         // Always allow writes to the working directory and /tmp; append any
         // explicit write paths from the config on top.
@@ -384,13 +402,30 @@ mod tests {
 
         let ruleset = LandlockRuleset::new(&config);
 
-        assert_eq!(ruleset.read_paths.len(), 2);
         assert!(
             ruleset
                 .read_paths
                 .contains(&PathBuf::from("/home/user/bench"))
         );
         assert!(ruleset.read_paths.contains(&PathBuf::from("/usr/lib")));
+    }
+
+    #[test]
+    fn new_auto_includes_system_execution_read_paths() {
+        let config = SandboxConfig::builder()
+            .working_directory("/tmp/agent")
+            .build()
+            .unwrap();
+
+        let ruleset = LandlockRuleset::new(&config);
+
+        for path in SYSTEM_EXECUTION_READ_PATHS {
+            assert!(
+                ruleset.read_paths.contains(&PathBuf::from(path)),
+                "system execution path {path} must be readable; got: {:?}",
+                ruleset.read_paths
+            );
+        }
     }
 
     #[test]
@@ -444,8 +479,9 @@ mod tests {
     }
 
     #[test]
-    fn new_with_no_config_paths_has_two_write_paths() {
-        // Only working_directory and /tmp should be present.
+    fn new_with_no_config_paths_has_default_read_paths_and_two_write_paths() {
+        // The default read paths support command execution; writes remain
+        // limited to the workspace and /tmp.
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
             .build()
@@ -453,7 +489,7 @@ mod tests {
 
         let ruleset = LandlockRuleset::new(&config);
 
-        assert_eq!(ruleset.read_paths.len(), 0);
+        assert_eq!(ruleset.read_paths.len(), SYSTEM_EXECUTION_READ_PATHS.len());
         assert_eq!(ruleset.write_paths.len(), 2);
     }
 

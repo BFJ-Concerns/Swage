@@ -1,7 +1,6 @@
 //! Shell execution tool — runs commands in the bench's workspace directory.
 
 use std::io;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,12 +17,11 @@ use super::workspace::truncate_output;
 // ShellTool
 // ---------------------------------------------------------------------------
 
-/// Executes shell commands in the bench workspace.
+/// Executes shell commands in the turn workspace.
 ///
-/// Commands run via `sh -c` with CWD set to `workspace_root`.
+/// Commands run via `sh -c` with CWD set to the active ToolContext directory.
 /// Output is capped at `max_output_bytes` and killed after `timeout`.
 pub struct ShellTool {
-    pub workspace_root: PathBuf,
     pub timeout: Duration,
     pub max_output_bytes: usize,
 }
@@ -51,7 +49,7 @@ impl Tool for ShellTool {
         })
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Extract the command string from arguments.
         let command = match params.get("command").and_then(|v| v.as_str()) {
             Some(cmd) if !cmd.is_empty() => cmd.to_owned(),
@@ -67,7 +65,7 @@ impl Tool for ShellTool {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(&command)
-            .current_dir(&self.workspace_root)
+            .current_dir(ctx.working_directory())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -226,7 +224,6 @@ mod tests {
 
     fn tool(timeout_secs: u64) -> ShellTool {
         ShellTool {
-            workspace_root: std::env::temp_dir(),
             timeout: Duration::from_secs(timeout_secs),
             max_output_bytes: 1024 * 1024, // 1 MiB default
         }
@@ -279,7 +276,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_kills_process_and_returns_error() {
         let t = ShellTool {
-            workspace_root: std::env::temp_dir(),
             // Very short timeout — the sleep is 10s, so this should fire.
             timeout: Duration::from_millis(200),
             max_output_bytes: 1024 * 1024,
@@ -296,7 +292,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn large_output_truncated() {
         let t = ShellTool {
-            workspace_root: std::env::temp_dir(),
             timeout: Duration::from_secs(5),
             // Small cap to trigger truncation.
             max_output_bytes: 10,
@@ -322,7 +317,6 @@ mod tests {
         let mut ctx = MockToolContext::new("agent-test", "sess-test");
         ctx.working_directory = dir.path().to_path_buf();
         let t = ShellTool {
-            workspace_root: dir.path().to_path_buf(),
             timeout: Duration::from_secs(5),
             max_output_bytes: 1024 * 1024,
         };

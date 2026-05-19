@@ -80,6 +80,10 @@ impl Tool for AgentMemoryTool {
         })
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let operation =
             params["operation"]
@@ -524,6 +528,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
@@ -647,6 +652,7 @@ mod tests {
                 bench_id: bench.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             })
             .await
             .unwrap();

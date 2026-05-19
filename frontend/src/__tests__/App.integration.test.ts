@@ -32,6 +32,7 @@ import type {
   OperatorOverview,
   Bench,
   ServerEvent,
+  WorkspaceAttachment,
 } from "../lib/types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -77,7 +78,12 @@ const websocketHarness = vi.hoisted(() => {
 vi.mock("../lib/api/benches", () => ({
   listBenches: vi.fn(),
   createBench: vi.fn(),
+  updateBench: vi.fn(),
   deleteBench: vi.fn(),
+  listBenchWorkspaces: vi.fn(),
+  attachBenchWorkspace: vi.fn(),
+  detachBenchWorkspace: vi.fn(),
+  listBenchSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/conversations", () => ({
@@ -127,8 +133,27 @@ function makeBench(overrides: Partial<Bench> = {}): Bench {
   return {
     id: "proj-default",
     name: "default",
+    description: "",
     slug: "default",
     is_default: true,
+    created_at: "2026-04-07T12:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeWorkspaceAttachment(
+  overrides: Partial<WorkspaceAttachment> = {},
+): WorkspaceAttachment {
+  return {
+    id: "workspace-1",
+    bench_id: "proj-default",
+    label: "Codebase",
+    path: "/missing/codebase",
+    canonical_path: "/missing/codebase",
+    is_missing: false,
+    is_default: true,
+    permissions: ["read", "write"],
+    is_trusted: true,
     created_at: "2026-04-07T12:00:00Z",
     ...overrides,
   };
@@ -243,6 +268,18 @@ function makeLensRuntime(
         prominent_team_ids: ["workspace-core"],
         source_kind: "built_in",
       },
+      {
+        // Operator-led lens — the new shell reaches the operator surface by
+        // selecting a lens whose default_surface is "operator", rather than
+        // by switching surface tabs within a lens.
+        id: "operator",
+        title: "Operator lens",
+        summary: "Operator-first view",
+        default_surface: "operator",
+        ui_modules: ["operator", "conversation"],
+        prominent_team_ids: [],
+        source_kind: "built_in",
+      },
     ],
   };
 }
@@ -270,6 +307,24 @@ function setPath(path: string): void {
   window.history.replaceState(null, "", path);
 }
 
+/**
+ * Open a bench from the picker. Swage now lands on the bench picker on entry
+ * (Progress.md, workup view 04), so tests that need a bench open must go
+ * through it. Double-clicking a card triggers `openBench` in BenchPicker.
+ */
+async function openBenchFromPicker(name: string): Promise<void> {
+  const card = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+  ).find((el) => el.textContent?.includes(name));
+
+  if (!card) {
+    throw new Error(`Bench card with name "${name}" not found in picker`);
+  }
+
+  flushSync(() => card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await settleUi();
+}
+
 describe("App", () => {
   let component: MountedComponent | undefined;
 
@@ -286,6 +341,11 @@ describe("App", () => {
     vi.mocked(materialsApi.listBenchMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
+    // BenchPicker fetches workspace/session detail on card selection — return
+    // empty arrays by default so the picker renders without errors. Individual
+    // tests can override these mocks if they exercise the detail panel.
+    vi.mocked(benchesApi.listBenchWorkspaces).mockResolvedValue([]);
+    vi.mocked(benchesApi.listBenchSessions).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -361,9 +421,15 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // The app lands on the bench picker — open the default bench so the
+    // top bar (which holds the desktop shell stamp) renders.
+    await openBenchFromPicker("default");
 
-    expect(document.body.textContent).toContain("Desktop shell");
-    expect(document.body.textContent).toContain("Managed gateway");
+    // The riso shell condenses runtime context into a top-bar "stamp": the
+    // managed/remote token replaces the older verbose "Desktop shell" panel.
+    const stamp = document.querySelector(".topbar .stamp");
+    expect(stamp).not.toBeNull();
+    expect(stamp!.textContent).toContain("MANAGED");
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
@@ -381,6 +447,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so ConversationList (and its "New" button) renders.
+    await openBenchFromPicker(defaultBench.name);
 
     const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
@@ -424,7 +492,7 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector(".send-btn") as HTMLButtonElement | null;
+    const sendButton = document.querySelector(".action.send") as HTMLButtonElement | null;
     expect(sendButton).not.toBeNull();
 
     flushSync(() => sendButton!.click());
@@ -435,7 +503,7 @@ describe("App", () => {
       content: "Hello from the app",
     });
     expect(document.querySelector(".message-display")?.textContent).toContain("Hello from the app");
-    expect(document.querySelector(".stop-btn")).not.toBeNull();
+    expect(document.querySelector(".action.stop")).not.toBeNull();
 
     websocketHarness.fireEvent({ type: "token", content: "Streamed " });
     websocketHarness.fireEvent({ type: "token", content: "reply." });
@@ -449,7 +517,7 @@ describe("App", () => {
     });
     await settleUi();
 
-    expect(document.querySelector(".stop-btn")).toBeNull();
+    expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
@@ -458,22 +526,32 @@ describe("App", () => {
 
     vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
+    );
+    // Override the default beforeEach mock (which returns "builder") so
+    // selecting the Operator lens lands us in operator mode.
+    vi.mocked(lensApi.updateLensRuntime).mockResolvedValueOnce(
+      makeLensRuntime("operator"),
     );
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so the lens tabs render in the top bar.
+    await openBenchFromPicker(defaultBench.name);
 
-    const operatorButton = Array.from(
-      document.querySelectorAll(".toggle-btn"),
-    ).find((button) => button.textContent?.includes("Operator")) as
+    // Lens tabs sit in the top bar with class .lens. We look for the lens
+    // whose title resolves to "Operator" (after stripping the trailing "lens"
+    // word in AppLayout).
+    const operatorLens = Array.from(
+      document.querySelectorAll(".topbar .lens"),
+    ).find((button) => button.textContent?.toLowerCase().includes("operator")) as
       | HTMLButtonElement
       | undefined;
 
-    expect(operatorButton).toBeDefined();
+    expect(operatorLens).toBeDefined();
 
-    flushSync(() => operatorButton!.click());
+    flushSync(() => operatorLens!.click());
     await waitForText("Live control surface for the running gateway");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
@@ -497,60 +575,83 @@ describe("App", () => {
     );
 
     component = mount(App, { target: document.body });
+    await settleUi();
+    // Open the bench so the builder lens runtime is fetched and the deck
+    // gets placed on the stage.
+    await openBenchFromPicker(defaultBench.name);
     await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
+    // Bench name still surfaces in the bench head.
     expect(document.body.textContent).toContain("Workbench");
-    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(1);
+    // Operator overview is no longer pre-fetched on mount — the rail that
+    // displayed it was dropped. The operator lens loads its own data.
   });
 
-  it("keeps materials, shared references, and operator pulse visible in the workbench rail", async () => {
+  it("shows missing bench workspaces and relinks them before opening", async () => {
     const defaultBench = makeBench({ name: "Workbench" });
+    const missingWorkspace = makeWorkspaceAttachment({ is_missing: true });
+    const relinkedWorkspace = makeWorkspaceAttachment({
+      path: "/srv/workbench",
+      canonical_path: "/srv/workbench",
+      is_missing: false,
+    });
 
     vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-rail", message_preview: "Live thread" }),
-    ]);
-    vi.mocked(materialsApi.listBenchMaterials).mockResolvedValueOnce([
-      {
-        id: "mat-1",
-        scope_kind: "bench",
-        session_id: null,
-        bench_id: defaultBench.id,
-        source_kind: "manual",
-        source_attachment_id: null,
-        status: "active",
-        title: "Workspace brief",
-        relative_path: "shared/brief.md",
-        absolute_path: "/tmp/default/shared/brief.md",
-        mime_type: "text/markdown",
-        content_text: "brief",
-        created_at: "2026-04-07T12:00:00Z",
-        updated_at: "2026-04-07T12:01:00Z",
-        archived_at: null,
-      },
-    ]);
-    vi.mocked(materialsApi.listSessionMaterials).mockResolvedValueOnce([]);
-    vi.mocked(builderApi.listSharedReferences).mockResolvedValueOnce([
-      {
-        kind: "team_topology",
-        id: "default",
-        title: "Workspace team",
-        subtitle: "default lead",
-        updated_at: "2026-04-07T12:01:00Z",
-      },
-    ]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(benchesApi.listBenchWorkspaces)
+      .mockResolvedValueOnce([missingWorkspace])
+      .mockResolvedValueOnce([relinkedWorkspace]);
+    vi.mocked(benchesApi.detachBenchWorkspace).mockResolvedValueOnce(undefined);
+    vi.mocked(benchesApi.attachBenchWorkspace).mockResolvedValueOnce(relinkedWorkspace);
 
     component = mount(App, { target: document.body });
-    await waitForText("Capture material");
+    await settleUi();
 
-    expect(document.body.textContent).toContain("Capture material");
-    expect(document.body.textContent).toContain("Workspace brief");
-    expect(document.body.textContent).toContain("Workspace team");
-    expect(document.body.textContent).toContain("Operator pulse");
+    const card = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+    ).find((el) => el.textContent?.includes(defaultBench.name));
+    expect(card).toBeDefined();
+    flushSync(() => card!.click());
+    await waitForText("Missing folder");
+
+    const relinkInput = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Replacement path for Codebase"]',
+    );
+    expect(relinkInput).toBeDefined();
+    flushSync(() => {
+      relinkInput!.value = "/srv/workbench";
+      relinkInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const relinkButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Relink"));
+    expect(relinkButton).toBeDefined();
+    flushSync(() => relinkButton!.click());
+    await waitForText("Workspace relinked.");
+
+    expect(benchesApi.detachBenchWorkspace).toHaveBeenCalledWith(
+      defaultBench.id,
+      missingWorkspace.id,
+    );
+    expect(benchesApi.attachBenchWorkspace).toHaveBeenCalledWith(defaultBench.id, {
+      path: "/srv/workbench",
+      label: "Codebase",
+      permissions: ["read", "write"],
+      is_trusted: true,
+      set_as_default: true,
+    });
   });
+
+  // The right-hand WorkbenchRail (materials / shared references / operator
+  // pulse) was dropped per Surfaces.md ("Reference rail dropped; shared
+  // reference objects sit in the module stage"). The test that exercised the
+  // rail's contents is no longer applicable to the riso shell. When stage
+  // modules grow to expose those views, equivalent coverage should be added
+  // there.
 
   it("persists a lens switch and changes the available primary surface", async () => {
     const defaultBench = makeBench();
@@ -560,20 +661,21 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
+    // Open the bench so the lens tabs render in the top bar.
+    await openBenchFromPicker(defaultBench.name);
 
-    const builderButton = Array.from(
-      document.querySelectorAll(".toggle-btn"),
-    ).find((button) => button.textContent?.includes("Builder")) as
+    const builderLens = Array.from(
+      document.querySelectorAll(".topbar .lens"),
+    ).find((button) => button.textContent?.toLowerCase().includes("builder")) as
       | HTMLButtonElement
       | undefined;
 
-    expect(builderButton).toBeDefined();
+    expect(builderLens).toBeDefined();
 
-    flushSync(() => builderButton!.click());
+    flushSync(() => builderLens!.click());
     await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
-    expect(document.body.textContent).toContain("Builder deck");
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );

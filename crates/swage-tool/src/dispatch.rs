@@ -22,6 +22,8 @@ use crate::registry::ToolRegistry;
 use crate::tool::Tool;
 use crate::validation::validate_tool_schema;
 
+type ToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
+
 // ---------------------------------------------------------------------------
 // ToolExecutionStrategy
 // ---------------------------------------------------------------------------
@@ -95,6 +97,13 @@ pub struct ToolDispatcher {
     /// Optional strategy for executing tools at step 6.
     /// When `None`, tools are executed directly via `tool.execute()`.
     execution_strategy: Option<Arc<dyn ToolExecutionStrategy>>,
+    /// Optional caller-supplied effective-state filter for advertised tools.
+    ///
+    /// The dispatcher owns the common permission pipeline, but callers such as
+    /// the gateway may know about additional execution gates. This filter lets
+    /// `tool_definitions` advertise the same broad tool surface that dispatch
+    /// can actually execute for the current turn.
+    advertisement_filter: Option<Arc<ToolAdvertisementFilter>>,
 }
 
 impl ToolDispatcher {
@@ -115,6 +124,7 @@ impl ToolDispatcher {
             leak_detector,
             debug_mode,
             execution_strategy: None,
+            advertisement_filter: None,
         }
     }
 
@@ -143,6 +153,7 @@ impl ToolDispatcher {
             leak_detector: Arc::new(LeakDetector::default()),
             debug_mode: false,
             execution_strategy: None,
+            advertisement_filter: None,
         }
     }
 
@@ -165,12 +176,42 @@ impl ToolDispatcher {
         self
     }
 
+    /// Add an effective-state filter for tool advertisement.
+    ///
+    /// The normal permission resolver still runs first. The filter is for
+    /// broader per-turn gates that are known before model invocation, such as
+    /// remote execution host capabilities. Approval-gated tools should return
+    /// `true` here; approval is an allowed-but-paused state, not a denial.
+    pub fn with_advertisement_filter(mut self, filter: Arc<ToolAdvertisementFilter>) -> Self {
+        self.advertisement_filter = Some(filter);
+        self
+    }
+
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
-    /// Delegates to `ToolRegistry::generate_schemas` — each entry has `name`,
-    /// `description`, and `parameters` fields.
+    /// Only tools that the dispatcher would permit the agent to invoke are
+    /// advertised to the model. Tools behind `require_approval` stay visible:
+    /// the model may request them, but execution will pause for human approval
+    /// before the tool runs.
     pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
-        self.registry.generate_schemas()
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|name| check_permission(&self.permissions, name).is_ok())
+            .filter_map(|name| self.registry.get(name))
+            .filter(|tool| {
+                self.advertisement_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter(tool.as_ref()))
+            })
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "parameters": tool.parameters(),
+                })
+            })
+            .collect()
     }
 
     /// Run the tool invocation pipeline for a single call.
@@ -411,6 +452,34 @@ mod tests {
         }
     }
 
+    struct HiddenTool;
+
+    #[async_trait]
+    impl Tool for HiddenTool {
+        fn name(&self) -> &str {
+            "hidden"
+        }
+
+        fn description(&self) -> &str {
+            "Should not be advertised when permissions deny it."
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Ok(json!({}))
+        }
+    }
+
     fn make_dispatcher(tool_name: &str, allow: bool, debug_mode: bool) -> ToolDispatcher {
         let mut registry = ToolRegistry::new();
         registry
@@ -440,6 +509,109 @@ mod tests {
 
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
+    }
+
+    #[test]
+    fn tool_definitions_include_allowed_tools() {
+        let dispatcher = make_dispatcher("echo", true, false);
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
+    }
+
+    #[test]
+    fn tool_definitions_exclude_denied_tools() {
+        let dispatcher = make_dispatcher("echo", false, false);
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert!(
+            definitions.is_empty(),
+            "default-denied tools must not be advertised to the model"
+        );
+    }
+
+    #[test]
+    fn tool_definitions_keep_require_approval_tools_visible() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec![],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
+    }
+
+    #[test]
+    fn tool_definitions_do_not_expose_explicitly_denied_tools() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("echo registration should succeed");
+        registry
+            .register(Arc::new(HiddenTool))
+            .expect("hidden registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec!["hidden".into()],
+            bundles: HashMap::new(),
+            require_approval: vec![],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let names: Vec<_> = dispatcher
+            .tool_definitions()
+            .into_iter()
+            .map(|definition| definition["name"].as_str().unwrap().to_owned())
+            .collect();
+
+        assert_eq!(names, vec!["echo"]);
+    }
+
+    #[test]
+    fn tool_definitions_apply_effective_advertisement_filter_after_permissions() {
+        let dispatcher = make_dispatcher("echo", true, false)
+            .with_advertisement_filter(Arc::new(|tool: &dyn Tool| tool.name() != "echo"));
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert!(
+            definitions.is_empty(),
+            "effective-state filters should hide tools that broader dispatch gates cannot run"
+        );
     }
 
     // -- Happy path ----------------------------------------------------------

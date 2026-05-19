@@ -393,6 +393,17 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::register_execution_host),
         )
         .route("/api/voice/capabilities", get(handlers::voice_capabilities))
+        .route("/api/settings", get(handlers::get_settings))
+        .route("/api/settings", put(handlers::save_settings))
+        .route(
+            "/api/settings/providers/{id}/models",
+            get(handlers::discover_provider_models).post(handlers::discover_draft_provider_models),
+        )
+        .route(
+            "/api/settings/restart-required",
+            get(handlers::restart_status),
+        )
+        .route("/api/settings/restart", post(handlers::restart_gateway))
         .route(
             "/api/voice/transcriptions",
             post(handlers::transcribe_audio),

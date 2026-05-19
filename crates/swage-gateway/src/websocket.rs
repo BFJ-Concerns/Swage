@@ -45,6 +45,9 @@ pub enum ClientEvent {
         approval_id: String,
         /// The human's verdict: `"approved"` or `"rejected"`.
         decision: String,
+        /// How widely an approved decision should apply.
+        #[serde(default)]
+        scope: swage_agent::approval::ApprovalDecisionScope,
         /// Optional explanation from the human reviewer.
         reason: Option<String>,
     },
@@ -950,6 +953,7 @@ async fn dispatch_client_message(
         ClientEvent::ApprovalDecision {
             approval_id,
             decision,
+            scope,
             reason,
         } => {
             // Step 1: Parse the approval_id as a UUID.
@@ -1011,6 +1015,14 @@ async fn dispatch_client_message(
             } else {
                 swage_storage::ApprovalState::Rejected
             };
+            let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
+                tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
+                let _ = tx.send(ServerEvent::Error {
+                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    message: "Failed to record approval decision.".to_string(),
+                });
+                return;
+            };
             match state
                 .storage
                 .update_approval_state(approval_uuid, new_state, reason.as_deref())
@@ -1048,19 +1060,24 @@ async fn dispatch_client_message(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = channels.remove(&approval_uuid) {
-                    let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
-                        tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
-                        let _ = tx.send(ServerEvent::Error {
-                            code: error_codes::INTERNAL_ERROR.to_string(),
-                            message: "Failed to record approval decision.".to_string(),
-                        });
-                        return;
-                    };
                     let _ = sender.send(swage_agent::ApprovalDecision {
                         decision: decision_value,
+                        scope,
                         reason: reason.clone(),
                     });
                 }
+            }
+
+            if let Err(error) =
+                crate::approval_scope::apply_approval_scope(state, &approval, decision_value, scope)
+                    .await
+            {
+                tracing::error!(%session_id, %approval_uuid, err = %error.0, "approval scope update failed");
+                let _ = tx.send(ServerEvent::Error {
+                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    message: "Failed to save approval scope.".to_string(),
+                });
+                return;
             }
 
             // Step 6: Broadcast confirmation to the client.
@@ -1711,6 +1728,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -1719,6 +1739,8 @@ mod tests {
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         }
     }
 
@@ -1743,6 +1765,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 metadata: None,
+                active_workspace_attachment_id: None,
             },
         );
 
@@ -1768,6 +1791,9 @@ mod tests {
             broadcast,
             shutdown_signal: tokio_util::sync::CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -1776,6 +1802,8 @@ mod tests {
             pairing_codes: Arc::new(Mutex::new(HashMap::new())),
             secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
 
         (state, session_id)
@@ -1930,10 +1958,12 @@ mod tests {
             ClientEvent::ApprovalDecision {
                 approval_id,
                 decision,
+                scope,
                 reason,
             } => {
                 assert_eq!(approval_id, "apr_01");
                 assert_eq!(decision, "approved");
+                assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
                 assert!(reason.is_none(), "reason should be None when absent");
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -1948,10 +1978,12 @@ mod tests {
             ClientEvent::ApprovalDecision {
                 approval_id,
                 decision,
+                scope,
                 reason,
             } => {
                 assert_eq!(approval_id, "apr_02");
                 assert_eq!(decision, "rejected");
+                assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
                 assert_eq!(reason.as_deref(), Some("too risky"));
             }
             other => panic!("unexpected variant: {other:?}"),

@@ -50,6 +50,18 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+# Cap target/ at ~50 GiB by evicting least-recently-used artefacts. Time-based
+# sweeps don't help an actively-built workspace (every dep gets touched on every
+# build), so we cap by size instead. `--maxsize` takes megabytes.
+# Best-effort: skipped silently if cargo-sweep isn't installed (run
+# `cargo install cargo-sweep` to enable). Never fails the install.
+if command -v cargo-sweep >/dev/null 2>&1; then
+    echo "==> Capping target/ at 50 GiB (cargo sweep --maxsize)"
+    cargo sweep --maxsize 50000 || true
+else
+    echo "==> Skipping cargo sweep (install with: cargo install cargo-sweep)"
+fi
+
 if [[ "$skip_frontend" -eq 0 ]]; then
     echo "==> Building frontend (vite → frontend/dist)"
     npm --prefix frontend ci

@@ -1,11 +1,11 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    ContextConfig, HitlConfig, LogLevel, LoggingConfig, ModelCatalogConfig, ModelEndpointConfig,
-    ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
-    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig,
+    ContextConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
+    ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
+    PricingConfig, ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
+    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,6 +77,12 @@ pub struct PartialPricingConfig {
     pub models: Option<HashMap<String, ModelPricing>>,
 }
 
+/// Partial mirror of `GenerationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialGenerationConfig {
+    pub presets: Option<HashMap<String, GenerationPresetConfig>>,
+}
+
 /// Partial mirror of `ObservabilityConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialObservabilityConfig {
@@ -125,16 +131,16 @@ pub struct PartialPythonExecuteToolConfig {
 
 /// Partial mirror of `OutputConfig`. Each field is independently overridable.
 ///
-/// `schema` uses `Option<Option<serde_json::Value>>` so that a layer can
-/// explicitly set schema to `None` (disabling it) without being treated the
-/// same as "not configured". In practice most callers set it to `Some(value)`
-/// or leave it as `None` (absent), so the outer option behaves like all other
-/// fields: absent means "don't override the base".
+/// `schema` uses a double-option to distinguish "field not present" (outer
+/// `None`) from "field explicitly cleared" (`Some(None)`) from "field set to a
+/// schema" (`Some(Some(value))`). The outer option controls inheritance; the
+/// inner mirrors the `Option<Value>` in the resolved type.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialOutputConfig {
-    /// JSON Schema to validate agent output against. `None` means "not
-    /// configured at this level" — base value wins.
-    pub schema: Option<serde_json::Value>,
+    /// JSON Schema to validate agent output against. Outer `None` means "not
+    /// configured at this level"; `Some(None)` actively clears an inherited
+    /// schema.
+    pub schema: Option<Option<serde_json::Value>>,
     /// Override for the maximum number of validation-retry attempts.
     pub max_retries: Option<u32>,
 }
@@ -194,6 +200,11 @@ pub struct PartialConfig {
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
+    pub generation: Option<PartialGenerationConfig>,
+    /// Top-level bypass for the permission and approval system.
+    /// Mirrors `ResolvedConfig::dangerously_skip_permissions`.
+    #[serde(default)]
+    pub dangerously_skip_permissions: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +281,7 @@ impl From<ResolvedConfig> for PartialConfig {
                 require_approval: Some(r.tools.permissions.require_approval),
             }),
             output: Some(PartialOutputConfig {
-                schema: r.output.schema,
+                schema: Some(r.output.schema),
                 max_retries: Some(r.output.max_retries),
             }),
             hitl: Some(PartialHitlConfig {
@@ -307,6 +318,14 @@ impl From<ResolvedConfig> for PartialConfig {
                 message_ttl_secs: Some(r.communication.message_ttl_secs),
                 expiry_interval_secs: Some(r.communication.expiry_interval_secs),
             }),
+            generation: Some(PartialGenerationConfig {
+                presets: if r.generation.presets.is_empty() {
+                    None
+                } else {
+                    Some(r.generation.presets)
+                },
+            }),
+            dangerously_skip_permissions: Some(r.dangerously_skip_permissions),
         }
     }
 }
@@ -488,6 +507,18 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
             }
         }),
+        generation: merge_section(base.generation, overlay.generation, |b, o| {
+            let mut presets = b.presets.unwrap_or_default();
+            if let Some(overlay_presets) = o.presets {
+                presets.extend(overlay_presets);
+            }
+            PartialGenerationConfig {
+                presets: Some(presets),
+            }
+        }),
+        dangerously_skip_permissions: overlay
+            .dangerously_skip_permissions
+            .or(base.dangerously_skip_permissions),
     }
 }
 
@@ -529,9 +560,20 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     if let Some(entries) = models.entries {
         model_catalog.entries.extend(entries);
     }
-    if let Some(model_id) = default_model_id_override
-        && let Some(model) = model_catalog.entries.get_mut(&model_catalog.default)
-    {
+    if let Some(model_id) = default_model_id_override {
+        if model_catalog.default.is_empty() {
+            model_catalog.default = "default".to_string();
+        }
+        let model = model_catalog
+            .entries
+            .entry(model_catalog.default.clone())
+            .or_insert_with(|| ModelEndpointConfig {
+                provider_id: String::new(),
+                model_id: String::new(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+            });
         model.model_id = model_id;
     }
 
@@ -608,6 +650,13 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let models = partial.pricing.and_then(|p| p.models).unwrap_or_default();
             PricingConfig { models }
         },
+        generation: {
+            let presets = partial
+                .generation
+                .and_then(|generation| generation.presets)
+                .unwrap_or_default();
+            GenerationConfig { presets }
+        },
         observability: {
             let do_ = ObservabilityConfig::default();
             let o = partial.observability.unwrap_or_default();
@@ -619,7 +668,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let do_ = OutputConfig::default();
             let o = partial.output.unwrap_or_default();
             OutputConfig {
-                schema: o.schema.or(do_.schema),
+                schema: o.schema.unwrap_or(do_.schema),
                 max_retries: o.max_retries.unwrap_or(do_.max_retries),
             }
         },
@@ -668,6 +717,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
+        dangerously_skip_permissions: partial.dangerously_skip_permissions.unwrap_or(false),
     }
 }
 
@@ -862,6 +912,7 @@ mod tests {
                         model_id: "gpt-4o-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()
@@ -891,6 +942,7 @@ mod tests {
                 model_id: "base-model".to_string(),
                 aliases: Vec::new(),
                 context_window: None,
+                generation_preset: None,
             },
         )]);
 
@@ -925,6 +977,7 @@ mod tests {
                         model_id: "claude-3-7-sonnet".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
             }),
@@ -940,6 +993,7 @@ mod tests {
                         model_id: "gpt-4o-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()
@@ -966,6 +1020,7 @@ mod tests {
                         model_id: "claude-3-7-sonnet".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
             }),
@@ -980,6 +1035,7 @@ mod tests {
                         model_id: "gpt-4.1-mini".to_string(),
                         aliases: Vec::new(),
                         context_window: None,
+                        generation_preset: None,
                     },
                 )])),
                 ..Default::default()
@@ -1297,10 +1353,38 @@ mod tests {
     }
 
     #[test]
+    fn output_config_explicit_none_clears_inherited_schema() {
+        let global = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(Some(serde_json::json!({"type": "object"}))),
+                max_retries: Some(5),
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            output: Some(PartialOutputConfig {
+                schema: Some(None),
+                max_retries: None,
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_chain(vec![global, agent]));
+        assert!(
+            resolved.output.schema.is_none(),
+            "explicit None should clear an inherited output schema"
+        );
+        assert_eq!(
+            resolved.output.max_retries, 5,
+            "clearing schema should not clear unrelated output fields"
+        );
+    }
+
+    #[test]
     fn output_config_three_level_chain_agent_schema_wins() {
         let global = PartialConfig {
             output: Some(PartialOutputConfig {
-                schema: Some(serde_json::json!({"type": "string"})),
+                schema: Some(Some(serde_json::json!({"type": "string"}))),
                 max_retries: Some(5),
             }),
             ..Default::default()
@@ -1314,7 +1398,7 @@ mod tests {
         };
         let agent = PartialConfig {
             output: Some(PartialOutputConfig {
-                schema: Some(serde_json::json!({"type": "object"})),
+                schema: Some(Some(serde_json::json!({"type": "object"}))),
                 max_retries: Some(1),
             }),
             ..Default::default()

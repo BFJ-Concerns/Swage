@@ -347,6 +347,7 @@ mod tests {
             model_id: "claude".into(),
             aliases: Vec::new(),
             context_window: None,
+            generation_preset: None,
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
@@ -370,6 +371,7 @@ mod tests {
             model_id: "claude-sonnet".into(),
             aliases: Vec::new(),
             context_window: None,
+            generation_preset: None,
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.

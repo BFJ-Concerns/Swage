@@ -25,6 +25,13 @@ pub struct TopologyBudget {
     pub max_total_tokens: Option<u64>,
 }
 
+// TODO Make TopologyNode variant-typed by kind
+// kind-incompatible optional fields can coexist on the same node — an
+// `Llm` node can carry `handler_name`, a `Deterministic` node can carry
+// `agent_id`, etc. validate_graph catches missing required fields per
+// kind but not the spurious-field combinations. Replace the flat struct
+// with one variant per kind so the type system enforces the contract.
+// ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopologyNode {
     pub id: String,

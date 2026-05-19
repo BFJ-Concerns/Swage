@@ -45,8 +45,10 @@ pub struct TaskDefinition {
     #[serde(default)]
     pub max_output_retries: Option<u32>,
 
-    /// Tool permission overrides. When set, these replace the agent's base
-    /// permissions entirely (replacement semantics, not merge).
+    /// Tool permission overrides. If any permission field is set, the task's
+    /// permission set replaces the agent's base permission set as a whole.
+    /// Unset task fields resolve to the default empty permission values rather
+    /// than inheriting the corresponding base field.
     #[serde(default)]
     pub tool_allow: Option<Vec<String>>,
     #[serde(default)]
@@ -83,7 +85,7 @@ impl TaskDefinition {
             },
             output: if self.output_schema.is_some() || self.max_output_retries.is_some() {
                 Some(PartialOutputConfig {
-                    schema: self.output_schema.clone(),
+                    schema: self.output_schema.clone().map(Some),
                     max_retries: self.max_output_retries,
                 })
             } else {
@@ -115,12 +117,18 @@ impl TaskDefinition {
     /// normal overlay merge semantics via [`crate::resolve::apply_overlay`].
     pub fn apply_to(&self, base: ResolvedConfig) -> ResolvedConfig {
         let base_instructions = base.instructions.clone();
+        let has_tool_permission_override = self.tool_allow.is_some()
+            || self.tool_deny.is_some()
+            || self.tool_bundles.is_some()
+            || self.tool_require_approval.is_some();
         let mut resolved = crate::resolve::apply_overlay(base, self.to_partial_config());
 
-        // Task tool bundles are an explicit tool-set surface, so a task that
-        // defines bundles replaces inherited bundles rather than merging them.
-        if let Some(bundles) = &self.tool_bundles {
-            resolved.tools.permissions.bundles = bundles.clone();
+        if has_tool_permission_override {
+            resolved.tools.permissions.allow = self.tool_allow.clone().unwrap_or_default();
+            resolved.tools.permissions.deny = self.tool_deny.clone().unwrap_or_default();
+            resolved.tools.permissions.bundles = self.tool_bundles.clone().unwrap_or_default();
+            resolved.tools.permissions.require_approval =
+                self.tool_require_approval.clone().unwrap_or_default();
         }
 
         resolved.instructions = match (
@@ -194,7 +202,7 @@ mod tests {
         let partial = task.to_partial_config();
         assert!(partial.output.is_some());
         let output = partial.output.unwrap();
-        assert!(output.schema.is_some());
+        assert!(output.schema.is_some_and(|schema| schema.is_some()));
         assert_eq!(output.max_retries, Some(5));
     }
 
@@ -342,6 +350,38 @@ mod tests {
         assert_eq!(
             result.tools.permissions.require_approval,
             vec![RequireApprovalEntry::Simple("file_read".to_string())]
+        );
+    }
+
+    #[test]
+    fn apply_task_overlay_replaces_whole_tool_permission_set_when_partially_specified() {
+        let mut base = ResolvedConfig::default();
+        base.tools.permissions.allow = vec!["*".into()];
+        base.tools.permissions.deny = vec!["shell".into()];
+        base.tools.permissions.bundles =
+            HashMap::from([("default".into(), vec!["file_read".into()])]);
+        base.tools.permissions.require_approval =
+            vec![RequireApprovalEntry::Simple("web_search".into())];
+
+        let task = TaskDefinition {
+            name: "read-only".into(),
+            tool_allow: Some(vec!["file_read".into()]),
+            ..Default::default()
+        };
+
+        let result = task.apply_to(base);
+        assert_eq!(result.tools.permissions.allow, vec!["file_read"]);
+        assert!(
+            result.tools.permissions.deny.is_empty(),
+            "unset task deny rules must not inherit from the base permission set"
+        );
+        assert!(
+            result.tools.permissions.bundles.is_empty(),
+            "unset task bundles must not inherit from the base permission set"
+        );
+        assert!(
+            result.tools.permissions.require_approval.is_empty(),
+            "unset task approval rules must not inherit from the base permission set"
         );
     }
 

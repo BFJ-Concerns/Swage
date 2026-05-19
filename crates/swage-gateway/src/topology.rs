@@ -435,6 +435,7 @@ impl TopologyExecutor {
                     bench_id: team.bench_id,
                     agent_id: team.entry_agent_id.clone(),
                     metadata: None,
+                    active_workspace_attachment_id: None,
                 })
                 .await?
                 .id),
@@ -732,6 +733,7 @@ async fn execute_agent_node(
             agent_config: &agent_config,
             session_metadata: None,
             bench_id: Some(bench.id),
+            active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
         },
         "topology agent node",
@@ -1250,6 +1252,9 @@ mod tests {
             broadcast,
             shutdown_signal: CancellationToken::new(),
             approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             channel_routes: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
             execution_hosts: Arc::new(Mutex::new(
@@ -1260,6 +1265,8 @@ mod tests {
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            managed_gateway: false,
         };
         (state, storage)
     }

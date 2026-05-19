@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
 /**
- * Tests for the AppLayout workbench shell.
+ * Tests for the AppLayout riso/cyanotype shell.
  *
- * Verifies that the primary stage and the persistent workbench rail coexist
- * inside one coordinated workspace frame.
+ * Verifies the new shell structure:
+ *   - top bar (lens tabs) is present when a bench is selected
+ *   - left nav (.nav) holds bench head + ConversationList
+ *   - body holds a .conversation-pane (always) and an optional .stage-pane
+ *
+ * The right-hand WorkbenchRail was dropped per Surfaces.md — these tests no
+ * longer assert on `.workbench-rail`.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
@@ -11,6 +16,7 @@ import AppLayout from "../components/AppLayout.svelte";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
 import type { StreamingStore } from "../stores/streaming";
+import type { BenchStore } from "../stores/benches";
 
 import * as operatorApi from "../api/operator";
 
@@ -80,10 +86,47 @@ function mockStreamingStore(): StreamingStore {
     get isStreaming() { return false; },
     get streamedContent() { return ""; },
     get turnError() { return null; },
+    get turnStartedAt() { return null; },
+    get lastInputTokens() { return null; },
+    get lastOutputTokens() { return null; },
     get activeToolCalls() { return []; },
+    get pendingApproval() { return null; },
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+  };
+}
+
+// AppLayout collapses the top bar and shows a "pick a bench" placeholder when
+// no bench is selected, so the shell tests need a bench in scope.
+function mockBenchStore(): BenchStore {
+  return {
+    get benches() {
+      return [{
+        id: "default",
+        name: "default",
+        description: "",
+        is_default: true,
+        slug: "default",
+        created_at: "",
+      }];
+    },
+    get currentBench() {
+      return {
+        id: "default",
+        name: "default",
+        description: "",
+        is_default: true,
+        slug: "default",
+        created_at: "",
+      };
+    },
+    get recentBenches() { return []; },
+    get isLoading() { return false; },
+    loadBenches: async () => {},
+    selectBench: async () => {},
+    createBench: async () => {},
+    deleteBench: async () => {},
   };
 }
 
@@ -94,6 +137,7 @@ function mountLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
+      benchStore: mockBenchStore(),
       onRetry: () => {},
       activeLens: "assistant",
       availableLenses: [
@@ -122,6 +166,7 @@ function mountBuilderLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
+      benchStore: mockBenchStore(),
       onRetry: () => {},
       activeLens: "builder",
       availableLenses: [
@@ -150,6 +195,7 @@ function mountResearchLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
+      benchStore: mockBenchStore(),
       onRetry: () => {},
       activeLens: "research",
       availableLenses: [
@@ -207,83 +253,119 @@ describe("AppLayout: workbench shell", () => {
     }
   });
 
-  it("renders a sidebar panel", () => {
+  it("renders the nav panel", () => {
     component = mountLayout();
 
-    expect(document.querySelector(".sidebar")).not.toBeNull();
+    expect(document.querySelector(".nav")).not.toBeNull();
   });
 
-  it("renders a main conversation area", () => {
+  it("renders the conversation pane", () => {
     component = mountLayout();
 
-    expect(document.querySelector(".conversation-area")).not.toBeNull();
+    expect(document.querySelector(".conversation-pane")).not.toBeNull();
   });
 
-  it("renders a persistent workbench rail", () => {
+  it("renders the top bar with lens tabs when a bench is selected", () => {
     component = mountLayout();
 
-    expect(document.querySelector(".workbench-rail")).not.toBeNull();
+    const topbar = document.querySelector(".topbar");
+    expect(topbar).not.toBeNull();
+    expect(topbar!.querySelector(".lens")).not.toBeNull();
   });
 
-  it("renders BenchSelector inside the sidebar", () => {
+  it("renders BenchSelector inside the nav", () => {
     component = mountLayout();
 
-    const sidebar = document.querySelector(".sidebar");
-    expect(sidebar).not.toBeNull();
-    expect(sidebar!.querySelector(".bench-selector")).not.toBeNull();
+    const nav = document.querySelector(".nav");
+    expect(nav).not.toBeNull();
+    expect(nav!.querySelector(".bench-selector")).not.toBeNull();
   });
 
-  it("renders ConversationList inside the sidebar", () => {
+  it("renders ConversationList inside the nav", () => {
     component = mountLayout();
 
-    const sidebar = document.querySelector(".sidebar");
-    expect(sidebar).not.toBeNull();
-    expect(sidebar!.querySelector(".conversation-list")).not.toBeNull();
+    const nav = document.querySelector(".nav");
+    expect(nav).not.toBeNull();
+    expect(nav!.querySelector(".conversation-list")).not.toBeNull();
   });
 
-  it("renders MessageDisplay inside the conversation area", () => {
+  it("renders MessageDisplay inside the conversation pane", () => {
     component = mountLayout();
 
-    const main = document.querySelector(".conversation-area");
-    expect(main).not.toBeNull();
-    expect(main!.querySelector(".message-display")).not.toBeNull();
+    const pane = document.querySelector(".conversation-pane");
+    expect(pane).not.toBeNull();
+    expect(pane!.querySelector(".message-display")).not.toBeNull();
   });
 
-  it("renders MessageInput inside the conversation area", () => {
+  it("renders MessageInput inside the conversation pane", () => {
     component = mountLayout();
 
-    const main = document.querySelector(".conversation-area");
-    expect(main).not.toBeNull();
-    expect(main!.querySelector(".message-input")).not.toBeNull();
+    const pane = document.querySelector(".conversation-pane");
+    expect(pane).not.toBeNull();
+    expect(pane!.querySelector(".message-input")).not.toBeNull();
   });
 
-  it("renders conversation area with message display and input sections", () => {
+  it("renders conversation pane with message display and input sections", () => {
     component = mountLayout();
 
-    const main = document.querySelector(".conversation-area");
-    expect(main).not.toBeNull();
+    const pane = document.querySelector(".conversation-pane");
+    expect(pane).not.toBeNull();
     // ConnectionIndicator is hidden when status is "disconnected" (no active
     // connection attempt), so we verify the other children are present.
-    expect(main!.children.length).toBeGreaterThan(0);
+    expect(pane!.children.length).toBeGreaterThan(0);
   });
 
-  it("renders the builder deck when the builder lens is active", async () => {
+  it("renders the builder deck on the stage when the builder lens is active", async () => {
     component = mountBuilderLayout();
     await waitForText("Author the workspace, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
-    expect(document.querySelector(".workbench-rail")).not.toBeNull();
+    // The stage pane sits next to the conversation pane in stage-dominant mode.
+    expect(document.querySelector(".stage-pane")).not.toBeNull();
+    expect(document.querySelector(".body.stage-dominant")).not.toBeNull();
   });
 
-  it("renders lens-specific modules and prominent teams from lens data", async () => {
+  it("renders the operator stage when the research lens is active", async () => {
     component = mountResearchLayout();
     await waitForText("Live control surface for the running gateway");
 
-    expect(document.body.textContent).toContain("Research");
-    expect(document.body.textContent).toContain("research-lead");
-    expect(document.body.textContent).not.toContain("Builder deck");
-    expect(document.body.textContent).toContain("Operator");
+    expect(document.body.textContent).toContain("Live control surface for the running gateway");
+    expect(document.querySelector(".stage-pane")).not.toBeNull();
+  });
+
+  it("collapses the top bar when no bench is selected", () => {
+    // Replace the bench-store mock with one that has no current bench.
+    const noBenchStore: BenchStore = {
+      get benches() { return []; },
+      get currentBench() { return null; },
+      get recentBenches() { return []; },
+      get isLoading() { return false; },
+      loadBenches: async () => {},
+      selectBench: async () => {},
+      createBench: async () => {},
+      deleteBench: async () => {},
+    };
+    component = mount(AppLayout, {
+      target: document.body,
+      props: {
+        conversationStore: mockConversationStore(),
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        benchStore: noBenchStore,
+        onRetry: () => {},
+        activeLens: "assistant",
+        availableLenses: [],
+        activeSurface: "conversation",
+        onSelectLens: () => {},
+        onRefreshLenses: () => {},
+        onSelectSurface: () => {},
+      },
+    });
+
+    // The window flips into no-topbar mode and the body shows the BenchPicker.
+    expect(document.querySelector(".window.no-topbar")).not.toBeNull();
+    expect(document.querySelector(".bench-grid")).not.toBeNull();
   });
 });

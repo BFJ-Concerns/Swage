@@ -239,9 +239,33 @@ async fn run_turn_and_collect_tool_result(
     addr: SocketAddr,
     provider_tx1: tokio::sync::mpsc::Sender<StreamChunk>,
     provider_tx2: tokio::sync::mpsc::Sender<StreamChunk>,
+    workspace_root: Option<&std::path::Path>,
 ) -> serde_json::Value {
     let client = GatewayClient::new(&format!("http://{addr}"));
     let conversation = client.create_conversation().await.unwrap();
+    if let Some(workspace_root) = workspace_root {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/api/benches/{}/workspaces",
+                conversation.bench_id
+            ))
+            .json(&json!({
+                "path": workspace_root,
+                "label": "execution host test workspace",
+                "active_session_id": conversation.id,
+                "permissions": ["read", "write"],
+                "is_trusted": true
+            }))
+            .send()
+            .await
+            .expect("workspace attachment request should succeed");
+        assert!(
+            response.status().is_success(),
+            "workspace attachment failed with status {}: {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        );
+    }
     let (mut ws_write, mut ws_read) = connect_ws(addr, &conversation.id.to_string()).await;
 
     ws_send(
@@ -328,7 +352,7 @@ async fn same_machine_gateway_executes_turns_through_local_execution_host() {
         .unwrap();
     assert_eq!(hosts["hosts"][0]["host_id"], "local");
 
-    let result = run_turn_and_collect_tool_result(addr, tx1, tx2).await;
+    let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
     assert_eq!(result["host"], "local-host");
 }
 
@@ -370,13 +394,15 @@ async fn node_only_execution_host_registers_with_remote_gateway_and_executes_wor
         base_url: node.base_url.clone(),
         shared_token_secret_ref,
         workspace_root: node_workspace.path().to_string_lossy().into_owned(),
+        workspace_roots: vec![],
         capabilities: vec!["host_identity".to_string()],
     };
     register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
         .await
         .unwrap();
 
-    let result = run_turn_and_collect_tool_result(addr, tx1, tx2).await;
+    let result =
+        run_turn_and_collect_tool_result(addr, tx1, tx2, Some(node_workspace.path())).await;
     assert_eq!(
         result["host"], "remote-node",
         "remote tool result: {result:?}"
@@ -427,13 +453,14 @@ async fn run_transport_backend_round_trip(
         base_url: backend.base_url.clone(),
         shared_token_secret_ref,
         workspace_root: workspace.path().to_string_lossy().into_owned(),
+        workspace_roots: vec![],
         capabilities: vec!["host_identity".to_string()],
     };
     register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
         .await
         .unwrap();
 
-    let result = run_turn_and_collect_tool_result(addr, tx1, tx2).await;
+    let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
     assert_eq!(result["host"], marker, "{backend_label} result: {result:?}");
 
     backend.join_handle.abort();
@@ -494,6 +521,7 @@ async fn registered_remote_execution_host_survives_restart() {
             base_url: backend.base_url.clone(),
             shared_token_secret_ref,
             workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
             capabilities: vec!["host_identity".to_string()],
         },
     )

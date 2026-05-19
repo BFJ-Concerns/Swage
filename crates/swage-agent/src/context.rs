@@ -21,6 +21,7 @@ pub struct TurnExecutionContext {
 ///
 /// Constructed by the agent when dispatching tools, populated from the
 /// agent's config and active session state.
+#[derive(Clone)]
 pub struct AgentToolContext {
     pub agent_id: String,
     pub session_id: String,

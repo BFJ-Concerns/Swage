@@ -19,15 +19,23 @@ use crate::ipc::agent::AgentConnection;
 use crate::ipc::message::{ErrorCategory, IpcMessage};
 use crate::ipc::transport::IpcTransport;
 
+fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig>, SandboxError> {
+    let Some(config_json) = std::env::var("SWAGE_SANDBOX_CONFIG_JSON").ok() else {
+        return Ok(None);
+    };
+
+    serde_json::from_str(&config_json)
+        .map(Some)
+        .map_err(|error| SandboxError::SpawnFailed {
+            message: format!("invalid SWAGE_SANDBOX_CONFIG_JSON: {error}"),
+        })
+}
+
 #[cfg(target_os = "linux")]
 fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
-    let Some(config_json) = std::env::var("SWAGE_SANDBOX_CONFIG_JSON").ok() else {
+    let Some(config) = child_sandbox_config_from_env()? else {
         return Ok(());
     };
-    let config: crate::config::SandboxConfig =
-        serde_json::from_str(&config_json).map_err(|error| SandboxError::SpawnFailed {
-            message: format!("invalid SWAGE_SANDBOX_CONFIG_JSON: {error}"),
-        })?;
     let status = crate::landlock::LandlockRuleset::new(&config).apply()?;
     tracing::debug!(?status, "child Landlock policy applied");
     Ok(())
@@ -97,9 +105,10 @@ pub(crate) async fn run_loop(
     mut conn: AgentConnection,
     tools: Vec<Box<dyn Tool>>,
 ) -> Result<(), SandboxError> {
-    let ctx = SandboxToolContext {
-        working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-    };
+    let working_directory = child_sandbox_config_from_env()?
+        .map(|config| config.working_directory)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let ctx = SandboxToolContext { working_directory };
 
     // Index tools by name for O(1) lookup per request.
     let tool_map: HashMap<String, Box<dyn Tool>> = tools

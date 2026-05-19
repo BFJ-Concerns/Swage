@@ -1,0 +1,177 @@
+/*
+  Swage riso/cyanotype theme tokens.
+
+  The visual language is two-tone print: a single ink colour on a paper-coloured
+  surface, with fluoro orange as a decorative second pass. Active surfaces get
+  a translucent orange "shadow" offset 3px down-and-right, blended with the ink
+  via mix-blend-mode (multiply on light, screen on dark) — the riso effect.
+
+  Themes:
+    .theme-riso       light, navy ink on cream paper
+    .theme-cyanotype  dark,  cream ink on dark navy paper
+
+  Both themes reuse the same custom-property names so component CSS doesn't have
+  to know which theme is active.
+
+  Conventions:
+    --ink            primary ink (text/borders)
+    --paper          surface colour
+    --accent         fluoro orange (decorative — never used for text on paper)
+    --ink-orange     orange variant suitable for body text on paper (AA contrast)
+    --ink-soft       muted variant of ink for secondary text
+    --rule-soft      hairline divider colour
+*/
+
+:root {
+  --accent: #f06a3a;
+
+  /* Type stacks */
+  --font-display: "Bebas Neue", sans-serif;
+  --font-body: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Spacing scale (px). Loose enough to leave room for breathing. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 22px;
+  --space-6: 28px;
+  --space-7: 36px;
+
+  /* Riso shadow offset — used by .riso-block and offset pseudo-elements. */
+  --offset: 3px;
+}
+
+/* ---------------------------------------------------------------------------
+   Light theme — riso (navy ink on cream paper)
+   --------------------------------------------------------------------------- */
+.theme-riso {
+  --ink: #0e3b66;
+  --ink-soft: rgba(14, 59, 102, 0.65);
+  --paper: #fff8ee;
+  --paper-deep: #ececea;
+  --rule-soft: rgba(14, 59, 102, 0.3);
+  --rule-faint: rgba(14, 59, 102, 0.18);
+  /* Decorative orange (#f06a3a) is below AA on cream — use --ink-orange for text. */
+  --ink-orange: #c54115;
+  --shadow-blend: multiply;
+  --shadow-opacity: 0.5;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark theme — cyanotype (cream ink on dark navy)
+   --------------------------------------------------------------------------- */
+.theme-cyanotype {
+  --ink: #fff8ee;
+  --ink-soft: #c4d0e0;
+  --paper: #0a1c33;
+  --paper-deep: #07101e;
+  --rule-soft: rgba(255, 248, 238, 0.3);
+  --rule-faint: rgba(255, 248, 238, 0.18);
+  /* On dark paper, the fluoro orange has enough contrast to act as ink-orange. */
+  --ink-orange: var(--accent);
+  --shadow-blend: screen;
+  --shadow-opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------------------
+   Reusable patterns — applied via class names from components.
+   --------------------------------------------------------------------------- */
+
+/*
+  .riso-block — a bordered surface with the offset orange shadow underneath.
+  Use isolation: isolate on the parent if the shadow is escaping the stack.
+*/
+.riso-block {
+  position: relative;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+}
+
+.riso-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--accent);
+  transform: translate(var(--offset), var(--offset));
+  z-index: -1;
+  mix-blend-mode: var(--shadow-blend);
+  opacity: var(--shadow-opacity);
+  pointer-events: none;
+}
+
+/* The "active" treatment — solid ink with the offset orange behind. */
+.riso-active {
+  position: relative;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.riso-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: translate(var(--offset), var(--offset));
+  z-index: -1;
+  mix-blend-mode: var(--shadow-blend);
+  opacity: var(--shadow-opacity);
+  pointer-events: none;
+}
+
+/* Eyebrow labels — small uppercased mono used throughout. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* Display heading — Bebas Neue with subtle tracking. */
+.display {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Buttons in the riso style — flat, ink-bordered, no rounding. */
+.riso-btn {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  cursor: pointer;
+}
+
+.riso-btn:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.riso-btn.primary {
+  background: var(--accent);
+  color: var(--paper);
+  border-color: var(--accent);
+}
+
+.riso-btn.primary:hover {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.riso-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

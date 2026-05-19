@@ -47,92 +47,74 @@
 {/if}
 
 <style>
+  /*
+    Riso alert banner — a fluoro-orange-on-paper strip sitting at the top of
+    the conversation pane. Per Surfaces.md ("Connection lost" goes in the
+    conversation surface) and Progress.md ("Failures bind to the right scope
+    — pane banners for failures that affect everything in the pane.").
+  */
   .banner {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 16px;
-    font-size: 0.8125rem;
-    /* Banner sits at the top of the conversation area without blocking content. */
+    gap: 12px;
+    padding: 8px 22px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
     flex-shrink: 0;
+    background: var(--accent);
+    color: var(--paper);
   }
 
-  /* -------------------------------------------------------------------------
-     State-specific colours
-  ------------------------------------------------------------------------- */
-
-  .banner.disconnected {
-    background: #fef3c7;
-    color: #92400e;
-    border-bottom: 1px solid #fde68a;
-  }
-
-  .banner.reconnecting {
-    background: #eff6ff;
-    color: #1e40af;
-    border-bottom: 1px solid #bfdbfe;
-  }
-
+  /* All three states share the same fluoro orange treatment — the dot's
+     animation distinguishes "reconnecting" from the static failure states. */
+  .banner.disconnected,
+  .banner.reconnecting,
   .banner.error {
-    background: #fee2e2;
-    color: #991b1b;
-    border-bottom: 1px solid #fca5a5;
+    background: var(--accent);
+    color: var(--paper);
+    border-bottom: 2px solid var(--ink);
   }
 
-  /* -------------------------------------------------------------------------
-     Status dot
-  ------------------------------------------------------------------------- */
-
+  /* Status block on the left — solid ink against the orange band. */
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    background: var(--ink);
     flex-shrink: 0;
   }
 
-  .disconnected .dot {
-    background: #d97706;
-  }
-
-  .reconnecting .dot {
-    background: #3b82f6;
-  }
-
-  .error .dot {
-    background: #dc2626;
-  }
-
-  /* Pulse animation for reconnecting state — draws attention without alarming. */
   @keyframes pulse {
     0%, 100% { opacity: 1; }
-    50%       { opacity: 0.3; }
+    50% { opacity: 0.3; }
   }
 
   .pulsing {
     animation: pulse 1.4s ease-in-out infinite;
   }
 
-  /* -------------------------------------------------------------------------
-     Message and retry button
-  ------------------------------------------------------------------------- */
-
   .message {
     flex: 1;
   }
 
   .retry-btn {
-    padding: 2px 10px;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    border-radius: 4px;
+    padding: 4px 12px;
+    font-family: var(--font-display);
+    font-size: 14px;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
     cursor: pointer;
-    background: #fca5a5;
-    color: #7f1d1d;
-    border: 1px solid #f87171;
   }
 
   .retry-btn:hover {
-    background: #f87171;
-    color: #450a0a;
+    background: var(--paper);
+    color: var(--ink);
   }
 </style>

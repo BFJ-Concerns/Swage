@@ -36,6 +36,7 @@ async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uu
             bench_id: bench.id,
             agent_id: agent_id.to_string(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();
@@ -151,6 +152,7 @@ async fn delegation_creates_child_turn_with_parent() {
             bench_id: bench.id,
             agent_id: "agent-b".into(),
             metadata: None,
+            active_workspace_attachment_id: None,
         })
         .await
         .unwrap();

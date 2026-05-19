@@ -46,6 +46,10 @@ impl Tool for PluginTool {
         self.manifest.parameters.clone()
     }
 
+    fn requires_host_execution(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         use tokio::io::AsyncWriteExt;
         use tokio::process::Command;

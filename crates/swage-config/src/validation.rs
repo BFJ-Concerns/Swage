@@ -19,11 +19,16 @@ const KNOWN_SECTIONS: &[&str] = &[
     "tools",
     "context",
     "pricing",
+    "generation",
     "observability",
     "output",
     "hitl",
     "communication",
 ];
+
+/// Top-level scalar keys (i.e. fields that live above any [section] header).
+/// These are recognised alongside `KNOWN_SECTIONS` during validation.
+const KNOWN_TOP_LEVEL_SCALARS: &[(&str, &str)] = &[("dangerously_skip_permissions", "boolean")];
 
 /// Valid field names for each known section.
 fn known_fields_for(section: &str) -> &'static [&'static str] {
@@ -51,6 +56,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing" => &["models"],
+        "generation" => &["presets"],
         "observability" => &["force_on"],
         "output" => &["schema", "max_retries"],
         "hitl" => &["timeout", "timeout_policy"],
@@ -136,6 +142,8 @@ fn check_field_type(
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
+        // generation.presets is a dynamic map of preset name → preset config.
+        ("generation", "presets") => ("table", matches!(value, Value::Table(_))),
         ("observability", "force_on") => ("boolean", matches!(value, Value::Boolean(_))),
         // [tools] permission fields — flat under [tools] in TOML
         ("tools", "allow") => ("array", matches!(value, Value::Array(_))),
@@ -687,10 +695,11 @@ pub fn validate_resolved_catalog_references(
 ) -> Vec<ConfigProblem> {
     let mut problems = Vec::new();
 
-    if !config
-        .providers
-        .entries
-        .contains_key(&config.providers.default)
+    if !config.providers.default.is_empty()
+        && !config
+            .providers
+            .entries
+            .contains_key(&config.providers.default)
     {
         problems.push(make_problem(
             file_path,
@@ -702,6 +711,10 @@ pub fn validate_resolved_catalog_references(
                 ),
             },
         ));
+    }
+
+    if config.models.default.is_empty() && config.models.entries.is_empty() {
+        return problems;
     }
 
     let Some(default_model) = config.models.entries.get(&config.models.default) else {
@@ -722,6 +735,7 @@ pub fn validate_resolved_catalog_references(
         .providers
         .entries
         .contains_key(&default_model.provider_id)
+        && !default_model.provider_id.is_empty()
     {
         problems.push(make_problem(
             file_path,
@@ -776,6 +790,27 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
 
     // Phase 2: schema and semantics
     for (section_name, section_value) in &table {
+        // Top-level scalar keys (above any [section] header) live in the
+        // same iteration as section tables. Recognise them first so they
+        // don't trip the unknown-section check.
+        if let Some((_, expected_type)) = KNOWN_TOP_LEVEL_SCALARS
+            .iter()
+            .find(|(name, _)| name == section_name)
+        {
+            let actual_type = toml_type_name(section_value);
+            if actual_type != *expected_type {
+                problems.push(make_problem(
+                    file_path,
+                    Some(section_name.clone()),
+                    ConfigProblemKind::TypeError {
+                        expected: (*expected_type).to_string(),
+                        found: actual_type.to_string(),
+                    },
+                ));
+            }
+            continue;
+        }
+
         if !KNOWN_SECTIONS.contains(&section_name.as_str()) {
             problems.push(make_problem(
                 file_path,
@@ -923,6 +958,19 @@ mod tests {
             |p| matches!(&p.kind, ConfigProblemKind::UnknownSection { name } if name == "databse"),
         );
         assert!(found, "should report unknown section 'databse'");
+    }
+
+    #[test]
+    fn generation_presets_section_is_known() {
+        let toml = r#"
+[generation.presets.fast]
+max_tokens = 1024
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.is_empty(),
+            "generation presets should pass schema validation: {problems:?}"
+        );
     }
 
     #[test]

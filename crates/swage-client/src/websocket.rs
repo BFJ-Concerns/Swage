@@ -271,6 +271,9 @@ pub enum ClientEvent {
         approval_id: String,
         /// The human's verdict: `"approved"` or `"rejected"`.
         decision: String,
+        /// Optional approval scope; omitted decisions apply only once.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
         /// Optional explanation from the human reviewer.
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -434,6 +437,24 @@ impl GatewayWebSocket {
         self.send(ClientEvent::ApprovalDecision {
             approval_id,
             decision,
+            scope: None,
+            reason,
+        })
+        .await
+    }
+
+    /// Submit an approval decision with an explicit scope.
+    pub async fn approval_decision_with_scope(
+        &mut self,
+        approval_id: String,
+        decision: String,
+        scope: impl Into<String>,
+        reason: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.send(ClientEvent::ApprovalDecision {
+            approval_id,
+            decision,
+            scope: Some(scope.into()),
             reason,
         })
         .await
@@ -901,6 +922,7 @@ mod tests {
         let event = ClientEvent::ApprovalDecision {
             approval_id: "abc-123".to_string(),
             decision: "approved".to_string(),
+            scope: Some("session".to_string()),
             reason: Some("looks good".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -908,6 +930,7 @@ mod tests {
         assert_eq!(v["type"], "approval_decision");
         assert_eq!(v["approval_id"], "abc-123");
         assert_eq!(v["decision"], "approved");
+        assert_eq!(v["scope"], "session");
         assert_eq!(v["reason"], "looks good");
     }
 
@@ -916,6 +939,7 @@ mod tests {
         let event = ClientEvent::ApprovalDecision {
             approval_id: "abc-123".to_string(),
             decision: "rejected".to_string(),
+            scope: None,
             reason: None,
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -925,6 +949,10 @@ mod tests {
         assert!(
             v.get("reason").is_none(),
             "None reason should be omitted from JSON"
+        );
+        assert!(
+            v.get("scope").is_none(),
+            "None scope should be omitted from JSON"
         );
     }
 
