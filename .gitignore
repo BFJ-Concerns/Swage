@@ -54,7 +54,6 @@ coverage/
 venv/
 
 # Local agent tooling
-AGENTS.md
 .claude/
 .opencode/
 .motes/
