@@ -112,7 +112,7 @@ fn dev_fallback() -> Response {
         .unwrap()
 }
 
-/// Redirect browser routes from the gateway to Vite while `scripts/dev.sh` is
+/// Redirect browser routes from the gateway to Vite while the xtask dev loop is
 /// supervising both processes. Without this, port 3000 can serve embedded
 /// `frontend/dist` assets from a previous build, which looks like a stale UI.
 fn dev_frontend_redirect(headers: &HeaderMap, uri: &Uri) -> Option<Response> {
