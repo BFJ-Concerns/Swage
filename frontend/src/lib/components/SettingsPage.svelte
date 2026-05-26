@@ -460,10 +460,10 @@
     </div>
 
     {#if tab === "plugins"}
-      <!-- TODO Add a platform plugin catalogue to settings -->
-      <!-- Surface installed plugins, tools, and enablement state on the Plugins settings page. -->
-      <!-- --- -->
       <!--
+        Debt marker: this visible settings page is intentionally a shell until
+        the platform plugin model is accepted in the backlog.
+
         Wire the Plugins page to a real plugin/extension catalogue. Today the
         gateway exposes per-bench extensions (`/api/benches/{id}/extensions`)
         but no platform-level plugin registry. Surface installed plugins,
@@ -479,10 +479,10 @@
         <p class="shell-empty">No platform plugin registry yet. Bench-level extensions live in the Builder lens.</p>
       </section>
     {:else if tab === "channels"}
-      <!-- TODO Add channel management to settings -->
-      <!-- Add channel CRUD and credential editing behind the Channels settings page. -->
-      <!-- --- -->
       <!--
+        Debt marker: this visible settings page is intentionally a shell until
+        channel management semantics are accepted in the backlog.
+
         Render the channel list returned by /api/operator/overview.channels
         and add per-channel route/credential editing. Today the page is a
         shell because the operator endpoint is read-only and there is no
@@ -497,10 +497,11 @@
         <p class="shell-empty">Channel management is read-only via the operator API; this page will configure them once a CRUD endpoint exists.</p>
       </section>
     {:else if tab === "nodes"}
-      <!-- TODO Add execution node management to settings -->
-      <!-- Show registered execution hosts and add register or disconnect flows. -->
-      <!-- --- -->
       <!--
+        Debt marker: this visible settings page is intentionally a shell until
+        execution-host registration and disconnect semantics are accepted in
+        the backlog.
+
         Show registered execution hosts (operator overview already returns
         nodes). Add register/disconnect flows once the gateway exposes them.
         Why: workup view 06 includes Nodes; today there is no settings-level
@@ -514,10 +515,10 @@
         <p class="shell-empty">Node listing will mirror /api/operator/overview.nodes once this page is wired.</p>
       </section>
     {:else if tab === "voice"}
-      <!-- TODO Add voice configuration to settings -->
-      <!-- Bind voice capabilities and provider configuration into the Voice settings page. -->
-      <!-- --- -->
       <!--
+        Debt marker: this visible settings page is intentionally a shell until
+        the voice provider/configuration model is accepted in the backlog.
+
         Bind to /api/voice/capabilities for read-only state, then add voice
         provider configuration (transcription engine, synthesis voice,
         per-bench overrides). The capabilities endpoint exists; the
@@ -533,7 +534,11 @@
         <p class="shell-empty">Read-only capability flags live on the voice endpoint; configuration arrives with a future settings backend.</p>
       </section>
     {:else if tab === "recovery"}
-      <!-- TODO Add recovery export management to settings -->
+      <!-- TODO Add a recovery export listing API -->
+      <!-- Store and return recovery export metadata so settings can list past bundles. -->
+      <!-- --- -->
+      <!-- TODO Wire recovery export controls into settings -->
+      <!-- blocked-by: rx10 -->
       <!-- List, trigger, and download recovery export bundles from settings. -->
       <!-- --- -->
       <!--
@@ -590,10 +595,10 @@
         </div>
       </section>
     {:else if tab === "account"}
-      <!-- TODO Scope the account settings page -->
-      <!-- Decide the local or remote identity model before replacing the Account shell. -->
-      <!-- --- -->
       <!--
+        Debt marker: this visible settings page is intentionally a shell until
+        the local-vs-remote identity model is accepted in the backlog.
+
         Account is unscoped. Swage runs locally with no notion of identity;
         a remote identity provider would precede any meaningful account
         page. Until then this stays a shell so the workup nav resolves.

@@ -290,8 +290,16 @@
       >＋</button>
 
       {#if builderModeOpen && isBuilderLens(activeLens)}
-        <!-- TODO Wire the builder mode picker -->
-        <!-- Dispatch Team, Agent, Context, Lens, Skill, and Tool selections to real Builder stage modes. -->
+        <!-- TODO Add builder mode state to the lens runtime -->
+        <!-- Add a persisted active Builder mode field covering Team, Agent, Context, Lens, Skill, and Tool. -->
+        <!-- --- -->
+        <!-- TODO Render Builder stage content from the active mode -->
+        <!-- blocked-by: b1m0 -->
+        <!-- Swap the Builder stage modules when the runtime active mode changes. -->
+        <!-- --- -->
+        <!-- TODO Enable Builder mode menu selection -->
+        <!-- blocked-by: b1m0, b1m1 -->
+        <!-- Dispatch Team, Agent, Context, Lens, Skill, and Tool selections to the Builder runtime. -->
         <!-- --- -->
         <!--
           Builder mode menu, view 05 of the Riso workup. Listed entries
@@ -565,8 +573,16 @@
           {/if}
         </section>
       {:else}
-        <!-- TODO Place lens modules on the stage -->
-        <!-- Drive the stage from real lens module placement instead of workup shell cards. -->
+        <!-- TODO Add a lens module placement contract -->
+        <!-- Expose placed module identity and payloads from the lens runtime or conversation API. -->
+        <!-- --- -->
+        <!-- TODO Render the shared reference stage module -->
+        <!-- blocked-by: l1m0 -->
+        <!-- Replace the shared-reference shell card with a real file/reference module fed by placement data. -->
+        <!-- --- -->
+        <!-- TODO Render the active team topology stage module -->
+        <!-- blocked-by: l1m0 -->
+        <!-- Replace the active-team shell card with a live module consuming topology events. -->
         <!-- --- -->
         <!--
           No module placed by this lens. The Riso workup (view 01/02) puts

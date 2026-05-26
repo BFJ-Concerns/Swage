@@ -27,9 +27,6 @@ pub struct SettingsResponse {
     // TODO Add global context assembly controls to settings
     // Let operators edit global context assembly, timeout, and budget defaults from settings.
     // ---
-    // TODO Add global workspace default controls to settings
-    // Surface the global workspace path default in settings while keeping bench workspace attachments and grants conceptually separate.
-    // ---
     pub restart_required: bool,
     pub can_restart: bool,
 }

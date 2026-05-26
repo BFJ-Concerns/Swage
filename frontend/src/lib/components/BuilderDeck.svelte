@@ -614,7 +614,18 @@
       Select a bench before editing teams or extensions.
     </section>
   {:else}
+    <!-- TODO Build the Builder orchestration flow module -->
+    <!-- Bind a real flow diagram to team topology instead of the orchestration shell card. -->
+    <!-- --- -->
+    <!-- TODO Build the Builder agent inspector module -->
+    <!-- blocked-by: bd10 -->
+    <!-- Inspect and edit the selected topology node from the Builder flow module. -->
+    <!-- --- -->
+    <!-- TODO Build the Builder tool palette module -->
+    <!-- Show registry tools and attach allowed tools to the selected Builder node. -->
+    <!-- --- -->
     <!-- TODO Replace builder workup shells with real stage modules -->
+    <!-- blocked-by: bd10, bd11, bd12 -->
     <!-- Replace the Builder diagram, inspector, and palette shells with real interactive modules. -->
     <!-- --- -->
     <!--

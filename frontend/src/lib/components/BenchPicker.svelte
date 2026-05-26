@@ -12,6 +12,10 @@
   Per the same doc, bench cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
+  Debt marker: the ▾ secondary menu is visible but disabled until
+  bench-scoped settings exists. The implementation work below is split so
+  agents can land the route, page, and trigger in order.
+
   Wire the ▾ secondary menu on each bench card to a bench-scoped settings
   overlay (workup view 04). Today the trigger renders disabled because
   bench-scoped settings is not a route yet — the global settings overlay is
@@ -23,7 +27,15 @@
   same SettingsPage shell with bench-scoped pages, then bind the ▾ here.
   ---
 -->
-<!-- TODO Add bench-scoped settings entry points -->
+<!-- TODO Add a bench-scoped settings route family -->
+<!-- Add the route state and API request scoping needed for /settings/bench/:slug pages. -->
+<!-- --- -->
+<!-- TODO Render bench-scoped settings pages -->
+<!-- blocked-by: bs10 -->
+<!-- Reuse the settings shell for bench-scoped pages without mixing global and bench configuration. -->
+<!-- --- -->
+<!-- TODO Wire bench card secondary menus to settings -->
+<!-- blocked-by: bs10, bs11 -->
 <!-- Route bench card secondary menus to bench-scoped settings from workup view 04. -->
 <!-- --- -->
 <script lang="ts">
