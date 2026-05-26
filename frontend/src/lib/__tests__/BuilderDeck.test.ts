@@ -94,9 +94,27 @@ function buildTeam(id: string, name: string) {
         instructions: "",
         model: null,
       },
+      {
+        id: "reviewer",
+        display_name: "Reviewer",
+        description: "Reviews changes",
+        instructions: "Review the plan.",
+        model: "review-model",
+      },
     ],
-    tasks: [],
-    members: ["default"],
+    tasks: [
+      {
+        name: "review-plan",
+        description: "Review the plan",
+        instructions: "Check the plan.",
+        model: null,
+        output_schema: null,
+        max_output_retries: null,
+        tool_allow: ["file_read"],
+        tool_deny: null,
+      },
+    ],
+    members: ["default", "reviewer"],
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
@@ -260,6 +278,57 @@ describe("BuilderDeck", () => {
 
     expect(document.body.textContent).toContain("Builder Guardrails");
     expect(document.body.textContent).toContain("workspace-skill");
+  });
+
+  it("renders interactive builder modules and attaches tools to the selected task", async () => {
+    component = mount(BuilderDeck, {
+      target: document.body,
+      props: {
+        benchStore: mockBenchStore(),
+        activeLens: "builder",
+        availableLenses: [
+          {
+            id: "builder",
+            title: "Builder lens",
+            summary: "Workspace-first view",
+            default_surface: "builder",
+            ui_modules: ["builder", "conversation"],
+            prominent_team_ids: ["workspace-core"],
+            source_kind: "built_in",
+          },
+        ],
+        onSelectLens: vi.fn(),
+        onRefreshLenses: vi.fn(),
+      },
+    });
+
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Orchestration flow");
+    expect(document.body.textContent).toContain("Agent inspector");
+    expect(document.body.textContent).toContain("Tool palette");
+    expect(document.body.textContent).not.toContain("SHELL");
+
+    (
+      Array.from(document.querySelectorAll(".flow-node")).find((node) =>
+        node.textContent?.includes("review-plan"),
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+    (
+      Array.from(document.querySelectorAll(".tool-chip")).find((node) =>
+        node.textContent?.includes("shell"),
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+    (
+      Array.from(document.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Update task draft",
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+
+    expect(document.body.textContent).toContain("file_read, shell");
   });
 
   it("creates a team and a managed extension through the builder forms", async () => {

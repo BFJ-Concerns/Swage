@@ -76,6 +76,7 @@
   let taskDraftInstructions = $state("");
   let taskDraftModel = $state("");
   let taskDraftOutputSchema = $state("");
+  let taskDraftAllowedTools = $state<string[]>([]);
 
   let lensError = $state<string | null>(null);
   let lensNotice = $state<string | null>(null);
@@ -109,6 +110,7 @@
   let builderRuntimeNotice = $state<string | null>(null);
   let isGeneratingProposal = $state(false);
   let isApplyingProposal = $state(false);
+  let selectedBuilderNode = $state<string>("team:draft");
 
   const currentBench = $derived(benchStore?.currentBench ?? null);
   const managedExtensions = $derived(
@@ -125,6 +127,16 @@
   const showsTeamBuilder = $derived(activeBuilderMode === "team" || activeBuilderMode === "agent");
   const showsExtensionBuilder = $derived(["team", "skill", "tool"].includes(activeBuilderMode));
   const showsSharedReferenceBuilder = $derived(showSharedReferences && activeBuilderMode === "context");
+  const selectedTeam = $derived(
+    selectedTeamId
+      ? teams.find((team) => team.id === selectedTeamId) ?? null
+      : teams[0] ?? null,
+  );
+  const flowAgents = $derived(teamAgents.length ? teamAgents : selectedTeam?.agents ?? []);
+  const flowTasks = $derived(teamTasks.length ? teamTasks : selectedTeam?.tasks ?? []);
+  const selectedFlowKind = $derived(selectedBuilderNode.split(":")[0] ?? "team");
+  const toolPaletteTarget = $derived(toolTargetLabel());
+  const availableToolNames = $derived(discoverToolNames());
 
   $effect(() => {
     if (!operatorDashboardModule) {
@@ -189,6 +201,7 @@
     taskDraftOutputSchema = task.output_schema
       ? JSON.stringify(task.output_schema, null, 2)
       : "";
+    taskDraftAllowedTools = [...(task.tool_allow ?? [])];
   }
 
   function ensureEntryAgentStillExists(): void {
@@ -256,6 +269,23 @@
     ensureEntryAgentStillExists();
     resetAgentDraft(teamAgents[0] ?? blankAgent(team.entry_agent_id));
     resetTaskDraft(teamTasks[0] ?? blankTask());
+    selectedBuilderNode = `team:${team.id}`;
+  }
+
+  function selectTeamNode(team: TeamSummary | null): void {
+    if (!team) return;
+    populateTeamForm(team);
+    selectedBuilderNode = `team:${team.id}`;
+  }
+
+  function selectAgentNode(agent: TeamAgentDefinition): void {
+    resetAgentDraft(agent);
+    selectedBuilderNode = `agent:${agent.id}`;
+  }
+
+  function selectTaskNode(task: TeamTaskDefinition): void {
+    resetTaskDraft(task);
+    selectedBuilderNode = `task:${task.name}`;
   }
 
   function saveAgentDraft(): void {
@@ -332,7 +362,7 @@
       model: taskDraftModel.trim() || null,
       output_schema: outputSchema,
       max_output_retries: null,
-      tool_allow: null,
+      tool_allow: taskDraftAllowedTools.length ? [...taskDraftAllowedTools] : null,
       tool_deny: null,
     };
 
@@ -356,6 +386,7 @@
     }
 
     selectedTaskDraftName = nextTask.name;
+    selectedBuilderNode = `task:${nextTask.name}`;
     teamError = null;
   }
 
@@ -373,6 +404,7 @@
     extensionToolsCsv = "";
     extensionInstructions =
       "Describe the builder behaviour this extension should inject.";
+    selectedBuilderNode = "extension:draft";
   }
 
   function populateExtensionForm(extension: BenchExtensionSummary): void {
@@ -382,6 +414,66 @@
     extensionDescription = extension.description;
     extensionToolsCsv = extension.requested_tools.join(", ");
     extensionInstructions = extension.instructions;
+    selectedBuilderNode = `extension:${extension.name}`;
+  }
+
+  function discoverToolNames(): string[] {
+    const names = new Set(["shell", "file_read", "file_write", "python_execute"]);
+    for (const extension of extensions) {
+      for (const tool of extension.requested_tools) {
+        if (tool.trim()) names.add(tool.trim());
+      }
+    }
+    for (const task of teamTasks) {
+      for (const tool of task.tool_allow ?? []) {
+        if (tool.trim()) names.add(tool.trim());
+      }
+    }
+    return [...names].sort();
+  }
+
+  function toolTargetLabel(): string {
+    if (selectedFlowKind === "task") {
+      return selectedTaskDraftName ? `task:${selectedTaskDraftName}` : "task draft";
+    }
+    if (selectedFlowKind === "extension") {
+      return selectedExtensionName ? `extension:${selectedExtensionName}` : "extension draft";
+    }
+    if (selectedFlowKind === "agent") {
+      return selectedAgentDraftId ? `agent:${selectedAgentDraftId}` : "agent draft";
+    }
+    return selectedTeamId ? `team:${selectedTeamId}` : "team draft";
+  }
+
+  function targetHasTool(toolName: string): boolean {
+    if (selectedFlowKind === "task") {
+      return taskDraftAllowedTools.includes(toolName);
+    }
+    if (selectedFlowKind === "extension") {
+      return normaliseCsvList(extensionToolsCsv).includes(toolName);
+    }
+    return false;
+  }
+
+  function toggleToolForSelectedNode(toolName: string): void {
+    if (selectedFlowKind === "task") {
+      taskDraftAllowedTools = taskDraftAllowedTools.includes(toolName)
+        ? taskDraftAllowedTools.filter((tool) => tool !== toolName)
+        : [...taskDraftAllowedTools, toolName].sort();
+      return;
+    }
+
+    if (selectedFlowKind === "extension") {
+      const tools = normaliseCsvList(extensionToolsCsv);
+      extensionToolsCsv = (tools.includes(toolName)
+        ? tools.filter((tool) => tool !== toolName)
+        : [...tools, toolName].sort()
+      ).join(", ");
+    }
+  }
+
+  function canAttachToolsToSelectedNode(): boolean {
+    return selectedFlowKind === "task" || selectedFlowKind === "extension";
   }
 
   resetTeamForm();
@@ -625,72 +717,160 @@
       Select a bench before editing teams or extensions.
     </section>
   {:else}
-    <!-- TODO Build the Builder orchestration flow module -->
-    <!-- Bind a real flow diagram to team topology instead of the orchestration shell card. -->
-    <!-- --- -->
-    <!-- TODO Build the Builder agent inspector module -->
-    <!-- blocked-by: bd10 -->
-    <!-- Inspect and edit the selected topology node from the Builder flow module. -->
-    <!-- --- -->
-    <!-- TODO Build the Builder tool palette module -->
-    <!-- Show registry tools and attach allowed tools to the selected Builder node. -->
-    <!-- --- -->
-    <!-- TODO Replace builder workup shells with real stage modules -->
-    <!-- blocked-by: bd10, bd11, bd12 -->
-    <!-- Replace the Builder diagram, inspector, and palette shells with real interactive modules. -->
-    <!-- --- -->
-    <!--
-      Workup module shells — the Riso workup (view 05) places three modules
-      on the Builder stage: orchestration flow (real diagram), agent inspector,
-      tool palette. The actual implementation today is the form-driven editor
-      below; these shells preserve the workup vocabulary so the layout reads
-      correctly until the diagrammatic modules exist.
-
-      The Builder stage modules below are non-functional — they describe
-      what the workup specifies but no diagram, inspector, or palette
-      component exists. The form-driven editor that follows is the live
-      authoring surface.
-      Why: workup view 05 expects an interactive flow diagram with an
-      inspector and palette panel; without them, the lens reads as a
-      data-entry form rather than an authoring surface.
-      How to apply: build a flow-diagram component bound to the team
-      topology shared reference (`SharedReferenceStudio` already covers
-      part of this), an agent inspector bound to the selected node, and
-      a tool palette bound to the registry. Promote each to a task once
-      the components are scoped.
-      ---
-    -->
-    <section class="workup-shell-row" aria-label="Builder workup shells">
-      <article class="workup-shell-card" data-tone="span">
-        <header class="workup-shell-head">
+    <section class="builder-module-row" aria-label="Builder modules">
+      <article class="builder-module flow-module">
+        <header class="module-head">
           <h3>Orchestration flow</h3>
-          <span class="workup-shell-tag">SHELL · workup view 05</span>
+          <span class="chip subtle">{teams.length} team(s)</span>
         </header>
-        <p class="workup-shell-body">
-          The workup places an editable flow diagram here (agents, edges,
-          triggers). The form-driven team editor below is the live surface
-          today; the diagrammatic component is not yet built.
-        </p>
+        <div class="flow-board" role="list" aria-label="Team topology">
+          {#each teams as team (team.id)}
+            <button
+              type="button"
+              class="flow-node team-node"
+              class:active={selectedBuilderNode === `team:${team.id}`}
+              onclick={() => selectTeamNode(team)}
+            >
+              <span>Team</span>
+              <strong>{team.name}</strong>
+              <small>{team.agents?.length ?? team.members.length} agent(s)</small>
+            </button>
+          {:else}
+            <button
+              type="button"
+              class="flow-node team-node"
+              class:active={selectedBuilderNode === "team:draft"}
+              onclick={() => {
+                resetTeamForm();
+                selectedBuilderNode = "team:draft";
+              }}
+            >
+              <span>Team</span>
+              <strong>Draft team</strong>
+              <small>not saved yet</small>
+            </button>
+          {/each}
+
+          {#each flowAgents as agent (agent.id)}
+            <button
+              type="button"
+              class="flow-node agent-node"
+              class:active={selectedBuilderNode === `agent:${agent.id}`}
+              onclick={() => selectAgentNode(agent)}
+            >
+              <span>Agent</span>
+              <strong>{agent.display_name || agent.id}</strong>
+              <small>{agent.model ?? "inherited model"}</small>
+            </button>
+          {/each}
+
+          {#each flowTasks as task (task.name)}
+            <button
+              type="button"
+              class="flow-node task-node"
+              class:active={selectedBuilderNode === `task:${task.name}`}
+              onclick={() => selectTaskNode(task)}
+            >
+              <span>Task</span>
+              <strong>{task.name}</strong>
+              <small>{(task.tool_allow ?? []).join(", ") || "no tool allow-list"}</small>
+            </button>
+          {/each}
+        </div>
       </article>
-      <article class="workup-shell-card">
-        <header class="workup-shell-head">
+
+      <article class="builder-module inspector-module">
+        <header class="module-head">
           <h3>Agent inspector</h3>
-          <span class="workup-shell-tag">SHELL</span>
+          <span class="chip subtle">{toolPaletteTarget}</span>
         </header>
-        <p class="workup-shell-body">
-          Inspector for the selected agent (model, scope, prompt, tools).
-          Definitions exist server-side; the inspector module isn't built.
-        </p>
+        {#if selectedFlowKind === "team"}
+          <dl class="inspector-list">
+            <div>
+              <dt>Team</dt>
+              <dd>{teamName || selectedTeam?.name || "Draft"}</dd>
+            </div>
+            <div>
+              <dt>Entry agent</dt>
+              <dd>{teamEntryAgentId}</dd>
+            </div>
+            <div>
+              <dt>Description</dt>
+              <dd>{teamDescription || selectedTeam?.description || "No description"}</dd>
+            </div>
+          </dl>
+        {:else if selectedFlowKind === "agent"}
+          <dl class="inspector-list">
+            <div>
+              <dt>Agent</dt>
+              <dd>{agentDraftDisplayName || agentDraftId}</dd>
+            </div>
+            <div>
+              <dt>Model</dt>
+              <dd>{agentDraftModel || "Inherited"}</dd>
+            </div>
+            <div>
+              <dt>Instructions</dt>
+              <dd>{agentDraftInstructions || "No instructions yet"}</dd>
+            </div>
+          </dl>
+        {:else if selectedFlowKind === "task"}
+          <dl class="inspector-list">
+            <div>
+              <dt>Task</dt>
+              <dd>{taskDraftName || "Draft task"}</dd>
+            </div>
+            <div>
+              <dt>Model</dt>
+              <dd>{taskDraftModel || "Inherited"}</dd>
+            </div>
+            <div>
+              <dt>Allowed tools</dt>
+              <dd>{taskDraftAllowedTools.join(", ") || "None"}</dd>
+            </div>
+          </dl>
+        {:else}
+          <dl class="inspector-list">
+            <div>
+              <dt>Extension</dt>
+              <dd>{extensionDisplayName || selectedExtensionName || "Draft extension"}</dd>
+            </div>
+            <div>
+              <dt>Requested tools</dt>
+              <dd>{normaliseCsvList(extensionToolsCsv).join(", ") || "None"}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{extensions.find((extension) => extension.name === selectedExtensionName)?.status ?? "Draft"}</dd>
+            </div>
+          </dl>
+        {/if}
       </article>
-      <article class="workup-shell-card">
-        <header class="workup-shell-head">
+
+      <article class="builder-module tool-palette-module">
+        <header class="module-head">
           <h3>Tool palette</h3>
-          <span class="workup-shell-tag">SHELL</span>
+          <span class="chip subtle">{availableToolNames.length} tool(s)</span>
         </header>
-        <p class="workup-shell-body">
-          Tools available to the selected agent. The tool registry exists; a
-          palette component bound to the active agent does not.
-        </p>
+        <div class="tool-palette" aria-label="Tool palette">
+          {#each availableToolNames as toolName}
+            <button
+              type="button"
+              class="tool-chip"
+              class:active={targetHasTool(toolName)}
+              disabled={!canAttachToolsToSelectedNode()}
+              onclick={() => toggleToolForSelectedNode(toolName)}
+            >
+              {toolName}
+            </button>
+          {/each}
+        </div>
+        {#if !canAttachToolsToSelectedNode()}
+          <p class="muted-note">
+            Select a task or extension node to attach tools. Agents inherit
+            tools through task allow-lists and extension bundles.
+          </p>
+        {/if}
       </article>
     </section>
 
@@ -1257,29 +1437,23 @@
     gap: 16px;
   }
 
-  /* Non-functional shell row — workup view 05 stage modules above the live
-     form-driven editor. */
-  .workup-shell-row {
+  .builder-module-row {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(320px, 1.35fr) minmax(240px, 0.85fr) minmax(240px, 0.8fr);
     gap: 12px;
   }
 
-  .workup-shell-card {
-    border: 2px dashed var(--accent);
+  .builder-module {
+    border: 2px solid var(--ink);
     background: var(--paper);
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
   }
 
-  .workup-shell-card[data-tone="span"] {
-    grid-column: 1 / -1;
-    border-style: solid;
-  }
-
-  .workup-shell-head {
+  .module-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1288,7 +1462,7 @@
     padding-bottom: 6px;
   }
 
-  .workup-shell-card h3 {
+  .builder-module h3 {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
@@ -1299,28 +1473,109 @@
     color: var(--ink);
   }
 
-  .workup-shell-tag {
-    padding: 2px 6px;
-    background: var(--accent);
+  .flow-board {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .flow-node {
+    min-height: 92px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 10px;
+    border: 1px solid var(--ink);
+    background: rgba(14, 59, 102, 0.04);
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .flow-node:hover,
+  .flow-node.active {
+    background: var(--ink);
     color: var(--paper);
+  }
+
+  .flow-node span,
+  .flow-node small,
+  .inspector-list dt {
     font-family: var(--font-mono);
     font-weight: 500;
     font-size: 10px;
-    letter-spacing: 0.16em;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
+    opacity: 0.72;
   }
 
-  .workup-shell-body {
+  .flow-node strong {
+    font-size: 13px;
+    line-height: 1.2;
+  }
+
+  .agent-node {
+    border-left-width: 4px;
+  }
+
+  .task-node {
+    border-style: dashed;
+  }
+
+  .inspector-list {
     margin: 0;
-    color: var(--ink-soft);
-    font-size: 12.5px;
-    line-height: 1.55;
+    display: grid;
+    gap: 10px;
   }
 
-  @media (max-width: 1100px) {
-    .workup-shell-row {
-      grid-template-columns: 1fr;
-    }
+  .inspector-list div {
+    display: grid;
+    gap: 4px;
+    padding-bottom: 8px;
+    border-bottom: 1px dotted var(--rule-soft);
+  }
+
+  .inspector-list div:last-child {
+    border-bottom: none;
+  }
+
+  .inspector-list dd {
+    margin: 0;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .tool-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tool-chip {
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 7px 9px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .tool-chip.active,
+  .tool-chip:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--paper);
+  }
+
+  .tool-chip:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
   }
 
   .builder-card {
@@ -1603,9 +1858,14 @@
   }
 
   @media (max-width: 1100px) {
+    .builder-module-row,
     .builder-grid,
     .authoring-columns {
       grid-template-columns: 1fr;
+    }
+
+    .flow-board {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 
@@ -1616,6 +1876,10 @@
 
     .builder-deck {
       padding: 16px;
+    }
+
+    .flow-board {
+      grid-template-columns: 1fr;
     }
   }
 </style>
