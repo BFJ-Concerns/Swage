@@ -15,18 +15,10 @@ pub struct SettingsResponse {
     pub models: HashMap<String, ModelSettings>,
     pub default_model: String,
     pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
-    // TODO Add global tool permission controls to settings
-    // Extend the settings API, persistence, validation, and UI so operators can edit global allow, deny, bundle, and approval-gated tool rules from settings.
-    // ---
-    // TODO Add global approval defaults to settings
-    // Surface global HITL timeout and timeout-policy defaults in settings, including save validation and honest restart-required messaging.
-    // ---
-    // TODO Add global sandbox policy controls to settings
-    // Expose the global sandbox enabled policy in settings with persistence through the global config file.
-    // ---
-    // TODO Add global context assembly controls to settings
-    // Let operators edit global context assembly, timeout, and budget defaults from settings.
-    // ---
+    pub tool_permissions: swage_config::ToolPermissionConfig,
+    pub hitl: swage_config::HitlConfig,
+    pub sandbox: swage_config::SandboxConfig,
+    pub context: swage_config::ContextConfig,
     pub restart_required: bool,
     pub can_restart: bool,
 }
@@ -57,6 +49,14 @@ pub struct SaveSettingsRequest {
     pub models: HashMap<String, ModelSettings>,
     #[serde(default)]
     pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
+    #[serde(default)]
+    pub tool_permissions: Option<swage_config::ToolPermissionConfig>,
+    #[serde(default)]
+    pub hitl: Option<swage_config::HitlConfig>,
+    #[serde(default)]
+    pub sandbox: Option<swage_config::SandboxConfig>,
+    #[serde(default)]
+    pub context: Option<swage_config::ContextConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +135,10 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
         models,
         default_model: state.config.models.default.clone(),
         generation_presets: state.config.generation.presets.clone(),
+        tool_permissions: state.config.tools.permissions.clone(),
+        hitl: state.config.hitl.clone(),
+        sandbox: state.config.sandbox.clone(),
+        context: state.config.context.clone(),
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
     }
@@ -151,6 +155,10 @@ pub async fn save_settings(
         default_model,
         models: requested_models,
         generation_presets,
+        tool_permissions,
+        hitl,
+        sandbox,
+        context,
     } = request;
 
     let mut providers = HashMap::new();
@@ -206,6 +214,13 @@ pub async fn save_settings(
             presets: Some(generation_presets.clone()),
         })
     };
+    apply_runtime_settings_to_partial(
+        &mut partial,
+        tool_permissions.clone(),
+        hitl.clone(),
+        sandbox.clone(),
+        context.clone(),
+    );
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     tokio::fs::write(&path, body)
@@ -225,6 +240,10 @@ pub async fn save_settings(
         default_model,
         requested_models,
         generation_presets,
+        tool_permissions.unwrap_or_else(|| state.config.tools.permissions.clone()),
+        hitl.unwrap_or_else(|| state.config.hitl.clone()),
+        sandbox.unwrap_or_else(|| state.config.sandbox.clone()),
+        context.unwrap_or_else(|| state.config.context.clone()),
     ))
 }
 
@@ -412,6 +431,10 @@ fn settings_response_from_saved_config(
     default_model: String,
     models: HashMap<String, ModelSettings>,
     generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
+    tool_permissions: swage_config::ToolPermissionConfig,
+    hitl: swage_config::HitlConfig,
+    sandbox: swage_config::SandboxConfig,
+    context: swage_config::ContextConfig,
 ) -> SettingsResponse {
     let providers = providers
         .iter()
@@ -436,6 +459,10 @@ fn settings_response_from_saved_config(
         models,
         default_model,
         generation_presets,
+        tool_permissions,
+        hitl,
+        sandbox,
+        context,
         restart_required: true,
         can_restart: state.managed_gateway,
     }
@@ -509,6 +536,99 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
                 "generation presets must be named and non-empty".to_string(),
             ));
         }
+    }
+    if let Some(tool_permissions) = &request.tool_permissions {
+        validate_tool_permissions(tool_permissions)?;
+    }
+    if let Some(hitl) = &request.hitl
+        && hitl.timeout == 0
+    {
+        return Err(ApiError::validation(
+            "hitl timeout must be positive".to_string(),
+        ));
+    }
+    if let Some(context) = &request.context {
+        if context.assembly.trim().is_empty() {
+            return Err(ApiError::validation(
+                "context assembly must not be empty".to_string(),
+            ));
+        }
+        if !(1..=60).contains(&context.timeout) {
+            return Err(ApiError::validation(
+                "context timeout must be between 1 and 60".to_string(),
+            ));
+        }
+        if matches!(context.budget, Some(0)) {
+            return Err(ApiError::validation(
+                "context budget must be positive when set".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_runtime_settings_to_partial(
+    partial: &mut swage_config::PartialConfig,
+    tool_permissions: Option<swage_config::ToolPermissionConfig>,
+    hitl: Option<swage_config::HitlConfig>,
+    sandbox: Option<swage_config::SandboxConfig>,
+    context: Option<swage_config::ContextConfig>,
+) {
+    if let Some(tool_permissions) = tool_permissions {
+        let tools = partial.tools.get_or_insert_with(Default::default);
+        tools.allow = Some(tool_permissions.allow);
+        tools.deny = Some(tool_permissions.deny);
+        tools.bundles = Some(tool_permissions.bundles);
+        tools.require_approval = Some(tool_permissions.require_approval);
+    }
+    if let Some(hitl) = hitl {
+        partial.hitl = Some(swage_config::merge::PartialHitlConfig {
+            timeout: Some(hitl.timeout),
+            timeout_policy: Some(hitl.timeout_policy),
+        });
+    }
+    if let Some(sandbox) = sandbox {
+        partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
+            enabled: Some(sandbox.enabled),
+        });
+    }
+    if let Some(context) = context {
+        partial.context = Some(swage_config::merge::PartialContextConfig {
+            assembly: Some(context.assembly),
+            timeout: Some(context.timeout),
+            budget: Some(context.budget),
+        });
+    }
+}
+
+fn validate_tool_permissions(
+    permissions: &swage_config::ToolPermissionConfig,
+) -> Result<(), ApiError> {
+    validate_named_list("tool allow rules", &permissions.allow)?;
+    validate_named_list("tool deny rules", &permissions.deny)?;
+    for (bundle, tools) in &permissions.bundles {
+        if bundle.trim().is_empty() {
+            return Err(ApiError::validation(
+                "tool bundle names must not be empty".to_string(),
+            ));
+        }
+        validate_named_list("tool bundle entries", tools)?;
+    }
+    for entry in &permissions.require_approval {
+        if entry.tool_name().trim().is_empty() {
+            return Err(ApiError::validation(
+                "approval-gated tool names must not be empty".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_named_list(label: &str, values: &[String]) -> Result<(), ApiError> {
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(ApiError::validation(format!(
+            "{label} must not contain empty entries"
+        )));
     }
     Ok(())
 }
@@ -809,6 +929,10 @@ mod tests {
             String::new(),
             HashMap::new(),
             HashMap::new(),
+            swage_config::ToolPermissionConfig::default(),
+            swage_config::HitlConfig::default(),
+            swage_config::SandboxConfig::default(),
+            swage_config::ContextConfig::default(),
         );
 
         let provider = response.providers.get("llama-cpp").expect("provider");
@@ -820,5 +944,91 @@ mod tests {
                 .get("api_key")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn validate_settings_rejects_invalid_runtime_controls() {
+        let mut request = SaveSettingsRequest {
+            default_provider: String::new(),
+            providers: HashMap::new(),
+            default_model: String::new(),
+            models: HashMap::new(),
+            generation_presets: HashMap::new(),
+            tool_permissions: Some(swage_config::ToolPermissionConfig {
+                allow: vec!["*".into()],
+                deny: vec!["".into()],
+                bundles: HashMap::new(),
+                require_approval: vec![],
+            }),
+            hitl: Some(swage_config::HitlConfig::default()),
+            sandbox: Some(swage_config::SandboxConfig::default()),
+            context: Some(swage_config::ContextConfig::default()),
+        };
+
+        let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
+        assert!(error.0.to_string().contains("tool deny rules"));
+
+        request.tool_permissions = Some(swage_config::ToolPermissionConfig::default());
+        request.hitl = Some(swage_config::HitlConfig {
+            timeout: 0,
+            timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+        });
+        let error = validate_settings_request(&request).expect_err("zero HITL timeout is invalid");
+        assert!(error.0.to_string().contains("hitl timeout"));
+
+        request.hitl = Some(swage_config::HitlConfig::default());
+        request.context = Some(swage_config::ContextConfig {
+            assembly: "default".into(),
+            timeout: 61,
+            budget: None,
+        });
+        let error = validate_settings_request(&request)
+            .expect_err("context timeout above range is invalid");
+        assert!(error.0.to_string().contains("context timeout"));
+    }
+
+    #[test]
+    fn runtime_settings_are_written_to_partial_config() {
+        let mut partial = swage_config::PartialConfig::default();
+        let mut bundles = HashMap::new();
+        bundles.insert("dangerous".to_string(), vec!["shell".to_string()]);
+        let permissions = swage_config::ToolPermissionConfig {
+            allow: vec!["file_read".into()],
+            deny: vec!["shell".into()],
+            bundles,
+            require_approval: vec![swage_config::RequireApprovalEntry::WithOptions {
+                tool: "python_execute".into(),
+                timeout: Some(120),
+                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
+            }],
+        };
+
+        apply_runtime_settings_to_partial(
+            &mut partial,
+            Some(permissions),
+            Some(swage_config::HitlConfig {
+                timeout: 600,
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
+            }),
+            Some(swage_config::SandboxConfig { enabled: false }),
+            Some(swage_config::ContextConfig {
+                assembly: "compact".into(),
+                timeout: 10,
+                budget: Some(8192),
+            }),
+        );
+
+        let body = toml::to_string(&partial).expect("partial config should serialise");
+        assert!(body.contains("[tools]"));
+        assert!(body.contains("allow = [\"file_read\"]"));
+        assert!(body.contains("deny = [\"shell\"]"));
+        assert!(body.contains("[hitl]"));
+        assert!(body.contains("timeout = 600"));
+        assert!(body.contains("timeout_policy = \"interrupt\""));
+        assert!(body.contains("[sandbox]"));
+        assert!(body.contains("enabled = false"));
+        assert!(body.contains("[context]"));
+        assert!(body.contains("assembly = \"compact\""));
+        assert!(body.contains("budget = 8192"));
     }
 }

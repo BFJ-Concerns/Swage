@@ -57,6 +57,24 @@ function emptySettings(): SettingsResponse {
     models: {},
     default_model: "",
     generation_presets: {},
+    tool_permissions: {
+      allow: ["*"],
+      deny: [],
+      bundles: {},
+      require_approval: ["shell", "file_write", "python_execute"],
+    },
+    hitl: {
+      timeout: 300,
+      timeout_policy: "reject",
+    },
+    sandbox: {
+      enabled: true,
+    },
+    context: {
+      assembly: "default",
+      timeout: 5,
+      budget: null,
+    },
     restart_required: false,
     can_restart: false,
   };
@@ -73,6 +91,10 @@ describe("SettingsPage", () => {
       models: payload.models,
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
+      tool_permissions: payload.tool_permissions,
+      hitl: payload.hitl,
+      sandbox: payload.sandbox,
+      context: payload.context,
       restart_required: true,
       can_restart: false,
     }));

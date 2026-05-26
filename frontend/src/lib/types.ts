@@ -87,6 +87,10 @@ export interface SettingsResponse {
   models: Record<string, ModelSettings>;
   default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
+  tool_permissions: ToolPermissionConfig;
+  hitl: HitlConfig;
+  sandbox: SandboxConfig;
+  context: ContextConfig;
   restart_required: boolean;
   can_restart: boolean;
 }
@@ -97,6 +101,42 @@ export interface SettingsPayload {
   models: Record<string, ModelSettings>;
   default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
+  tool_permissions: ToolPermissionConfig;
+  hitl: HitlConfig;
+  sandbox: SandboxConfig;
+  context: ContextConfig;
+}
+
+export interface ToolPermissionConfig {
+  allow: string[];
+  deny: string[];
+  bundles: Record<string, string[]>;
+  require_approval: RequireApprovalEntry[];
+}
+
+export type ApprovalTimeoutPolicy = "reject" | "interrupt";
+
+export type RequireApprovalEntry =
+  | string
+  | {
+      tool: string;
+      timeout?: number | null;
+      timeout_policy?: ApprovalTimeoutPolicy | null;
+    };
+
+export interface HitlConfig {
+  timeout: number;
+  timeout_policy: ApprovalTimeoutPolicy;
+}
+
+export interface SandboxConfig {
+  enabled: boolean;
+}
+
+export interface ContextConfig {
+  assembly: string;
+  timeout: number;
+  budget?: number | null;
 }
 
 export interface DiscoveredModel {

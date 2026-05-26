@@ -13,7 +13,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
-  import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, SettingsResponse } from "../types";
+  import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RequireApprovalEntry, SettingsResponse } from "../types";
 
   // Pages added per the Riso workup (`riso-cyanotype.html`, view 06) — only
   // providers, generation, and automation have a working backend. The rest are
@@ -52,6 +52,8 @@
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
+  let hasInvalidBundlesJson = $state(false);
+  let hasInvalidApprovalJson = $state(false);
   let status = $state("");
   let error = $state<string | null>(null);
 
@@ -318,6 +320,67 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function linesFromList(values: string[]): string {
+    return values.join("\n");
+  }
+
+  function listFromLines(value: string): string[] {
+    return value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function bundlesText(): string {
+    if (!settings) return "{}";
+    return JSON.stringify(settings.tool_permissions.bundles, null, 2);
+  }
+
+  function updateBundles(value: string): void {
+    if (!settings) return;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      const bundles: Record<string, string[]> = {};
+      for (const [name, tools] of Object.entries(parsed)) {
+        if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string")) {
+          throw new Error("Tool bundles must be a JSON object of string arrays.");
+        }
+        bundles[name] = tools;
+      }
+      settings.tool_permissions.bundles = bundles;
+      hasInvalidBundlesJson = false;
+      error = null;
+    } catch (err) {
+      hasInvalidBundlesJson = true;
+      error = err instanceof Error ? err.message : "Tool bundles must be valid JSON.";
+    }
+  }
+
+  function approvalRulesText(): string {
+    if (!settings) return "[]";
+    return JSON.stringify(settings.tool_permissions.require_approval, null, 2);
+  }
+
+  function updateApprovalRules(value: string): void {
+    if (!settings) return;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("Approval rules must be a JSON array.");
+      for (const entry of parsed) {
+        if (typeof entry === "string") continue;
+        if (!entry || typeof entry !== "object" || typeof (entry as { tool?: unknown }).tool !== "string") {
+          throw new Error("Approval rule objects need a tool string.");
+        }
+      }
+      settings.tool_permissions.require_approval = parsed as RequireApprovalEntry[];
+      hasInvalidApprovalJson = false;
+      error = null;
+    } catch (err) {
+      hasInvalidApprovalJson = true;
+      error = err instanceof Error ? err.message : "Approval rules must be valid JSON.";
+    }
+  }
+
   function normaliseDefaultModel(): void {
     if (!settings) return;
     if (settings.default_model && settings.models[settings.default_model]) {
@@ -333,6 +396,10 @@
     if (!settings) return false;
     error = null;
     status = "";
+    if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
+      error = "Fix the invalid automation JSON before saving.";
+      return false;
+    }
     for (const [id, preset] of Object.entries(settings.generation_presets)) {
       if (!id.trim() || presetIsEmpty(preset)) {
         error = "Generation presets need a name and at least one parameter.";
@@ -342,6 +409,9 @@
       preset.max_tokens = nullableNumber(preset.max_tokens);
       preset.temperature = nullableNumber(preset.temperature);
     }
+    settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
+    settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
+    settings.context.budget = nullableNumber(settings.context.budget);
     const providerToRestore = selectedProvider;
     try {
       isPersisting = true;
@@ -1057,26 +1127,174 @@
           </div>
         </div>
       {/if}
-    {:else}
+    {:else if tab === "automation"}
       <div class="field">
         <div class="key">
-          Lifecycle hooks
-          <small>Loaded by the gateway at startup. A runtime registry view will land alongside the hook authoring UI.</small>
+          Sandbox
+          <small>Global sandbox policy written to config.toml. Saved changes require a gateway restart.</small>
         </div>
         <div class="val">
-          <span class="opt active">Startup-loaded</span>
+          <button
+            type="button"
+            class="opt"
+            class:active={settings?.sandbox.enabled}
+            onclick={() => {
+              if (settings) settings.sandbox.enabled = true;
+            }}
+          >
+            Enabled
+          </button>
+          <button
+            type="button"
+            class="opt"
+            class:active={!settings?.sandbox.enabled}
+            onclick={() => {
+              if (settings) settings.sandbox.enabled = false;
+            }}
+          >
+            Disabled
+          </button>
         </div>
       </div>
 
       <div class="field">
         <div class="key">
-          Restart required
-          <small>Set when configuration changes haven't yet been applied to the running gateway.</small>
+          Approval defaults
+          <small>Timeout and timeout policy for human approval requests without a per-tool override.</small>
+        </div>
+        <div class="val val-stack">
+          <div class="search-row">
+            <input
+              type="number"
+              class="text small"
+              bind:value={settings.hitl.timeout}
+              min="1"
+              placeholder="300"
+            />
+            <button
+              type="button"
+              class="opt"
+              class:active={settings?.hitl.timeout_policy === "reject"}
+              onclick={() => {
+                if (settings) settings.hitl.timeout_policy = "reject";
+              }}
+            >
+              Reject
+            </button>
+            <button
+              type="button"
+              class="opt"
+              class:active={settings?.hitl.timeout_policy === "interrupt"}
+              onclick={() => {
+                if (settings) settings.hitl.timeout_policy = "interrupt";
+              }}
+            >
+              Interrupt
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="key">
+          Context assembly
+          <small>Assembly strategy, assembly timeout, and optional token budget.</small>
+        </div>
+        <div class="val val-stack">
+          <div class="search-row">
+            <input
+              type="text"
+              class="text"
+              bind:value={settings.context.assembly}
+              placeholder="default"
+              autocomplete="off"
+            />
+            <input
+              type="number"
+              class="text small"
+              bind:value={settings.context.timeout}
+              min="1"
+              max="60"
+              placeholder="5"
+            />
+            <input
+              type="number"
+              class="text small"
+              value={settings.context.budget ?? ""}
+              min="1"
+              placeholder="model limit"
+              oninput={(event) => {
+                const value = (event.currentTarget as HTMLInputElement).value;
+                if (settings) settings.context.budget = value ? Number(value) : null;
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="key">
+          Tool allow rules
+          <small>One rule per line. Use * for broad availability.</small>
         </div>
         <div class="val">
-          <span class="opt" class:active={settings.restart_required}>
-            {settings.restart_required ? "Yes" : "No"}
-          </span>
+          <textarea
+            class="text"
+            rows="4"
+            value={linesFromList(settings?.tool_permissions.allow ?? [])}
+            oninput={(event) => {
+              if (settings) settings.tool_permissions.allow = listFromLines((event.currentTarget as HTMLTextAreaElement).value);
+            }}
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="key">
+          Tool deny rules
+          <small>One denied tool name or pattern per line.</small>
+        </div>
+        <div class="val">
+          <textarea
+            class="text"
+            rows="4"
+            value={linesFromList(settings?.tool_permissions.deny ?? [])}
+            oninput={(event) => {
+              if (settings) settings.tool_permissions.deny = listFromLines((event.currentTarget as HTMLTextAreaElement).value);
+            }}
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="key">
+          Tool bundles
+          <small>JSON object mapping bundle names to tool arrays.</small>
+        </div>
+        <div class="val">
+          <textarea
+            class="text code"
+            rows="7"
+            value={bundlesText()}
+            spellcheck="false"
+            oninput={(event) => updateBundles((event.currentTarget as HTMLTextAreaElement).value)}
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="key">
+          Approval-gated tools
+          <small>JSON array of tool names or objects with timeout overrides.</small>
+        </div>
+        <div class="val">
+          <textarea
+            class="text code"
+            rows="7"
+            value={approvalRulesText()}
+            spellcheck="false"
+            oninput={(event) => updateApprovalRules((event.currentTarget as HTMLTextAreaElement).value)}
+          ></textarea>
         </div>
       </div>
     {/if}
