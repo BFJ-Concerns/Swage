@@ -225,6 +225,7 @@ describe("AppLayout: workbench shell", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
+    window.localStorage.clear();
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
       gateway: {
         status: "running",
@@ -325,6 +326,25 @@ describe("AppLayout: workbench shell", () => {
     // The stage pane sits next to the conversation pane in stage-dominant mode.
     expect(document.querySelector(".stage-pane")).not.toBeNull();
     expect(document.querySelector(".body.stage-dominant")).not.toBeNull();
+  });
+
+  it("selects and persists the builder mode from the lens menu", async () => {
+    component = mountBuilderLayout();
+    await waitForText("Author the workspace, then let the agent live in it.");
+
+    (document.querySelector(".lens-caret") as HTMLButtonElement).click();
+    await flushUi();
+    (
+      Array.from(document.querySelectorAll(".builder-pop-item")).find((button) =>
+        button.textContent?.includes("Lens"),
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+
+    expect(window.localStorage.getItem("swage.builder.activeMode")).toBe("lens");
+    expect(document.body.textContent).toContain("Builder mode Lens");
+    expect(document.body.textContent).toContain("Lens catalogue");
+    expect(document.body.textContent).not.toContain("Entry team");
   });
 
   it("renders the operator stage when the research lens is active", async () => {

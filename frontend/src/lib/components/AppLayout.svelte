@@ -28,7 +28,7 @@
   import type { Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
-  import type { AppLens, LensDescriptor, LensSurface } from "../types";
+  import type { AppLens, BuilderMode, LensDescriptor, LensSurface } from "../types";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
@@ -119,6 +119,21 @@
     { id: "account", label: "Account", ix: "—", functional: false },
   ];
 
+  const BUILDER_MODE_STORAGE_KEY = "swage.builder.activeMode";
+  const BUILDER_MODE_OPTIONS: ReadonlyArray<{
+    num: string;
+    mode: BuilderMode;
+    name: string;
+    hint: string;
+  }> = [
+    { num: "01", mode: "team", name: "Team", hint: "topology + flow" },
+    { num: "02", mode: "agent", name: "Agent", hint: "role + tools" },
+    { num: "03", mode: "context", name: "Context", hint: "assembly" },
+    { num: "04", mode: "lens", name: "Lens", hint: "layout + modules" },
+    { num: "05", mode: "skill", name: "Skill", hint: "trigger + content" },
+    { num: "06", mode: "tool", name: "Tool", hint: "schema + handler" },
+  ];
+
   // × CLOSE returns to the active conversation if one was open before the
   // user entered settings; otherwise drops back to the bench picker (root).
   function closeSettings(): void {
@@ -175,6 +190,10 @@
   );
 
   onMount(() => {
+    const storedBuilderMode = window.localStorage.getItem(BUILDER_MODE_STORAGE_KEY);
+    if (isBuilderMode(storedBuilderMode)) {
+      activeBuilderMode = storedBuilderMode;
+    }
     const interval = window.setInterval(() => {
       now = Date.now();
     }, 1000);
@@ -194,10 +213,9 @@
   }
 
   // The Builder lens carries a caret (workup view 05). Clicking the lens body
-  // activates it; clicking the caret toggles the mode menu independently. The
-  // menu is rendered as a non-functional shell because the gateway has no
-  // mode dispatcher — see the mote on the dropdown markup below.
+  // activates it; clicking the caret toggles the persisted mode menu.
   let builderModeOpen = $state(false);
+  let activeBuilderMode = $state<BuilderMode>("team");
 
   function isBuilderLens(id: AppLens): boolean {
     return /builder/i.test(id);
@@ -209,12 +227,25 @@
     builderModeOpen = !builderModeOpen;
   }
 
+  function isBuilderMode(value: string | null): value is BuilderMode {
+    return BUILDER_MODE_OPTIONS.some((option) => option.mode === value);
+  }
+
+  function selectBuilderMode(mode: BuilderMode): void {
+    activeBuilderMode = mode;
+    builderModeOpen = false;
+  }
+
   async function openLensCreation(): Promise<void> {
     const builderLens = availableLenses.find((lens) => isBuilderLens(lens.id));
     if (!builderLens) return;
     builderModeOpen = false;
     await onSelectLens(builderLens.id);
   }
+
+  $effect(() => {
+    window.localStorage.setItem(BUILDER_MODE_STORAGE_KEY, activeBuilderMode);
+  });
 
   $effect(() => {
     if (stageSurface === "builder" && !builderDeckModule) {
@@ -290,51 +321,16 @@
       >＋</button>
 
       {#if builderModeOpen && isBuilderLens(activeLens)}
-        <!-- TODO Add builder mode state to the lens runtime -->
-        <!-- Add a persisted active Builder mode field covering Team, Agent, Context, Lens, Skill, and Tool. -->
-        <!-- --- -->
-        <!-- TODO Render Builder stage content from the active mode -->
-        <!-- blocked-by: b1m0 -->
-        <!-- Swap the Builder stage modules when the runtime active mode changes. -->
-        <!-- --- -->
-        <!-- TODO Enable Builder mode menu selection -->
-        <!-- blocked-by: b1m0, b1m1 -->
-        <!-- Dispatch Team, Agent, Context, Lens, Skill, and Tool selections to the Builder runtime. -->
-        <!-- --- -->
-        <!--
-          Builder mode menu, view 05 of the Riso workup. Listed entries
-          mirror the workup exactly: Team / Agent / Context / Lens / Skill /
-          Tool. None of them dispatch — see the mote below.
-
-          The builder mode menu is non-functional. The gateway has no mode
-          dispatcher: today the Builder lens always renders the same
-          BuilderDeck regardless of intent. Each entry should swap the
-          stage modules (orchestration flow, agent inspector, tool
-          palette, etc.) for the active mode.
-          Why: workup view 05 places the mode picker as the central
-          affordance for Builder; without it the lens doesn't deliver the
-          authoring vocabulary the workup describes.
-          How to apply: design a `builder_mode` runtime field; when an
-          entry is selected, push a "select_mode" event over the wire and
-          let the lens runtime swap modules. Promote to a task once the
-          dispatcher is scoped.
-          ---
-        -->
         <div class="builder-pop" role="menu" aria-label="Builder mode">
-          <div class="builder-pop-banner">Non-functional · workup view 05</div>
-          {#each [
-            { num: "01", name: "Team", hint: "topology + flow" },
-            { num: "02", name: "Agent", hint: "role + tools" },
-            { num: "03", name: "Context", hint: "assembly" },
-            { num: "04", name: "Lens", hint: "layout + modules" },
-            { num: "05", name: "Skill", hint: "trigger + content" },
-            { num: "06", name: "Tool", hint: "schema + handler" },
-          ] as item (item.num)}
+          <div class="builder-pop-banner">Builder mode · workup view 05</div>
+          {#each BUILDER_MODE_OPTIONS as item (item.mode)}
             <button
               type="button"
               class="builder-pop-item"
-              disabled
-              title="Builder mode menu is not yet wired"
+              class:active={activeBuilderMode === item.mode}
+              role="menuitemradio"
+              aria-checked={activeBuilderMode === item.mode}
+              onclick={() => selectBuilderMode(item.mode)}
             >
               <span class="builder-pop-num">{item.num}</span>
               <span class="builder-pop-name">{item.name}</span>
@@ -543,6 +539,7 @@
                   {benchStore}
                   {desktopRuntime}
                   {activeLens}
+                  {activeBuilderMode}
                   {availableLenses}
                   {onSelectLens}
                   {onRefreshLenses}
@@ -1019,7 +1016,7 @@
     filter: brightness(1.1);
   }
 
-  /* Builder mode dropdown — non-functional shell per workup view 05. */
+  /* Builder mode dropdown — workup view 05. */
   .builder-pop {
     position: absolute;
     top: 48px;
@@ -1058,12 +1055,24 @@
     font-size: 12px;
     text-align: left;
     text-transform: none;
-    cursor: not-allowed;
-    opacity: 0.7;
+    cursor: pointer;
   }
 
   .builder-pop-item:last-child {
     border-bottom: none;
+  }
+
+  .builder-pop-item:hover,
+  .builder-pop-item.active {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .builder-pop-item:hover .builder-pop-num,
+  .builder-pop-item:hover .builder-pop-hint,
+  .builder-pop-item.active .builder-pop-num,
+  .builder-pop-item.active .builder-pop-hint {
+    color: var(--paper);
   }
 
   .builder-pop-num {

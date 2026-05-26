@@ -16,6 +16,7 @@
   import type { BenchStore } from "../stores/benches";
   import type {
     AppLens,
+    BuilderMode,
     BuilderProposalResponse,
     LensDescriptor,
     LensSurface,
@@ -36,6 +37,7 @@
     onRefreshLenses: (preferredSurface?: LensSurface) => void | Promise<void>;
     showSharedReferences?: boolean;
     showOperatorDeck?: boolean;
+    activeBuilderMode?: BuilderMode;
   }
 
   let {
@@ -47,6 +49,7 @@
     onRefreshLenses,
     showSharedReferences = true,
     showOperatorDeck = true,
+    activeBuilderMode = "team",
   }: Props = $props();
 
   let loadError = $state<string | null>(null);
@@ -114,6 +117,14 @@
   const workspaceCandidates = $derived(
     extensions.filter((extension) => extension.status === "approval_required"),
   );
+  const modeTitle = $derived(
+    activeBuilderMode.charAt(0).toUpperCase() + activeBuilderMode.slice(1),
+  );
+  const showsRuntimeBuilder = $derived(["team", "agent", "context"].includes(activeBuilderMode));
+  const showsLensBuilder = $derived(activeBuilderMode === "lens");
+  const showsTeamBuilder = $derived(activeBuilderMode === "team" || activeBuilderMode === "agent");
+  const showsExtensionBuilder = $derived(["team", "skill", "tool"].includes(activeBuilderMode));
+  const showsSharedReferenceBuilder = $derived(showSharedReferences && activeBuilderMode === "context");
 
   $effect(() => {
     if (!operatorDashboardModule) {
@@ -600,10 +611,10 @@
       </article>
 
       <article class="status-card">
-        <span class="label">Authoring posture</span>
-        <strong>{managedExtensions.length} managed extension(s)</strong>
+        <span class="label">Builder mode</span>
+        <strong>{modeTitle}</strong>
         <span class="meta">
-          {workspaceCandidates.length} workspace candidate(s) waiting for trust.
+          {managedExtensions.length} managed extension(s) · {workspaceCandidates.length} workspace candidate(s)
         </span>
       </article>
     </div>
@@ -684,7 +695,8 @@
     </section>
 
     <section class="builder-grid">
-      <article class="builder-card conversational-card">
+      {#if showsRuntimeBuilder}
+        <article class="builder-card conversational-card">
         <div class="card-heading">
           <div>
             <p class="section-kicker">Conversation</p>
@@ -754,9 +766,11 @@
             </div>
           </div>
         {/if}
-      </article>
+        </article>
+      {/if}
 
-      <article class="builder-card">
+      {#if showsLensBuilder}
+        <article class="builder-card">
         <div class="card-heading">
           <div>
             <p class="section-kicker">Presentation</p>
@@ -829,9 +843,11 @@
             </div>
           {/each}
         </div>
-      </article>
+        </article>
+      {/if}
 
-      <article class="builder-card">
+      {#if showsTeamBuilder}
+        <article class="builder-card">
         <div class="card-heading">
           <div>
             <p class="section-kicker">Team</p>
@@ -970,9 +986,11 @@
             </button>
           {/each}
         </div>
-      </article>
+        </article>
+      {/if}
 
-      <article class="builder-card extension-card">
+      {#if showsExtensionBuilder}
+        <article class="builder-card extension-card">
         <div class="card-heading">
           <div>
             <p class="section-kicker">Extension</p>
@@ -1055,9 +1073,10 @@
             </div>
           </div>
         </div>
-      </article>
+        </article>
+      {/if}
 
-      {#if showSharedReferences}
+      {#if showsSharedReferenceBuilder}
         <SharedReferenceStudio
           benchId={currentBench.id}
           onTeamTopologyUpdated={handleTeamTopologyUpdate}

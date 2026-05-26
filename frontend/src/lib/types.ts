@@ -237,6 +237,7 @@ export interface ConversationResponse {
 
 export type AppLens = string;
 export type LensSurface = "conversation" | "operator" | "builder";
+export type BuilderMode = "team" | "agent" | "context" | "lens" | "skill" | "tool";
 export type LensSourceKind = "built_in" | "authored" | "installed";
 
 export interface LensDescriptor {
