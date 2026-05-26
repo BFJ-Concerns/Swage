@@ -230,6 +230,14 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::export_gateway_recovery),
         )
         .route(
+            "/api/recovery/exports",
+            get(handlers::list_gateway_recovery_exports),
+        )
+        .route(
+            "/api/recovery/exports/{id}",
+            get(handlers::get_gateway_recovery_export),
+        )
+        .route(
             "/api/recovery/import",
             post(handlers::import_gateway_recovery),
         )

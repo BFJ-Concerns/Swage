@@ -86,6 +86,32 @@ pub struct GatewayRecoveryBundle {
     pub heartbeats: Vec<RecoveryHeartbeatRecord>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecoveryExportSnapshot {
+    pub summary: RecoveryExportSummary,
+    pub bundle: GatewayRecoveryBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryExportSummary {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub size_bytes: usize,
+    pub benches: usize,
+    pub workspaces: usize,
+    pub sessions: usize,
+    pub secrets: usize,
+    pub channel_links: usize,
+    pub execution_hosts: usize,
+    pub scheduled_jobs: usize,
+    pub heartbeats: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryExportListResponse {
+    pub exports: Vec<RecoveryExportSummary>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportGatewayRecoveryRequest {
     pub bundle: GatewayRecoveryBundle,
@@ -375,7 +401,7 @@ pub async fn export_gateway_recovery_bundle(
     let scheduled_jobs = state.storage.list_scheduled_jobs().await?;
     let heartbeats = state.storage.list_heartbeats().await?;
 
-    Ok(GatewayRecoveryBundle {
+    let bundle = GatewayRecoveryBundle {
         version: 1,
         benches: benches
             .into_iter()
@@ -482,7 +508,69 @@ pub async fn export_gateway_recovery_bundle(
                 next_beat_at: heartbeat.next_beat_at,
             })
             .collect(),
+    };
+    record_recovery_export(state, bundle.clone()).await?;
+    Ok(bundle)
+}
+
+pub async fn list_gateway_recovery_exports(
+    state: &AppState,
+) -> Result<RecoveryExportListResponse, GatewayError> {
+    let exports = state.recovery_exports.lock().await;
+    Ok(RecoveryExportListResponse {
+        exports: exports
+            .iter()
+            .rev()
+            .map(|snapshot| snapshot.summary.clone())
+            .collect(),
     })
+}
+
+pub async fn get_gateway_recovery_export(
+    state: &AppState,
+    export_id: Uuid,
+) -> Result<GatewayRecoveryBundle, GatewayError> {
+    let exports = state.recovery_exports.lock().await;
+    exports
+        .iter()
+        .find(|snapshot| snapshot.summary.id == export_id)
+        .map(|snapshot| snapshot.bundle.clone())
+        .ok_or_else(|| {
+            GatewayError::Storage(swage_core::StorageError::NotFound {
+                entity: "recovery_export".to_string(),
+                id: export_id.to_string(),
+            })
+        })
+}
+
+async fn record_recovery_export(
+    state: &AppState,
+    bundle: GatewayRecoveryBundle,
+) -> Result<(), GatewayError> {
+    let size_bytes = serde_json::to_vec(&bundle)
+        .map_err(|error| GatewayError::ConfigError(format!("recovery export failed: {error}")))?
+        .len();
+    let summary = RecoveryExportSummary {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        size_bytes,
+        benches: bundle.benches.len(),
+        workspaces: bundle.workspaces.len(),
+        sessions: bundle.sessions.len(),
+        secrets: bundle.secrets.len(),
+        channel_links: bundle.channel_links.len(),
+        execution_hosts: bundle.execution_hosts.len(),
+        scheduled_jobs: bundle.scheduled_jobs.len(),
+        heartbeats: bundle.heartbeats.len(),
+    };
+
+    let mut exports = state.recovery_exports.lock().await;
+    exports.push(RecoveryExportSnapshot { summary, bundle });
+    if exports.len() > 20 {
+        let stale_count = exports.len() - 20;
+        exports.drain(..stale_count);
+    }
+    Ok(())
 }
 
 pub async fn import_gateway_recovery_bundle(

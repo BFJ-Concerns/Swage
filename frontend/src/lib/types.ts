@@ -698,6 +698,24 @@ export interface VoiceCapabilitiesResponse {
   supported_voices: string[];
 }
 
+export interface RecoveryExportSummary {
+  id: string;
+  created_at: string;
+  size_bytes: number;
+  benches: number;
+  workspaces: number;
+  sessions: number;
+  secrets: number;
+  channel_links: number;
+  execution_hosts: number;
+  scheduled_jobs: number;
+  heartbeats: number;
+}
+
+export interface RecoveryExportListResponse {
+  exports: RecoveryExportSummary[];
+}
+
 export interface ChannelStatusSummary {
   integration: string;
   status: string;

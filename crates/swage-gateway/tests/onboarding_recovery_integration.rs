@@ -195,6 +195,44 @@ async fn get_json(addr: SocketAddr, path: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recovery_exports_are_listed_and_downloadable() {
+    let workspace = tempfile::TempDir::new().unwrap();
+    let provider = ChannelProvider::new(vec![]);
+    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
+    let (addr, _state) = start_test_server(
+        None,
+        provider,
+        dispatcher,
+        workspace.path().to_path_buf(),
+        false,
+    )
+    .await;
+
+    let (empty_status, empty_body) = get_json(addr, "/api/recovery/exports").await;
+    assert_eq!(empty_status, StatusCode::OK);
+    assert_eq!(empty_body["exports"].as_array().unwrap().len(), 0);
+
+    let (export_status, export_body) = get_json(addr, "/api/recovery/export").await;
+    assert_eq!(export_status, StatusCode::OK);
+
+    let (list_status, list_body) = get_json(addr, "/api/recovery/exports").await;
+    assert_eq!(list_status, StatusCode::OK);
+    let exports = list_body["exports"].as_array().unwrap();
+    assert_eq!(exports.len(), 1);
+    assert_eq!(
+        exports[0]["benches"],
+        json!(export_body["benches"].as_array().unwrap().len())
+    );
+    assert!(exports[0]["size_bytes"].as_u64().unwrap() > 0);
+
+    let export_id = exports[0]["id"].as_str().unwrap();
+    let (download_status, download_body) =
+        get_json(addr, &format!("/api/recovery/exports/{export_id}")).await;
+    assert_eq!(download_status, StatusCode::OK);
+    assert_eq!(download_body, export_body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn channel_onboarding_pairs_node_and_delivers_first_message() {
     let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();

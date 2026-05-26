@@ -24,8 +24,8 @@ use swage_storage::{
 use crate::channel_gateway::ChannelOrigin;
 use crate::{
     capabilities::WorkflowCapabilities, execution_host::ExecutionHostRuntime,
-    lifecycle::ActivityTracker, presence::PresenceRuntime, secret::SecretManager,
-    tool::ToolDispatcher, websocket::ServerEvent,
+    lifecycle::ActivityTracker, onboarding::RecoveryExportSnapshot, presence::PresenceRuntime,
+    secret::SecretManager, tool::ToolDispatcher, websocket::ServerEvent,
 };
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
@@ -102,6 +102,12 @@ pub struct AppState {
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
+    /// Recently produced recovery exports available for operator download.
+    ///
+    /// Recovery bundles include secret material when managed secrets are in use,
+    /// so this catalogue is intentionally process-local until the product has
+    /// an explicit encrypted archive retention model.
+    pub recovery_exports: Arc<AsyncMutex<Vec<RecoveryExportSnapshot>>>,
     /// Capability surface used to gate attachment and media workflows.
     pub workflow_capabilities: WorkflowCapabilities,
     /// True after persisted global settings differ from this running process.
@@ -149,6 +155,7 @@ impl AppState {
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
+            recovery_exports: Arc::new(AsyncMutex::new(Vec::new())),
             workflow_capabilities,
             restart_required: Arc::new(AtomicBool::new(false)),
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")

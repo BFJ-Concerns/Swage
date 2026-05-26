@@ -13,11 +13,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
-  import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RequireApprovalEntry, SettingsResponse } from "../types";
+  import { downloadRecoveryExport, exportRecoveryBundle, listRecoveryExports } from "../api/workflows";
+  import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RecoveryExportSummary, RequireApprovalEntry, SettingsResponse } from "../types";
 
   // Pages added per the Riso workup (`riso-cyanotype.html`, view 06) — only
-  // providers, generation, and automation have a working backend. The rest are
-  // shells; see the per-page motes below.
+  // providers, generation, automation, and recovery have working backends. The
+  // rest are shells; see the per-page motes below.
   type SettingsTabId =
     | "providers"
     | "generation"
@@ -54,6 +55,9 @@
   let isPersisting = $state(false);
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
+  let recoveryExports = $state<RecoveryExportSummary[]>([]);
+  let isLoadingRecoveryExports = $state(false);
+  let activeRecoveryExportId = $state<string | null>(null);
   let status = $state("");
   let error = $state<string | null>(null);
 
@@ -89,10 +93,80 @@
       selectedProvider = settings.default_provider || providerIds[0] || "";
       selectedPreset = presetIds[0] ?? "";
       if (selectedProvider) await loadModels();
+      if (tab === "recovery") await loadRecoveryExports();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to load settings.";
     }
   });
+
+  async function loadRecoveryExports(): Promise<void> {
+    isLoadingRecoveryExports = true;
+    try {
+      recoveryExports = (await listRecoveryExports()).exports;
+      error = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to load recovery exports.";
+    } finally {
+      isLoadingRecoveryExports = false;
+    }
+  }
+
+  async function createRecoveryExport(): Promise<void> {
+    activeRecoveryExportId = "new";
+    try {
+      await exportRecoveryBundle();
+      await loadRecoveryExports();
+      status = "Recovery export captured.";
+      error = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to create recovery export.";
+    } finally {
+      activeRecoveryExportId = null;
+    }
+  }
+
+  async function downloadRecoveryBundle(exportId: string): Promise<void> {
+    activeRecoveryExportId = exportId;
+    try {
+      const bundle = await downloadRecoveryExport(exportId);
+      const json = JSON.stringify(bundle, null, 2);
+      const filename = `swage-recovery-${exportId}.json`;
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      status = `Downloaded ${filename}.`;
+      error = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to download recovery export.";
+    } finally {
+      activeRecoveryExportId = null;
+    }
+  }
+
+  function recoveryCountSummary(recoveryExport: RecoveryExportSummary): string {
+    const counts = [
+      ["benches", recoveryExport.benches],
+      ["workspaces", recoveryExport.workspaces],
+      ["sessions", recoveryExport.sessions],
+      ["secrets", recoveryExport.secrets],
+      ["channels", recoveryExport.channel_links],
+      ["nodes", recoveryExport.execution_hosts],
+      ["jobs", recoveryExport.scheduled_jobs],
+      ["heartbeats", recoveryExport.heartbeats],
+    ];
+    return counts.map(([label, value]) => `${label}: ${value}`).join(" · ");
+  }
+
+  function formatRecoverySize(sizeBytes: number): string {
+    if (sizeBytes < 1024) return `${sizeBytes} B`;
+    const kib = sizeBytes / 1024;
+    if (kib < 1024) return `${kib.toFixed(1)} KiB`;
+    return `${(kib / 1024).toFixed(1)} MiB`;
+  }
 
   async function loadModels(): Promise<void> {
     if (!settings || !selectedProvider) return;
@@ -604,25 +678,43 @@
         <p class="shell-empty">Read-only capability flags live on the voice endpoint; configuration arrives with a future settings backend.</p>
       </section>
     {:else if tab === "recovery"}
-      <!-- TODO Add a recovery export listing API -->
-      <!-- Store and return recovery export metadata so settings can list past bundles. -->
-      <!-- --- -->
-      <!-- TODO Wire recovery export controls into settings -->
-      <!-- blocked-by: rx10 -->
-      <!-- List, trigger, and download recovery export bundles from settings. -->
-      <!-- --- -->
-      <!--
-        Surface recovery export status and a download trigger. The export
-        endpoint exists (used by WorkbenchOperations) but there is no listing
-        of past exports or a schedule control here.
-        Why: workup view 06 lists Recovery; an operator should be able to
-        review and trigger exports from settings, not only from the bench.
-        How to apply: extend the recovery API to list exports and bind here.
-        ---
-      -->
       <section class="shell-section">
-        <h2 class="shell-section-title">Recovery exports</h2>
-        <p class="shell-empty">Export bundles are produced by the workbench operations panel today; a listing API will land alongside scheduled exports.</p>
+        <div class="section-heading-row">
+          <h2 class="shell-section-title">Recovery exports</h2>
+          <div class="opt-row">
+            <button type="button" class="btn" onclick={loadRecoveryExports} disabled={isLoadingRecoveryExports || activeRecoveryExportId !== null}>
+              {isLoadingRecoveryExports ? "Refreshing" : "Refresh"}
+            </button>
+            <button type="button" class="btn primary" onclick={createRecoveryExport} disabled={activeRecoveryExportId !== null}>
+              {activeRecoveryExportId === "new" ? "Exporting" : "Export now"}
+            </button>
+          </div>
+        </div>
+        {#if recoveryExports.length === 0}
+          <p class="shell-empty">No recovery exports have been produced by this gateway process.</p>
+        {:else}
+          <div class="recovery-export-list">
+            {#each recoveryExports as recoveryExport (recoveryExport.id)}
+              <article class="recovery-export-row">
+                <div>
+                  <strong>{new Date(recoveryExport.created_at).toLocaleString()}</strong>
+                  <span>{recoveryCountSummary(recoveryExport)}</span>
+                </div>
+                <div class="recovery-export-actions">
+                  <span>{formatRecoverySize(recoveryExport.size_bytes)}</span>
+                  <button
+                    type="button"
+                    class="btn"
+                    onclick={() => downloadRecoveryBundle(recoveryExport.id)}
+                    disabled={activeRecoveryExportId !== null}
+                  >
+                    {activeRecoveryExportId === recoveryExport.id ? "Preparing" : "Download"}
+                  </button>
+                </div>
+              </article>
+            {/each}
+          </div>
+        {/if}
       </section>
     {:else if tab === "display"}
       <!-- TODO Add persisted display preferences -->
@@ -1373,6 +1465,14 @@
     color: var(--ink);
   }
 
+  .section-heading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
   .shell-empty {
     margin: 0;
     color: var(--ink-soft);
@@ -1412,6 +1512,44 @@
     color: var(--ink);
     font-size: 13px;
     line-height: 1.5;
+  }
+
+  .recovery-export-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .recovery-export-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: center;
+    padding: 12px 0;
+    border-top: 1px dotted var(--rule-soft);
+  }
+
+  .recovery-export-row strong,
+  .recovery-export-row span {
+    display: block;
+  }
+
+  .recovery-export-row strong {
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.3;
+  }
+
+  .recovery-export-row span {
+    color: var(--ink-soft);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .recovery-export-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: flex-end;
   }
 
   .loading {
@@ -2064,6 +2202,14 @@
 
     .model-row {
       grid-template-columns: 1fr;
+    }
+
+    .recovery-export-row {
+      grid-template-columns: 1fr;
+    }
+
+    .recovery-export-actions {
+      justify-content: space-between;
     }
   }
 </style>

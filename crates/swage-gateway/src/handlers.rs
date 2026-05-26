@@ -65,7 +65,7 @@ use crate::{
     onboarding::{
         ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
         CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
-        RedeemNodePairingRequest,
+        RecoveryExportListResponse, RedeemNodePairingRequest,
     },
     operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
@@ -730,6 +730,25 @@ pub async fn export_gateway_recovery(
 ) -> Result<Json<crate::onboarding::GatewayRecoveryBundle>, ApiError> {
     Ok(Json(
         crate::onboarding::export_gateway_recovery_bundle(&state).await?,
+    ))
+}
+
+/// `GET /api/recovery/exports` — list recovery exports produced by this process.
+pub async fn list_gateway_recovery_exports(
+    State(state): State<AppState>,
+) -> Result<Json<RecoveryExportListResponse>, ApiError> {
+    Ok(Json(
+        crate::onboarding::list_gateway_recovery_exports(&state).await?,
+    ))
+}
+
+/// `GET /api/recovery/exports/{id}` — download a previously produced recovery export.
+pub async fn get_gateway_recovery_export(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::onboarding::GatewayRecoveryBundle>, ApiError> {
+    Ok(Json(
+        crate::onboarding::get_gateway_recovery_export(&state, id).await?,
     ))
 }
 

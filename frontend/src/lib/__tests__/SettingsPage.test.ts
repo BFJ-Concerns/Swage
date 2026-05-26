@@ -6,12 +6,19 @@ import SettingsPage from "../components/SettingsPage.svelte";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
 import * as settingsApi from "../api/settings";
+import * as workflowApi from "../api/workflows";
 
 vi.mock("../api/settings", () => ({
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
+}));
+
+vi.mock("../api/workflows", () => ({
+  downloadRecoveryExport: vi.fn(),
+  exportRecoveryBundle: vi.fn(),
+  listRecoveryExports: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -102,6 +109,9 @@ describe("SettingsPage", () => {
       provider_id: "openai",
       models: [{ id: "gpt-4.1-mini", name: "gpt-4.1-mini", context_window: null }],
     });
+    vi.mocked(workflowApi.listRecoveryExports).mockResolvedValue({ exports: [] });
+    vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({});
+    vi.mocked(workflowApi.downloadRecoveryExport).mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -136,6 +146,80 @@ describe("SettingsPage", () => {
       "Save settings before discovering models for a new provider.",
     );
     expect(document.body.textContent).toContain("gpt-4.1-mini");
+  });
+
+  it("lists, triggers, and downloads recovery exports", async () => {
+    const createObjectUrl = vi.fn(() => "blob:swage-recovery");
+    const revokeObjectUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    vi.mocked(workflowApi.listRecoveryExports)
+      .mockResolvedValueOnce({
+        exports: [
+          {
+            id: "export-1",
+            created_at: "2026-05-26T10:00:00Z",
+            size_bytes: 2048,
+            benches: 1,
+            workspaces: 2,
+            sessions: 3,
+            secrets: 1,
+            channel_links: 1,
+            execution_hosts: 1,
+            scheduled_jobs: 0,
+            heartbeats: 1,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        exports: [
+          {
+            id: "export-2",
+            created_at: "2026-05-26T10:05:00Z",
+            size_bytes: 512,
+            benches: 1,
+            workspaces: 0,
+            sessions: 0,
+            secrets: 0,
+            channel_links: 0,
+            execution_hosts: 0,
+            scheduled_jobs: 0,
+            heartbeats: 0,
+          },
+        ],
+      });
+    vi.mocked(workflowApi.downloadRecoveryExport).mockResolvedValue({ version: 1 });
+
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "recovery" },
+    });
+    await flushUi();
+
+    expect(workflowApi.listRecoveryExports).toHaveBeenCalled();
+    expect(document.body.textContent).toContain("sessions: 3");
+    expect(document.body.textContent).toContain("2.0 KiB");
+
+    buttonNamed("Export now").click();
+    await flushUi();
+
+    expect(workflowApi.exportRecoveryBundle).toHaveBeenCalled();
+    expect(document.body.textContent).toContain("512 B");
+
+    buttonNamed("Download").click();
+    await flushUi();
+
+    expect(workflowApi.downloadRecoveryExport).toHaveBeenCalledWith("export-2");
+    expect(createObjectUrl).toHaveBeenCalled();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:swage-recovery");
   });
 
   it("makes the first discovered model the default before saving", async () => {

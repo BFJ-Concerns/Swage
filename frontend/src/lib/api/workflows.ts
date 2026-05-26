@@ -4,6 +4,7 @@ import type {
   CreateHeartbeatRequest,
   CreateScheduledJobRequest,
   HeartbeatSummary,
+  RecoveryExportListResponse,
   ScheduledJobSummary,
   VoiceCapabilitiesResponse,
 } from "../types";
@@ -71,5 +72,15 @@ export async function fetchVoiceCapabilities(): Promise<VoiceCapabilitiesRespons
 
 export async function exportRecoveryBundle(): Promise<Record<string, unknown>> {
   const response = await request("/api/recovery/export", "GET");
+  return response.json() as Promise<Record<string, unknown>>;
+}
+
+export async function listRecoveryExports(): Promise<RecoveryExportListResponse> {
+  const response = await request("/api/recovery/exports", "GET");
+  return response.json() as Promise<RecoveryExportListResponse>;
+}
+
+export async function downloadRecoveryExport(exportId: string): Promise<Record<string, unknown>> {
+  const response = await request(`/api/recovery/exports/${encodeURIComponent(exportId)}`, "GET");
   return response.json() as Promise<Record<string, unknown>>;
 }

@@ -114,7 +114,7 @@
     { id: "channels", label: "Channels", ix: "—", functional: false },
     { id: "nodes", label: "Nodes", ix: "—", functional: false },
     { id: "voice", label: "Voice", ix: "—", functional: false },
-    { id: "recovery", label: "Recovery", ix: "—", functional: false },
+    { id: "recovery", label: "Recovery", ix: "—", functional: true },
     { id: "display", label: "Display", ix: "—", functional: false },
     { id: "account", label: "Account", ix: "—", functional: false },
   ];
