@@ -2055,11 +2055,18 @@ async fn execute_external_delegate_message(
     let target_resolved =
         crate::turn::load_session_config(&state, &bench.slug, &delegate_msg.recipient_agent_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
-    let target_agent_config = crate::turn::build_agent_config(
+    let active_workspace_attachment_id =
+        active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
+    let target_agent_config = crate::turn::build_agent_config_for_bench_workspace(
+        &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-    );
+        bench_id,
+        sender_turn_id.unwrap_or_else(Uuid::new_v4),
+        active_workspace_attachment_id,
+    )
+    .await;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
 
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2124,6 +2131,38 @@ async fn execute_external_delegate_message(
     .await?;
 
     Ok(())
+}
+
+async fn active_workspace_attachment_for_sender_turn(
+    state: &AppState,
+    sender_turn_id: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    let Some(turn_id) = sender_turn_id else {
+        return Ok(None);
+    };
+    let Some(turn) = state
+        .storage
+        .get_turn(turn_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let Some(thread) = swage_storage::store::ThreadStore::get(&*state.storage, turn.thread_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let Some(session) = state
+        .storage
+        .get_session(thread.session_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    Ok(session.active_workspace_attachment_id)
 }
 
 async fn deliver_external_delegate_completion(

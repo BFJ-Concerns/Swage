@@ -867,21 +867,6 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
     }
 }
 
-pub(crate) fn build_agent_config(
-    agent_id: String,
-    config: &swage_config::ResolvedConfig,
-    output_schema_override: Option<serde_json::Value>,
-) -> AgentConfig {
-    let workspace_root = crate::tool::workspace::resolve_workspace_root(config);
-    build_agent_config_with_workspace(
-        agent_id,
-        config,
-        output_schema_override,
-        &workspace_root,
-        vec![workspace_root.clone()],
-    )
-}
-
 pub(crate) fn build_agent_config_with_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
@@ -908,6 +893,29 @@ pub(crate) fn build_agent_config_with_workspace(
         agent_config.generation_metadata = preset.metadata.clone();
     }
     agent_config
+}
+
+pub(crate) async fn build_agent_config_for_bench_workspace(
+    state: &AppState,
+    agent_id: String,
+    config: &swage_config::ResolvedConfig,
+    output_schema_override: Option<serde_json::Value>,
+    bench_id: Uuid,
+    session_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+) -> AgentConfig {
+    let workspace_policy =
+        load_trusted_workspace_policy(&state.storage, bench_id, active_workspace_attachment_id)
+            .await;
+    let (workspace_root, allowed_paths) =
+        agent_workspace_from_policy(&workspace_policy, bench_id, session_id);
+    build_agent_config_with_workspace(
+        agent_id,
+        config,
+        output_schema_override,
+        &workspace_root,
+        allowed_paths,
+    )
 }
 
 fn managed_scratch_workspace(bench_id: Uuid, session_id: Uuid) -> PathBuf {
@@ -1095,8 +1103,19 @@ impl DelegationHandler for GatewayDelegationHandler {
                 ))
             })?;
 
-        let target_agent_config =
-            build_agent_config(target_agent_id.to_string(), &target_resolved, None);
+        let active_workspace_attachment_id = self
+            .active_workspace_attachment_for_turn(sender_turn_id)
+            .await?;
+        let target_agent_config = build_agent_config_for_bench_workspace(
+            &self.state,
+            target_agent_id.to_string(),
+            &target_resolved,
+            None,
+            bench_id,
+            sender_turn_id,
+            active_workspace_attachment_id,
+        )
+        .await;
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
 
         // Delegated child agents execute within the gateway runtime, but their
@@ -1110,7 +1129,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 agent_config: &target_agent_config,
                 session_metadata: None,
                 bench_id: Some(bench_id),
-                active_workspace_attachment_id: None,
+                active_workspace_attachment_id,
                 ws_tx: silent_ws_tx,
             },
             "delegated turn",
@@ -1214,6 +1233,27 @@ impl DelegationHandler for GatewayDelegationHandler {
             return Err(error);
         }
         Ok(result_msg.payload.clone())
+    }
+}
+
+impl GatewayDelegationHandler {
+    async fn active_workspace_attachment_for_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Option<Uuid>, AgentError> {
+        let Some(turn) = self.state.storage.get_turn(turn_id).await? else {
+            return Ok(None);
+        };
+        let Some(thread) =
+            swage_storage::store::ThreadStore::get(self.state.storage.as_ref(), turn.thread_id)
+                .await?
+        else {
+            return Ok(None);
+        };
+        let Some(session) = self.state.storage.get_session(thread.session_id).await? else {
+            return Ok(None);
+        };
+        Ok(session.active_workspace_attachment_id)
     }
 }
 

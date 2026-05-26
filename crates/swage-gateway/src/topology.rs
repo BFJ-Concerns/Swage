@@ -22,7 +22,7 @@ use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind}
 
 use crate::state::AppState;
 use crate::turn::{
-    GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config,
+    GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config_for_bench_workspace,
     build_assembly_elements, build_gateway_dispatcher_with_unsandboxed_degradation,
     load_bench_memory,
 };
@@ -723,9 +723,22 @@ async fn execute_agent_node(
     )
     .await;
 
+    let active_workspace_attachment_id = state
+        .storage
+        .get_session(session_id)
+        .await?
+        .and_then(|session| session.active_workspace_attachment_id);
     let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let agent_config =
-        build_agent_config(agent_id.to_string(), &config, node.output_schema.clone());
+    let agent_config = build_agent_config_for_bench_workspace(
+        state,
+        agent_id.to_string(),
+        &config,
+        node.output_schema.clone(),
+        bench.id,
+        session_id,
+        active_workspace_attachment_id,
+    )
+    .await;
     let dispatcher_build = build_gateway_dispatcher_with_unsandboxed_degradation(
         state,
         GatewayDispatcherRequest {
@@ -733,7 +746,7 @@ async fn execute_agent_node(
             agent_config: &agent_config,
             session_metadata: None,
             bench_id: Some(bench.id),
-            active_workspace_attachment_id: None,
+            active_workspace_attachment_id,
             ws_tx: silent_ws_tx,
         },
         "topology agent node",
