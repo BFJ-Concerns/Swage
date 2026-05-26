@@ -131,10 +131,10 @@ fn default_assembly_produces_era_01_equivalent_output() {
         !output.messages.is_empty(),
         "assembly must produce messages"
     );
-    assert_eq!(output.messages[0].role, swage_core::Role::System);
+    assert_eq!(output.messages[0].role(), swage_core::Role::System);
 
     // The system message content should contain both rules' content in priority order
-    let system_text = &output.messages[0].content[0];
+    let system_text = &output.messages[0].content()[0];
     match system_text {
         swage_core::ContentPart::Text { text } => {
             assert!(
@@ -158,8 +158,8 @@ fn default_assembly_produces_era_01_equivalent_output() {
 
     // 2. Remaining messages should be the history in chronological order
     assert_eq!(output.messages.len(), 3, "system + 2 history messages");
-    assert_eq!(output.messages[1].role, swage_core::Role::User);
-    assert_eq!(output.messages[2].role, swage_core::Role::Assistant);
+    assert_eq!(output.messages[1].role(), swage_core::Role::User);
+    assert_eq!(output.messages[2].role(), swage_core::Role::Assistant);
 
     // 3. Report should be populated
     assert_eq!(output.report.assembly_name, "default");
@@ -232,7 +232,8 @@ fn budget_triggers_truncation_preserving_recent_messages() {
     let last_output = output.messages.last().unwrap();
     let last_input = messages.last().unwrap();
     assert_eq!(
-        last_output.role, last_input.role,
+        last_output.role(),
+        last_input.role(),
         "last message role should match — most recent exchange preserved"
     );
 
@@ -383,7 +384,7 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
 
     // The assembled system message should contain all three rules' content
     assert!(!output.messages.is_empty());
-    assert_eq!(output.messages[0].role, swage_core::Role::System);
+    assert_eq!(output.messages[0].role(), swage_core::Role::System);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

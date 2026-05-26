@@ -194,14 +194,14 @@ fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
     );
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = match message.role {
+        let role_label = match message.role() {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
         let text = message
-            .content
+            .content()
             .iter()
             .filter_map(|part| match part {
                 swage_core::ContentPart::Text { text } => Some(text.as_str()),
@@ -261,7 +261,7 @@ fn apply_evictions(
             continue;
         }
         // System messages are never evicted.
-        if messages[idx].role == Role::System {
+        if messages[idx].role() == Role::System {
             continue;
         }
         // Deduplicate.
@@ -361,7 +361,10 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn make(role: Role, text: &str) -> ChatMessage {
-        ChatMessage::new(role, text)
+        match role {
+            Role::Tool => ChatMessage::tool_result("call_test", text),
+            Role::System | Role::User | Role::Assistant => ChatMessage::new(role, text),
+        }
     }
 
     fn tokeniser() -> TiktokenTokeniser {
@@ -369,7 +372,7 @@ mod tests {
     }
 
     fn message_text(msg: &ChatMessage) -> String {
-        msg.content
+        msg.content()
             .iter()
             .filter_map(|p| match p {
                 ContentPart::Text { text } => Some(text.as_str()),
@@ -414,7 +417,7 @@ mod tests {
             output
                 .messages
                 .iter()
-                .all(|m| { m.role != Role::Tool || !message_text(m).contains("ERROR") }),
+                .all(|m| { m.role() != Role::Tool || !message_text(m).contains("ERROR") }),
             "the failed tool call message must not appear in output"
         );
 
@@ -475,7 +478,7 @@ mod tests {
 
         // System message must remain.
         assert!(
-            output.messages.iter().any(|m| m.role == Role::System),
+            output.messages.iter().any(|m| m.role() == Role::System),
             "system message must never be evicted"
         );
         assert_eq!(

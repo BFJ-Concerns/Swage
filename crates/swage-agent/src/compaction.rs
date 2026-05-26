@@ -29,7 +29,7 @@ pub fn exceeds_threshold(messages: &[ChatMessage], threshold: &CompactionThresho
         CompactionThreshold::TokenCount(max_tokens) => {
             let char_count: usize = messages
                 .iter()
-                .flat_map(|m| m.content.iter())
+                .flat_map(|m| m.content().iter())
                 .map(|part| match part {
                     ContentPart::Text { text } => text.len(),
                     // Images are treated as zero for the purposes of this estimate.
@@ -115,7 +115,7 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
     // Collect the text content from older messages for the summarisation prompt.
     let old_text: String = old_messages
         .iter()
-        .flat_map(|m| m.content.iter())
+        .flat_map(|m| m.content().iter())
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
             ContentPart::ImageUrl { .. } => None,
@@ -157,7 +157,7 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
 /// bring the total below the threshold. System messages are always preserved.
 fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<ChatMessage> {
     let (system_msgs, non_system): (Vec<_>, Vec<_>) =
-        messages.into_iter().partition(|m| m.role == Role::System);
+        messages.into_iter().partition(|m| m.role() == Role::System);
 
     let target_keep = match threshold {
         CompactionThreshold::MessageCount(max) => {
@@ -169,7 +169,7 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
             let avg_tokens_per_msg = {
                 let total_chars: usize = non_system
                     .iter()
-                    .flat_map(|m| m.content.iter())
+                    .flat_map(|m| m.content().iter())
                     .map(|p| {
                         if let ContentPart::Text { text } = p {
                             text.len()
@@ -182,7 +182,7 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
             };
             let system_tokens: u64 = system_msgs
                 .iter()
-                .flat_map(|m| m.content.iter())
+                .flat_map(|m| m.content().iter())
                 .map(|p| {
                     if let ContentPart::Text { text } = p {
                         text.len() as u64 / 4
@@ -207,7 +207,7 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
 /// This is the last-resort tier before declaring the context uncompactable.
 fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let (system_msgs, non_system): (Vec<_>, Vec<_>) =
-        messages.into_iter().partition(|m| m.role == Role::System);
+        messages.into_iter().partition(|m| m.role() == Role::System);
 
     let mut result = system_msgs;
     if let Some(last) = non_system.into_iter().last() {
@@ -445,8 +445,8 @@ mod tests {
         // Summary message (system) + the 2 recent messages = 3 total.
         assert_eq!(result.len(), 3);
         // First message should be the system summary.
-        assert_eq!(result[0].role, Role::System);
-        let summary_text = match &result[0].content[0] {
+        assert_eq!(result[0].role(), Role::System);
+        let summary_text = match &result[0].content()[0] {
             ContentPart::Text { text } => text.clone(),
             _ => panic!("expected text content in summary"),
         };

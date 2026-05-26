@@ -218,9 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_forwards_messages_and_model_to_provider() {
-        use chrono::Utc;
         use swage_core::{ChatMessage, ContentPart, Role};
-        use uuid::Uuid;
 
         let received =
             std::sync::Arc::new(std::sync::Mutex::new(None::<swage_core::CompletionRequest>));
@@ -241,18 +239,12 @@ mod tests {
 
         let handler = HostLlmHandler::new(provider);
         let mut req = minimal_request();
-        req.messages = vec![ChatMessage {
-            id: Uuid::new_v4(),
-            role: Role::User,
-            content: vec![ContentPart::Text {
+        req.messages = vec![ChatMessage::new_parts(
+            Role::User,
+            vec![ContentPart::Text {
                 text: "hello".into(),
             }],
-            created_at: Utc::now(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            content_blocks: None,
-        }];
+        )];
         req.model = Some("claude-3".into());
 
         handler.handle_request(req).await.unwrap();

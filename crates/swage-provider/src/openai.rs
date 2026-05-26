@@ -216,8 +216,8 @@ impl OpenAiProvider {
     }
 
     fn convert_message(message: &ChatMessage) -> Vec<OpenAiMessage> {
-        if let Some(blocks) = message.content_blocks.as_ref() {
-            match message.role {
+        if let Some(blocks) = message.content_blocks() {
+            match message.role() {
                 Role::Assistant => {
                     let text_content = blocks
                         .iter()
@@ -250,7 +250,7 @@ impl OpenAiProvider {
                         } else {
                             Some(text_content)
                         },
-                        name: message.name.clone(),
+                        name: message.name().map(ToOwned::to_owned),
                         tool_call_id: None,
                         tool_calls: if tool_calls.is_empty() {
                             None
@@ -286,7 +286,7 @@ impl OpenAiProvider {
             }
         }
 
-        let role = match message.role {
+        let role = match message.role() {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -294,7 +294,7 @@ impl OpenAiProvider {
         };
 
         let content_text: String = message
-            .content
+            .content()
             .iter()
             .filter_map(|part| match part {
                 ContentPart::Text { text } => Some(text.as_str()),
@@ -303,7 +303,7 @@ impl OpenAiProvider {
             .collect::<Vec<_>>()
             .join("");
 
-        let tool_calls = message.tool_calls.as_ref().map(|calls| {
+        let tool_calls = message.tool_calls().map(|calls| {
             calls
                 .iter()
                 .map(|tool_call| OpenAiToolCall {
@@ -324,8 +324,8 @@ impl OpenAiProvider {
             } else {
                 Some(content_text)
             },
-            name: message.name.clone(),
-            tool_call_id: message.tool_call_id.clone(),
+            name: message.name().map(ToOwned::to_owned),
+            tool_call_id: message.tool_call_id().map(ToOwned::to_owned),
             tool_calls,
         }]
     }
@@ -758,8 +758,7 @@ mod tests {
 
     #[test]
     fn convert_tool_message_preserves_tool_call_id() {
-        let mut msg = ChatMessage::new(Role::Tool, "result text");
-        msg.tool_call_id = Some("call_abc".into());
+        let msg = ChatMessage::tool_result("call_abc", "result text");
         let converted = OpenAiProvider::convert_messages(&[msg]);
         assert_eq!(converted[0].role, "tool");
         assert_eq!(converted[0].tool_call_id, Some("call_abc".into()));
@@ -767,13 +766,14 @@ mod tests {
 
     #[test]
     fn convert_assistant_with_tool_calls() {
-        let mut msg = ChatMessage::new(Role::Assistant, "");
-        msg.content = Vec::new();
-        msg.tool_calls = Some(vec![ToolCall {
-            call_id: "call_1".into(),
-            name: "search".into(),
-            arguments: serde_json::json!({"query": "rust"}),
-        }]);
+        let msg = ChatMessage::assistant_tool_calls(
+            "",
+            vec![ToolCall {
+                call_id: "call_1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }],
+        );
 
         let converted = OpenAiProvider::convert_messages(&[msg]);
         let tc = converted[0].tool_calls.as_ref().unwrap();

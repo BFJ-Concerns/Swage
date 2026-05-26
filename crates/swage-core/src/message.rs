@@ -12,7 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Role of a participant in a conversation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -82,40 +82,32 @@ pub enum ContentPart {
 /// The `content_blocks` field holds Anthropic-specific JSON blocks used when
 /// representing tool_use/tool_result pairs in the conversation history — these
 /// are built by `crate::tool::build_tool_round_messages`.
-// TODO Make ChatMessage cross-field invariants type-level
-// Public fields plus convenience constructors let callers build a
-// ChatMessage where (role, content, content_blocks, tool_call_id,
-// tool_calls) are mutually inconsistent — e.g. tool_call_id set on a
-// non-Tool role, or both content and content_blocks populated. Convert
-// to a sealed enum with one variant per role, or hide the fields and
-// expose constructors that enforce the cross-field rules.
-// ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Provider-independent message identifier.
-    pub id: Uuid,
+    id: Uuid,
     /// Who sent the message.
-    pub role: Role,
+    role: Role,
     /// Content parts — may be empty for messages that only carry tool calls
     /// or structured `content_blocks`.
-    pub content: Vec<ContentPart>,
+    content: Vec<ContentPart>,
     /// When the message was created (UTC).
-    pub created_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
     /// Optional display name for the participant.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    name: Option<String>,
     /// Identifies which tool call this message responds to (Role::Tool messages).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
+    tool_call_id: Option<String>,
     /// Tool calls requested by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<crate::tool::ToolCall>>,
+    tool_calls: Option<Vec<crate::tool::ToolCall>>,
     /// Anthropic-specific structured content blocks (tool_use, tool_result).
     ///
     /// When present, providers use these instead of the `content` vec.
     /// Built by `crate::tool::build_tool_round_messages`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub content_blocks: Option<Vec<serde_json::Value>>,
+    content_blocks: Option<Vec<serde_json::Value>>,
 }
 
 impl ChatMessage {
@@ -123,6 +115,10 @@ impl ChatMessage {
     ///
     /// The `content` string is wrapped in a single `ContentPart::Text`.
     pub fn new(role: Role, content: impl Into<String>) -> Self {
+        assert!(
+            !matches!(role, Role::Tool),
+            "tool messages must be built with ChatMessage::tool_result"
+        );
         Self {
             id: Uuid::new_v4(),
             role,
@@ -143,6 +139,10 @@ impl ChatMessage {
     /// The `content` field is left empty since the blocks carry the actual
     /// payload. Providers check `content_blocks` first.
     pub fn with_blocks(role: Role, blocks: Vec<serde_json::Value>) -> Self {
+        assert!(
+            matches!(role, Role::Assistant | Role::User),
+            "structured content blocks are only valid for assistant and user messages"
+        );
         Self {
             id: Uuid::new_v4(),
             role,
@@ -160,6 +160,10 @@ impl ChatMessage {
     ///
     /// Use this when constructing multimodal messages (e.g. text + image).
     pub fn new_parts(role: Role, content: Vec<ContentPart>) -> Self {
+        assert!(
+            !matches!(role, Role::Tool),
+            "tool messages must be built with ChatMessage::tool_result"
+        );
         Self {
             id: Uuid::new_v4(),
             role,
@@ -170,6 +174,92 @@ impl ChatMessage {
             tool_calls: None,
             content_blocks: None,
         }
+    }
+
+    /// Create an assistant message that requests tool calls.
+    pub fn assistant_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<crate::tool::ToolCall>,
+    ) -> Self {
+        let content = content.into();
+        Self {
+            id: Uuid::new_v4(),
+            role: Role::Assistant,
+            content: if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentPart::Text { text: content }]
+            },
+            created_at: Utc::now(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(tool_calls),
+            content_blocks: None,
+        }
+    }
+
+    /// Create a tool-result message for a previously issued assistant tool call.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            role: Role::Tool,
+            content: vec![ContentPart::Text {
+                text: content.into(),
+            }],
+            created_at: Utc::now(),
+            name: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: None,
+            content_blocks: None,
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    pub fn content(&self) -> &[ContentPart] {
+        &self.content
+    }
+
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    pub fn tool_calls(&self) -> Option<&[crate::tool::ToolCall]> {
+        self.tool_calls.as_deref()
+    }
+
+    pub fn content_blocks(&self) -> Option<&[serde_json::Value]> {
+        self.content_blocks.as_deref()
+    }
+
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 
@@ -407,11 +497,7 @@ mod tests {
         let messages = vec![
             ChatMessage::new(Role::User, "hello"),
             // Orphan: no preceding assistant message issued call_999
-            {
-                let mut m = ChatMessage::new(Role::Tool, "result");
-                m.tool_call_id = Some("call_999".into());
-                m
-            },
+            ChatMessage::tool_result("call_999", "result"),
         ];
 
         let sanitized = sanitize_tool_messages(messages);
@@ -421,21 +507,15 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_valid_tool_result() {
-        let assistant_msg = {
-            let mut m = ChatMessage::new(Role::Assistant, "");
-            m.content = Vec::new();
-            m.tool_calls = Some(vec![crate::tool::ToolCall {
+        let assistant_msg = ChatMessage::assistant_tool_calls(
+            "",
+            vec![crate::tool::ToolCall {
                 call_id: "call_1".into(),
                 name: "search".into(),
                 arguments: serde_json::json!({}),
-            }]);
-            m
-        };
-        let tool_msg = {
-            let mut m = ChatMessage::new(Role::Tool, "found it");
-            m.tool_call_id = Some("call_1".into());
-            m
-        };
+            }],
+        );
+        let tool_msg = ChatMessage::tool_result("call_1", "found it");
 
         let sanitized = sanitize_tool_messages(vec![assistant_msg, tool_msg]);
         assert_eq!(sanitized.len(), 2);
@@ -445,7 +525,15 @@ mod tests {
     #[test]
     fn sanitize_removes_tool_result_without_tool_call_id() {
         // A Tool message with no tool_call_id is always orphaned.
-        let messages = vec![ChatMessage::new(Role::Tool, "stray")];
+        let messages = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000001",
+                "role": "tool",
+                "content": [{ "type": "text", "text": "stray" }],
+                "created_at": "2024-01-01T00:00:00Z"
+            }))
+            .expect("legacy malformed tool message should deserialize"),
+        ];
         let sanitized = sanitize_tool_messages(messages);
         assert!(sanitized.is_empty());
     }
@@ -463,28 +551,18 @@ mod tests {
 
     #[test]
     fn sanitize_handles_mixed_valid_and_orphaned_tool_results() {
-        let assistant_msg = {
-            let mut m = ChatMessage::new(Role::Assistant, "");
-            m.content = Vec::new();
-            m.tool_calls = Some(vec![crate::tool::ToolCall {
+        let assistant_msg = ChatMessage::assistant_tool_calls(
+            "",
+            vec![crate::tool::ToolCall {
                 call_id: "call_a".into(),
                 name: "tool_a".into(),
                 arguments: serde_json::json!({}),
-            }]);
-            m
-        };
+            }],
+        );
         // Valid — matches call_a
-        let valid_tool = {
-            let mut m = ChatMessage::new(Role::Tool, "result a");
-            m.tool_call_id = Some("call_a".into());
-            m
-        };
+        let valid_tool = ChatMessage::tool_result("call_a", "result a");
         // Orphan — call_b was never issued
-        let orphaned_tool = {
-            let mut m = ChatMessage::new(Role::Tool, "result b");
-            m.tool_call_id = Some("call_b".into());
-            m
-        };
+        let orphaned_tool = ChatMessage::tool_result("call_b", "result b");
 
         let sanitized = sanitize_tool_messages(vec![assistant_msg, valid_tool, orphaned_tool]);
         assert_eq!(sanitized.len(), 2);

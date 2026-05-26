@@ -369,7 +369,7 @@ fn substitute_compacted(
     results: &[CompactionResult],
 ) -> Vec<ChatMessage> {
     for result in results {
-        let intent_ids: Vec<Uuid> = result.intent.messages.iter().map(|m| m.id).collect();
+        let intent_ids: Vec<Uuid> = result.intent.messages.iter().map(|m| m.id()).collect();
         if intent_ids.is_empty() {
             continue;
         }
@@ -392,7 +392,7 @@ fn find_contiguous_by_id(messages: &[ChatMessage], ids: &[Uuid]) -> Option<std::
     }
     'outer: for start in 0..=messages.len() - ids.len() {
         for (offset, id) in ids.iter().enumerate() {
-            if messages[start + offset].id != *id {
+            if messages[start + offset].id() != *id {
                 continue 'outer;
             }
         }
@@ -763,10 +763,10 @@ mod tests {
 
         assert!(output.messages.len() >= 2);
         // System message must be first.
-        assert_eq!(output.messages[0].role, Role::System);
+        assert_eq!(output.messages[0].role(), Role::System);
         // Conversation messages follow.
-        assert_eq!(output.messages[1].role, Role::User);
-        assert_eq!(output.messages[2].role, Role::Assistant);
+        assert_eq!(output.messages[1].role(), Role::User);
+        assert_eq!(output.messages[2].role(), Role::Assistant);
     }
 
     #[test]
@@ -785,7 +785,7 @@ mod tests {
 
         // Only history messages — no system message.
         assert!(
-            output.messages.iter().all(|m| m.role != Role::System),
+            output.messages.iter().all(|m| m.role() != Role::System),
             "expected no system message when prompts element is empty"
         );
         assert_eq!(output.messages.len(), 2);
@@ -812,7 +812,7 @@ mod tests {
         // No message should come from the memory element.
         for msg in &output.messages {
             let is_memory = matches!(
-                msg.content.first(),
+                msg.content().first(),
                 Some(swage_core::ContentPart::Text { text }) if text.contains("memory content")
             );
             assert!(!is_memory, "memory content appeared in assembled messages");
@@ -1031,7 +1031,7 @@ mod tests {
             .iter()
             .zip(direct_output.messages.iter())
         {
-            assert_eq!(fb.role, direct.role, "message roles should match");
+            assert_eq!(fb.role(), direct.role(), "message roles should match");
         }
     }
 
@@ -1047,8 +1047,8 @@ mod tests {
 
         // The most recent exchange must remain.
         let has_recent_user = output.messages.iter().any(|m| {
-            m.role == Role::User
-                && m.content.iter().any(|p| {
+            m.role() == Role::User
+                && m.content().iter().any(|p| {
                     matches!(p, swage_core::ContentPart::Text { text } if text.contains("Recent user"))
                 })
         });
@@ -1072,7 +1072,7 @@ mod tests {
         // Message sequence must be identical.
         assert_eq!(via_assemble.messages.len(), via_direct.messages.len());
         for (a, b) in via_assemble.messages.iter().zip(via_direct.messages.iter()) {
-            assert_eq!(a.role, b.role);
+            assert_eq!(a.role(), b.role());
         }
     }
 
@@ -1181,10 +1181,10 @@ mod tests {
 
         // Expected order: System (prompts), System (skills), User, Assistant
         assert_eq!(output.messages.len(), 4);
-        assert_eq!(output.messages[0].role, Role::System); // prompts
-        assert_eq!(output.messages[1].role, Role::System); // skills
-        assert_eq!(output.messages[2].role, Role::User); // history
-        assert_eq!(output.messages[3].role, Role::Assistant);
+        assert_eq!(output.messages[0].role(), Role::System); // prompts
+        assert_eq!(output.messages[1].role(), Role::System); // skills
+        assert_eq!(output.messages[2].role(), Role::User); // history
+        assert_eq!(output.messages[3].role(), Role::Assistant);
     }
 
     #[test]

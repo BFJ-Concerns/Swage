@@ -195,8 +195,8 @@ mod tests {
 
         let messages = build_tool_round_messages(&calls, &results, "");
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::Assistant);
-        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[0].role(), Role::Assistant);
+        assert_eq!(messages[1].role(), Role::User);
     }
 
     #[test]
@@ -213,10 +213,7 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let blocks = messages[0]
-            .content_blocks
-            .as_ref()
-            .expect("should have blocks");
+        let blocks = messages[0].content_blocks().expect("should have blocks");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "tool_use");
         assert_eq!(blocks[0]["id"], "call_abc");
@@ -237,7 +234,7 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "Let me try that.");
-        let blocks = messages[0].content_blocks.as_ref().unwrap();
+        let blocks = messages[0].content_blocks().unwrap();
         // First block should be text, second should be tool_use.
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "text");
@@ -259,10 +256,7 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let blocks = messages[1]
-            .content_blocks
-            .as_ref()
-            .expect("should have blocks");
+        let blocks = messages[1].content_blocks().expect("should have blocks");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "tool_result");
         assert_eq!(blocks[0]["tool_use_id"], "call_1");
@@ -285,7 +279,7 @@ mod tests {
         }];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let blocks = messages[1].content_blocks.as_ref().unwrap();
+        let blocks = messages[1].content_blocks().unwrap();
         assert_eq!(blocks[0]["is_error"], true);
     }
 
@@ -317,9 +311,9 @@ mod tests {
         ];
 
         let messages = build_tool_round_messages(&calls, &results, "");
-        let assistant_blocks = messages[0].content_blocks.as_ref().unwrap();
+        let assistant_blocks = messages[0].content_blocks().unwrap();
         assert_eq!(assistant_blocks.len(), 2);
-        let user_blocks = messages[1].content_blocks.as_ref().unwrap();
+        let user_blocks = messages[1].content_blocks().unwrap();
         assert_eq!(user_blocks.len(), 2);
     }
 }

@@ -216,9 +216,9 @@ mod tests {
 
         let messages = element.content();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].role(), Role::System);
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert!(text.contains("You are a friendly assistant."));
             }
@@ -238,7 +238,7 @@ mod tests {
         let messages = element.content();
         assert_eq!(messages.len(), 1, "all skills → single system message");
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert!(
                     text.contains("Instruction A."),
@@ -267,7 +267,7 @@ mod tests {
         let messages = element.content();
         assert_eq!(messages.len(), 1);
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 let agent_pos = text.find("Agent instructions.").unwrap();
                 let user_pos = text.find("User instructions.").unwrap();
@@ -293,7 +293,7 @@ mod tests {
         let messages = element.content();
         assert_eq!(messages.len(), 1);
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 let first_pos = text.find("First instructions.").unwrap();
                 let second_pos = text.find("Second instructions.").unwrap();

@@ -76,7 +76,7 @@ impl TruncationCompactor {
         // Collect droppable candidates: non-system messages before the protected
         // region, ordered oldest-first (they appear earlier in the slice).
         let droppable: Vec<usize> = (0..protected_start)
-            .filter(|&i| messages[i].role != Role::System)
+            .filter(|&i| messages[i].role() != Role::System)
             .collect();
 
         // Iteratively drop the oldest candidate until within budget or exhausted.
@@ -365,17 +365,17 @@ async fn execute_single(
 /// only finds where the "recent exchange" starts within the non-system slice.
 fn find_protected_start(messages: &[ChatMessage]) -> usize {
     // Find the last assistant message.
-    let last_asst = messages.iter().rposition(|m| m.role == Role::Assistant);
+    let last_asst = messages.iter().rposition(|m| m.role() == Role::Assistant);
 
     // Find the last user message that appears before the last assistant message.
     // If there is no assistant message, protect the last user message alone.
     let last_user = match last_asst {
         Some(asst_idx) => messages[..asst_idx]
             .iter()
-            .rposition(|m| m.role == Role::User)
+            .rposition(|m| m.role() == Role::User)
             // If no user appears before the assistant, fall back to any user message.
-            .or_else(|| messages.iter().rposition(|m| m.role == Role::User)),
-        None => messages.iter().rposition(|m| m.role == Role::User),
+            .or_else(|| messages.iter().rposition(|m| m.role() == Role::User)),
+        None => messages.iter().rposition(|m| m.role() == Role::User),
     };
 
     match (last_asst, last_user) {
@@ -447,13 +447,13 @@ mod tests {
         let (result, record) = compactor.compact(msgs, tight_budget, &t);
 
         // Old messages should be gone.
-        assert!(!result.iter().any(|m| m.role == Role::User
-            && m.content.iter().any(
+        assert!(!result.iter().any(|m| m.role() == Role::User
+            && m.content().iter().any(
                 |p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("First"))
             )));
 
         // System message must remain.
-        assert!(result.iter().any(|m| m.role == Role::System));
+        assert!(result.iter().any(|m| m.role() == Role::System));
 
         // Record reflects removal.
         assert!(record.messages_removed > 0);
@@ -483,7 +483,7 @@ mod tests {
 
         // System message must always be present.
         assert!(
-            result.iter().any(|m| m.role == Role::System),
+            result.iter().any(|m| m.role() == Role::System),
             "system message was incorrectly removed"
         );
     }
@@ -517,13 +517,13 @@ mod tests {
 
         // The most recent exchange must be present.
         assert!(
-            result.iter().any(|m| m.role == Role::User
-                && m.content.iter().any(|p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("Most recent user")))),
+            result.iter().any(|m| m.role() == Role::User
+                && m.content().iter().any(|p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("Most recent user")))),
             "most recent user message was removed"
         );
         assert!(
-            result.iter().any(|m| m.role == Role::Assistant
-                && m.content.iter().any(|p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("Most recent assistant")))),
+            result.iter().any(|m| m.role() == Role::Assistant
+                && m.content().iter().any(|p| matches!(p, swage_core::ContentPart::Text { text } if text.contains("Most recent assistant")))),
             "most recent assistant reply was removed"
         );
 

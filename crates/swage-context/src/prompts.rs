@@ -153,9 +153,9 @@ mod tests {
 
         let messages = element.content();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].role(), Role::System);
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert_eq!(text, "You are a helpful assistant.");
             }
@@ -175,9 +175,9 @@ mod tests {
         let messages = element.content();
         // All rules → single system message.
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].role(), Role::System);
 
-        match &messages[0].content[0] {
+        match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 // Content must appear in the order given (highest priority first).
                 let coding_pos = text.find("You are a coding assistant.").unwrap();

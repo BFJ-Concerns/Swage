@@ -219,7 +219,7 @@ async fn context_transfer_explicit_restricts_fields() {
 
     // Only the system message should pass through.
     assert_eq!(transferred.messages.len(), 1);
-    assert_eq!(transferred.messages[0].role, Role::System);
+    assert_eq!(transferred.messages[0].role(), Role::System);
 }
 
 // ---------------------------------------------------------------------------

@@ -66,7 +66,7 @@ pub fn evaluate_transfer(
                 .filter(|msg| {
                     allowed_fields.iter().any(|field| {
                         matches!(
-                            (field, &msg.role),
+                            (field, msg.role()),
                             (ContextTransferField::System, Role::System)
                                 | (ContextTransferField::User, Role::User)
                                 | (ContextTransferField::Assistant, Role::Assistant)
@@ -125,7 +125,7 @@ pub async fn evaluate_transfer_async(
             // Collect text content from the sender's context for summarisation.
             let context_text: String = sender_context
                 .iter()
-                .flat_map(|m| m.content.iter())
+                .flat_map(|m| m.content().iter())
                 .filter_map(|part| match part {
                     ContentPart::Text { text } => Some(text.as_str()),
                     ContentPart::ImageUrl { .. } => None,
@@ -237,8 +237,8 @@ mod tests {
             &sample_context(),
         );
         assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.messages[0].role, Role::System);
-        assert_eq!(result.messages[1].role, Role::User);
+        assert_eq!(result.messages[0].role(), Role::System);
+        assert_eq!(result.messages[1].role(), Role::User);
     }
 
     #[test]
@@ -358,8 +358,8 @@ mod tests {
             1,
             "summary should produce one message"
         );
-        assert_eq!(result.messages[0].role, Role::System);
-        let text = match &result.messages[0].content[0] {
+        assert_eq!(result.messages[0].role(), Role::System);
+        let text = match &result.messages[0].content()[0] {
             ContentPart::Text { text } => text.clone(),
             _ => panic!("expected text"),
         };
@@ -442,7 +442,7 @@ mod tests {
         )
         .await;
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, Role::User);
+        assert_eq!(result.messages[0].role(), Role::User);
     }
 
     #[test]
@@ -485,6 +485,6 @@ mod tests {
 
         let result = transfer_context(&config, "any-agent", &sample_context());
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, Role::System);
+        assert_eq!(result.messages[0].role(), Role::System);
     }
 }

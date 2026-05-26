@@ -292,7 +292,7 @@ mod tests {
     }
 
     fn message_text(msg: &ChatMessage) -> String {
-        msg.content
+        msg.content()
             .iter()
             .filter_map(|p| match p {
                 ContentPart::Text { text } => Some(text.as_str()),
@@ -335,7 +335,7 @@ mod tests {
         // Delta starts at the beginning when there is no prior boundary.
         assert_eq!(output.delta_start, 0, "delta_start must be 0 on first use");
         // The output message is a system message.
-        assert_eq!(output.messages[0].role, Role::System);
+        assert_eq!(output.messages[0].role(), Role::System);
     }
 
     // ── Subsequent-use path: prior result present ─────────────────────────────

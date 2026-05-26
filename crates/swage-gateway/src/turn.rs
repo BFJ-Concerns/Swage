@@ -6653,14 +6653,14 @@ pub(crate) mod tests {
 
         let second = &requests[1];
         assert_eq!(second.messages.len(), 3);
-        assert_eq!(second.messages[1].role, Role::Assistant);
+        assert_eq!(second.messages[1].role(), Role::Assistant);
         assert!(
-            second.messages[1].content_blocks.is_some(),
+            second.messages[1].content_blocks().is_some(),
             "assistant tool-use message should retain content_blocks"
         );
-        assert_eq!(second.messages[2].role, Role::User);
+        assert_eq!(second.messages[2].role(), Role::User);
         assert!(
-            second.messages[2].content_blocks.is_some(),
+            second.messages[2].content_blocks().is_some(),
             "tool-result message should retain content_blocks"
         );
     }
@@ -6740,14 +6740,14 @@ pub(crate) mod tests {
 
         let second = &requests[1];
         assert_eq!(second.messages.len(), 3);
-        assert_eq!(second.messages[1].role, Role::Assistant);
+        assert_eq!(second.messages[1].role(), Role::Assistant);
         assert!(
-            second.messages[1].content_blocks.is_some(),
+            second.messages[1].content_blocks().is_some(),
             "assistant tool-use message should retain content_blocks after approval"
         );
-        assert_eq!(second.messages[2].role, Role::User);
+        assert_eq!(second.messages[2].role(), Role::User);
         assert!(
-            second.messages[2].content_blocks.is_some(),
+            second.messages[2].content_blocks().is_some(),
             "tool-result message should retain content_blocks after approval"
         );
     }
@@ -7858,13 +7858,13 @@ pub(crate) mod tests {
 
         // System message from instructions appears first.
         assert_eq!(
-            output.messages[0].role,
+            output.messages[0].role(),
             Role::System,
             "first message should be system instructions"
         );
         // User message from history follows.
         assert_eq!(
-            output.messages[1].role,
+            output.messages[1].role(),
             Role::User,
             "second message should be user history"
         );
@@ -7909,7 +7909,7 @@ pub(crate) mod tests {
 
         // No system message when instructions are empty.
         assert!(
-            output.messages.iter().all(|m| m.role != Role::System),
+            output.messages.iter().all(|m| m.role() != Role::System),
             "expected no system message when prompts are empty"
         );
         assert_eq!(
@@ -7943,9 +7943,9 @@ pub(crate) mod tests {
             1,
             "should produce exactly one system message"
         );
-        assert_eq!(content[0].role, flat_system.role);
+        assert_eq!(content[0].role(), flat_system.role());
         // Content should be identical — single rule, no joining needed.
-        assert_eq!(content[0].content, flat_system.content);
+        assert_eq!(content[0].content(), flat_system.content());
     }
 
     // -----------------------------------------------------------------------
@@ -8262,7 +8262,7 @@ pub(crate) mod tests {
             "non-empty memory should produce one message"
         );
         // content is Vec<ContentPart> — extract the text to check the value.
-        let text = messages[0].content.iter().find_map(|p| {
+        let text = messages[0].content().iter().find_map(|p| {
             if let swage_core::ContentPart::Text { text } = p {
                 Some(text.as_str())
             } else {

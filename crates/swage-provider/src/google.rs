@@ -206,9 +206,9 @@ impl GoogleProvider {
         let mut remaining = Vec::new();
 
         for msg in messages {
-            if msg.role == Role::System {
+            if msg.role() == Role::System {
                 let text: String = msg
-                    .content
+                    .content()
                     .iter()
                     .filter_map(|p| match p {
                         ContentPart::Text { text } => Some(text.as_str()),
@@ -245,7 +245,7 @@ impl GoogleProvider {
         messages
             .iter()
             .map(|msg| {
-                let role = match msg.role {
+                let role = match msg.role() {
                     Role::User | Role::Tool => "user",
                     Role::Assistant => "model",
                     Role::System => "user", // Should not happen — system is extracted
@@ -254,10 +254,10 @@ impl GoogleProvider {
                 let mut parts = Vec::new();
 
                 // Tool result messages produce function_response parts.
-                if msg.role == Role::Tool {
-                    if let Some(ref call_id) = msg.tool_call_id {
+                if msg.role() == Role::Tool {
+                    if let Some(call_id) = msg.tool_call_id() {
                         let text: String = msg
-                            .content
+                            .content()
                             .iter()
                             .filter_map(|p| match p {
                                 ContentPart::Text { text } => Some(text.as_str()),
@@ -269,14 +269,14 @@ impl GoogleProvider {
                             text: None,
                             function_call: None,
                             function_response: Some(GeminiFunctionResponse {
-                                name: call_id.clone(),
+                                name: call_id.to_string(),
                                 response: serde_json::json!({ "result": text }),
                             }),
                         });
                     }
                 } else {
                     // Regular text parts.
-                    for part in &msg.content {
+                    for part in msg.content() {
                         // Image URLs are not yet supported for Gemini.
                         if let ContentPart::Text { text } = part
                             && !text.is_empty()
@@ -290,7 +290,7 @@ impl GoogleProvider {
                     }
 
                     // Assistant messages may include tool calls as function_call parts.
-                    if let Some(ref calls) = msg.tool_calls {
+                    if let Some(calls) = msg.tool_calls() {
                         for tc in calls {
                             parts.push(GeminiPart {
                                 text: None,
@@ -774,7 +774,7 @@ mod tests {
         assert!(text.contains("Be helpful"));
         assert!(text.contains("Be concise"));
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].role, Role::User);
+        assert_eq!(remaining[0].role(), Role::User);
     }
 
     #[test]
@@ -805,8 +805,7 @@ mod tests {
 
     #[test]
     fn convert_tool_result_to_function_response() {
-        let mut msg = ChatMessage::new(Role::Tool, "result text");
-        msg.tool_call_id = Some("get_weather".into());
+        let msg = ChatMessage::tool_result("get_weather", "result text");
         let converted = GoogleProvider::convert_messages(&[&msg]);
         assert_eq!(converted[0].role.as_deref(), Some("user"));
         let fr = converted[0].parts[0].function_response.as_ref().unwrap();
@@ -816,13 +815,14 @@ mod tests {
 
     #[test]
     fn convert_assistant_with_tool_calls() {
-        let mut msg = ChatMessage::new(Role::Assistant, "");
-        msg.content = Vec::new();
-        msg.tool_calls = Some(vec![ToolCall {
-            call_id: "call_1".into(),
-            name: "search".into(),
-            arguments: serde_json::json!({"query": "rust"}),
-        }]);
+        let msg = ChatMessage::assistant_tool_calls(
+            "",
+            vec![ToolCall {
+                call_id: "call_1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }],
+        );
         let converted = GoogleProvider::convert_messages(&[&msg]);
         let fc = converted[0]
             .parts

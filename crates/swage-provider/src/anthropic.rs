@@ -358,18 +358,18 @@ impl AnthropicProvider {
         let mut messages: Vec<AnthropicMessage> = request
             .messages
             .iter()
-            .filter(|m| m.role != swage_core::Role::System)
+            .filter(|m| m.role() != swage_core::Role::System)
             .map(|m| {
                 // Tool messages carry structured content_blocks (tool_use / tool_result).
                 // Plain text messages use the simple Text variant.
-                let content = match &m.content_blocks {
-                    Some(blocks) => MessageContent::Blocks(blocks.clone()),
+                let content = match m.content_blocks() {
+                    Some(blocks) => MessageContent::Blocks(blocks.to_vec()),
                     None => {
                         // Extract plain text from ContentPart::Text entries.
                         // Multi-modal messages (with images) are not currently
                         // supported in this code path; image parts are dropped.
                         let text = m
-                            .content
+                            .content()
                             .iter()
                             .filter_map(|p| {
                                 if let swage_core::ContentPart::Text { text } = p {
@@ -384,7 +384,7 @@ impl AnthropicProvider {
                     }
                 };
                 AnthropicMessage {
-                    role: m.role.to_string(),
+                    role: m.role().to_string(),
                     content,
                 }
             })
@@ -608,9 +608,9 @@ impl AnthropicProvider {
     fn to_anthropic_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMessage>) {
         let system_parts: Vec<String> = messages
             .iter()
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role() == Role::System)
             .flat_map(|m| {
-                m.content.iter().filter_map(|p| {
+                m.content().iter().filter_map(|p| {
                     if let ContentPart::Text { text } = p {
                         Some(text.clone())
                     } else {
@@ -627,13 +627,13 @@ impl AnthropicProvider {
 
         let wire_messages = messages
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| m.role() != Role::System)
             .map(|m| {
-                let content = match &m.content_blocks {
-                    Some(blocks) => MessageContent::Blocks(blocks.clone()),
+                let content = match m.content_blocks() {
+                    Some(blocks) => MessageContent::Blocks(blocks.to_vec()),
                     None => {
                         let text = m
-                            .content
+                            .content()
                             .iter()
                             .filter_map(|p| {
                                 if let ContentPart::Text { text } = p {
@@ -648,7 +648,7 @@ impl AnthropicProvider {
                     }
                 };
                 AnthropicMessage {
-                    role: m.role.to_string(),
+                    role: m.role().to_string(),
                     content,
                 }
             })

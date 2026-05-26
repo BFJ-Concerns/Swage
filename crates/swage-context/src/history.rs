@@ -94,7 +94,7 @@ mod tests {
         let output = element.content();
         assert_eq!(output.len(), messages.len());
         for (out, original) in output.iter().zip(messages.iter()) {
-            assert_eq!(out.role, original.role);
+            assert_eq!(out.role(), original.role());
         }
     }
 

@@ -156,7 +156,7 @@ def assemble(ctx):
     // Memory content should actually be present in the assembled messages —
     // not empty (false-completion guard: element APIs must return real data).
     let has_memory_content = output.messages.iter().any(|m| {
-        m.content.iter().any(|p| {
+        m.content().iter().any(|p| {
             matches!(p, swage_core::ContentPart::Text { text } if text.contains("prefers Rust"))
         })
     });
@@ -284,7 +284,7 @@ def assemble(ctx):
     let assembled_text: String = output
         .messages
         .iter()
-        .flat_map(|m| m.content.iter())
+        .flat_map(|m| m.content().iter())
         .filter_map(|p| match p {
             swage_core::ContentPart::Text { text } => Some(text.as_str()),
             _ => None,

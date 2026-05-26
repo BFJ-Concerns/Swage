@@ -172,14 +172,14 @@ fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
     );
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = match message.role {
+        let role_label = match message.role() {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
         let text = message
-            .content
+            .content()
             .iter()
             .filter_map(|part| match part {
                 swage_core::ContentPart::Text { text } => Some(text.as_str()),
@@ -385,7 +385,7 @@ mod tests {
                 .iter()
                 .map(|m| {
                     let text_len: usize = m
-                        .content
+                        .content()
                         .iter()
                         .map(|p| match p {
                             swage_core::ContentPart::Text { text } => text.len(),

@@ -105,7 +105,7 @@ mod tests {
         let messages = element.content();
         assert_eq!(messages.len(), 1, "expected exactly one message");
         assert_eq!(
-            messages[0].role,
+            messages[0].role(),
             Role::System,
             "memory should produce a system message"
         );

@@ -77,19 +77,19 @@ impl Tokeniser for TiktokenTokeniser {
             // Role string contributes token cost (e.g. "user", "assistant").
             total += self
                 .bpe
-                .encode_with_special_tokens(&msg.role.to_string())
+                .encode_with_special_tokens(&msg.role().to_string())
                 .len();
 
             // Count text parts; image URL references carry no token cost here
             // since the model bills image tokens separately via vision pricing.
-            for part in &msg.content {
+            for part in msg.content() {
                 if let ContentPart::Text { text } = part {
                     total += self.bpe.encode_with_special_tokens(text).len();
                 }
             }
 
             // An explicit name field occupies its own tokens plus one separator.
-            if let Some(name) = &msg.name {
+            if let Some(name) = msg.name() {
                 total += self.bpe.encode_with_special_tokens(name).len();
                 total += 1;
             }
@@ -102,23 +102,15 @@ impl Tokeniser for TiktokenTokeniser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use swage_core::message::Role;
-    use uuid::Uuid;
 
     fn text_message(role: Role, text: &str) -> ChatMessage {
-        ChatMessage {
-            id: Uuid::new_v4(),
+        ChatMessage::new_parts(
             role,
-            content: vec![ContentPart::Text {
+            vec![ContentPart::Text {
                 text: text.to_string(),
             }],
-            created_at: Utc::now(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            content_blocks: None,
-        }
+        )
     }
 
     // ── count_text ────────────────────────────────────────────────────────────
