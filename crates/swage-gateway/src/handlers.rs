@@ -2615,6 +2615,7 @@ mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
+            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             managed_gateway: false,
@@ -3079,6 +3080,10 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["active_lens"], "assistant");
         assert_eq!(body["available_lenses"].as_array().unwrap().len(), 2);
+        let stage_modules = body["stage_modules"].as_array().unwrap();
+        assert_eq!(stage_modules.len(), 2);
+        assert_eq!(stage_modules[0]["kind"], "shared_reference");
+        assert_eq!(stage_modules[1]["kind"], "active_team_topology");
     }
 
     #[tokio::test]
@@ -3104,6 +3109,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["active_lens"], "builder");
+        assert_eq!(body["stage_modules"].as_array().unwrap().len(), 0);
 
         let stored = swage_storage::store::LensStore::get_active_lens(&*storage, bench.id)
             .await
@@ -4458,6 +4464,7 @@ def build_topology():
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn Storage>
             )),
+            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             managed_gateway: false,

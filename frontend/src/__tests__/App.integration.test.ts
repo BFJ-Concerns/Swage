@@ -249,6 +249,7 @@ function makeLensRuntime(
     bench_id: "proj-default",
     active_lens: activeLens,
     updated_at: "2026-04-07T12:00:00Z",
+    stage_modules: [],
     available_lenses: [
       {
         id: "assistant",

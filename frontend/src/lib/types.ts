@@ -255,6 +255,16 @@ export interface LensRuntimeResponse {
   active_lens: AppLens;
   updated_at: string;
   available_lenses: LensDescriptor[];
+  stage_modules: LensStageModulePlacement[];
+}
+
+export type LensStageModuleKind = "shared_reference" | "active_team_topology";
+
+export interface LensStageModulePlacement {
+  id: string;
+  kind: LensStageModuleKind;
+  title: string;
+  team_ids: string[];
 }
 
 export interface CreateLensRequest {

@@ -28,7 +28,12 @@
     writeDisplayPreferences,
     type DisplayPreferences,
   } from "./lib/display-preferences";
-  import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
+  import type {
+    AppLens,
+    LensDescriptor,
+    LensStageModulePlacement,
+    LensSurface,
+  } from "./lib/types";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -149,6 +154,7 @@
   let activeLens = $state<AppLens>("assistant");
   let activeSurface = $state<LensSurface>("conversation");
   let availableLenses = $state<LensDescriptor[]>([]);
+  let stageModules = $state<LensStageModulePlacement[]>([]);
   let currentRoute = $state<Route>(router.currentRoute);
   let activeModelContextWindow = $state<number | null>(null);
   const desktopRuntime = getDesktopRuntime();
@@ -283,6 +289,7 @@
     if (!benchId) return;
     const runtime = await fetchLensRuntime(benchId);
     availableLenses = runtime.available_lenses;
+    stageModules = runtime.stage_modules;
     activeLens = runtime.active_lens;
 
     const descriptor = getLensDescriptor(runtime.active_lens);
@@ -298,6 +305,7 @@
     if (!benchId) return;
     const runtime = await updateLensRuntime(benchId, next);
     availableLenses = runtime.available_lenses;
+    stageModules = runtime.stage_modules;
     activeLens = runtime.active_lens;
     handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
   }
@@ -382,6 +390,7 @@
     onRetry={handleRetry}
     {activeLens}
     {availableLenses}
+    {stageModules}
     {activeSurface}
     onSelectLens={handleSelectLens}
     onRefreshLenses={refreshLensRuntime}

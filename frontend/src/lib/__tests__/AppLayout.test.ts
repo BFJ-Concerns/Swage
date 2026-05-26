@@ -19,6 +19,7 @@ import type { StreamingStore } from "../stores/streaming";
 import type { BenchStore } from "../stores/benches";
 
 import * as operatorApi from "../api/operator";
+import * as builderApi from "../api/builder";
 
 vi.mock("../api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
@@ -28,6 +29,24 @@ vi.mock("../api/operator", () => ({
   resumeScheduledJob: vi.fn(),
   disableHeartbeat: vi.fn(),
   enableHeartbeat: vi.fn(),
+}));
+
+vi.mock("../api/builder", () => ({
+  createBuilderProposal: vi.fn(),
+  applyBuilderProposal: vi.fn(),
+  listTeams: vi.fn(),
+  createTeam: vi.fn(),
+  updateTeam: vi.fn(),
+  listBenchExtensions: vi.fn(),
+  createBenchExtension: vi.fn(),
+  updateBenchExtension: vi.fn(),
+  approveWorkspaceExtension: vi.fn(),
+  listSharedReferences: vi.fn(),
+  getSharedReference: vi.fn(),
+  createSharedReferenceEvent: vi.fn(),
+  updateTeamTopologyReference: vi.fn(),
+  isTeamTopologyPayload: (payload: Record<string, unknown>) => "nodes" in payload,
+  isContextSnapshotPayload: (payload: Record<string, unknown>) => "elements" in payload,
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -242,6 +261,40 @@ describe("AppLayout: workbench shell", () => {
       channels: { channels: [] },
       nodes: [],
     });
+    vi.mocked(builderApi.listTeams).mockResolvedValue([
+      {
+        id: "research-lead",
+        bench_id: "default",
+        name: "research-lead",
+        description: "Research coordination team",
+        entry_agent_id: "lead",
+        agents: [
+          {
+            id: "lead",
+            display_name: "Research Lead",
+            description: "Keeps research moving.",
+            instructions: "Coordinate research.",
+            model: "claude-sonnet-4-20250514",
+          },
+        ],
+        members: ["lead"],
+        tasks: [],
+        created_at: "2026-04-18T10:00:00Z",
+        updated_at: "2026-04-18T10:00:00Z",
+      },
+    ]);
+    vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
+    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([]);
+    vi.mocked(builderApi.createBuilderProposal).mockResolvedValue({
+      summary: "No changes proposed.",
+      operations: [],
+      diagnostics: [],
+      can_apply: false,
+    });
+    vi.mocked(builderApi.applyBuilderProposal).mockResolvedValue({
+      status: 200,
+      body: { success: true, summary: "Applied.", diagnostics: [], applied: [] },
+    });
   });
 
   afterEach(() => {
@@ -353,6 +406,58 @@ describe("AppLayout: workbench shell", () => {
 
     expect(document.body.textContent).toContain("Live control surface for the running gateway");
     expect(document.querySelector(".stage-pane")).not.toBeNull();
+  });
+
+  it("renders placed stage modules from the lens runtime", async () => {
+    component = mount(AppLayout, {
+      target: document.body,
+      props: {
+        conversationStore: mockConversationStore(),
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        benchStore: mockBenchStore(),
+        onRetry: () => {},
+        activeLens: "research",
+        availableLenses: [
+          {
+            id: "research",
+            title: "Research lens",
+            summary: "Conversation-first research workspace",
+            default_surface: "conversation",
+            ui_modules: ["conversation", "operator"],
+            prominent_team_ids: ["research-lead"],
+            source_kind: "installed",
+          },
+        ],
+        stageModules: [
+          {
+            id: "research:shared-reference",
+            kind: "shared_reference",
+            title: "Shared references",
+            team_ids: ["research-lead"],
+          },
+          {
+            id: "research:team-topology",
+            kind: "active_team_topology",
+            title: "Active team topology",
+            team_ids: ["research-lead"],
+          },
+        ],
+        activeSurface: "conversation",
+        onSelectLens: () => {},
+        onRefreshLenses: () => {},
+        onSelectSurface: () => {},
+      },
+    });
+
+    await waitForText("Shared references");
+    await waitForText("research-lead");
+
+    expect(document.body.textContent).toContain("Active team topology");
+    expect(document.body.textContent).toContain("Live");
+    expect(document.body.textContent).not.toContain("SHELL");
+    expect(builderApi.listTeams).toHaveBeenCalledWith("default");
+    expect(builderApi.listSharedReferences).toHaveBeenCalledWith("default");
   });
 
   it("collapses the top bar when no bench is selected", () => {

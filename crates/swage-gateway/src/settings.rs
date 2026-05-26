@@ -907,6 +907,7 @@ mod tests {
                 std::sync::Arc::new(crate::turn::tests::MockStorage::new())
                     as std::sync::Arc<dyn swage_storage::store::Storage>,
             )),
+            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             managed_gateway: false,

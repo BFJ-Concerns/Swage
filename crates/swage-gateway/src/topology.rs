@@ -1264,6 +1264,7 @@ mod tests {
             secret_manager: Arc::new(crate::secret::SecretManager::new(
                 Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
             )),
+            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             managed_gateway: false,

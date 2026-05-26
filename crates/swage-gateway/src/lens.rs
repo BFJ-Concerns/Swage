@@ -23,6 +23,15 @@ pub struct LensRuntimeResponse {
     pub active_lens: AppLens,
     pub updated_at: String,
     pub available_lenses: Vec<LensDescriptor>,
+    pub stage_modules: Vec<LensStageModulePlacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensStageModulePlacement {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub team_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,12 +139,38 @@ fn to_descriptor(record: LensRecord) -> LensDescriptor {
 }
 
 fn to_response(preference: LensPreference, lenses: Vec<LensRecord>) -> LensRuntimeResponse {
+    let active_lens = preference.active_lens.clone();
+    let active_record = lenses.iter().find(|lens| lens.id == active_lens);
     LensRuntimeResponse {
         bench_id: preference.bench_id,
         active_lens: preference.active_lens,
         updated_at: preference.updated_at.to_rfc3339(),
+        stage_modules: active_record
+            .map(stage_modules_for_lens)
+            .unwrap_or_default(),
         available_lenses: lenses.into_iter().map(to_descriptor).collect(),
     }
+}
+
+fn stage_modules_for_lens(lens: &LensRecord) -> Vec<LensStageModulePlacement> {
+    if lens.default_surface != "conversation" {
+        return Vec::new();
+    }
+
+    vec![
+        LensStageModulePlacement {
+            id: format!("{}:shared-reference", lens.id),
+            kind: "shared_reference".to_string(),
+            title: "Shared references".to_string(),
+            team_ids: lens.prominent_team_ids.clone(),
+        },
+        LensStageModulePlacement {
+            id: format!("{}:team-topology", lens.id),
+            kind: "active_team_topology".to_string(),
+            title: "Active team topology".to_string(),
+            team_ids: lens.prominent_team_ids.clone(),
+        },
+    ]
 }
 
 pub async fn list_lenses(state: &AppState) -> Result<LensListResponse, GatewayError> {

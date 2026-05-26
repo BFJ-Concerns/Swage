@@ -24,13 +24,22 @@
   import MessageInput from "./MessageInput.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import { listTeams } from "../api/builder";
   import type { DisplayPreferences } from "../display-preferences";
   import type { BenchSettingsTab, Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
-  import type { AppLens, BuilderMode, LensDescriptor, LensSurface } from "../types";
+  import type {
+    AppLens,
+    BuilderMode,
+    LensDescriptor,
+    LensStageModulePlacement,
+    LensSurface,
+    TeamSummary,
+  } from "../types";
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
@@ -48,6 +57,7 @@
     onRetry: () => void;
     activeLens: AppLens;
     availableLenses: LensDescriptor[];
+    stageModules?: LensStageModulePlacement[];
     activeSurface: LensSurface;
     onSelectLens: (next: AppLens) => void | Promise<void>;
     onRefreshLenses: (preferredSurface?: LensSurface) => void | Promise<void>;
@@ -73,6 +83,7 @@
     onRetry,
     activeLens,
     availableLenses,
+    stageModules = [],
     onSelectLens,
     onRefreshLenses,
     desktopRuntime,
@@ -88,6 +99,9 @@
   // assistant-lens users. The dynamic import resolves once on first use.
   let builderDeckModule = $state<Promise<BuilderDeckModule> | null>(null);
   let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
+  let stageTeams = $state<TeamSummary[]>([]);
+  let stageTeamError = $state<string | null>(null);
+  let lastStageTeamBenchId = "";
 
   const activeLensDescriptor = $derived(
     availableLenses.find((lens) => lens.id === activeLens) ?? null,
@@ -101,6 +115,7 @@
   const settingsBenchSlug = $derived(route?.settingsBenchSlug ?? null);
   const settingsBenchTab = $derived(route?.settingsBenchTab ?? null);
   const settingsMode = $derived(settingsTab !== null || settingsBenchSlug !== null);
+  const hasPlacedStageModules = $derived(stageModules.length > 0);
   const settingsBench = $derived(
     settingsBenchSlug
       ? benches.find((bench) => bench.slug === settingsBenchSlug) ?? null
@@ -175,7 +190,7 @@
   // Stage-dominant layout: conversation moves to the narrow side when a
   // module is on the stage. Per Progress.md, each lens picks one layout —
   // this isn't an on-demand swap.
-  const isStageDominant = $derived(stageSurface !== null);
+  const isStageDominant = $derived(stageSurface !== null || hasPlacedStageModules);
 
   // Stamp shown on the right of the topbar — `BENCH · NAME · STATE` per
   // workup view 01/02/03/07. The bench portion is real; the state cycles
@@ -277,6 +292,24 @@
       operatorDashboardModule = import("./OperatorDashboard.svelte");
     }
   });
+
+  $effect(() => {
+    const benchId = currentBench?.id ?? "";
+    const needsTeams = stageModules.some((module) => module.kind === "active_team_topology");
+    if (!benchId || !needsTeams || lastStageTeamBenchId === benchId) return;
+    lastStageTeamBenchId = benchId;
+    void loadStageTeams(benchId);
+  });
+
+  async function loadStageTeams(benchId: string): Promise<void> {
+    try {
+      stageTeams = await listTeams(benchId);
+      stageTeamError = null;
+    } catch (error) {
+      stageTeamError =
+        error instanceof Error ? error.message : "Failed to load stage team topology.";
+    }
+  }
 </script>
 
 <div
@@ -617,67 +650,48 @@
             {/if}
           {/if}
         </section>
-      {:else}
-        <!-- TODO Add a lens module placement contract -->
-        <!-- Expose placed module identity and payloads from the lens runtime or conversation API. -->
-        <!-- --- -->
-        <!-- TODO Render the shared reference stage module -->
-        <!-- blocked-by: l1m0 -->
-        <!-- Replace the shared-reference shell card with a real file/reference module fed by placement data. -->
-        <!-- --- -->
-        <!-- TODO Render the active team topology stage module -->
-        <!-- blocked-by: l1m0 -->
-        <!-- Replace the active-team shell card with a live module consuming topology events. -->
-        <!-- --- -->
-        <!--
-          No module placed by this lens. The Riso workup (view 01/02) puts
-          stage modules on this side: shared reference (assistant default)
-          and active team state when a team is running. Neither is wired today,
-          so we render the catalogue as non-functional shells so the chrome
-          matches the workup.
-
-          The module catalogue is not yet wired to the lens runtime. The
-          gateway exposes lens descriptors with `ui_modules` and the
-          assistant-lens default, but no module placement happens on the
-          stage. Each shell below names the workup module it stands in
-          for and the backend gap blocking it.
-          Why: workup views 01/02 hinge on stage module presence; without
-          it the pane reads as empty even though modules belong there.
-          How to apply: design a "module placement" runtime field on the
-          lens, expose the placed module's data on the conversation API,
-          render real components when the data arrives.
-          ---
-        -->
+      {:else if hasPlacedStageModules}
         <section class="pane stage-pane stage-shell" aria-label="Module stage">
           <header class="pane-head">
             <span class="pane-label">Stage</span>
-            <span class="pane-index">Workup shells</span>
+            <span class="pane-index">{stageModules.length} module(s)</span>
           </header>
           <div class="stage-modules">
-            <article class="stage-module" data-tone="auto">
-              <header class="stage-module-head">
-                <h3>Shared · workup placeholder</h3>
-                <span class="stage-module-tag">SHELL</span>
-              </header>
-              <p class="stage-module-body">
-                The assistant lens (workup view 01) places a shared reference
-                module here — typically a file viewer auto-loaded into agent
-                context. The file_read tool exists; module placement does not.
-              </p>
-            </article>
-
-            <article class="stage-module" data-tone="streaming">
-              <header class="stage-module-head">
-                <h3>Active team · live</h3>
-                <span class="stage-module-tag">SHELL</span>
-              </header>
-              <p class="stage-module-body">
-                Workup view 02 places the active team topology here (per-agent
-                step, model, status). The gateway emits `topology_*` events
-                but the live module that consumes them isn't built.
-              </p>
-            </article>
-
+            {#each stageModules as module (module.id)}
+              {#if module.kind === "shared_reference" && currentBench}
+                <article class="stage-module" data-tone="auto">
+                  <header class="stage-module-head">
+                    <h3>{module.title}</h3>
+                    <span class="stage-module-tag">Live</span>
+                  </header>
+                  <SharedReferenceStudio benchId={currentBench.id} />
+                </article>
+              {:else if module.kind === "active_team_topology"}
+                <article class="stage-module" data-tone="streaming">
+                  <header class="stage-module-head">
+                    <h3>{module.title}</h3>
+                    <span class="stage-module-tag">Live</span>
+                  </header>
+                  {#if stageTeamError}
+                    <p class="stage-module-body error">{stageTeamError}</p>
+                  {:else}
+                    <div class="stage-team-list">
+                      {#each stageTeams.filter((team) => module.team_ids.length === 0 || module.team_ids.includes(team.id) || module.team_ids.includes(team.name)) as team (team.id)}
+                        <article class="stage-team-card">
+                          <strong>{team.name}</strong>
+                          <span>{team.agents?.length ?? team.members.length} agent(s)</span>
+                          <span>entry · {team.entry_agent_id}</span>
+                        </article>
+                      {:else}
+                        <p class="stage-module-body">
+                          No matching team topology is available for this lens yet.
+                        </p>
+                      {/each}
+                    </div>
+                  {/if}
+                </article>
+              {/if}
+            {/each}
           </div>
         </section>
       {/if}
@@ -1406,7 +1420,7 @@
   }
 
   /* Pane heads — workup view 01/02/05 place a small label + index above each
-     pane. Index expresses live state ("LIVE", "Builder", "Workup shells"). */
+     pane. Index expresses live state such as "LIVE", "Builder", or a count. */
   .pane-head {
     display: flex;
     justify-content: space-between;
@@ -1469,7 +1483,7 @@
     border-color: var(--accent);
   }
 
-  /* Stage shell — column of non-functional module placeholders. */
+  /* Stage modules placed by the active lens runtime. */
   .stage-pane.stage-shell {
     padding: 0;
     gap: 0;
@@ -1539,6 +1553,37 @@
     color: var(--ink-soft);
     font-size: 12.5px;
     line-height: 1.55;
+  }
+
+  .stage-module-body.error {
+    color: var(--ink-orange);
+  }
+
+  .stage-team-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .stage-team-card {
+    display: grid;
+    gap: 4px;
+    padding: 10px 0;
+    border-bottom: 1px dotted var(--rule-soft);
+  }
+
+  .stage-team-card:last-child {
+    border-bottom: none;
+  }
+
+  .stage-team-card strong {
+    color: var(--ink);
+    font-size: 14px;
+  }
+
+  .stage-team-card span {
+    color: var(--ink-soft);
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .surface-loading,
