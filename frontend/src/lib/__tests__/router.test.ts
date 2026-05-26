@@ -29,6 +29,8 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       settingsTab: null,
+      settingsBenchSlug: null,
+      settingsBenchTab: null,
       notFound: false,
     });
   });
@@ -38,6 +40,8 @@ describe("parseRoute", () => {
       path: "/conversations/abc-123",
       conversationId: "abc-123",
       settingsTab: null,
+      settingsBenchSlug: null,
+      settingsBenchTab: null,
       notFound: false,
     });
   });
@@ -47,6 +51,8 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       settingsTab: null,
+      settingsBenchSlug: null,
+      settingsBenchTab: null,
       notFound: false,
     });
   });
@@ -56,6 +62,8 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       settingsTab: null,
+      settingsBenchSlug: null,
+      settingsBenchTab: null,
       notFound: false,
     });
   });
@@ -65,6 +73,19 @@ describe("parseRoute", () => {
       path: "/settings/generation",
       conversationId: null,
       settingsTab: "generation",
+      settingsBenchSlug: null,
+      settingsBenchTab: null,
+      notFound: false,
+    });
+  });
+
+  it("maps bench settings routes to their bench slug and tab", () => {
+    expect(parseRoute("/settings/bench/research/workspaces")).toEqual({
+      path: "/settings/bench/research/workspaces",
+      conversationId: null,
+      settingsTab: null,
+      settingsBenchSlug: "research",
+      settingsBenchTab: "workspaces",
       notFound: false,
     });
   });

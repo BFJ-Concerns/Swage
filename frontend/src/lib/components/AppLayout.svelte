@@ -19,6 +19,7 @@
   import ConversationList from "./ConversationList.svelte";
   import BenchSelector from "./BenchSelector.svelte";
   import BenchPicker from "./BenchPicker.svelte";
+  import BenchSettingsPage from "./BenchSettingsPage.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
@@ -26,7 +27,7 @@
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import type { DisplayPreferences } from "../display-preferences";
-  import type { Route } from "../router";
+  import type { BenchSettingsTab, Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { AppLens, BuilderMode, LensDescriptor, LensSurface } from "../types";
@@ -91,11 +92,20 @@
   const activeLensDescriptor = $derived(
     availableLenses.find((lens) => lens.id === activeLens) ?? null,
   );
+  const benches = $derived(benchStore?.benches ?? []);
   const currentBench = $derived(benchStore?.currentBench ?? null);
   const recentBenches = $derived(benchStore?.recentBenches ?? []);
   const conversationCount = $derived(conversationStore.conversations.length);
   const activeConversation = $derived(conversationStore.activeConversation);
   const settingsTab = $derived(route?.settingsTab ?? null);
+  const settingsBenchSlug = $derived(route?.settingsBenchSlug ?? null);
+  const settingsBenchTab = $derived(route?.settingsBenchTab ?? null);
+  const settingsMode = $derived(settingsTab !== null || settingsBenchSlug !== null);
+  const settingsBench = $derived(
+    settingsBenchSlug
+      ? benches.find((bench) => bench.slug === settingsBenchSlug) ?? null
+      : null,
+  );
   let now = $state(Date.now());
 
   // Settings sub-pages — drives both the URL the page list links to and the
@@ -120,6 +130,15 @@
     { id: "recovery", label: "Recovery", ix: "—", functional: true },
     { id: "display", label: "Display", ix: "—", functional: true },
     { id: "account", label: "Account", ix: "—", functional: false },
+  ];
+  const BENCH_SETTINGS_PAGES: ReadonlyArray<{
+    id: BenchSettingsTab;
+    label: string;
+    ix: string;
+  }> = [
+    { id: "overview", label: "Overview", ix: "01" },
+    { id: "workspaces", label: "Workspaces", ix: "02" },
+    { id: "sessions", label: "Sessions", ix: "03" },
   ];
 
   const BUILDER_MODE_STORAGE_KEY = "swage.builder.activeMode";
@@ -262,17 +281,23 @@
 
 <div
   class="window"
-  class:no-topbar={!currentBench && !settingsTab}
-  class:settings-mode={!!settingsTab}
+  class:no-topbar={!currentBench && !settingsMode}
+  class:settings-mode={settingsMode}
 >
-  {#if settingsTab}
+  {#if settingsMode}
     <!--
       Settings shell takes the window over completely: topbar collapses to a
       single label and a × CLOSE affordance, nav becomes a parked bench-head
       plus a vertical page list, body is single-column.
     -->
     <header class="topbar settings-topbar">
-      <span class="settings-label">Settings · {settingsTab}</span>
+      <span class="settings-label">
+        {#if settingsBenchSlug}
+          Bench settings · {settingsBench?.name ?? settingsBenchSlug}
+        {:else}
+          Settings · {settingsTab}
+        {/if}
+      </span>
       <button
         type="button"
         class="settings-close"
@@ -367,8 +392,8 @@
     </header>
   {/if}
 
-  <aside class="nav" class:settings={!!settingsTab} aria-label="Navigation">
-    {#if settingsTab}
+  <aside class="nav" class:settings={settingsMode} aria-label="Navigation">
+    {#if settingsMode}
       <!--
         Settings nav: parked bench-head shows where × CLOSE returns to,
         then a vertical list of settings pages drives the active sub-route.
@@ -377,29 +402,43 @@
         <div class="crumb">
           <span class="return-mark">Return to</span>
         </div>
-        <h2 class="name">{currentBench?.name ?? "Swage"}</h2>
+        <h2 class="name">{settingsBench?.name ?? currentBench?.name ?? "Swage"}</h2>
         <div class="meta">on close</div>
       </div>
       <div class="settings-pages">
-        {#each SETTINGS_PAGES as page (page.id)}
-          <button
-            type="button"
-            class="settings-page"
-            class:active={settingsTab === page.id}
-            class:shell={!page.functional}
-            onclick={() => onNavigate?.(`/settings/${page.id}`)}
-            title={page.functional ? page.label : `${page.label} (not yet wired)`}
-          >
-            <span>{page.label}</span>
-            <span class="ix">
-              {#if !page.functional}
-                <span class="shell-mark" aria-label="Non-functional placeholder">SHELL</span>
-              {:else}
-                {page.ix}
-              {/if}
-            </span>
-          </button>
-        {/each}
+        {#if settingsBenchSlug}
+          {#each BENCH_SETTINGS_PAGES as page (page.id)}
+            <button
+              type="button"
+              class="settings-page"
+              class:active={(settingsBenchTab ?? "overview") === page.id}
+              onclick={() => onNavigate?.(`/settings/bench/${settingsBenchSlug}/${page.id}`)}
+            >
+              <span>{page.label}</span>
+              <span class="ix">{page.ix}</span>
+            </button>
+          {/each}
+        {:else}
+          {#each SETTINGS_PAGES as page (page.id)}
+            <button
+              type="button"
+              class="settings-page"
+              class:active={settingsTab === page.id}
+              class:shell={!page.functional}
+              onclick={() => onNavigate?.(`/settings/${page.id}`)}
+              title={page.functional ? page.label : `${page.label} (not yet wired)`}
+            >
+              <span>{page.label}</span>
+              <span class="ix">
+                {#if !page.functional}
+                  <span class="shell-mark" aria-label="Non-functional placeholder">SHELL</span>
+                {:else}
+                  {page.ix}
+                {/if}
+              </span>
+            </button>
+          {/each}
+        {/if}
       </div>
     {:else if currentBench}
       <!-- Bench header — large display name, becomes back-arrow + secondary
@@ -479,14 +518,20 @@
 
   <main
     class="body"
-    class:full={!currentBench || !!settingsTab}
-    class:stage-dominant={isStageDominant && !settingsTab}
+    class:full={!currentBench || settingsMode}
+    class:stage-dominant={isStageDominant && !settingsMode}
   >
-    {#if settingsTab}
+    {#if settingsBenchSlug}
+      <BenchSettingsPage bench={settingsBench} tab={settingsBenchTab ?? "overview"} />
+    {:else if settingsTab}
       <SettingsPage tab={settingsTab} />
     {:else if !currentBench}
       <!-- Bench picker view: full card grid with two-stage selection. -->
-      <BenchPicker {benchStore} {onBenchChange} />
+      <BenchPicker
+        {benchStore}
+        {onBenchChange}
+        onOpenBenchSettings={(bench) => onNavigate?.(`/settings/bench/${bench.slug}`)}
+      />
     {:else}
       <!-- Conversation pane: always present per Surfaces.md.
            The connection indicator only renders when a conversation is in

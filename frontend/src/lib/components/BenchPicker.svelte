@@ -12,32 +12,7 @@
   Per the same doc, bench cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
-  Debt marker: the ▾ secondary menu is visible but disabled until
-  bench-scoped settings exists. The implementation work below is split so
-  agents can land the route, page, and trigger in order.
-
-  Wire the ▾ secondary menu on each bench card to a bench-scoped settings
-  overlay (workup view 04). Today the trigger renders disabled because
-  bench-scoped settings is not a route yet — the global settings overlay is
-  the only settings surface.
-  Why: workup view 04 expects a per-bench ▾ menu so the user can edit
-  bench-scoped configuration without entering the bench. Without it the
-  card has nowhere to put bench-scoped actions.
-  How to apply: add a `/settings/bench/:slug/...` route family, render the
-  same SettingsPage shell with bench-scoped pages, then bind the ▾ here.
-  ---
 -->
-<!-- TODO Add a bench-scoped settings route family -->
-<!-- Add the route state and API request scoping needed for /settings/bench/:slug pages. -->
-<!-- --- -->
-<!-- TODO Render bench-scoped settings pages -->
-<!-- blocked-by: bs10 -->
-<!-- Reuse the settings shell for bench-scoped pages without mixing global and bench configuration. -->
-<!-- --- -->
-<!-- TODO Wire bench card secondary menus to settings -->
-<!-- blocked-by: bs10, bs11 -->
-<!-- Route bench card secondary menus to bench-scoped settings from workup view 04. -->
-<!-- --- -->
 <script lang="ts">
   import {
     attachBenchWorkspace,
@@ -52,9 +27,10 @@
   interface Props {
     benchStore?: BenchStore;
     onBenchChange?: () => void;
+    onOpenBenchSettings?: (bench: Bench) => void;
   }
 
-  let { benchStore, onBenchChange }: Props = $props();
+  let { benchStore, onBenchChange, onOpenBenchSettings }: Props = $props();
 
   // The picker tracks its own selection separately from benchStore.currentBench
   // — picking a card is a preview, not a switch. Switching only happens when
@@ -268,12 +244,25 @@
       >
         <div class="card-top">
           <h2 class="bench-name">{bench.name}</h2>
-          <!-- ▾ secondary trigger. Same nesting concern as the open button —
-               render as a span so the outer card-button stays valid HTML. -->
+          <!-- ▾ secondary trigger. Same nesting concern as the open button:
+               render as a span with button semantics so the outer card-button
+               stays valid HTML. -->
           <span
-            class="bench-menu disabled"
-            aria-disabled="true"
-            title="Bench-scoped settings (not yet wired)"
+            role="button"
+            tabindex="0"
+            class="bench-menu"
+            title="Open bench settings"
+            onclick={(event) => {
+              event.stopPropagation();
+              onOpenBenchSettings?.(bench);
+            }}
+            onkeydown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenBenchSettings?.(bench);
+              }
+            }}
           >
             ▾
           </span>
@@ -621,10 +610,12 @@
     line-height: 1;
     padding: 0 4px;
     user-select: none;
+    cursor: pointer;
   }
 
-  .bench-menu.disabled {
-    cursor: not-allowed;
+  .bench-menu:hover,
+  .bench-menu:focus-visible {
+    opacity: 1;
   }
 
   .default-mark {
