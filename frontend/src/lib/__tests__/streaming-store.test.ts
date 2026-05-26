@@ -68,6 +68,7 @@ describe("initial state", () => {
     expect(store.isStreaming).toBe(false);
     expect(store.streamedContent).toBe("");
     expect(store.turnError).toBeNull();
+    expect(store.providerRetry).toBeNull();
   });
 });
 
@@ -747,6 +748,52 @@ describe("context_assembled events", () => {
 
     // Assembly reporting does not affect the streaming lifecycle.
     expect(store.isStreaming).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// provider retry events
+// ---------------------------------------------------------------------------
+
+describe("provider retry events", () => {
+  it("records live retry wait progress", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "provider_retry_started",
+      turn_id: "t-1",
+      attempt: 2,
+      max_retries: 3,
+      provider: "anthropic",
+      wait_ms: 4_000,
+    });
+
+    expect(store.providerRetry).toEqual({
+      turn_id: "t-1",
+      attempt: 2,
+      max_retries: 3,
+      provider: "anthropic",
+      wait_ms: 4_000,
+      status: "waiting",
+    });
+  });
+
+  it("clears retry progress when a turn completes", () => {
+    const store = createStreamingStore();
+    store.startTurn("question");
+
+    store.handleServerEvent({
+      type: "provider_retry_started",
+      turn_id: "t-1",
+      attempt: 1,
+      max_retries: 3,
+      provider: "openai",
+      wait_ms: 500,
+    });
+    store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
+
+    expect(store.providerRetry).toBeNull();
   });
 });
 

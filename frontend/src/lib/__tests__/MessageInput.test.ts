@@ -30,6 +30,9 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     get activeToolCalls() {
       return [];
     },
+    get providerRetry() {
+      return null;
+    },
     get pendingApproval() {
       return null;
     },

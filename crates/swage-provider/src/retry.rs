@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -194,40 +194,76 @@ impl LlmProvider for RetryProvider {
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
         let inner = Arc::clone(&self.inner);
         let config = self.config.clone();
+        let provider = inner.model_id().to_string();
+        let (mut tx, rx) = futures::channel::mpsc::unbounded();
 
-        Box::pin(
-            futures::stream::once(async move {
-                let mut attempt = 0u32;
-                loop {
-                    let chunks: Vec<StreamChunk> = inner.stream(request.clone()).collect().await;
+        tokio::spawn(async move {
+            let mut attempt = 0u32;
+            let mut active_retry: Option<u32> = None;
 
-                    // Scan for an error chunk in this attempt.
-                    let error_msg = chunks.iter().find_map(|c| {
-                        if let StreamChunk::Error { message } = c {
-                            Some(message.clone())
-                        } else {
-                            None
-                        }
-                    });
+            loop {
+                let chunks: Vec<StreamChunk> = inner.stream(request.clone()).collect().await;
 
-                    match error_msg {
-                        // No error — stream completed successfully.
-                        None => return chunks,
-                        // Error, retries exhausted — propagate a single error chunk.
-                        Some(msg) if attempt >= config.max_retries => {
-                            return vec![StreamChunk::Error { message: msg }];
-                        }
-                        // Transient stream error — back off and retry from scratch.
-                        Some(_) => {
-                            let delay = RetryProvider::jittered_backoff(&config, attempt);
-                            tokio::time::sleep(delay).await;
-                            attempt += 1;
-                        }
+                let error_msg = chunks.iter().find_map(|chunk| {
+                    if let StreamChunk::Error { message } = chunk {
+                        Some(message.clone())
+                    } else {
+                        None
                     }
+                });
+
+                if error_msg.is_none() {
+                    if let Some(retry_attempt) = active_retry.take() {
+                        let _ = tx
+                            .send(StreamChunk::ProviderRetrySettled {
+                                attempt: retry_attempt,
+                                max_retries: config.max_retries,
+                                provider: provider.clone(),
+                                success: true,
+                            })
+                            .await;
+                    }
+                    for chunk in chunks {
+                        let _ = tx.send(chunk).await;
+                    }
+                    break;
                 }
-            })
-            .flat_map(futures::stream::iter),
-        )
+
+                let Some(message) = error_msg else {
+                    unreachable!("checked above");
+                };
+
+                if attempt >= config.max_retries {
+                    if let Some(retry_attempt) = active_retry.take() {
+                        let _ = tx
+                            .send(StreamChunk::ProviderRetrySettled {
+                                attempt: retry_attempt,
+                                max_retries: config.max_retries,
+                                provider: provider.clone(),
+                                success: false,
+                            })
+                            .await;
+                    }
+                    let _ = tx.send(StreamChunk::Error { message }).await;
+                    break;
+                }
+
+                attempt += 1;
+                active_retry = Some(attempt);
+                let delay = RetryProvider::jittered_backoff(&config, attempt - 1);
+                let _ = tx
+                    .send(StreamChunk::ProviderRetryStarted {
+                        attempt,
+                        max_retries: config.max_retries,
+                        provider: provider.clone(),
+                        wait_ms: delay.as_millis().min(u128::from(u64::MAX)) as u64,
+                    })
+                    .await;
+                tokio::time::sleep(delay).await;
+            }
+        });
+
+        Box::pin(rx)
     }
 }
 
@@ -594,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn stream_retries_twice_and_returns_successful_chunks() {
         // First two stream attempts return an error chunk; third succeeds.
-        // Caller must see only the successful attempt's chunks.
+        // Caller must see retry progress plus the successful attempt's chunks.
         let retry = RetryProvider::new(
             FailN::new(2, ProviderError::StreamError("transient".into())),
             zero_backoff(),
@@ -606,6 +642,22 @@ mod tests {
                 .iter()
                 .all(|c| !matches!(c, StreamChunk::Error { .. })),
             "no error chunks expected: {chunks:?}"
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|c| matches!(c, StreamChunk::ProviderRetryStarted { .. }))
+                .count(),
+            2,
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|c| {
+                    matches!(c, StreamChunk::ProviderRetrySettled { success: true, .. })
+                })
+                .count(),
+            1,
         );
         assert!(
             chunks
@@ -629,6 +681,12 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, StreamChunk::Error { .. })),
             "expected an error chunk when retries are exhausted"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| { matches!(c, StreamChunk::ProviderRetrySettled { success: false, .. }) }),
+            "expected retry failure to settle before final error"
         );
     }
 }

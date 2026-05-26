@@ -136,10 +136,9 @@ export function createWebSocketClient(
       // rather than hammering the server at the base rate on every recovery.
       emitStatus("connected");
 
-      // Subscribe to the "tools" channel so ToolStart/ToolEnd events are
-      // delivered. The gateway gates these events behind subscription state;
-      // without this the web UI would not receive tool activity events.
-      ws!.send(JSON.stringify({ type: "subscribe", channels: ["tools"] }));
+      // Subscribe to the live observability channels the conversation surface
+      // renders inline: tools for call cards, retry for provider retry chips.
+      ws!.send(JSON.stringify({ type: "subscribe", channels: ["tools", "retry"] }));
     };
 
     ws.onmessage = (event: MessageEvent) => {

@@ -25,6 +25,8 @@ pub enum ObservabilityChannel {
     Context,
     /// Tool execution start and end events.
     Tools,
+    /// Provider retry progress events.
+    Retry,
 }
 
 impl FromStr for ObservabilityChannel {
@@ -34,6 +36,7 @@ impl FromStr for ObservabilityChannel {
         match s {
             "context" => Ok(Self::Context),
             "tools" => Ok(Self::Tools),
+            "retry" => Ok(Self::Retry),
             // Unknown channel names are intentionally rejected here so callers
             // can silently ignore them rather than surfacing errors to clients.
             _ => Err(()),
@@ -137,6 +140,10 @@ impl SubscriptionState {
             // Retry progress is observability noise — only deliver to subscribers.
             ServerEvent::OutputSchemaRetry { .. } => {
                 self.is_subscribed(ObservabilityChannel::Context)
+            }
+
+            ServerEvent::ProviderRetryStarted { .. } | ServerEvent::ProviderRetrySettled { .. } => {
+                self.is_subscribed(ObservabilityChannel::Retry)
             }
 
             // TurnComplete always delivers the base event. Usage fields
@@ -533,6 +540,32 @@ mod tests {
             attempt: 1,
             max_retries: 3,
             errors: vec![],
+        };
+        assert!(state.should_deliver(&event));
+    }
+
+    #[test]
+    fn provider_retry_gated_without_retry_subscription() {
+        let state = unsubscribed();
+        let event = ServerEvent::ProviderRetryStarted {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            provider: "anthropic".to_string(),
+            wait_ms: 1_000,
+        };
+        assert!(!state.should_deliver(&event));
+    }
+
+    #[test]
+    fn provider_retry_delivered_with_retry_subscription() {
+        let state = subscribed_to(&["retry"]);
+        let event = ServerEvent::ProviderRetryStarted {
+            turn_id: Uuid::new_v4(),
+            attempt: 1,
+            max_retries: 3,
+            provider: "anthropic".to_string(),
+            wait_ms: 1_000,
         };
         assert!(state.should_deliver(&event));
     }

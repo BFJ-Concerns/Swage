@@ -167,6 +167,22 @@ pub enum ServerEvent {
         /// Validation errors from this attempt.
         errors: Vec<SchemaValidationError>,
     },
+    /// Provider retry progress for the active turn.
+    ProviderRetryStarted {
+        turn_id: Uuid,
+        attempt: u32,
+        max_retries: u32,
+        provider: String,
+        wait_ms: u64,
+    },
+    /// Provider retry wait has settled.
+    ProviderRetrySettled {
+        turn_id: Uuid,
+        attempt: u32,
+        max_retries: u32,
+        provider: String,
+        success: bool,
+    },
     /// All schema validation retries were exhausted without a valid response.
     ///
     /// Always delivered regardless of subscription state — this is an error
@@ -1911,6 +1927,40 @@ mod tests {
         assert_eq!(json["max_retries"], 3);
         assert_eq!(json["errors"][0]["path"], "/name");
         assert_eq!(json["errors"][0]["message"], "required");
+    }
+
+    #[test]
+    fn provider_retry_started_serialises() {
+        let turn_id = Uuid::new_v4();
+        let event = ServerEvent::ProviderRetryStarted {
+            turn_id,
+            attempt: 2,
+            max_retries: 3,
+            provider: "anthropic".to_string(),
+            wait_ms: 4_000,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "provider_retry_started");
+        assert_eq!(json["turn_id"], turn_id.to_string());
+        assert_eq!(json["attempt"], 2);
+        assert_eq!(json["max_retries"], 3);
+        assert_eq!(json["provider"], "anthropic");
+        assert_eq!(json["wait_ms"], 4_000);
+    }
+
+    #[test]
+    fn provider_retry_settled_serialises() {
+        let turn_id = Uuid::new_v4();
+        let event = ServerEvent::ProviderRetrySettled {
+            turn_id,
+            attempt: 2,
+            max_retries: 3,
+            provider: "anthropic".to_string(),
+            success: true,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "provider_retry_settled");
+        assert_eq!(json["success"], true);
     }
 
     #[test]

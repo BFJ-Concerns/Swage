@@ -394,11 +394,11 @@ describe("reconnection on unexpected close", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tools subscription on open
+// Observability subscription on open
 // ---------------------------------------------------------------------------
 
-describe("tools channel subscription", () => {
-  it("sends a subscribe message for 'tools' immediately on open", () => {
+describe("observability channel subscription", () => {
+  it("subscribes to the live channels rendered by the conversation UI", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
     client.connect("conv-abc");
     latestWs().simulateOpen();
@@ -407,7 +407,7 @@ describe("tools channel subscription", () => {
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0])).toEqual({
       type: "subscribe",
-      channels: ["tools"],
+      channels: ["tools", "retry"],
     });
   });
 

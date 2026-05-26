@@ -791,6 +791,8 @@ export const KNOWN_SERVER_EVENT_TYPES = [
   "tool_end",
   "context_assembled",
   "output_schema_retry",
+  "provider_retry_started",
+  "provider_retry_settled",
   "output_schema_failed",
   "delegation_started",
   "delegation_completed",
@@ -858,6 +860,22 @@ export type KnownServerEvent =
       attempt: number;
       max_retries: number;
       errors: SchemaValidationError[];
+    }
+  | {
+      type: "provider_retry_started";
+      turn_id: string;
+      attempt: number;
+      max_retries: number;
+      provider: string;
+      wait_ms: number;
+    }
+  | {
+      type: "provider_retry_settled";
+      turn_id: string;
+      attempt: number;
+      max_retries: number;
+      provider: string;
+      success: boolean;
     }
   | {
       type: "output_schema_failed";

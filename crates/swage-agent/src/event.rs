@@ -35,6 +35,24 @@ pub enum AgentEvent {
     /// A streaming token arrived from the LLM.
     Token { content: String },
 
+    /// The provider retry decorator is waiting before the next stream attempt.
+    ProviderRetryStarted {
+        turn_id: Uuid,
+        attempt: u32,
+        max_retries: u32,
+        provider: String,
+        wait_ms: u64,
+    },
+
+    /// A provider retry wait has settled.
+    ProviderRetrySettled {
+        turn_id: Uuid,
+        attempt: u32,
+        max_retries: u32,
+        provider: String,
+        success: bool,
+    },
+
     /// A tool call has started; consumers can show a "running…" indicator.
     ToolStart {
         call_id: String,

@@ -304,6 +304,8 @@ impl LlmProvider for CircuitBreakerProvider {
                                 }
                                 StreamChunk::Delta { .. }
                                 | StreamChunk::Usage(_)
+                                | StreamChunk::ProviderRetryStarted { .. }
+                                | StreamChunk::ProviderRetrySettled { .. }
                                 | StreamChunk::ToolUse { .. } => {}
                             }
                         }

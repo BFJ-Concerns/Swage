@@ -659,6 +659,24 @@ impl Agent {
                             *total_input_tokens += usage.input_tokens;
                             *total_output_tokens += usage.output_tokens;
                         }
+                        Some(StreamChunk::ProviderRetryStarted { attempt, max_retries, provider, wait_ms }) => {
+                            let _ = event_tx.send(AgentEvent::ProviderRetryStarted {
+                                turn_id: execution.turn_id,
+                                attempt,
+                                max_retries,
+                                provider,
+                                wait_ms,
+                            });
+                        }
+                        Some(StreamChunk::ProviderRetrySettled { attempt, max_retries, provider, success }) => {
+                            let _ = event_tx.send(AgentEvent::ProviderRetrySettled {
+                                turn_id: execution.turn_id,
+                                attempt,
+                                max_retries,
+                                provider,
+                                success,
+                            });
+                        }
                         Some(StreamChunk::Error { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
                             let _ = event_tx.send(AgentEvent::Error { message: message.clone() });

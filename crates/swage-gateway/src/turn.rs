@@ -1807,6 +1807,42 @@ pub(crate) async fn process_turn_with_existing_turn(
                     let _ = ws_tx.send(retry_event);
                 }
             }
+            AgentEvent::ProviderRetryStarted {
+                turn_id,
+                attempt,
+                max_retries,
+                provider,
+                wait_ms,
+            } => {
+                let retry_event = ServerEvent::ProviderRetryStarted {
+                    turn_id,
+                    attempt,
+                    max_retries,
+                    provider,
+                    wait_ms,
+                };
+                if subscription.lock().await.should_deliver(&retry_event) {
+                    let _ = ws_tx.send(retry_event);
+                }
+            }
+            AgentEvent::ProviderRetrySettled {
+                turn_id,
+                attempt,
+                max_retries,
+                provider,
+                success,
+            } => {
+                let retry_event = ServerEvent::ProviderRetrySettled {
+                    turn_id,
+                    attempt,
+                    max_retries,
+                    provider,
+                    success,
+                };
+                if subscription.lock().await.should_deliver(&retry_event) {
+                    let _ = ws_tx.send(retry_event);
+                }
+            }
             AgentEvent::OutputSchemaFailed {
                 turn_id,
                 attempts,

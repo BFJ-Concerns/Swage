@@ -151,6 +151,10 @@
   const isStreaming = $derived(streamingStore?.isStreaming ?? false);
   const streamedContent = $derived(streamingStore?.streamedContent ?? "");
   const turnError = $derived(streamingStore?.turnError ?? null);
+  const providerRetry = $derived(streamingStore?.providerRetry ?? null);
+  const retryWaitSeconds = $derived(
+    providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
+  );
   const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
   // Live tool calls for the current in-progress turn.
   const activeToolCalls = $derived(streamingStore?.activeToolCalls ?? []);
@@ -252,33 +256,17 @@
       </div>
     {/if}
 
-    <!-- TODO Emit provider retry events for inline retry chips -->
-    <!-- Surface retry attempt, wait timer, and provider name so workup view 07 can render live. -->
-    <!-- --- -->
-    <!--
-      Inline retry chip — workup view 07. Pinned to the assistant turn that's
-      currently retrying so the failure stays local rather than splashing
-      across the shell. Today the chip renders only as a placeholder when a
-      turn ends in error: the provider chain has no per-attempt events, so
-      we can't render the live "retry 3 of 5" state the workup specifies.
-
-      Emit per-attempt provider events (`provider_retry_started`,
-      `provider_retry_settled`) so the chip can render real attempt
-      counts, the wait timer, and the active provider name. The retry
-      decorator already tracks attempts internally; surface them to the
-      WS observability channel.
-      Why: workup view 07 specifies an inline retry chip with
-      `WAIT 4s · provider · anthropic`; without per-attempt events the
-      chip is stuck showing placeholder copy.
-      How to apply: add a "retry" subscription to the WS layer, emit on
-      each attempt, and bind here.
-      ---
-    -->
-    {#if turnError}
-      <div class="inline-retry shell" role="status">
-        <span class="retry-mark">SHELL</span>
+    {#if providerRetry}
+      <div class="inline-retry" role="status">
+        <span class="retry-mark">
+          {providerRetry.status === "waiting"
+            ? `WAIT ${retryWaitSeconds}s`
+            : providerRetry.status === "resuming"
+              ? "RESUME"
+              : "FAILED"}
+        </span>
         <span class="retry-label">
-          Inline retry chip — provider per-attempt events not yet wired.
+          retry {providerRetry.attempt} of {providerRetry.max_retries} · provider · {providerRetry.provider}
         </span>
       </div>
     {/if}

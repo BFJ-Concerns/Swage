@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount } from "svelte";
 import MessageDisplay from "../components/MessageDisplay.svelte";
 import type { ConversationStore } from "../stores/conversations";
-import type { StreamingStore } from "../stores/streaming";
+import type { ProviderRetryState, StreamingStore } from "../stores/streaming";
 import type { ConversationDetail, MessageView, ToolCallView } from "../types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -90,6 +90,7 @@ function makeConversationStore(messages: MessageView[]): ConversationStore {
 function makeStreamingStore(
   activeToolCalls: ToolCallView[] = [],
   isStreaming = false,
+  providerRetry: ProviderRetryState | null = null,
 ): StreamingStore {
   return {
     get isStreaming() {
@@ -112,6 +113,9 @@ function makeStreamingStore(
     },
     get activeToolCalls() {
       return activeToolCalls;
+    },
+    get providerRetry() {
+      return providerRetry;
     },
     get pendingApproval() {
       return null;
@@ -333,5 +337,26 @@ describe("live tool calls from streaming store", () => {
     // A completed live tool call should look identical to a historical one.
     const pulse = document.querySelector(".tool-call .pulse");
     expect(pulse).toBeNull();
+  });
+
+  it("renders live provider retry progress", () => {
+    const store = makeConversationStore([]);
+    const streaming = makeStreamingStore([], true, {
+      turn_id: "turn-1",
+      attempt: 2,
+      max_retries: 3,
+      provider: "anthropic",
+      wait_ms: 4_000,
+      status: "waiting",
+    });
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: streaming },
+    });
+
+    expect(document.body.textContent).toContain("WAIT 4s");
+    expect(document.body.textContent).toContain("retry 2 of 3 · provider · anthropic");
+    expect(document.body.textContent).not.toContain("SHELL");
   });
 });

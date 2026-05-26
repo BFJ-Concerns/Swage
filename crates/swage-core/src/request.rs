@@ -157,6 +157,28 @@ pub enum StreamChunk {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
     },
+    /// A provider retry is waiting before the next attempt.
+    ProviderRetryStarted {
+        /// 1-indexed retry attempt number.
+        attempt: u32,
+        /// Maximum configured retry attempts.
+        max_retries: u32,
+        /// Provider or model label available at the retry boundary.
+        provider: String,
+        /// Wait duration before the next attempt starts.
+        wait_ms: u64,
+    },
+    /// A provider retry wait has settled and streaming is resuming or failing.
+    ProviderRetrySettled {
+        /// 1-indexed retry attempt number.
+        attempt: u32,
+        /// Maximum configured retry attempts.
+        max_retries: u32,
+        /// Provider or model label available at the retry boundary.
+        provider: String,
+        /// Whether a later attempt produced a usable stream.
+        success: bool,
+    },
     /// A provider-side error terminated the stream.
     Error { message: String },
     /// The model is invoking a tool. The turn processor uses this to trigger

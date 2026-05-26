@@ -22,6 +22,15 @@ export interface PendingApproval {
   timeout_policy: string;
 }
 
+export interface ProviderRetryState {
+  turn_id: string;
+  attempt: number;
+  max_retries: number;
+  provider: string;
+  wait_ms: number;
+  status: "waiting" | "resuming" | "failed";
+}
+
 export interface StreamingStore {
   readonly isStreaming: boolean;
   readonly streamedContent: string;
@@ -33,6 +42,7 @@ export interface StreamingStore {
   // events arrive. Cleared when the turn completes normally. Preserved (for
   // display) when a turn ends in error or is cancelled.
   readonly activeToolCalls: ToolCallView[];
+  readonly providerRetry: ProviderRetryState | null;
   // The most recently raised approval still awaiting a decision. Cleared
   // when an approval_confirmed/expired/decision_error event arrives.
   // The ApprovalCard reads this and replaces the input box while it is set,
@@ -87,6 +97,7 @@ export function createStreamingStore(
   const lastOutputTokensStore = writable<number | null>(null);
   // Tracks in-flight and completed tool calls for the current turn.
   const activeToolCallsStore = writable<ToolCallView[]>([]);
+  const providerRetryStore = writable<ProviderRetryState | null>(null);
   // Currently active approval awaiting user decision; null when none.
   const pendingApprovalStore = writable<PendingApproval | null>(null);
 
@@ -97,6 +108,7 @@ export function createStreamingStore(
   const lastInputTokensState = fromStore(lastInputTokensStore);
   const lastOutputTokensState = fromStore(lastOutputTokensStore);
   const activeToolCallsState = fromStore(activeToolCallsStore);
+  const providerRetryState = fromStore(providerRetryStore);
   const pendingApprovalState = fromStore(pendingApprovalStore);
 
   // ---- Helpers ----------------------------------------------------------------
@@ -150,6 +162,10 @@ export function createStreamingStore(
 
     get activeToolCalls(): ToolCallView[] {
       return activeToolCallsState.current;
+    },
+
+    get providerRetry(): ProviderRetryState | null {
+      return providerRetryState.current;
     },
 
     get pendingApproval(): PendingApproval | null {
@@ -257,6 +273,7 @@ export function createStreamingStore(
           lastOutputTokensStore.set(event.output_tokens ?? null);
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
+          providerRetryStore.set(null);
           break;
 
         case "error":
@@ -270,6 +287,7 @@ export function createStreamingStore(
           // alongside the error until the next startTurn clears it.
           // activeToolCalls are preserved so the UI can show what was
           // in-flight when the error occurred.
+          providerRetryStore.set(null);
           break;
 
         case "output_schema_failed": {
@@ -289,6 +307,7 @@ export function createStreamingStore(
           });
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
+          providerRetryStore.set(null);
           break;
         }
 
@@ -299,6 +318,7 @@ export function createStreamingStore(
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
+          providerRetryStore.set(null);
           break;
 
         case "shutdown":
@@ -309,6 +329,37 @@ export function createStreamingStore(
           turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
+          providerRetryStore.set(null);
+          break;
+
+        case "provider_retry_started":
+          providerRetryStore.set({
+            turn_id: event.turn_id,
+            attempt: event.attempt,
+            max_retries: event.max_retries,
+            provider: event.provider,
+            wait_ms: event.wait_ms,
+            status: "waiting",
+          });
+          break;
+
+        case "provider_retry_settled":
+          providerRetryStore.set({
+            turn_id: event.turn_id,
+            attempt: event.attempt,
+            max_retries: event.max_retries,
+            provider: event.provider,
+            wait_ms: 0,
+            status: event.success ? "resuming" : "failed",
+          });
+          if (event.success) {
+            globalThis.setTimeout(() => {
+              const current = get(providerRetryStore);
+              if (current?.turn_id === event.turn_id && current.attempt === event.attempt) {
+                providerRetryStore.set(null);
+              }
+            }, 1_200);
+          }
           break;
 
         case "approval_required":
@@ -363,6 +414,7 @@ export function createStreamingStore(
       streamedContentStore.set("");
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
+      providerRetryStore.set(null);
       lastInputTokensStore.set(null);
       lastOutputTokensStore.set(null);
       turnStartedAtStore.set(new Date().toISOString());

@@ -109,6 +109,7 @@ function mockStreamingStore(): StreamingStore {
     get lastInputTokens() { return null; },
     get lastOutputTokens() { return null; },
     get activeToolCalls() { return []; },
+    get providerRetry() { return null; },
     get pendingApproval() { return null; },
     handleServerEvent: () => {},
     startTurn: () => {},
