@@ -12,6 +12,11 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import {
+    readDisplayPreferences,
+    writeDisplayPreferences,
+    type DisplayPreferences,
+  } from "../display-preferences";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import { downloadRecoveryExport, exportRecoveryBundle, listRecoveryExports } from "../api/workflows";
   import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RecoveryExportSummary, RequireApprovalEntry, SettingsResponse } from "../types";
@@ -58,6 +63,7 @@
   let recoveryExports = $state<RecoveryExportSummary[]>([]);
   let isLoadingRecoveryExports = $state(false);
   let activeRecoveryExportId = $state<string | null>(null);
+  let displayPreferences = $state<DisplayPreferences>(readDisplayPreferences());
   let status = $state("");
   let error = $state<string | null>(null);
 
@@ -68,6 +74,11 @@
     { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
     { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
   ] as const satisfies readonly ProviderKindDefinition[];
+  const DISPLAY_THEME_OPTIONS = ["system", "light", "dark"] as const;
+  const DISPLAY_DENSITY_OPTIONS = ["compact", "comfortable"] as const;
+  const DISPLAY_MODEL_OPTIONS = ["off", "assistant", "all"] as const;
+  const DISPLAY_RENDERING_OPTIONS = ["markdown", "plain"] as const;
+  const DISPLAY_PRINT_OPTIONS = ["full", "minimal", "off"] as const;
 
   const providerIds = $derived(Object.keys(settings?.providers ?? {}));
   const modelIds = $derived(Object.keys(settings?.models ?? {}));
@@ -166,6 +177,16 @@
     const kib = sizeBytes / 1024;
     if (kib < 1024) return `${kib.toFixed(1)} KiB`;
     return `${(kib / 1024).toFixed(1)} MiB`;
+  }
+
+  function setDisplayPreference<K extends keyof DisplayPreferences>(
+    key: K,
+    value: DisplayPreferences[K],
+  ): void {
+    displayPreferences = { ...displayPreferences, [key]: value };
+    writeDisplayPreferences(displayPreferences);
+    status = "Display preferences saved.";
+    error = null;
   }
 
   async function loadModels(): Promise<void> {
@@ -562,9 +583,9 @@
     },
   };
 
-  // Non-functional pages — listed once so the shell branch can short-circuit
-  // without duplicating the gating logic. See the per-page motes for the gap.
-  const SHELL_TABS: ReadonlySet<SettingsTabId> = new Set([
+  // Pages rendered in the compact settings-shell layout. Some are fully wired
+  // frontend surfaces; the non-functional subset gets an explicit banner.
+  const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
     "channels",
     "nodes",
@@ -573,8 +594,16 @@
     "display",
     "account",
   ]);
+  const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "plugins",
+    "channels",
+    "nodes",
+    "voice",
+    "account",
+  ]);
 
-  const isShellTab = $derived(SHELL_TABS.has(tab));
+  const isShellTab = $derived(SHELL_LAYOUT_TABS.has(tab));
+  const isNonFunctionalTab = $derived(NON_FUNCTIONAL_TABS.has(tab));
 </script>
 
 <div class="settings-pane" aria-label="Settings">
@@ -595,13 +624,28 @@
       </div>
     </div>
 
-    <div class="shell-banner" role="note">
-      <span class="shell-flag">Non-functional</span>
-      <span class="shell-body">
-        This page is a placeholder for the Riso workup view. No values here are
-        saved or applied — the underlying backend hasn't been built yet.
-      </span>
-    </div>
+    {#if isNonFunctionalTab}
+      <div class="shell-banner" role="note">
+        <span class="shell-flag">Non-functional</span>
+        <span class="shell-body">
+          This page is a placeholder for the Riso workup view. No values here are
+          saved or applied — the underlying backend hasn't been built yet.
+        </span>
+      </div>
+    {/if}
+
+    {#if error}
+      <div class="notice error" role="alert">
+        <span>{error}</span>
+        <button type="button" class="notice-dismiss" onclick={() => (error = null)} aria-label="Dismiss">×</button>
+      </div>
+    {/if}
+
+    {#if status}
+      <div class="notice">
+        <span>{status}</span>
+      </div>
+    {/if}
 
     {#if tab === "plugins"}
       <!--
@@ -717,42 +761,83 @@
         {/if}
       </section>
     {:else if tab === "display"}
-      <!-- TODO Add persisted display preferences -->
-      <!-- Persist theme, density, model display, rendering, and print-mark preferences. -->
-      <!-- --- -->
-      <!--
-        Move the display preferences from per-component locations (theme
-        toggle in topbar, density implicit in CSS) into a single settings
-        page. Need a persisted preference store first — today theme is the
-        only knob and it lives in the topbar component.
-        Why: workup view 06 specifies a Display page covering theme,
-        density, per-message model, conversation rendering, and print marks.
-        How to apply: design a `display_preferences` table in storage,
-        expose it via /api/preferences, then bind real toggles here.
-        ---
-      -->
       <section class="shell-section">
         <h2 class="shell-section-title">Display preferences</h2>
         <div class="shell-grid">
           <div class="shell-row">
             <span class="shell-label">Theme</span>
-            <span class="shell-value">Use the topbar toggle until the preferences API lands.</span>
+            <div class="segmented-control" role="group" aria-label="Theme">
+              {#each DISPLAY_THEME_OPTIONS as mode}
+                <button
+                  type="button"
+                  class="opt"
+                  class:active={displayPreferences.theme === mode}
+                  onclick={() => setDisplayPreference("theme", mode)}
+                >
+                  {mode}
+                </button>
+              {/each}
+            </div>
           </div>
           <div class="shell-row">
             <span class="shell-label">Density</span>
-            <span class="shell-value">Compact (fixed)</span>
+            <div class="segmented-control" role="group" aria-label="Density">
+              {#each DISPLAY_DENSITY_OPTIONS as density}
+                <button
+                  type="button"
+                  class="opt"
+                  class:active={displayPreferences.density === density}
+                  onclick={() => setDisplayPreference("density", density)}
+                >
+                  {density}
+                </button>
+              {/each}
+            </div>
           </div>
           <div class="shell-row">
             <span class="shell-label">Show model on each message</span>
-            <span class="shell-value">Off (fixed)</span>
+            <div class="segmented-control" role="group" aria-label="Message model display">
+              {#each DISPLAY_MODEL_OPTIONS as modelDisplay}
+                <button
+                  type="button"
+                  class="opt"
+                  class:active={displayPreferences.message_model_display === modelDisplay}
+                  onclick={() => setDisplayPreference("message_model_display", modelDisplay)}
+                >
+                  {modelDisplay}
+                </button>
+              {/each}
+            </div>
           </div>
           <div class="shell-row">
             <span class="shell-label">Conversation rendering</span>
-            <span class="shell-value">Markdown (fixed)</span>
+            <div class="segmented-control" role="group" aria-label="Conversation rendering">
+              {#each DISPLAY_RENDERING_OPTIONS as rendering}
+                <button
+                  type="button"
+                  class="opt"
+                  class:active={displayPreferences.conversation_rendering === rendering}
+                  onclick={() => setDisplayPreference("conversation_rendering", rendering)}
+                >
+                  {rendering}
+                </button>
+              {/each}
+            </div>
           </div>
           <div class="shell-row">
             <span class="shell-label">Print marks</span>
-            <span class="shell-value">Full (fixed)</span>
+            <div class="segmented-control" role="group" aria-label="Print marks">
+              {#each DISPLAY_PRINT_OPTIONS as printMarks}
+                <button
+                  type="button"
+                  class="opt"
+                  class:active={displayPreferences.print_marks === printMarks}
+                  onclick={() => setDisplayPreference("print_marks", printMarks)}
+                >
+                  {printMarks}
+                </button>
+              {/each}
+            </div>
           </div>
         </div>
       </section>
@@ -1508,10 +1593,10 @@
     color: var(--ink-soft);
   }
 
-  .shell-value {
-    color: var(--ink);
-    font-size: 13px;
-    line-height: 1.5;
+  .segmented-control {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .recovery-export-list {

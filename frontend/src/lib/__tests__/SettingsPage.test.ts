@@ -91,6 +91,7 @@ describe("SettingsPage", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
+    window.localStorage.clear();
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue(emptySettings());
     vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload: SettingsPayload) => ({
       providers: payload.providers,
@@ -246,5 +247,31 @@ describe("SettingsPage", () => {
         default_provider: "openai",
       }),
     );
+  });
+
+  it("persists display preferences locally", async () => {
+    const preferenceEvents: Event[] = [];
+    const onPreferenceChange = (event: Event) => {
+      preferenceEvents.push(event);
+    };
+    window.addEventListener("swage:display-preferences-changed", onPreferenceChange);
+
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "display" },
+    });
+    await flushUi();
+
+    buttonNamed("comfortable").click();
+    await flushUi();
+    buttonNamed("plain").click();
+    await flushUi();
+
+    const stored = JSON.parse(window.localStorage.getItem("swage:display-preferences") ?? "{}");
+    expect(stored.density).toBe("comfortable");
+    expect(stored.conversation_rendering).toBe("plain");
+    expect(document.body.textContent).toContain("Display preferences saved.");
+    expect(preferenceEvents).toHaveLength(2);
+    window.removeEventListener("swage:display-preferences-changed", onPreferenceChange);
   });
 });

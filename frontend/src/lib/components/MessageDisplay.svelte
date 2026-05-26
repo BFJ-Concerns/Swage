@@ -24,6 +24,10 @@
 
   import type { ConversationStore } from "../stores/conversations";
   import type { StreamingStore } from "../stores/streaming";
+  import {
+    DEFAULT_DISPLAY_PREFERENCES,
+    type DisplayPreferences,
+  } from "../display-preferences";
   import type { ToolCallView } from "../types";
   import ToolCallDisplay from "./ToolCallDisplay.svelte";
 
@@ -105,9 +109,10 @@
     store?: ConversationStore;
     /** Injected by App.svelte — provides streaming state. */
     streamingStore?: StreamingStore;
+    displayPreferences?: DisplayPreferences;
   }
 
-  let { store, streamingStore }: Props = $props();
+  let { store, streamingStore, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
 
   // ---- Auto-scroll ----------------------------------------------------------
 
@@ -146,8 +151,16 @@
   const isStreaming = $derived(streamingStore?.isStreaming ?? false);
   const streamedContent = $derived(streamingStore?.streamedContent ?? "");
   const turnError = $derived(streamingStore?.turnError ?? null);
+  const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
   // Live tool calls for the current in-progress turn.
   const activeToolCalls = $derived(streamingStore?.activeToolCalls ?? []);
+
+  function shouldShowModel(role: "user" | "assistant"): boolean {
+    return (
+      displayPreferences.message_model_display === "all" ||
+      (displayPreferences.message_model_display === "assistant" && role === "assistant")
+    );
+  }
 </script>
 
 <div
@@ -188,15 +201,22 @@
             class:interrupted={message.turn_state === "interrupted" ||
               message.turn_state === "failed"}
           >
-            <!-- marked output is trusted (server-generated content only). -->
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-            {@html renderMarkdown(message.content)}
+            {#if shouldRenderMarkdown}
+              <!-- marked output is trusted (server-generated content only). -->
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+              {@html renderMarkdown(message.content)}
+            {:else}
+              <div class="plain-body">{message.content}</div>
+            {/if}
 
             {#if message.turn_state === "interrupted" || message.turn_state === "failed"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
             {/if}
           </div>
+        {/if}
+        {#if shouldShowModel(message.role)}
+          <div class="message-model">Model not reported</div>
         {/if}
       </div>
 
@@ -216,9 +236,13 @@
     {#if isStreaming || streamedContent}
       <div class="message assistant streaming">
         <div class="message-content assistant-content markdown-body">
-          <!-- Incremental markdown render — re-parses on each token. -->
-          <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-          {@html renderMarkdown(streamedContent)}
+          {#if shouldRenderMarkdown}
+            <!-- Incremental markdown render — re-parses on each token. -->
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+            {@html renderMarkdown(streamedContent)}
+          {:else}
+            <div class="plain-body">{streamedContent}</div>
+          {/if}
 
           {#if isStreaming}
             <!-- Blinking cursor to signal active generation. -->
@@ -364,11 +388,37 @@
     max-width: 80ch;
   }
 
+  :global(body.display-density-comfortable) .message-display {
+    gap: 18px;
+  }
+
+  :global(body.display-density-comfortable) .message-content {
+    padding: 14px 18px;
+    font-size: 14.5px;
+    line-height: 1.7;
+  }
+
   .user-content {
     border-left-color: var(--ink-orange);
     background: rgba(240, 106, 58, 0.08);
     /* User-written text preserves manual line breaks. */
     white-space: pre-wrap;
+  }
+
+  .plain-body {
+    white-space: pre-wrap;
+  }
+
+  .message-model {
+    width: fit-content;
+    margin-top: 2px;
+    padding: 3px 6px;
+    border: 1px solid var(--rule-soft);
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
 
   .assistant-content.interrupted {

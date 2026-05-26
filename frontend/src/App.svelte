@@ -22,6 +22,12 @@
   import { createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
+  import {
+    DISPLAY_PREFERENCES_CHANGED,
+    readDisplayPreferences,
+    writeDisplayPreferences,
+    type DisplayPreferences,
+  } from "./lib/display-preferences";
   import type { AppLens, LensDescriptor, LensSurface } from "./lib/types";
 
   // ---------------------------------------------------------------------------
@@ -156,15 +162,9 @@
   // Type lives in a shared module so child components type their props the
   // same way without round-tripping through a Svelte instance script.
   type ThemeMode = import("./lib/theme").ThemeMode;
-  const THEME_KEY = "swage:theme";
-
-  function readStoredTheme(): ThemeMode {
-    if (typeof localStorage === "undefined") return "system";
-    const value = localStorage.getItem(THEME_KEY);
-    return value === "light" || value === "dark" || value === "system" ? value : "system";
-  }
-
-  let themeMode = $state<ThemeMode>(readStoredTheme());
+  const initialDisplayPreferences = readDisplayPreferences();
+  let displayPreferences = $state<DisplayPreferences>(initialDisplayPreferences);
+  let themeMode = $state<ThemeMode>(initialDisplayPreferences.theme);
 
   function resolveTheme(mode: ThemeMode): "theme-riso" | "theme-cyanotype" {
     if (mode === "light") return "theme-riso";
@@ -183,26 +183,51 @@
     document.body.classList.add(next);
   }
 
+  function applyDisplayPreferences(preferences: DisplayPreferences): void {
+    document.body.classList.remove(
+      "display-density-compact",
+      "display-density-comfortable",
+      "print-marks-full",
+      "print-marks-minimal",
+      "print-marks-off",
+    );
+    document.body.classList.add(`display-density-${preferences.density}`);
+    document.body.classList.add(`print-marks-${preferences.print_marks}`);
+    applyTheme(preferences.theme);
+  }
+
   function setThemeMode(mode: ThemeMode): void {
+    displayPreferences = { ...displayPreferences, theme: mode };
     themeMode = mode;
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(THEME_KEY, mode);
-    }
-    applyTheme(mode);
+    writeDisplayPreferences(displayPreferences);
+    applyDisplayPreferences(displayPreferences);
   }
 
   onMount(() => {
-    applyTheme(themeMode);
+    applyDisplayPreferences(displayPreferences);
+
+    const onChange = () => {
+      if (displayPreferences.theme === "system") applyTheme("system");
+    };
+    const onPreferencesChange = (event: Event) => {
+      const next = (event as CustomEvent<DisplayPreferences>).detail;
+      displayPreferences = next;
+      themeMode = next.theme;
+      applyDisplayPreferences(next);
+    };
 
     // Re-resolve when the OS theme changes, but only while in "system" mode —
     // an explicit light/dark choice should stick regardless of OS toggle.
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      if (themeMode === "system") applyTheme("system");
+    const media =
+      typeof window !== "undefined" && window.matchMedia
+        ? window.matchMedia("(prefers-color-scheme: dark)")
+        : null;
+    media?.addEventListener("change", onChange);
+    window.addEventListener(DISPLAY_PREFERENCES_CHANGED, onPreferencesChange);
+    return () => {
+      media?.removeEventListener("change", onChange);
+      window.removeEventListener(DISPLAY_PREFERENCES_CHANGED, onPreferencesChange);
     };
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
   });
 
   function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
@@ -363,6 +388,7 @@
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}
+    {displayPreferences}
     onSelectTheme={setThemeMode}
     {activeModelContextWindow}
     route={currentRoute}

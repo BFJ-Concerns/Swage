@@ -25,6 +25,7 @@
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import type { DisplayPreferences } from "../display-preferences";
   import type { Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
@@ -52,6 +53,7 @@
     onSelectSurface: (next: LensSurface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
     themeMode?: ThemeMode;
+    displayPreferences?: DisplayPreferences;
     onSelectTheme?: (mode: ThemeMode) => void;
     activeModelContextWindow?: number | null;
     route?: Route;
@@ -74,6 +76,7 @@
     onRefreshLenses,
     desktopRuntime,
     themeMode = "system",
+    displayPreferences,
     onSelectTheme,
     activeModelContextWindow = null,
     route,
@@ -115,7 +118,7 @@
     { id: "nodes", label: "Nodes", ix: "—", functional: false },
     { id: "voice", label: "Voice", ix: "—", functional: false },
     { id: "recovery", label: "Recovery", ix: "—", functional: true },
-    { id: "display", label: "Display", ix: "—", functional: false },
+    { id: "display", label: "Display", ix: "—", functional: true },
     { id: "account", label: "Account", ix: "—", functional: false },
   ];
 
@@ -505,7 +508,7 @@
         {#if activeConversation}
           <ConnectionIndicator store={connectionStore} {onRetry} />
         {/if}
-        <MessageDisplay store={conversationStore} {streamingStore} />
+        <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
         {#if streamingStore.pendingApproval}
           <!-- Approval replaces the input box (workup view 03). -->
           <ApprovalCard approval={streamingStore.pendingApproval} />
@@ -1322,6 +1325,15 @@
 
   .body.stage-dominant > .stage-pane {
     grid-column: 2;
+  }
+
+  :global(body.print-marks-minimal) .topbar::before,
+  :global(body.print-marks-minimal) .bench-head::after,
+  :global(body.print-marks-off) .topbar::before,
+  :global(body.print-marks-off) .bench-head::after,
+  :global(body.print-marks-off) .lens.active::before,
+  :global(body.print-marks-off) .settings-page.active::before {
+    display: none;
   }
 
   .pane {

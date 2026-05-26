@@ -192,6 +192,55 @@ describe("historical tool calls from committed messages", () => {
     expect(toolCalls.length).toBe(0);
   });
 
+  it("renders assistant content as plain text when markdown rendering is disabled", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("**not bold**"),
+    ]);
+    const streaming = makeStreamingStore();
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store,
+        streamingStore: streaming,
+        displayPreferences: {
+          theme: "system",
+          density: "compact",
+          message_model_display: "off",
+          conversation_rendering: "plain",
+          print_marks: "full",
+        },
+      },
+    });
+
+    expect(document.querySelector("strong")).toBeNull();
+    expect(document.body.textContent).toContain("**not bold**");
+  });
+
+  it("shows the message model disclosure when enabled", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("Plain response."),
+    ]);
+    const streaming = makeStreamingStore();
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store,
+        streamingStore: streaming,
+        displayPreferences: {
+          theme: "system",
+          density: "compact",
+          message_model_display: "assistant",
+          conversation_rendering: "markdown",
+          print_marks: "full",
+        },
+      },
+    });
+
+    expect(document.body.textContent).toContain("Model not reported");
+  });
+
   it("renders tool calls from multiple messages independently", () => {
     const store = makeConversationStore([
       makeAssistantMessage("First turn", [makeToolCall({ call_id: "a" })]),
