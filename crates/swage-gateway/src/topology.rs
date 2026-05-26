@@ -18,7 +18,7 @@ use swage_storage::model::{
     TopologyRunState,
 };
 use swage_storage::store::ThreadStore;
-use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKind};
+use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKindTag};
 
 use crate::state::AppState;
 use crate::turn::{
@@ -475,13 +475,13 @@ async fn execute_node(
         .create_node_execution(NewNodeExecution {
             topology_run_id,
             node_id: node.id.clone(),
-            node_kind: match node.kind {
-                TopologyNodeKind::Llm => TopologyNodeRecordKind::Llm,
-                TopologyNodeKind::Deterministic => TopologyNodeRecordKind::Deterministic,
-                TopologyNodeKind::Continuation => TopologyNodeRecordKind::Continuation,
+            node_kind: match node.kind_tag() {
+                TopologyNodeKindTag::Llm => TopologyNodeRecordKind::Llm,
+                TopologyNodeKindTag::Deterministic => TopologyNodeRecordKind::Deterministic,
+                TopologyNodeKindTag::Continuation => TopologyNodeRecordKind::Continuation,
             },
-            agent_id: node.agent_id.clone(),
-            task_name: node.task_name.clone(),
+            agent_id: node.agent_id().map(ToOwned::to_owned),
+            task_name: node.task_name().map(ToOwned::to_owned),
             state: NodeExecutionState::Running,
             input_json: Some(input_json.clone()),
             output_json: None,
@@ -495,7 +495,7 @@ async fn execute_node(
             topology_run_id: topology_run_id.to_string(),
             node_execution_id: node_execution.id.to_string(),
             node_id: node.id.clone(),
-            agent_id: node.agent_id.clone(),
+            agent_id: node.agent_id().map(ToOwned::to_owned),
         },
     )
     .await?;
@@ -509,12 +509,12 @@ async fn execute_node(
         },
     );
 
-    let result = match node.kind {
-        TopologyNodeKind::Deterministic => execute_deterministic_node(&node, &input_json),
-        TopologyNodeKind::Llm | TopologyNodeKind::Continuation => {
+    let result = match node.kind_tag() {
+        TopologyNodeKindTag::Deterministic => execute_deterministic_node(&node, &input_json),
+        TopologyNodeKindTag::Llm | TopologyNodeKindTag::Continuation => {
             let agent_id = node
-                .agent_id
-                .clone()
+                .agent_id()
+                .map(ToOwned::to_owned)
                 .unwrap_or_else(|| team.entry_agent_id.clone());
             execute_agent_node(
                 &state,
@@ -649,7 +649,7 @@ async fn execute_agent_node(
     input_json: &serde_json::Value,
     cancel_token: CancellationToken,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let config = resolve_node_config(state, bench, team, agent_id, node.task_name.as_deref())?;
+    let config = resolve_node_config(state, bench, team, agent_id, node.task_name())?;
     let rendered_input = render_node_input(node, input_json);
 
     let thread = ThreadStore::create(
@@ -886,7 +886,7 @@ fn execute_deterministic_node(
     node: &TopologyNode,
     input_json: &serde_json::Value,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let handler_name = node.handler_name.as_deref().ok_or_else(|| {
+    let handler_name = node.handler_name().ok_or_else(|| {
         TopologyEngineError::InvalidGraph(format!(
             "deterministic node '{}' is missing a handler_name",
             node.id
@@ -975,8 +975,7 @@ fn load_topology_node_config(
 
 fn render_node_input(node: &TopologyNode, input_json: &serde_json::Value) -> String {
     let task_prefix = node
-        .task_name
-        .as_ref()
+        .task_name()
         .map(|task_name| format!("Task: {task_name}\n\n"))
         .unwrap_or_default();
 
@@ -1213,6 +1212,7 @@ mod tests {
     use swage_storage::model::{NewBench, NewTeam};
     use swage_storage::store::BenchStore;
     use swage_storage::store::TeamStore;
+    use swage_topology::TopologyNodeKind;
 
     use super::*;
     use crate::lifecycle::ActivityTracker;
@@ -1412,10 +1412,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "decision": {"type": "string"},
                         "draft": {"type": "string"}
@@ -1424,10 +1424,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "result": {"type": "string"}
                     }))),
@@ -1528,10 +1528,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "items": {"type": "array"}
                     }))),
@@ -1539,10 +1539,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "worker".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("worker".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "worker".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "result": {"type": "string"}
                     }))),
@@ -1617,19 +1617,17 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "loop".into(),
-                    kind: TopologyNodeKind::Deterministic,
-                    agent_id: None,
-                    task_name: None,
-                    handler_name: Some("identity".into()),
+                    kind: TopologyNodeKind::Deterministic {
+                        handler_name: "identity".into(),
+                    },
                     output_schema: None,
                     iteration_limit: Some(1),
                 },
                 TopologyNode {
                     id: "later".into(),
-                    kind: TopologyNodeKind::Deterministic,
-                    agent_id: None,
-                    task_name: None,
-                    handler_name: Some("identity".into()),
+                    kind: TopologyNodeKind::Deterministic {
+                        handler_name: "identity".into(),
+                    },
                     output_schema: None,
                     iteration_limit: None,
                 },
@@ -1753,10 +1751,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "decision": {"type": "string"}
                     }))),
@@ -1764,10 +1762,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(schema(serde_json::json!({
                         "result": {"type": "string"}
                     }))),
@@ -1875,10 +1873,10 @@ mod tests {
             },
             nodes: vec![TopologyNode {
                 id: "plan".into(),
-                kind: TopologyNodeKind::Llm,
-                agent_id: Some("planner".into()),
-                task_name: Some("draft-plan".into()),
-                handler_name: None,
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "planner".into(),
+                    task_name: Some("draft-plan".into()),
+                },
                 output_schema: Some(schema(serde_json::json!({
                     "result": {"type": "string"}
                 }))),
@@ -1948,10 +1946,10 @@ mod tests {
             },
             nodes: vec![TopologyNode {
                 id: "plan".into(),
-                kind: TopologyNodeKind::Llm,
-                agent_id: Some("planner".into()),
-                task_name: Some("draft-plan".into()),
-                handler_name: None,
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "planner".into(),
+                    task_name: Some("draft-plan".into()),
+                },
                 output_schema: Some(schema(serde_json::json!({
                     "result": {"type": "string"}
                 }))),
@@ -2032,10 +2030,10 @@ mod tests {
             },
             nodes: vec![TopologyNode {
                 id: "plan".into(),
-                kind: TopologyNodeKind::Llm,
-                agent_id: Some("planner".into()),
-                task_name: Some("draft-plan".into()),
-                handler_name: None,
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "planner".into(),
+                    task_name: Some("draft-plan".into()),
+                },
                 output_schema: Some(schema(serde_json::json!({
                     "result": {"type": "string"}
                 }))),

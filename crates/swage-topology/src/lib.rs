@@ -25,30 +25,72 @@ pub struct TopologyBudget {
     pub max_total_tokens: Option<u64>,
 }
 
-// TODO Make TopologyNode variant-typed by kind
-// kind-incompatible optional fields can coexist on the same node — an
-// `Llm` node can carry `handler_name`, a `Deterministic` node can carry
-// `agent_id`, etc. validate_graph catches missing required fields per
-// kind but not the spurious-field combinations. Replace the flat struct
-// with one variant per kind so the type system enforces the contract.
-// ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopologyNode {
     pub id: String,
+    #[serde(flatten)]
     pub kind: TopologyNodeKind,
-    pub agent_id: Option<String>,
-    pub task_name: Option<String>,
-    pub handler_name: Option<String>,
     pub output_schema: Option<serde_json::Value>,
     pub iteration_limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TopologyNodeKind {
+    Llm {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_name: Option<String>,
+    },
+    Deterministic {
+        handler_name: String,
+    },
+    Continuation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_name: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopologyNodeKindTag {
     Llm,
     Deterministic,
     Continuation,
+}
+
+impl TopologyNode {
+    pub fn kind_tag(&self) -> TopologyNodeKindTag {
+        match &self.kind {
+            TopologyNodeKind::Llm { .. } => TopologyNodeKindTag::Llm,
+            TopologyNodeKind::Deterministic { .. } => TopologyNodeKindTag::Deterministic,
+            TopologyNodeKind::Continuation { .. } => TopologyNodeKindTag::Continuation,
+        }
+    }
+
+    pub fn agent_id(&self) -> Option<&str> {
+        match &self.kind {
+            TopologyNodeKind::Llm { agent_id, .. } => Some(agent_id),
+            TopologyNodeKind::Continuation { agent_id, .. } => agent_id.as_deref(),
+            TopologyNodeKind::Deterministic { .. } => None,
+        }
+    }
+
+    pub fn task_name(&self) -> Option<&str> {
+        match &self.kind {
+            TopologyNodeKind::Llm { task_name, .. }
+            | TopologyNodeKind::Continuation { task_name, .. } => task_name.as_deref(),
+            TopologyNodeKind::Deterministic { .. } => None,
+        }
+    }
+
+    pub fn handler_name(&self) -> Option<&str> {
+        match &self.kind {
+            TopologyNodeKind::Deterministic { handler_name } => Some(handler_name),
+            TopologyNodeKind::Llm { .. } | TopologyNodeKind::Continuation { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,14 +214,34 @@ fn validate_node(
         ));
     }
 
-    match node.kind {
-        TopologyNodeKind::Llm => {
-            require_non_empty_field(&path, "agent_id", node.agent_id.as_deref(), problems);
-            require_non_empty_field(&path, "task_name", node.task_name.as_deref(), problems);
-            if let Some(agent_id) = node.agent_id.as_deref() {
+    match &node.kind {
+        TopologyNodeKind::Llm {
+            agent_id,
+            task_name,
+        } => {
+            require_non_empty_field(&path, "agent_id", Some(agent_id.as_str()), problems);
+            require_non_empty_field(&path, "task_name", task_name.as_deref(), problems);
+            ensure_known(&path, "agent_id", agent_id, &catalog.known_agents, problems);
+            if let Some(task_name) = task_name.as_deref() {
+                ensure_known(
+                    &path,
+                    "task_name",
+                    task_name,
+                    &catalog.known_tasks,
+                    problems,
+                );
+            }
+        }
+        TopologyNodeKind::Continuation {
+            agent_id,
+            task_name,
+        } => {
+            if let Some(agent_id) = agent_id.as_deref() {
+                require_non_empty_field(&path, "agent_id", Some(agent_id), problems);
                 ensure_known(&path, "agent_id", agent_id, &catalog.known_agents, problems);
             }
-            if let Some(task_name) = node.task_name.as_deref() {
+            require_non_empty_field(&path, "task_name", task_name.as_deref(), problems);
+            if let Some(task_name) = task_name.as_deref() {
                 ensure_known(
                     &path,
                     "task_name",
@@ -189,26 +251,9 @@ fn validate_node(
                 );
             }
         }
-        TopologyNodeKind::Continuation => {
-            require_non_empty_field(&path, "task_name", node.task_name.as_deref(), problems);
-            if let Some(task_name) = node.task_name.as_deref() {
-                ensure_known(
-                    &path,
-                    "task_name",
-                    task_name,
-                    &catalog.known_tasks,
-                    problems,
-                );
-            }
-        }
-        TopologyNodeKind::Deterministic => {
-            require_non_empty_field(
-                &path,
-                "handler_name",
-                node.handler_name.as_deref(),
-                problems,
-            );
-            if let Some(handler_name) = node.handler_name.as_deref() {
+        TopologyNodeKind::Deterministic { handler_name } => {
+            require_non_empty_field(&path, "handler_name", Some(handler_name.as_str()), problems);
+            if !handler_name.trim().is_empty() {
                 ensure_known(
                     &path,
                     "handler_name",
@@ -483,6 +528,27 @@ mod tests {
     }
 
     #[test]
+    fn node_kind_payloads_keep_flat_wire_shape() {
+        let node: TopologyNode = serde_json::from_value(serde_json::json!({
+            "id": "plan",
+            "kind": "llm",
+            "agent_id": "planner",
+            "task_name": "draft-plan",
+            "output_schema": null,
+            "iteration_limit": null
+        }))
+        .expect("flat node JSON should deserialize");
+
+        assert_eq!(node.agent_id(), Some("planner"));
+        assert_eq!(node.task_name(), Some("draft-plan"));
+
+        let encoded = serde_json::to_value(&node).expect("node should serialize");
+        assert_eq!(encoded["kind"], "llm");
+        assert_eq!(encoded["agent_id"], "planner");
+        assert!(encoded.get("kind_payload").is_none());
+    }
+
+    #[test]
     fn valid_graph_passes_validation() {
         let graph = TopologyGraph {
             entry_node_id: "plan".into(),
@@ -494,10 +560,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({
                         "decision": { "type": "string" }
                     }))),
@@ -505,10 +571,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
@@ -534,10 +600,10 @@ mod tests {
             budget: TopologyBudget::default(),
             nodes: vec![TopologyNode {
                 id: "plan".into(),
-                kind: TopologyNodeKind::Llm,
-                agent_id: Some("ghost".into()),
-                task_name: Some("draft-plan".into()),
-                handler_name: None,
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "ghost".into(),
+                    task_name: Some("draft-plan".into()),
+                },
                 output_schema: Some(object_schema(serde_json::json!({}))),
                 iteration_limit: None,
             }],
@@ -560,10 +626,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({
                         "decision": { "type": "string" }
                     }))),
@@ -571,10 +637,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
@@ -606,19 +672,19 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
@@ -642,19 +708,19 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
@@ -691,19 +757,19 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: Some(3),
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
@@ -739,10 +805,10 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     id: "plan".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("planner".into()),
-                    task_name: Some("draft-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "planner".into(),
+                        task_name: Some("draft-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({
                         "items": { "type": "string" }
                     }))),
@@ -750,10 +816,10 @@ mod tests {
                 },
                 TopologyNode {
                     id: "review".into(),
-                    kind: TopologyNodeKind::Llm,
-                    agent_id: Some("reviewer".into()),
-                    task_name: Some("review-plan".into()),
-                    handler_name: None,
+                    kind: TopologyNodeKind::Llm {
+                        agent_id: "reviewer".into(),
+                        task_name: Some("review-plan".into()),
+                    },
                     output_schema: Some(object_schema(serde_json::json!({}))),
                     iteration_limit: None,
                 },
