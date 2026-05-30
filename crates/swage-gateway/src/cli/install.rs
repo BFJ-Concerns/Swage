@@ -18,12 +18,12 @@ pub struct ServiceInstallConfig {
 }
 
 pub fn install_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".swage").join("service.json")
+    swage_config::discovery::resolve_root()
+        .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
+        .join("service.json")
 }
 
-pub fn load_install_config() -> Result<Option<ServiceInstallConfig>, ClientError> {
-    let path = install_config_path();
+fn load_install_config_at_path(path: PathBuf) -> Result<Option<ServiceInstallConfig>, ClientError> {
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             serde_json::from_str(&content)
@@ -37,8 +37,15 @@ pub fn load_install_config() -> Result<Option<ServiceInstallConfig>, ClientError
     }
 }
 
+pub fn load_install_config() -> Result<Option<ServiceInstallConfig>, ClientError> {
+    load_install_config_at_path(install_config_path())
+}
+
 pub async fn install(args: &InstallArgs) -> Result<(), ClientError> {
-    let path = install_config_path();
+    install_at_path(args, install_config_path()).await
+}
+
+async fn install_at_path(args: &InstallArgs, path: PathBuf) -> Result<(), ClientError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ClientError::MetadataIo { source })?;
     }
@@ -56,7 +63,10 @@ pub async fn install(args: &InstallArgs) -> Result<(), ClientError> {
 }
 
 pub async fn uninstall(_args: &UninstallArgs) -> Result<(), ClientError> {
-    let path = install_config_path();
+    uninstall_at_path(install_config_path()).await
+}
+
+async fn uninstall_at_path(path: PathBuf) -> Result<(), ClientError> {
     match std::fs::remove_file(&path) {
         Ok(()) => {
             println!("Gateway service defaults removed");
@@ -72,64 +82,60 @@ pub async fn uninstall(_args: &UninstallArgs) -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::await_holding_lock)]
-
     use super::*;
-    use std::sync::Mutex;
-
-    // These tests mutate HOME. Hold the process-env lock across awaits so
-    // concurrent tests cannot observe a half-mutated environment.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn install_path_ends_with_service_json() {
         let path = install_config_path();
-        assert!(path.to_string_lossy().ends_with(".swage/service.json"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("service.json")
+        );
     }
 
     #[tokio::test]
     async fn install_and_load_round_trip() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        let path = dir.path().join("service.json");
 
-        install(&InstallArgs {
-            port: Some(4000),
-            host: Some("127.0.0.1".into()),
-            config: Some("/tmp/swage.toml".into()),
-        })
+        install_at_path(
+            &InstallArgs {
+                port: Some(4000),
+                host: Some("127.0.0.1".into()),
+                config: Some("/tmp/swage.toml".into()),
+            },
+            path.clone(),
+        )
         .await
         .unwrap();
 
         assert_eq!(
-            load_install_config().unwrap(),
+            load_install_config_at_path(path).unwrap(),
             Some(ServiceInstallConfig {
                 port: Some(4000),
                 host: Some("127.0.0.1".into()),
                 config: Some("/tmp/swage.toml".into()),
             })
         );
-
-        unsafe { std::env::remove_var("HOME") };
     }
 
     #[tokio::test]
     async fn uninstall_is_idempotent() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        let path = dir.path().join("service.json");
 
-        uninstall(&UninstallArgs {}).await.unwrap();
-        install(&InstallArgs {
-            port: None,
-            host: None,
-            config: None,
-        })
+        uninstall_at_path(path.clone()).await.unwrap();
+        install_at_path(
+            &InstallArgs {
+                port: None,
+                host: None,
+                config: None,
+            },
+            path.clone(),
+        )
         .await
         .unwrap();
-        uninstall(&UninstallArgs {}).await.unwrap();
-        assert_eq!(load_install_config().unwrap(), None);
-
-        unsafe { std::env::remove_var("HOME") };
+        uninstall_at_path(path.clone()).await.unwrap();
+        assert_eq!(load_install_config_at_path(path).unwrap(), None);
     }
 }

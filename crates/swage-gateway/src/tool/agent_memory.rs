@@ -68,7 +68,7 @@ impl Tool for AgentMemoryTool {
                 "scope": {
                     "type": "string",
                     "enum": ["agent", "session"],
-                    "description": "Recall scope. Agent scope searches the caller's memories across the bench. Session scope limits results to the current session."
+                    "description": "Recall scope. Agent scope searches all of the caller's own memories across every session. Session scope limits results to the current session."
                 },
                 "limit": {
                     "type": "integer",

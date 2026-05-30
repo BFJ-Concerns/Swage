@@ -520,10 +520,10 @@ mod tests {
         }
     }
 
-    fn object_schema(properties: serde_json::Value) -> serde_json::Value {
+    fn object_schema(properties: impl Into<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": properties,
+            "properties": properties.into(),
         })
     }
 

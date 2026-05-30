@@ -54,10 +54,14 @@ impl Tool for PluginTool {
         use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
-        let mut child = Command::new(&self.executable_path)
+        let mut command = Command::new(&self.executable_path);
+        command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = command
             .spawn()
             .map_err(|error| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
@@ -83,6 +87,9 @@ impl Tool for PluginTool {
                 })?;
         }
 
+        // `kill_on_drop` makes timeout cancellation terminate the consumed child
+        // handle inside `wait_with_output` instead of leaving a plugin running.
+        #[allow(clippy::disallowed_methods)]
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await
             .map_err(|_| ToolError::Timeout {

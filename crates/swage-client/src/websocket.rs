@@ -330,9 +330,6 @@ impl GatewayWebSocket {
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, ClientError> {
         loop {
             match self.inner.next().await {
-                // Clean close or stream exhausted.
-                None => return Ok(None),
-
                 Some(Err(e)) => {
                     return Err(ClientError::WebSocketFailed {
                         address: self.address.clone(),
@@ -340,7 +337,8 @@ impl GatewayWebSocket {
                     });
                 }
 
-                Some(Ok(Message::Close(_))) => return Ok(None),
+                // Clean close or stream exhausted.
+                None | Some(Ok(Message::Close(_))) => return Ok(None),
 
                 Some(Ok(Message::Text(text))) => {
                     let value = match serde_json::from_str::<serde_json::Value>(&text) {
@@ -379,14 +377,13 @@ impl GatewayWebSocket {
                                 message = %text,
                                 "Skipping malformed WebSocket message from gateway"
                             );
-                            continue;
                         }
                     }
                 }
 
                 // Ping, Pong, and Binary frames are not part of the gateway
                 // protocol — skip them silently.
-                Some(Ok(_)) => continue,
+                Some(Ok(_)) => {}
             }
         }
     }

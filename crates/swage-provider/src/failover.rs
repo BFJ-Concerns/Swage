@@ -107,7 +107,10 @@ impl FailoverProvider {
     /// - Cooled providers, sorted by earliest cooldown start (most likely recovered).
     fn compute_try_order(&self) -> Vec<usize> {
         let now = Instant::now();
-        let cooldowns = self.cooldowns.lock().unwrap();
+        let cooldowns = self
+            .cooldowns
+            .lock()
+            .expect("failover cooldown lock should not be poisoned");
         let n = self.providers.len();
 
         let mut available: Vec<usize> = Vec::new();
@@ -137,12 +140,16 @@ impl FailoverProvider {
 
     /// Put provider `idx` into cooldown.
     fn set_cooldown(&self, idx: usize) {
-        self.cooldowns.lock().unwrap()[idx] = Some(Instant::now());
+        self.cooldowns
+            .lock()
+            .expect("failover cooldown lock should not be poisoned")[idx] = Some(Instant::now());
     }
 
     /// Clear the cooldown for provider `idx` (called on success).
     fn clear_cooldown(&self, idx: usize) {
-        self.cooldowns.lock().unwrap()[idx] = None;
+        self.cooldowns
+            .lock()
+            .expect("failover cooldown lock should not be poisoned")[idx] = None;
     }
 }
 
@@ -260,7 +267,9 @@ impl LlmProvider for FailoverProvider {
             futures::stream::once(async move {
                 let order = {
                     let now = Instant::now();
-                    let locked = cooldowns.lock().unwrap();
+                    let locked = cooldowns
+                        .lock()
+                        .expect("failover cooldown lock should not be poisoned");
                     let n = providers.len();
 
                     let mut available: Vec<usize> = Vec::new();
@@ -308,12 +317,18 @@ impl LlmProvider for FailoverProvider {
                     match error_msg {
                         None => {
                             // Success — clear cooldown.
-                            cooldowns.lock().unwrap()[idx] = None;
+                            cooldowns
+                                .lock()
+                                .expect("failover cooldown lock should not be poisoned")[idx] =
+                                None;
                             return chunks;
                         }
                         Some(msg) => {
                             // Treat all stream errors as transient for failover purposes.
-                            cooldowns.lock().unwrap()[idx] = Some(Instant::now());
+                            cooldowns
+                                .lock()
+                                .expect("failover cooldown lock should not be poisoned")[idx] =
+                                Some(Instant::now());
                             last_error_msg = Some(msg);
                         }
                     }

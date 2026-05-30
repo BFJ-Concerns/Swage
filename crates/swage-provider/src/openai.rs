@@ -407,7 +407,7 @@ impl OpenAiProvider {
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
                     .cloned()
-                    .unwrap_or(serde_json::json!({"type": "object"}));
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
 
                 Some(OpenAiTool {
                     tool_type: "function".to_string(),
@@ -440,7 +440,7 @@ impl OpenAiProvider {
             .map(|tc| {
                 // OpenAI sends arguments as a JSON string — parse it into a Value.
                 let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 
                 ToolCall {
                     call_id: tc.id.clone(),
@@ -573,7 +573,7 @@ impl ToolCallAccumulator {
             .drain(..)
             .map(|acc| {
                 let arguments = serde_json::from_str(&acc.arguments)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
                 ToolCall {
                     call_id: acc.id,
                     name: acc.name,

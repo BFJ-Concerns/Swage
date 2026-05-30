@@ -101,7 +101,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                         title: turn
                             .user_input
                             .clone()
-                            .or(turn.assistant_response.clone())
+                            .or_else(|| turn.assistant_response.clone())
                             .unwrap_or_else(|| "turn".to_string()),
                         session_id: Some(session.id),
                         bench_id: Some(bench.id),
@@ -232,7 +232,7 @@ async fn get_turn_detail(state: &AppState, id: Uuid) -> Result<RunDetailResponse
         title: turn
             .user_input
             .clone()
-            .or(turn.assistant_response.clone())
+            .or_else(|| turn.assistant_response.clone())
             .unwrap_or_else(|| "turn".to_string()),
         session_id: Some(session.id),
         bench_id: Some(session.bench_id),

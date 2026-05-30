@@ -1,5 +1,7 @@
 use std::{
-    env, fs, io,
+    env,
+    fmt::Write as _,
+    fs, io,
     path::{Path, PathBuf},
     process::{Child, Command, ExitCode, Stdio},
     thread,
@@ -31,20 +33,29 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("setup") => setup(),
-        Some("build-dev") => build_dev(BuildDevOptions::parse(args)?),
-        Some("dev") => dev(DevOptions::parse(args)?),
+        Some("build-dev") => {
+            let options = BuildDevOptions::parse(args)?;
+            build_dev(&options)
+        }
+        Some("dev") => {
+            let options = DevOptions::parse(args)?;
+            dev(&options)
+        }
         Some("fmt") => fmt(),
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
         Some("clippy") => clippy(),
         Some("test") => test(),
         Some("ci") => ci(),
-        Some("sweep") => {
-            cargo_sweep();
-            Ok(())
+        Some("sweep") => cargo_sweep(),
+        Some("release" | "build") => {
+            let options = ReleaseOptions::parse(args)?;
+            release(&options)
         }
-        Some("release") | Some("build") => release(ReleaseOptions::parse(args)?),
-        Some("install") => install(InstallOptions::parse(args)?),
+        Some("install") => {
+            let options = InstallOptions::parse(args)?;
+            install(&options)
+        }
         Some("-h" | "--help") | None => {
             print_help();
             Ok(())
@@ -193,7 +204,7 @@ fn setup() -> Result<()> {
     Ok(())
 }
 
-fn build_dev(options: BuildDevOptions) -> Result<()> {
+fn build_dev(options: &BuildDevOptions) -> Result<()> {
     setup()?;
 
     if options.embed_frontend {
@@ -212,8 +223,8 @@ fn build_dev(options: BuildDevOptions) -> Result<()> {
     Ok(())
 }
 
-fn dev(options: DevOptions) -> Result<()> {
-    build_dev(BuildDevOptions::default())?;
+fn dev(options: &DevOptions) -> Result<()> {
+    build_dev(&BuildDevOptions::default())?;
     warn_if_vite_proxy_mismatch(&options.gateway_port)?;
 
     println!(
@@ -241,7 +252,7 @@ fn dev(options: DevOptions) -> Result<()> {
         .arg("--strictPort")
         .spawn()?;
 
-    print_dev_urls(&options);
+    print_dev_urls(options);
     wait_for_first_exit(&mut gateway, &mut vite)?;
     Ok(())
 }
@@ -324,7 +335,7 @@ fn ci() -> Result<()> {
     Ok(())
 }
 
-fn release(options: ReleaseOptions) -> Result<()> {
+fn release(options: &ReleaseOptions) -> Result<()> {
     setup()?;
     build_frontend_release_if_needed(options.force_frontend)?;
 
@@ -350,7 +361,7 @@ fn release(options: ReleaseOptions) -> Result<()> {
     Ok(())
 }
 
-fn install(options: InstallOptions) -> Result<()> {
+fn install(options: &InstallOptions) -> Result<()> {
     if options.skip_frontend {
         ensure_file(
             FRONTEND_DIST_INDEX,
@@ -358,7 +369,7 @@ fn install(options: InstallOptions) -> Result<()> {
         )?;
         println!("==> Reusing existing frontend/dist");
     } else {
-        release(ReleaseOptions::default())?;
+        release(&ReleaseOptions::default())?;
     }
 
     if options.skip_frontend {
@@ -568,17 +579,20 @@ fn hash_file(hasher: &mut Sha256, path: &Path) -> Result<()> {
 }
 
 fn stable_missing_label(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.display().to_string())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    )
 }
 
 fn hex_digest(hasher: Sha256) -> String {
     hasher
         .finalize()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::new(), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
 }
 
 fn read_stamp(path: &str) -> Result<Option<String>> {
@@ -633,7 +647,7 @@ fn npm_command<const N: usize>(package_dir: &str, args: [&str; N]) -> Command {
     command
 }
 
-fn cargo_sweep() {
+fn cargo_sweep() -> Result<()> {
     if Command::new("cargo-sweep")
         .arg("--version")
         .stdout(Stdio::null())
@@ -642,13 +656,13 @@ fn cargo_sweep() {
         .is_err()
     {
         println!("==> Skipping cargo sweep (install with: cargo install cargo-sweep)");
-        return;
+        return Ok(());
     }
 
-    let _ = run_command(
+    run_command(
         "Capping target/ at 50 GiB",
         command("cargo", ["sweep", "--maxsize", "50000"]),
-    );
+    )
 }
 
 fn ensure_file(path: &str, message: &str) -> Result<()> {
@@ -711,7 +725,9 @@ fn print_dev_urls(options: &DevOptions) {
 fn print_install_next_steps(prefix: &Path, lan_mode: bool) {
     println!();
     println!("Next steps:");
-    if !path_contains(prefix) {
+    if path_contains(prefix) {
+        println!("  1. Start the gateway: swage gateway start");
+    } else {
         println!("  1. {} is not on PATH yet.", prefix.display());
         println!(
             "     fish: set -U fish_user_paths {} $fish_user_paths",
@@ -722,8 +738,6 @@ fn print_install_next_steps(prefix: &Path, lan_mode: bool) {
             prefix.display()
         );
         println!("  2. Start the gateway: swage gateway start");
-    } else {
-        println!("  1. Start the gateway: swage gateway start");
     }
 
     if lan_mode {
@@ -748,7 +762,7 @@ fn warn_if_vite_proxy_mismatch(gateway_port: &str) -> Result<()> {
     };
     let expected_port = proxy_marker
         .chars()
-        .take_while(|character| character.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect::<String>();
     if !expected_port.is_empty() && expected_port != gateway_port {
         eprintln!(
@@ -770,9 +784,7 @@ fn lan_ip() -> Option<String> {
 }
 
 fn path_contains(prefix: &Path) -> bool {
-    env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).any(|path| path == prefix))
-        .unwrap_or(false)
+    env::var_os("PATH").is_some_and(|paths| env::split_paths(&paths).any(|path| path == prefix))
 }
 
 #[cfg(unix)]
@@ -796,7 +808,7 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn option_value(arg: &str) -> &str {
-    arg.split_once('=').map(|(_, value)| value).unwrap_or("")
+    arg.split_once('=').map_or("", |(_, value)| value)
 }
 
 fn print_help() {

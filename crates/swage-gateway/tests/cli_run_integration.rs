@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::io::Write;
 use std::net::SocketAddr;
 use std::pin::Pin;

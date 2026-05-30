@@ -17,7 +17,13 @@
 //!
 //! Core Journey proved: #3 (Bench Workspace) — benches are genuinely isolated.
 
-use std::sync::Arc;
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+// The env-serialisation guard intentionally spans awaits: it locks out other
+// tests for the whole request, since the gateway reads SWAGE_HOME during the
+// call. The guarded state is process env, not cancellation-sensitive data.
+#![allow(clippy::await_holding_lock)]
+
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -32,6 +38,8 @@ use swage_storage::SqliteStorage;
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a router backed by in-memory SQLite storage.
 /// Returns the router and storage handle for inspection.
@@ -236,6 +244,10 @@ async fn sessions_are_isolated_between_benches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_is_isolated_between_benches() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
+
     let (router, _storage) = make_test_router();
 
     // Create two benches.
@@ -268,15 +280,9 @@ async fn memory_is_isolated_between_benches() {
     // (In production, the agent does this via the memory tool during a turn.
     //  Here we verify the filesystem scoping by checking that bench B's
     //  memory directory does not contain the file.)
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let mem_dir_a = std::path::PathBuf::from(&home)
-        .join(".swage/benches")
-        .join(slug_a)
-        .join("memory");
-    let mem_dir_b = std::path::PathBuf::from(&home)
-        .join(".swage/benches")
-        .join(slug_b)
-        .join("memory");
+    let swage_root = swage_config::discovery::resolve_root().unwrap();
+    let mem_dir_a = swage_root.join("benches").join(slug_a).join("memory");
+    let mem_dir_b = swage_root.join("benches").join(slug_b).join("memory");
 
     // Create memory directory for A and write a file.
     std::fs::create_dir_all(&mem_dir_a).expect("create memory dir A");
@@ -305,17 +311,7 @@ async fn memory_is_isolated_between_benches() {
         "bench A should have the memory file"
     );
 
-    // Clean up the test directories.
-    let _ = std::fs::remove_dir_all(
-        std::path::PathBuf::from(&home)
-            .join(".swage/benches")
-            .join(slug_a),
-    );
-    let _ = std::fs::remove_dir_all(
-        std::path::PathBuf::from(&home)
-            .join(".swage/benches")
-            .join(slug_b),
-    );
+    unsafe { std::env::remove_var("SWAGE_HOME") };
 }
 
 // ---------------------------------------------------------------------------

@@ -2272,7 +2272,7 @@ mod tests {
         // Top-level calls use None.
         let top = NewToolCall {
             parent_call_id: None,
-            ..sub.clone()
+            ..sub
         };
         assert!(top.parent_call_id.is_none());
     }
@@ -2868,7 +2868,7 @@ mod tests {
 
         let turn_no_cost = Turn {
             cost_microcents: None,
-            ..turn_with_cost.clone()
+            ..turn_with_cost
         };
         assert_eq!(turn_no_cost.cost_microcents, None);
     }

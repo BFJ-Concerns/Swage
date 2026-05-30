@@ -202,7 +202,7 @@ impl SecretManager {
                 request
                     .external_reference
                     .clone()
-                    .or(existing.external_reference.clone()),
+                    .or_else(|| existing.external_reference.clone()),
                 metadata,
             )
             .await

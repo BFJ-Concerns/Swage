@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -166,10 +167,10 @@ impl ManagedSecretEncryptor {
 
 fn key_fingerprint(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    digest[..8].iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 fn managed_secret_encryptor() -> Result<ManagedSecretEncryptor, StorageError> {

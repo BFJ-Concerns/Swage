@@ -410,9 +410,7 @@ mod tests {
             description: "Run a shell command".into(),
             input_schema: serde_json::json!({ "type": "object" }),
         };
-        let req = LlmRequest::builder("claude-3")
-            .tools(vec![tool.clone()])
-            .build();
+        let req = LlmRequest::builder("claude-3").tools(vec![tool]).build();
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "bash");
     }

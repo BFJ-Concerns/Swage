@@ -34,15 +34,13 @@ impl RuntimeMetadata {
     /// Resolves the path to the metadata file.
     ///
     /// Prefers `$XDG_RUNTIME_DIR/swage/metadata.json`; falls back to
-    /// `~/.swage/run/metadata.json` when the XDG variable is absent.
+    /// `$SWAGE_HOME/run/metadata.json` or `~/.swage/run/metadata.json` when the
+    /// XDG variable is absent.
     pub fn metadata_path() -> PathBuf {
         if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
             PathBuf::from(xdg).join("swage").join("metadata.json")
         } else {
-            // HOME is virtually always present; /tmp is an emergency fallback.
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            PathBuf::from(home)
-                .join(".swage")
+            effective_swage_root_path()
                 .join("run")
                 .join("metadata.json")
         }
@@ -111,6 +109,16 @@ impl RuntimeMetadata {
     }
 }
 
+fn effective_swage_root_path() -> PathBuf {
+    if let Ok(swage_home) = std::env::var("SWAGE_HOME") {
+        PathBuf::from(swage_home)
+    } else {
+        // HOME is virtually always present; /tmp is an emergency fallback.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home).join(".swage")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,20 +160,24 @@ mod tests {
     }
 
     #[test]
-    fn metadata_path_falls_back_to_home() {
+    fn metadata_path_falls_back_to_swage_root() {
         let _guard = ENV_LOCK.lock().unwrap();
         let original_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        let original_swage_home = std::env::var("SWAGE_HOME").ok();
+        let root = TempDir::new().unwrap();
         // SAFETY: single-threaded within the lock.
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        unsafe { std::env::set_var("SWAGE_HOME", root.path()) };
         let path = RuntimeMetadata::metadata_path();
         if let Some(val) = original_xdg {
             unsafe { std::env::set_var("XDG_RUNTIME_DIR", val) };
         }
-        assert!(
-            path.to_str().unwrap().contains(".swage/run/metadata.json"),
-            "home fallback path should contain .swage/run/metadata.json, got: {}",
-            path.display()
-        );
+        if let Some(val) = original_swage_home {
+            unsafe { std::env::set_var("SWAGE_HOME", val) };
+        } else {
+            unsafe { std::env::remove_var("SWAGE_HOME") };
+        }
+        assert_eq!(path, root.path().join("run").join("metadata.json"));
     }
 
     #[test]

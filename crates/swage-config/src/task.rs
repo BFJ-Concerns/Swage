@@ -138,7 +138,7 @@ impl TaskDefinition {
             (true, true) => String::new(),
             (false, true) => base_instructions,
             (true, false) => self.rendered_instructions(),
-            (false, false) => format!("{base_instructions}\n\n{}", self.rendered_instructions(),),
+            (false, false) => format!("{base_instructions}\n\n{}", self.rendered_instructions()),
         };
 
         resolved

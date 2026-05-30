@@ -351,7 +351,7 @@ mod tests {
                 host_transport
                     .send(&IpcMessage::LlmResponse {
                         request_id,
-                        content: "".into(),
+                        content: String::new(),
                         token_usage: TokenUsage {
                             prompt_tokens: 5,
                             completion_tokens: 2,

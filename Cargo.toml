@@ -25,6 +25,107 @@ version = "0.202604.3000"
 edition = "2024"
 rust-version = "1.95"
 
+# Clippy lints, curated: keep what catches real
+# bugs, needless allocations, or genuine redundancy; drop what is purely
+# stylistic or fires falsely on provably-correct code.
+#
+# `pedantic` runs as a group (with an allow-list below). `nursery` does NOT —
+# its lints are still under development and ship with false positives - so the
+# handful of nursery lints worth having are opted in individually.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# --- Nursery lints opted in individually (real perf wins, not style) ---
+redundant_clone = "warn"   # catches clones whose value is never used after
+or_fun_call = "warn"       # eager `unwrap_or(expensive())` -> lazy `_else`
+needless_collect = "warn"  # collecting only to immediately re-iterate
+disallowed_methods = "warn" # configured in clippy.toml for async abandonment hazards
+
+# --- Pedantic allowed: stylistic preferences with no correctness payoff ---
+doc_markdown = "allow"              # backticks in doc comments - a rendering nicety
+uninlined_format_args = "allow"     # `{}", x` vs `{x}` - cosmetic, churns across toolchains
+must_use_candidate = "allow"        # `#[must_use]` hints aimed at external callers
+return_self_not_must_use = "allow"  # same family
+too_many_lines = "allow"            # function-length heuristic, not a correctness check
+items_after_statements = "allow"    # block-organisation preference
+unused_self = "allow"               # usually a deliberate API-consistency choice
+default_trait_access = "allow"      # `Default::default()` vs `T::default()` - style
+single_match_else = "allow"         # the suggested rewrite often reads worse
+match_same_arms = "allow"           # keeping semantic cases separate often documents intent
+match_wildcard_for_single_variants = "allow" # wildcard arms make future enum growth visible in tests
+map_unwrap_or = "allow"             # map_or/map_or_else is shorter, not clearer by default
+manual_let_else = "allow"           # match remains clearer when the fallback has comments
+needless_continue = "allow"         # explicit loop control is useful in protocol readers
+if_not_else = "allow"               # branch order should follow the story being told
+match_bool = "allow"                # boolean matches are sometimes clearer in state tables
+unnested_or_patterns = "allow"      # nested patterns are denser, not meaningfully safer
+needless_raw_string_hashes = "allow" # harmless test fixture spelling churn
+redundant_closure_for_method_calls = "allow" # method-path spelling is stylistic
+ignored_unit_patterns = "allow"     # `_` in select branches is idiomatic enough
+unnecessary_literal_bound = "allow" # trait impls commonly return string literals as `&str`
+duration_suboptimal_units = "allow" # seconds are often the domain unit in settings/tests
+needless_pass_by_value = "allow"    # command/config structs are often intentionally consumed at boundaries
+too_many_arguments = "allow"        # some gateway assemblers mirror API contracts
+many_single_char_names = "allow"    # naming-readability heuristic
+similar_names = "allow"             # likewise; reliably noisy, pre-empted for portability
+struct_excessive_bools = "allow"    # struct-design heuristic
+fn_params_excessive_bools = "allow" # signature-design heuristic
+struct_field_names = "allow"        # repeated domain suffixes are clearer than invented synonyms
+
+# --- Pedantic allowed: false-positive prone on bounded arithmetic ---
+# The cast lints fire on provably-bounded arithmetic (clamped/masked values)
+# Clippy can't prove safe; the "fixes" are `try_from` noise or a bare #[allow].
+# Tests, not these lints, guard against genuine truncation.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# --- Allowed: too noisy at workspace scale ---
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+bool_to_int_with_if = "allow"
+unused_async = "allow"
+unnecessary_wraps = "allow"
+used_underscore_binding = "allow"
+used_underscore_items = "allow"
+unnecessary_join = "allow"
+assigning_clones = "allow"
+manual_string_new = "allow"
+unchecked_time_subtraction = "allow" # tests sometimes need an already-expired instant
+ref_option = "allow"
+implicit_hasher = "allow"
+implicit_clone = "allow"
+semicolon_if_nothing_returned = "allow"
+format_collect = "allow"
+format_push_string = "allow"
+
+# --- Async cancellation safety (deny: pure tripwires) ---
+# Guard the "task abandoned mid-mutation" and "future silently dropped" failure
+# modes. If these don't fire on your tree today, denying only ever bites a future
+# regression. See clippy.toml for the disallowed-method counterparts.
+await_holding_lock = "deny"        # lock guard held across .await - the lock-shaped footgun
+await_holding_refcell_ref = "deny" # same hazard via a RefCell borrow across .await
+async_yields_async = "deny"        # returned a future where you meant to await one
+let_underscore_future = "deny"     # `let _ = async_fn();` drops the future - it never runs
+
+# --- Hygiene (deny: leftovers that should never be committed) ---
+# NB: `unimplemented` is intentionally NOT denied - it's the correct macro for
+# trait methods a test stub deliberately doesn't support. Check your own tree
+# before adding it: `grep -rn 'unimplemented!' --include='*.rs'`.
+dbg_macro = "deny"
+todo = "deny"
+
+# --- Panic discipline (warn: nudge toward handling None/Err) ---
+# Paired with allow-unwrap-in-tests in clippy.toml for unit tests. Integration
+# test crates that use unwrap as assertion syntax opt out locally.
+unwrap_used = "warn"
+
+[workspace.lints.rust]
+unused_must_use = "deny" # a #[must_use] value (often a Result or future) was discarded
+
 [workspace.dependencies]
 # Serialisation
 serde = { version = "1", features = ["derive"] }

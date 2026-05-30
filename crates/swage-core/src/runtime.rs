@@ -56,11 +56,7 @@ mod tests {
 
     #[test]
     fn run_sync_executes_future() {
-        async fn test_future() -> i32 {
-            42
-        }
-
-        let result = run_sync(test_future());
+        let result = run_sync(async { 42 });
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
     }
@@ -71,11 +67,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async {
-            async fn inner_future() -> i32 {
-                1
-            }
-
-            let result = run_sync(inner_future());
+            let result = run_sync(async { 1 });
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), RuntimeError::NestedRuntime));
         });

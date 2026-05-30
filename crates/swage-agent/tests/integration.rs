@@ -56,7 +56,10 @@ impl CompactionStreamingProvider {
     }
 
     fn last_stream_message_count(&self) -> usize {
-        self.last_stream_messages.lock().unwrap().len()
+        self.last_stream_messages
+            .lock()
+            .expect("mock provider message lock should not be poisoned")
+            .len()
     }
 }
 
@@ -90,11 +93,14 @@ impl LlmProvider for CompactionStreamingProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        *self.last_stream_messages.lock().unwrap() = request.messages;
+        *self
+            .last_stream_messages
+            .lock()
+            .expect("mock provider message lock should not be poisoned") = request.messages;
         let chunks = self
             .stream_rounds
             .lock()
-            .unwrap()
+            .expect("mock provider stream lock should not be poisoned")
             .pop()
             .expect("mock provider ran out of streaming rounds");
         Box::pin(stream::iter(chunks))
@@ -129,7 +135,7 @@ impl LlmProvider for StreamingProvider {
         let chunks = self
             .rounds
             .lock()
-            .unwrap()
+            .expect("mock provider stream lock should not be poisoned")
             .pop()
             .expect("mock provider ran out of streaming rounds");
         Box::pin(stream::iter(chunks))

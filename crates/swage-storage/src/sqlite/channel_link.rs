@@ -40,9 +40,8 @@ fn parse_json(json: Option<&str>) -> rusqlite::Result<Option<serde_json::Value>>
     .transpose()
 }
 
-fn serialise_json(value: &Option<serde_json::Value>) -> Result<Option<String>, rusqlite::Error> {
+fn serialise_json(value: Option<&serde_json::Value>) -> Result<Option<String>, rusqlite::Error> {
     value
-        .as_ref()
         .map(|value| {
             serde_json::to_string(value)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -72,7 +71,7 @@ fn row_to_channel_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelLink>
 #[async_trait]
 impl ChannelLinkStore for SqliteStorage {
     async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
-        let home_target_json = serialise_json(&link.home_target)
+        let home_target_json = serialise_json(link.home_target.as_ref())
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(move |conn| {
             let now = Utc::now();

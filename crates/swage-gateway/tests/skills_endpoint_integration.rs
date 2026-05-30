@@ -1,4 +1,8 @@
-#![allow(clippy::await_holding_lock)]
+#![allow(
+    clippy::await_holding_lock,
+    clippy::unwrap_used,
+    clippy::disallowed_methods
+)]
 // These integration tests serialise process-env mutations with a std mutex.
 // The guard intentionally spans awaits because the gateway reads env during requests.
 //! Integration tests for GET /api/skills — skill listing with hierarchy resolution.
@@ -133,12 +137,12 @@ async fn unknown_bench_returns_404() {
     assert_eq!(body["code"], "not_found");
 }
 
-/// Known bench but no config root set → returns 200 with empty skills list.
+/// Known bench but fresh config root → returns 200 with empty skills list.
 ///
-/// When `SWAGE_HOME` is unset or points to a non-existent directory,
-/// the handler degrades gracefully rather than returning an error.
+/// When `SWAGE_HOME` points at a fresh directory, the handler has no skills
+/// to discover and should degrade gracefully rather than returning an error.
 #[tokio::test(flavor = "multi_thread")]
-async fn known_bench_no_config_root_returns_empty() {
+async fn known_bench_fresh_config_root_returns_empty() {
     let (router, storage) = make_router();
 
     // Create a bench in storage — it exists but has no config directory.
@@ -150,13 +154,13 @@ async fn known_bench_no_config_root_returns_empty() {
         .await
         .unwrap();
 
-    // Point SWAGE_HOME at a path that doesn't exist so resolve_root() fails.
-    let non_existent = format!("/tmp/swage-nonexistent-{}", uuid::Uuid::new_v4());
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("fresh-swage-root");
     // Serialise env-var mutations: SWAGE_HOME is process-level and would race
     // if tests ran concurrently without coordination.
     let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Safety: test-only env mutation; scoped by this test's execution.
-    unsafe { std::env::set_var("SWAGE_HOME", &non_existent) };
+    unsafe { std::env::set_var("SWAGE_HOME", &root) };
     let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
     unsafe { std::env::remove_var("SWAGE_HOME") };
 
@@ -166,8 +170,9 @@ async fn known_bench_no_config_root_returns_empty() {
         .expect("response should have a skills array");
     assert!(
         skills.is_empty(),
-        "no config root should produce an empty skill list"
+        "fresh config root should produce an empty skill list"
     );
+    assert!(root.is_dir(), "skill discovery should auto-create the root");
 }
 
 /// Skills at global level appear with level="global".

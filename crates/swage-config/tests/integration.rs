@@ -28,16 +28,17 @@ fn build_skeleton(
 
     // Global level
     if let Some(content) = global_toml {
-        fs::write(root.join("config.toml"), content).unwrap();
+        fs::write(root.join("config.toml"), content).expect("failed to write global config");
     }
 
     // Bench level
     let bench_dir = root.join("benches").join(bench);
-    fs::create_dir_all(bench_dir.join("agents").join(agent)).unwrap();
-    fs::create_dir_all(bench_dir.join("teams")).unwrap();
+    fs::create_dir_all(bench_dir.join("agents").join(agent))
+        .expect("failed to create agent config dir");
+    fs::create_dir_all(bench_dir.join("teams")).expect("failed to create teams config dir");
 
     if let Some(content) = bench_toml {
-        fs::write(bench_dir.join("config.toml"), content).unwrap();
+        fs::write(bench_dir.join("config.toml"), content).expect("failed to write bench config");
     }
 
     // Agent level
@@ -46,7 +47,7 @@ fn build_skeleton(
             bench_dir.join("agents").join(agent).join("config.toml"),
             content,
         )
-        .unwrap();
+        .expect("failed to write agent config");
     }
 
     tmp

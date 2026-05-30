@@ -110,6 +110,11 @@ impl Tool for ShellTool {
             Ok::<_, ToolError>((stdout_bytes, stderr_bytes, stdout_over, stderr_over))
         };
 
+        // Safe to abandon on timeout: read_fut owns only local pipe handles and
+        // output buffers — no shared or persisted state. The timeout arm below
+        // kills the child and discards the partial buffers, so dropping the
+        // future leaves nothing half-written.
+        #[allow(clippy::disallowed_methods)]
         let read_result = tokio::time::timeout(self.timeout, read_fut).await;
 
         match read_result {

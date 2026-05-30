@@ -919,11 +919,8 @@ pub(crate) async fn build_agent_config_for_bench_workspace(
 }
 
 fn managed_scratch_workspace(bench_id: Uuid, session_id: Uuid) -> PathBuf {
-    let base = swage_config::discovery::resolve_root().unwrap_or_else(|_| {
-        std::env::var("HOME")
-            .map(|home| PathBuf::from(home).join(".swage"))
-            .unwrap_or_else(|_| std::env::temp_dir().join("swage"))
-    });
+    let base = swage_config::discovery::resolve_root()
+        .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
     base.join("scratch")
         .join("benches")
         .join(bench_id.to_string())
@@ -2193,24 +2190,34 @@ pub(crate) mod tests {
     // SWAGE_HOME isolation for config tests
     // -----------------------------------------------------------------------
 
-    /// Serialise tests that mutate SWAGE_HOME — it's process-wide state.
+    /// Serialise tests that mutate SWAGE_HOME - it's process-wide state.
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// RAII guard that points SWAGE_HOME at a non-existent path so the gateway
-    /// falls back to the injected `state.config` instead of loading from disk.
+    /// RAII guard that points SWAGE_HOME at an empty temporary root so tests do
+    /// not read the developer's real app data.
     struct SwageHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
+        _temp_dir: Option<tempfile::TempDir>,
     }
 
     impl SwageHomeGuard {
         fn set_to(path: impl AsRef<std::path::Path>) -> Self {
             let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             unsafe { std::env::set_var("SWAGE_HOME", path.as_ref()) };
-            Self { _lock: lock }
+            Self {
+                _lock: lock,
+                _temp_dir: None,
+            }
         }
 
         fn isolate() -> Self {
-            Self::set_to("/tmp/swage_nonexistent_test_root")
+            let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
+            Self {
+                _lock: lock,
+                _temp_dir: Some(temp_dir),
+            }
         }
     }
 
@@ -2860,7 +2867,7 @@ pub(crate) mod tests {
             let run = db
                 .topology_runs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "TopologyRun".into(),
                     id: id.to_string(),
                 })?;
@@ -2950,13 +2957,13 @@ pub(crate) mod tests {
             error_message: Option<&str>,
         ) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
-            let execution = db
-                .node_executions
-                .get_mut(&id)
-                .ok_or(StorageError::NotFound {
-                    entity: "NodeExecution".into(),
-                    id: id.to_string(),
-                })?;
+            let execution =
+                db.node_executions
+                    .get_mut(&id)
+                    .ok_or_else(|| StorageError::NotFound {
+                        entity: "NodeExecution".into(),
+                        id: id.to_string(),
+                    })?;
             execution.state = state.clone();
             if let Some(output_json) = output_json {
                 execution.output_json = Some(output_json.clone());
@@ -3594,7 +3601,7 @@ pub(crate) mod tests {
             let job = db
                 .scheduled_jobs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "ScheduledJob".into(),
                     id: id.to_string(),
                 })?;
@@ -3685,7 +3692,7 @@ pub(crate) mod tests {
             let run = db
                 .scheduled_runs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "ScheduledRun".into(),
                     id: id.to_string(),
                 })?;
@@ -3776,10 +3783,13 @@ pub(crate) mod tests {
             update: UpdateHeartbeat,
         ) -> Result<Heartbeat, StorageError> {
             let mut db = self.db.lock().await;
-            let heartbeat = db.heartbeats.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Heartbeat".into(),
-                id: id.to_string(),
-            })?;
+            let heartbeat = db
+                .heartbeats
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Heartbeat".into(),
+                    id: id.to_string(),
+                })?;
             if let Some(message) = update.message {
                 heartbeat.message = message;
             }
@@ -3860,7 +3870,7 @@ pub(crate) mod tests {
             let run = db
                 .heartbeat_runs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "HeartbeatRun".into(),
                     id: id.to_string(),
                 })?;
@@ -3975,10 +3985,13 @@ pub(crate) mod tests {
             status: AttachmentStatus,
         ) -> Result<Attachment, StorageError> {
             let mut db = self.db.lock().await;
-            let attachment = db.attachments.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Attachment".into(),
-                id: id.to_string(),
-            })?;
+            let attachment = db
+                .attachments
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Attachment".into(),
+                    id: id.to_string(),
+                })?;
             attachment.status = status;
             attachment.updated_at = chrono::Utc::now();
             Ok(attachment.clone())
@@ -4022,7 +4035,7 @@ pub(crate) mod tests {
             let job = db
                 .background_jobs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "BackgroundJob".into(),
                     id: id.to_string(),
                 })?;
@@ -4044,7 +4057,7 @@ pub(crate) mod tests {
             let job = db
                 .background_jobs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "BackgroundJob".into(),
                     id: id.to_string(),
                 })?;
@@ -4066,7 +4079,7 @@ pub(crate) mod tests {
             let job = db
                 .background_jobs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "BackgroundJob".into(),
                     id: id.to_string(),
                 })?;
@@ -4083,7 +4096,7 @@ pub(crate) mod tests {
             let job = db
                 .background_jobs
                 .get_mut(&id)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "BackgroundJob".into(),
                     id: id.to_string(),
                 })?;
@@ -4204,10 +4217,13 @@ pub(crate) mod tests {
             mime_type: &str,
         ) -> Result<Material, StorageError> {
             let mut db = self.db.lock().await;
-            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Material".into(),
-                id: id.to_string(),
-            })?;
+            let material = db
+                .materials
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Material".into(),
+                    id: id.to_string(),
+                })?;
             material.content_text = content_text.to_string();
             material.mime_type = mime_type.to_string();
             material.status = MaterialStatus::Active;
@@ -4218,10 +4234,13 @@ pub(crate) mod tests {
 
         async fn archive_material(&self, id: Uuid) -> Result<Material, StorageError> {
             let mut db = self.db.lock().await;
-            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Material".into(),
-                id: id.to_string(),
-            })?;
+            let material = db
+                .materials
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Material".into(),
+                    id: id.to_string(),
+                })?;
             material.status = MaterialStatus::Archived;
             material.archived_at = Some(chrono::Utc::now());
             material.updated_at = chrono::Utc::now();
@@ -4230,10 +4249,13 @@ pub(crate) mod tests {
 
         async fn restore_material(&self, id: Uuid) -> Result<Material, StorageError> {
             let mut db = self.db.lock().await;
-            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Material".into(),
-                id: id.to_string(),
-            })?;
+            let material = db
+                .materials
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Material".into(),
+                    id: id.to_string(),
+                })?;
             material.status = MaterialStatus::Active;
             material.archived_at = None;
             material.updated_at = chrono::Utc::now();
@@ -4249,10 +4271,13 @@ pub(crate) mod tests {
             relative_path: &str,
         ) -> Result<Material, StorageError> {
             let mut db = self.db.lock().await;
-            let material = db.materials.get_mut(&id).ok_or(StorageError::NotFound {
-                entity: "Material".into(),
-                id: id.to_string(),
-            })?;
+            let material = db
+                .materials
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "Material".into(),
+                    id: id.to_string(),
+                })?;
             material.scope_kind = scope_kind;
             material.session_id = session_id;
             material.bench_id = bench_id;
@@ -4345,14 +4370,12 @@ pub(crate) mod tests {
             branched_from_message_id: Uuid,
         ) -> Result<swage_storage::ThreadBranch, StorageError> {
             let mut db = self.db.lock().await;
-            let parent =
-                db.threads
-                    .get(&parent_thread_id)
-                    .cloned()
-                    .ok_or(StorageError::NotFound {
-                        entity: "Thread".into(),
-                        id: parent_thread_id.to_string(),
-                    })?;
+            let parent = db.threads.get(&parent_thread_id).cloned().ok_or_else(|| {
+                StorageError::NotFound {
+                    entity: "Thread".into(),
+                    id: parent_thread_id.to_string(),
+                }
+            })?;
             let source_position = db
                 .messages
                 .iter()
@@ -4360,7 +4383,7 @@ pub(crate) mod tests {
                     message.id == branched_from_message_id && message.thread_id == parent_thread_id
                 })
                 .map(|message| message.position)
-                .ok_or(StorageError::NotFound {
+                .ok_or_else(|| StorageError::NotFound {
                     entity: "Message".into(),
                     id: branched_from_message_id.to_string(),
                 })?;
@@ -6583,16 +6606,16 @@ pub(crate) mod tests {
 
         let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        let tool_starts: Vec<_> = events
+        let tool_start_count = events
             .iter()
             .filter(|e| matches!(e, ServerEvent::ToolStart { .. }))
-            .collect();
-        let tool_ends: Vec<_> = events
+            .count();
+        let tool_end_count = events
             .iter()
             .filter(|e| matches!(e, ServerEvent::ToolEnd { .. }))
-            .collect();
-        assert_eq!(tool_starts.len(), 3, "expected 3 ToolStart events");
-        assert_eq!(tool_ends.len(), 3, "expected 3 ToolEnd events");
+            .count();
+        assert_eq!(tool_start_count, 3, "expected 3 ToolStart events");
+        assert_eq!(tool_end_count, 3, "expected 3 ToolEnd events");
 
         let threads = state.storage.list_by_session(session_id).await.unwrap();
         let thread_id = threads[0].id;
@@ -8093,7 +8116,7 @@ pub(crate) mod tests {
                 has_write: true,
             },
             active_workspace: Some(TrustedWorkspacePath {
-                path: working_directory.clone(),
+                path: working_directory,
                 can_read: true,
                 can_write: true,
             }),

@@ -134,20 +134,15 @@ impl ProviderError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            ProviderError::RateLimited { .. } => true,
-            ProviderError::Timeout { .. } => true,
-            ProviderError::Network { .. } => true,
-            ProviderError::Auth { .. } => false,
-            ProviderError::InvalidConfig { .. } => false,
-            ProviderError::InvalidRequest { .. } => false,
-            ProviderError::ModelError { .. } => false,
-            // Callers can inspect `status` for finer control; the conservative
-            // default is non-retriable to avoid duplicate side effects.
-            ProviderError::HttpError { .. } => false,
-            ProviderError::StreamError(_) => true,
-            ProviderError::InvalidResponse(_) => false,
-        }
+        // HTTP errors stay conservative by default; callers can inspect
+        // `status` for finer retry decisions when duplicate side effects are safe.
+        matches!(
+            self,
+            ProviderError::RateLimited { .. }
+                | ProviderError::Timeout { .. }
+                | ProviderError::Network { .. }
+                | ProviderError::StreamError(_)
+        )
     }
 }
 
@@ -199,17 +194,10 @@ impl StorageError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            StorageError::Io(_) => false,
-            StorageError::Serialisation { .. } => false,
-            StorageError::NotFound { .. } => false,
-            StorageError::Corruption { .. } => false,
-            StorageError::CapacityExceeded { .. } => true,
-            StorageError::ConnectionFailed(_) => true,
-            StorageError::QueryFailed(_) => false,
-            StorageError::MigrationFailed(_) => false,
-            StorageError::ConstraintViolation(_) => false,
-        }
+        matches!(
+            self,
+            StorageError::CapacityExceeded { .. } | StorageError::ConnectionFailed(_)
+        )
     }
 }
 
@@ -358,18 +346,11 @@ impl ToolError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            ToolError::NotFound { .. } => false,
-            ToolError::ExecutionFailed { .. } => true,
-            ToolError::InvalidParameters { .. } => false,
-            ToolError::Timeout { .. } => true,
-            ToolError::PermissionDenied { .. } => false,
-            // Approval is a distinct control flow — not a transient failure.
-            ToolError::RequiresApproval { .. } => false,
-            ToolError::RequiresLocationApproval { .. } => false,
-            // Delegation is control flow — the agent handles it.
-            ToolError::RequiresDelegation { .. } => false,
-        }
+        // Approval and delegation variants are control flow, not transient failures.
+        matches!(
+            self,
+            ToolError::ExecutionFailed { .. } | ToolError::Timeout { .. }
+        )
     }
 }
 
@@ -400,11 +381,7 @@ impl HookError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            HookError::ExecutionFailed { .. } => false,
-            HookError::Timeout { .. } => false,
-            HookError::InvalidMatcher { .. } => false,
-        }
+        false
     }
 }
 
@@ -428,10 +405,7 @@ impl SafetyError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            SafetyError::InvalidPattern { .. } => false,
-            SafetyError::RedactionFailed { .. } => false,
-        }
+        false
     }
 }
 
@@ -459,11 +433,7 @@ impl SandboxError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            SandboxError::SpawnFailed { .. } => false,
-            SandboxError::IpcError { .. } => false,
-            SandboxError::Unavailable { .. } => false,
-        }
+        false
     }
 }
 
@@ -486,10 +456,7 @@ pub enum RuntimeError {
 impl RuntimeError {
     /// Returns true if the error represents a transient failure that may succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            RuntimeError::NestedRuntime => false,
-            RuntimeError::CreationFailed(_) => false,
-        }
+        false
     }
 }
 
@@ -516,11 +483,7 @@ pub enum SecretError {
 impl SecretError {
     /// Returns true if the error represents a transient failure that may succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        match self {
-            SecretError::NotFound { .. } => false,
-            SecretError::AccessDenied { .. } => false,
-            SecretError::InvalidEncoding { .. } => false,
-        }
+        false
     }
 }
 
@@ -582,17 +545,16 @@ impl GatewayError {
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
         match self {
-            GatewayError::ConfigError(_) => false,
-            GatewayError::BindError(_) => false,
             GatewayError::Provider(e) => e.is_retriable(),
             GatewayError::Storage(e) => e.is_retriable(),
-            GatewayError::WebSocketError(_) => true,
-            GatewayError::ShutdownError(_) => false,
-            GatewayError::TurnInProgress { .. } => true,
-            GatewayError::ConversationNotFound { .. } => false,
-            GatewayError::BenchNotFound { .. } => false,
-            GatewayError::BenchConflict(_) => false,
-            GatewayError::ValidationError(_) => false,
+            GatewayError::WebSocketError(_) | GatewayError::TurnInProgress { .. } => true,
+            GatewayError::ConfigError(_)
+            | GatewayError::BindError(_)
+            | GatewayError::ShutdownError(_)
+            | GatewayError::ConversationNotFound { .. }
+            | GatewayError::BenchNotFound { .. }
+            | GatewayError::BenchConflict(_)
+            | GatewayError::ValidationError(_) => false,
         }
     }
 }
@@ -629,7 +591,7 @@ mod tests {
     fn provider_timeout_is_retriable() {
         let err = ProviderError::Timeout {
             provider: "openai".to_string(),
-            duration: Duration::from_secs(60),
+            duration: Duration::from_mins(1),
         };
         assert!(err.is_retriable());
     }

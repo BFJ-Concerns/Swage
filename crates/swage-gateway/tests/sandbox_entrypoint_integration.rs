@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use serde_json::json;
 use swage_core::{CompletionRequest, CompletionResponse, FinishReason, SandboxError};
 use swage_sandbox::llm_handler::HostLlmHandler;

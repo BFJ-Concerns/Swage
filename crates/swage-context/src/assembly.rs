@@ -122,19 +122,18 @@ pub fn default_assembly(
         let total_tokens = tokeniser.count_messages(&assembled);
 
         if total_tokens > budget
-            && let Some(range) = history_range.clone()
+            && let Some(range) = history_range
         {
             // Compute the token cost of non-history messages (prompts, etc.).
             // History gets whatever budget remains after the other elements.
             let non_history_tokens: usize = {
-                let non_history: Vec<&ChatMessage> = assembled
+                let owned: Vec<ChatMessage> = assembled
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| !range.contains(i))
                     .map(|(_, m)| m)
+                    .cloned()
                     .collect();
-                // Collect into owned Vec<ChatMessage> for the tokeniser call.
-                let owned: Vec<ChatMessage> = non_history.into_iter().cloned().collect();
                 tokeniser.count_messages(&owned)
             };
 
@@ -506,7 +505,13 @@ pub async fn assemble_for_agent(
         python_runner,
     });
 
-    match tokio::time::timeout(timeout_duration, run).await {
+    // Assembly is built to be all-or-nothing: outputs are returned only after
+    // the awaited provider/Python work completes, and timeout reports failure
+    // without committing a partial assembled context.
+    #[allow(clippy::disallowed_methods)]
+    let timed_output = tokio::time::timeout(timeout_duration, run).await;
+
+    match timed_output {
         // Normal success path.
         Ok(Ok(output)) => output,
 

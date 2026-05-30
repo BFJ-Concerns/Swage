@@ -1573,9 +1573,8 @@ pub async fn list_skills(
             })
         })?;
 
-    // Resolve the config root. When it doesn't exist (no `~/.swage/` directory
-    // and `SWAGE_HOME` unset or pointing at a missing path), degrade gracefully
-    // by returning an empty list — skill discovery is a best-effort operation.
+    // Resolve the config root. If it cannot be created, degrade gracefully by
+    // returning an empty list — skill discovery is a best-effort operation.
     let root = match resolve_root() {
         Ok(r) => r,
         Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
@@ -1585,7 +1584,7 @@ pub async fn list_skills(
     // are included only when they exist on disk.
     let bench_dir = root.join("benches").join(&bench.slug);
     let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> =
-        vec![(HierarchyLevel::Global, root.clone())];
+        vec![(HierarchyLevel::Global, root)];
 
     if bench_dir.is_dir() {
         levels.push((HierarchyLevel::Bench, bench_dir.clone()));
@@ -2558,6 +2557,10 @@ pub async fn list_turns(
 
 #[cfg(test)]
 mod tests {
+    // Test HTTP servers are scoped to individual tests; abort is the cleanup
+    // path after assertions have observed the gateway behaviour.
+    #![allow(clippy::disallowed_methods)]
+
     use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
     use axum::{Router, body::to_bytes, extract::ConnectInfo, http::Request};

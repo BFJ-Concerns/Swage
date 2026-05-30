@@ -104,7 +104,7 @@ impl Registry {
     /// registered twice.
     pub fn register_provider(&mut self, config: ProviderConfig) -> Result<(), RegistryError> {
         if self.providers.contains_key(&config.id) {
-            return Err(RegistryError::DuplicateProvider(config.id.clone()));
+            return Err(RegistryError::DuplicateProvider(config.id));
         }
         self.providers.insert(config.id.clone(), config);
         Ok(())
@@ -119,14 +119,14 @@ impl Registry {
     pub fn register_model(&mut self, config: ModelConfig) -> Result<(), RegistryError> {
         // Reject duplicate model id.
         if self.models.contains_key(&config.id) {
-            return Err(RegistryError::DuplicateModel(config.id.clone()));
+            return Err(RegistryError::DuplicateModel(config.id));
         }
 
         // The provider must already be registered.
         if !self.providers.contains_key(&config.provider_id) {
             return Err(RegistryError::UnknownProvider {
-                model_id: config.id.clone(),
-                provider_id: config.provider_id.clone(),
+                model_id: config.id,
+                provider_id: config.provider_id,
             });
         }
 

@@ -22,7 +22,9 @@ use crate::cli::StartArgs;
 /// background daemon and polls until it is ready.
 pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
     let installed = super::install::load_install_config()?;
-    let effective_port = args.port.or(installed.as_ref().and_then(|cfg| cfg.port));
+    let effective_port = args
+        .port
+        .or_else(|| installed.as_ref().and_then(|cfg| cfg.port));
     let effective_host = args
         .host
         .clone()
@@ -83,9 +85,9 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
 /// Spawn the current binary as a detached background gateway process.
 ///
-/// Redirects stdout/stderr to `~/.swage/gateway.log`. Sets the child process
-/// into its own process group so it survives the CLI process exiting without
-/// receiving SIGHUP from the terminal.
+/// Redirects stdout/stderr to the gateway log under the canonical Swage root.
+/// Sets the child process into its own process group so it survives the CLI
+/// process exiting without receiving SIGHUP from the terminal.
 fn spawn_background_gateway(
     port: Option<u16>,
     host: Option<&str>,
@@ -168,10 +170,11 @@ pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String
 // Path helpers (extracted for testability)
 // ---------------------------------------------------------------------------
 
-/// Returns the path to the gateway log file: `~/.swage/gateway.log`.
+/// Returns the path to the gateway log file under the canonical Swage root.
 pub(crate) fn gateway_log_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".swage").join("gateway.log")
+    swage_config::discovery::resolve_root()
+        .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
+        .join("gateway.log")
 }
 
 /// Builds the argument list for spawning the binary in server mode.
@@ -214,16 +217,18 @@ pub(crate) fn build_spawn_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    // The log file must go to ~/.swage/gateway.log so users know where to look.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
-    fn log_path_ends_with_swage_gateway_log() {
+    fn log_path_uses_swage_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("SWAGE_HOME", dir.path()) };
         let path = gateway_log_path();
-        let s = path.to_string_lossy();
-        assert!(
-            s.ends_with(".swage/gateway.log"),
-            "expected path ending with .swage/gateway.log, got: {s}"
-        );
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+        assert_eq!(path, dir.path().join("gateway.log"));
     }
 
     // When no flags are given, only --server-mode should appear.

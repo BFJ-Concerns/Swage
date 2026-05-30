@@ -423,6 +423,7 @@ mod tests {
         let cloned = event.clone();
         let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("Token"));
+        assert!(matches!(event, AgentEvent::Token { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -459,6 +460,7 @@ mod tests {
         let cloned = err.clone();
         let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("SchemaValidationError"));
+        assert_eq!(err.path, "/x");
     }
 
     // -----------------------------------------------------------------------
@@ -505,6 +507,7 @@ mod tests {
         let cloned = event.clone();
         let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("OutputSchemaRetry"));
+        assert!(matches!(event, AgentEvent::OutputSchemaRetry { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -546,6 +549,7 @@ mod tests {
         let cloned = event.clone();
         let debug_str = format!("{cloned:?}");
         assert!(debug_str.contains("OutputSchemaFailed"));
+        assert!(matches!(event, AgentEvent::OutputSchemaFailed { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -702,7 +706,7 @@ mod tests {
             timeout_at: "2026-01-01T00:00:00Z".to_string(),
             timeout_policy: ApprovalTimeoutPolicy::Reject,
         };
-        let debug_str = format!("{:?}", required.clone());
+        let debug_str = format!("{required:?}");
         assert!(debug_str.contains("ApprovalRequired"));
 
         let confirmed = AgentEvent::ApprovalConfirmed {
@@ -710,14 +714,14 @@ mod tests {
             decision: ApprovalDecisionValue::Approved,
             reason: None,
         };
-        let debug_str = format!("{:?}", confirmed.clone());
+        let debug_str = format!("{confirmed:?}");
         assert!(debug_str.contains("ApprovalConfirmed"));
 
         let expired = AgentEvent::ApprovalExpired {
             approval_id: Uuid::new_v4(),
             timeout_policy: ApprovalTimeoutPolicy::Interrupt,
         };
-        let debug_str = format!("{:?}", expired.clone());
+        let debug_str = format!("{expired:?}");
         assert!(debug_str.contains("ApprovalExpired"));
     }
 

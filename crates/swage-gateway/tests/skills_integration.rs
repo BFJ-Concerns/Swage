@@ -5,8 +5,8 @@
 //! (swage-context), activation persistence (swage-storage), and gateway
 //! integration (WebSocket events, slash commands, turn assembly) are all
 //! working together.
-//!
-//! Tests are expected to FAIL until the phase 03 motes are implemented.
+
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

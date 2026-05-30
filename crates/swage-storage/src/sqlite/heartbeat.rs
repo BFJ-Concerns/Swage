@@ -191,7 +191,7 @@ impl HeartbeatStore for SqliteStorage {
         let existing = self
             .get_heartbeat(id)
             .await?
-            .ok_or(StorageError::NotFound {
+            .ok_or_else(|| StorageError::NotFound {
                 entity: "Heartbeat".into(),
                 id: id.to_string(),
             })?;

@@ -1403,10 +1403,7 @@ mod tests {
             "total_tokens": 512,
             "errors": [],
         });
-        let event = ServerEvent::ContextAssembled {
-            turn_id,
-            report: report.clone(),
-        };
+        let event = ServerEvent::ContextAssembled { turn_id, report };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "context_assembled");
         assert_eq!(json["turn_id"], turn_id.to_string());

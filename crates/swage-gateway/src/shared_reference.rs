@@ -322,7 +322,7 @@ fn expand_topology_members(
                 display_name: existing
                     .map(|agent| agent.display_name.clone())
                     .filter(|name| !name.is_empty())
-                    .unwrap_or(agent_id.clone()),
+                    .unwrap_or_else(|| agent_id.clone()),
                 description: existing
                     .map(|agent| agent.description.clone())
                     .unwrap_or_default(),

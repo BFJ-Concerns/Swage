@@ -103,6 +103,10 @@ impl IpcTransport {
 
     /// Receive a message, returning `SandboxError::IpcError` if `timeout`
     /// elapses before a complete line arrives.
+    ///
+    /// `read_until` is cancellation-safe: partial bytes remain in the internal
+    /// buffer for the next receive instead of being committed to shared state.
+    #[allow(clippy::disallowed_methods)]
     pub async fn receive_timeout(&mut self, timeout: Duration) -> Result<IpcMessage, SandboxError> {
         tokio::time::timeout(timeout, self.receive())
             .await

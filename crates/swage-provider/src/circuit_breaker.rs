@@ -234,16 +234,27 @@ impl LlmProvider for CircuitBreakerProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        if !self.state.lock().unwrap().should_allow_request() {
+        if !self
+            .state
+            .lock()
+            .expect("circuit-breaker state lock should not be poisoned")
+            .should_allow_request()
+        {
             return Err(circuit_open_error());
         }
         match self.inner.complete(request).await {
             Ok(resp) => {
-                self.state.lock().unwrap().record_success();
+                self.state
+                    .lock()
+                    .expect("circuit-breaker state lock should not be poisoned")
+                    .record_success();
                 Ok(resp)
             }
             Err(e) => {
-                self.state.lock().unwrap().record_failure(&e);
+                self.state
+                    .lock()
+                    .expect("circuit-breaker state lock should not be poisoned")
+                    .record_failure(&e);
                 Err(e)
             }
         }
@@ -253,16 +264,27 @@ impl LlmProvider for CircuitBreakerProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
-        if !self.state.lock().unwrap().should_allow_request() {
+        if !self
+            .state
+            .lock()
+            .expect("circuit-breaker state lock should not be poisoned")
+            .should_allow_request()
+        {
             return Err(circuit_open_error());
         }
         match self.inner.complete_with_tools(request).await {
             Ok(resp) => {
-                self.state.lock().unwrap().record_success();
+                self.state
+                    .lock()
+                    .expect("circuit-breaker state lock should not be poisoned")
+                    .record_success();
                 Ok(resp)
             }
             Err(e) => {
-                self.state.lock().unwrap().record_failure(&e);
+                self.state
+                    .lock()
+                    .expect("circuit-breaker state lock should not be poisoned")
+                    .record_failure(&e);
                 Err(e)
             }
         }
@@ -274,7 +296,12 @@ impl LlmProvider for CircuitBreakerProvider {
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
         // Circuit state is checked at request time — already-in-flight streams
         // continue if the circuit opens mid-stream.
-        if !self.state.lock().unwrap().should_allow_request() {
+        if !self
+            .state
+            .lock()
+            .expect("circuit-breaker state lock should not be poisoned")
+            .should_allow_request()
+        {
             return Box::pin(futures::stream::once(async {
                 StreamChunk::Error {
                     message: "circuit is open — backend is not accepting requests".into(),
@@ -293,13 +320,19 @@ impl LlmProvider for CircuitBreakerProvider {
                         if !is_recorded {
                             match &chunk {
                                 StreamChunk::Error { message } => {
-                                    state.lock().unwrap().record_failure(
-                                        &ProviderError::StreamError(message.clone()),
-                                    );
+                                    state
+                                        .lock()
+                                        .expect("circuit-breaker state lock should not be poisoned")
+                                        .record_failure(&ProviderError::StreamError(
+                                            message.clone(),
+                                        ));
                                     next_is_recorded = true;
                                 }
                                 StreamChunk::Done { .. } => {
-                                    state.lock().unwrap().record_success();
+                                    state
+                                        .lock()
+                                        .expect("circuit-breaker state lock should not be poisoned")
+                                        .record_success();
                                     next_is_recorded = true;
                                 }
                                 StreamChunk::Delta { .. }
@@ -313,7 +346,10 @@ impl LlmProvider for CircuitBreakerProvider {
                     }
                     None => {
                         if !is_recorded {
-                            state.lock().unwrap().record_success();
+                            state
+                                .lock()
+                                .expect("circuit-breaker state lock should not be poisoned")
+                                .record_success();
                         }
                         None
                     }

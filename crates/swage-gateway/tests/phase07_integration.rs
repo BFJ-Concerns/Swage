@@ -3,9 +3,8 @@
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the gateway's sandbox routing, structured logging,
 //! and lifecycle management are wired together.
-//!
-//! Tests in this file are expected to FAIL until the phase 07 motes are
-//! implemented. Each test documents why it currently fails.
+
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -147,8 +146,6 @@ async fn http_response(router: &Router, method: &str, uri: &str) -> axum::http::
 /// Proves: the health check endpoint is reachable and returns a well-formed
 /// response. External process managers (systemd, wrapper scripts) use this to
 /// confirm the gateway is ready to serve.
-///
-/// Currently fails: the /api/health route does not exist (returns 404).
 #[tokio::test(flavor = "multi_thread")]
 async fn health_endpoint_returns_ok() {
     let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;
@@ -172,8 +169,6 @@ async fn health_endpoint_returns_ok() {
 ///
 /// Proves: the middleware generates a unique UUID per request and returns it
 /// in the X-Request-Id response header for client-side correlation.
-///
-/// Currently fails: the request_id middleware does not exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_id_header_present_on_health_response() {
     let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;
@@ -202,8 +197,6 @@ async fn request_id_header_present_on_health_response() {
 /// Proves: the middleware generates a fresh UUID for each request, not a
 /// shared global value. If both requests share the same ID, log entries
 /// would be indistinguishable under load.
-///
-/// Currently fails: the request_id middleware does not exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_ids_are_unique_across_requests() {
     let (router, _addr) = start_test_server_with_config(ResolvedConfig::default()).await;

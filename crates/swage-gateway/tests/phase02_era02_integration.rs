@@ -3,9 +3,8 @@
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the assembly wiring, subscription protocol, token
 //! tracking, context snapshots, and shutdown endpoint are all working together.
-//!
-//! Tests in this file are expected to FAIL until the phase 02 motes are
-//! implemented. Each test documents which tasks it spans and why it currently fails.
+
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -327,10 +326,6 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 ///
 /// Proves: A subscribed client receives a ContextAssembled event before the
 /// first streaming token, with populated elements and non-zero token counts.
-///
-/// Currently fails because: Subscribe is not a recognised ClientEvent, the
-/// assembly engine is not wired into the turn loop, and ContextAssembled
-/// is not a ServerEvent variant.
 #[tokio::test(flavor = "multi_thread")]
 async fn subscribed_client_receives_assembly_report_before_tokens() {
     let provider = UsageTrackingProvider::new("Hello!", 150, 20);
@@ -395,9 +390,6 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
 /// Proves: An unsubscribed client receives no observability events (no
 /// ContextAssembled, no ToolStart, no ToolEnd). Only token, turn_complete,
 /// and error events reach the client.
-///
-/// Currently fails because: ToolStart and ToolEnd are emitted unconditionally
-/// to all WebSocket clients, regardless of subscription.
 #[tokio::test(flavor = "multi_thread")]
 async fn unsubscribed_client_receives_no_observability_events() {
     let echo_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(EchoTool);
@@ -447,9 +439,6 @@ async fn unsubscribed_client_receives_no_observability_events() {
 ///
 /// Proves: The assembly report delivered via WebSocket is also stored and
 /// retrievable via GET /api/turns/:id/context with matching content.
-///
-/// Currently fails because: The ContextAssembled event doesn't exist,
-/// context snapshots are not stored, and the REST endpoint doesn't exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn past_turn_report_matches_live_websocket_report() {
     let provider = UsageTrackingProvider::new("Stored!", 200, 30);
@@ -513,10 +502,6 @@ async fn past_turn_report_matches_live_websocket_report() {
 /// Proves: After a turn, token counts from the provider are persisted to
 /// storage and included in the extended TurnComplete event for subscribed
 /// clients.
-///
-/// Currently fails because: stored_usage is discarded (let _ = stored_usage),
-/// TurnComplete has no optional usage fields, and storage.update_tokens()
-/// is never called.
 #[tokio::test(flavor = "multi_thread")]
 async fn token_usage_persisted_and_in_turn_complete() {
     let provider = UsageTrackingProvider::new("Counted!", 1240, 380);
@@ -592,10 +577,6 @@ async fn token_usage_persisted_and_in_turn_complete() {
 ///
 /// Proves: POST /api/shutdown returns 200 from localhost, notifies connected
 /// WebSocket clients with a Shutdown event, and the gateway terminates.
-///
-/// Currently fails because: The /api/shutdown endpoint does not exist (404),
-/// the Shutdown ServerEvent variant does not exist, and there is no broadcast
-/// channel on AppState.
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_endpoint_notifies_websocket_clients() {
     let provider = UsageTrackingProvider::new("bye", 10, 5);

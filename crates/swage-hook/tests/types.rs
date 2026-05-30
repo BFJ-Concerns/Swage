@@ -214,6 +214,7 @@ fn hook_event_is_clone() {
     };
     let cloned = event.clone();
     assert_eq!(cloned.event_name(), "SessionStart");
+    assert_eq!(event.event_name(), "SessionStart");
 }
 
 #[test]
@@ -263,6 +264,7 @@ fn hook_outcome_is_clone() {
     let outcome = HookOutcome::Block("reason".into());
     let cloned = outcome.clone();
     assert!(matches!(cloned, HookOutcome::Block(_)));
+    assert!(matches!(outcome, HookOutcome::Block(_)));
 }
 
 #[test]
@@ -330,7 +332,7 @@ fn hook_outcome_request_approval_with_context() {
     let ctx = serde_json::json!({ "tool": "Bash", "command": "rm -rf /tmp/scratch" });
     let outcome = HookOutcome::RequestApproval {
         prompt: "Destructive command requires approval".into(),
-        context: Some(ctx.clone()),
+        context: Some(ctx),
         timeout: None,
     };
     match outcome {
@@ -382,6 +384,7 @@ fn hook_outcome_request_approval_is_clone() {
         timeout: Some(std::time::Duration::from_secs(60)),
     };
     let cloned = original.clone();
+    assert!(matches!(original, HookOutcome::RequestApproval { .. }));
     match cloned {
         HookOutcome::RequestApproval {
             prompt,

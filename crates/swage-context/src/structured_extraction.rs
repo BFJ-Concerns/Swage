@@ -5,6 +5,8 @@
 //! with source turn references. When the LLM call fails, the caller falls
 //! back to truncation.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 use swage_core::{ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role};
 use swage_provider::LlmProvider;
@@ -187,7 +189,7 @@ fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        prompt.push_str(&format!("[Turn {i}] ({role_label}): {text}\n"));
+        let _ = writeln!(prompt, "[Turn {i}] ({role_label}): {text}");
     }
 
     prompt.push_str("\nJSON output:");
@@ -208,7 +210,7 @@ fn parse_extraction_response(response: &str) -> Result<Vec<ExtractionCategory>, 
         .trim()
         .strip_prefix("```json")
         .or_else(|| response.trim().strip_prefix("```"))
-        .unwrap_or(response.trim());
+        .unwrap_or_else(|| response.trim());
     let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
     serde_json::from_str::<Vec<ExtractionCategory>>(json_str).map_err(|e| {
@@ -222,10 +224,10 @@ fn parse_extraction_response(response: &str) -> Result<Vec<ExtractionCategory>, 
 
 /// Format extraction categories into a human-readable system message.
 fn format_extraction(categories: &[ExtractionCategory]) -> String {
-    let mut output = String::from("## Conversation Summary (Structured Extraction)\n\n");
+    let mut output = String::from("## Conversation Summary\n\n");
 
     for category in categories {
-        output.push_str(&format!("### {}\n", capitalise_category(&category.name)));
+        let _ = writeln!(output, "### {}", capitalise_category(&category.name));
         for item in &category.items {
             let turns: String = item
                 .source_turns
@@ -233,7 +235,7 @@ fn format_extraction(categories: &[ExtractionCategory]) -> String {
                 .map(|t| t.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            output.push_str(&format!("- {} (turns: {})\n", item.content, turns));
+            let _ = writeln!(output, "- {} (turns: {})", item.content, turns);
         }
         output.push('\n');
     }

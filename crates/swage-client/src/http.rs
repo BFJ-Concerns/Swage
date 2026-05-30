@@ -5,6 +5,8 @@
 //! Constructed from a gateway address; also supports discovery from runtime
 //! metadata so consumers don't need to know where the metadata lives.
 
+use std::fmt::Write as _;
+
 use crate::error::ClientError;
 use crate::runtime::RuntimeMetadata;
 use chrono::{DateTime, Utc};
@@ -908,7 +910,7 @@ impl GatewayClient {
     ) -> Result<serde_json::Value, ClientError> {
         let mut url = format!("{}/api/approvals", self.base_url);
         if let Some(id) = agent_id {
-            url.push_str(&format!("?agent_id={id}"));
+            let _ = write!(url, "?agent_id={id}");
         }
 
         let response = self

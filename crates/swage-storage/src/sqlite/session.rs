@@ -65,10 +65,9 @@ fn parse_metadata(metadata_json: Option<&str>) -> rusqlite::Result<Option<serde_
 }
 
 fn serialise_metadata(
-    metadata: &Option<serde_json::Value>,
+    metadata: Option<&serde_json::Value>,
 ) -> Result<Option<String>, rusqlite::Error> {
     metadata
-        .as_ref()
         .map(|value| {
             serde_json::to_string(value)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -83,7 +82,7 @@ fn serialise_metadata(
 #[async_trait]
 impl SessionStore for SqliteStorage {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError> {
-        let metadata_json = serialise_metadata(&session.metadata)
+        let metadata_json = serialise_metadata(session.metadata.as_ref())
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(|conn| {
             let id = Uuid::new_v4();

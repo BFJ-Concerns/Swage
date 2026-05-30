@@ -13,6 +13,8 @@
 //! | `no_schema_preserves_existing_behaviour` | No-schema preserved behaviour | config absence + gateway [i59a, z4ov] |
 //! | `tokens_stream_during_both_initial_and_retry_attempts` | Streaming during validation proof | validation [xya3] + gateway [i59a] |
 
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,18 +42,23 @@ use swage_storage::{SqliteStorage, store::BenchStore};
 // Serialise tests that mutate SWAGE_HOME — it's process-wide state.
 static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// RAII guard that points SWAGE_HOME at a non-existent path so the gateway
-/// falls back to the injected `state.config` instead of loading from disk.
+/// RAII guard that points SWAGE_HOME at an empty temporary root so tests do not
+/// read the developer's real app data.
 struct SwageHomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
+    _temp_dir: tempfile::TempDir,
 }
 
 impl SwageHomeGuard {
     fn isolate() -> Self {
         let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::TempDir::new().unwrap();
         // Safety: test-only env mutation; set_var is unsafe in edition 2024.
-        unsafe { std::env::set_var("SWAGE_HOME", "/tmp/swage_nonexistent_test_root") };
-        Self { _lock: lock }
+        unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
+        Self {
+            _lock: lock,
+            _temp_dir: temp_dir,
+        }
     }
 }
 

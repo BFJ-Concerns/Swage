@@ -153,7 +153,7 @@ pub fn read_capability_bundle(
     let description = skill
         .as_ref()
         .map(|skill| skill.description.clone())
-        .or(manifest.description.clone())
+        .or_else(|| manifest.description.clone())
         .ok_or_else(|| {
             GatewayError::ValidationError(format!(
                 "capability {bundle_name} must define a description in SKILL.md or capability.json"
@@ -162,7 +162,7 @@ pub fn read_capability_bundle(
     let display_name = skill
         .as_ref()
         .and_then(|skill| skill.display_name.clone())
-        .or(manifest.display_name.clone());
+        .or_else(|| manifest.display_name.clone());
     let requested_tools = if let Some(skill) = &skill {
         skill.tools.clone()
     } else {

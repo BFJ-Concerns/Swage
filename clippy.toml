@@ -1,0 +1,17 @@
+# Clippy configuration shared across the workspace. Lint *levels* live in
+# Cargo.toml ([workspace.lints]); this file holds the settings those lints read.
+
+# Keep the test knobs set; unit tests should be treated as assertion code
+# rather than production panic paths. Integration test crates opt out locally
+# because Clippy reports them separately.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Methods that abandon an in-flight future. Fire as warnings (default level):
+# none are banned outright, but every call site must prove the abandoned future
+# touches no half-written shared state. #[allow] locally with that justification.
+disallowed-methods = [
+    { path = "tokio::time::timeout", reason = "drops the wrapped future when it fires; if that future was mid-mutation of shared state it leaves it half-written. Do awaits first and commit synchronously last, or thread a CancellationToken checked at safe points. #[allow] once the wrapped work is confirmed safe to abandon." },
+    { path = "tokio::time::timeout_at", reason = "same abandon-the-future hazard as tokio::time::timeout." },
+    { path = "tokio::task::JoinHandle::abort", reason = "stops a task at its next await with no cleanup - a classic source of half-finished state. Prefer cooperative cancellation via CancellationToken so the task unwinds at a point you chose. #[allow] only for tasks that touch no shared state." },
+]

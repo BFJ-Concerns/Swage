@@ -17,7 +17,7 @@ pub struct BenchContext {
     pub bench_slug: String,
     /// Absolute path to the bench's memory directory.
     ///
-    /// Typically: `~/.swage/benches/{slug}/memory/`
+    /// Typically: `{swage_root}/benches/{slug}/memory/`
     pub memory_path: PathBuf,
 }
 

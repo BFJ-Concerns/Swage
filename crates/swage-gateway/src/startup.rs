@@ -50,15 +50,15 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 2: Initialise logging from (possibly overridden) configuration.
     init_logging(&config);
 
-    // Step 3: Resolve database path and ensure its directory exists.
+    // Step 3: Resolve database path under the canonical Swage data root.
     let db_path = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".swage");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("Failed to create data directory {}: {e}", dir.display());
-            std::process::exit(1);
+        match swage_database_path() {
+            Ok(path) => path,
+            Err(problem) => {
+                eprintln!("{problem}");
+                std::process::exit(1);
+            }
         }
-        dir.join("swage.db")
     };
 
     // Step 4: Open persistent storage.
@@ -205,11 +205,16 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     .await
     .expect("server error");
 
-    // Step 12b: Abort the message expiry background task.
-    expiry_handle.abort();
-    scheduler_handle.abort();
-    heartbeat_handle.abort();
-    attachment_handle.abort();
+    // Step 12b: These background loops only wait for interval ticks and then
+    // perform independent maintenance transactions; gateway shutdown owns the
+    // point where they stop.
+    #[allow(clippy::disallowed_methods)]
+    {
+        expiry_handle.abort();
+        scheduler_handle.abort();
+        heartbeat_handle.abort();
+        attachment_handle.abort();
+    }
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
@@ -521,6 +526,10 @@ fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<Pat
     }
 }
 
+fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
+    swage_config::discovery::resolve_root().map(|root| root.join("swage.db"))
+}
+
 /// Create the LLM provider from resolved configuration.
 async fn create_provider(
     config: &swage_config::ResolvedConfig,
@@ -590,8 +599,28 @@ async fn create_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use swage_config::LogLevel;
     use swage_storage::store::AuditStore;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn swage_database_path_uses_swage_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path().join("app-data");
+        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+
+        let path = swage_database_path().unwrap();
+
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+        assert_eq!(path, root.join("swage.db"));
+        assert!(
+            root.is_dir(),
+            "database path resolution should auto-create root"
+        );
+    }
 
     // log_level_to_directive must map every LogLevel variant correctly.
     #[test]

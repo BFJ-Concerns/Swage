@@ -81,7 +81,7 @@ fn serve_static_file(path: &str, file: rust_embed::EmbeddedFile) -> Response {
         .header(header::CONTENT_TYPE, mime.as_ref())
         .header(header::CACHE_CONTROL, cache_control)
         .body(Body::from(file.data.into_owned()))
-        .unwrap()
+        .expect("static asset response should be valid")
 }
 
 /// Serve index.html with no-cache headers.
@@ -94,7 +94,7 @@ fn serve_index(file: rust_embed::EmbeddedFile) -> Response {
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(file.data.into_owned()))
-        .unwrap()
+        .expect("index response should be valid")
 }
 
 /// Response returned when no embedded assets exist (frontend not yet built).
@@ -109,7 +109,7 @@ fn dev_fallback() -> Response {
              Run 'npm run build' in the frontend/ directory, \
              or start the Vite dev server at http://localhost:5173 during development.",
         ))
-        .unwrap()
+        .expect("developer fallback response should be valid")
 }
 
 /// Redirect browser routes from the gateway to Vite while the xtask dev loop is
@@ -140,7 +140,7 @@ fn redirect_to_dev_frontend(headers: &HeaderMap, uri: &Uri, port: &str) -> Optio
             .status(StatusCode::TEMPORARY_REDIRECT)
             .header(header::LOCATION, location)
             .body(Body::empty())
-            .unwrap(),
+            .expect("dev redirect response should be valid"),
     )
 }
 

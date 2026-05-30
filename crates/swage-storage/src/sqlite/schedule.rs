@@ -233,7 +233,7 @@ impl ScheduleStore for SqliteStorage {
         let existing = self
             .get_scheduled_job(id)
             .await?
-            .ok_or(StorageError::NotFound {
+            .ok_or_else(|| StorageError::NotFound {
                 entity: "ScheduledJob".into(),
                 id: id.to_string(),
             })?;

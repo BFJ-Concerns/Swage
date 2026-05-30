@@ -97,6 +97,9 @@ impl Sandbox for BubblewrapSandbox {
     ///
     /// Builds the `bwrap` command, strips credential env vars, and waits for
     /// the agent's `Ready` signal before returning.
+    // Timeout only cancels `listener.accept()` while startup owns the socket and
+    // child process; the timeout arm immediately tears down that child.
+    #[allow(clippy::disallowed_methods)]
     async fn spawn_agent(&mut self) -> Result<(), SandboxError> {
         // Create the IPC socket before spawning so the child can connect.
         let (socket_manager, listener) = SocketManager::create("swage-sandbox")?;

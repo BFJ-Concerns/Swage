@@ -224,7 +224,7 @@ impl LandlockRuleset {
         let ruleset_fd = unsafe {
             libc::syscall(
                 libc::SYS_landlock_create_ruleset,
-                &attr as *const LandlockRulesetAttr,
+                &raw const attr,
                 std::mem::size_of::<LandlockRulesetAttr>(),
                 0u32,
             )
@@ -362,7 +362,7 @@ fn add_path_rule(ruleset_fd: i32, path: &std::path::Path, allowed_access: u64) {
             libc::SYS_landlock_add_rule,
             ruleset_fd,
             LANDLOCK_RULE_PATH_BENEATH,
-            &attr as *const LandlockPathBeneathAttr,
+            &raw const attr,
             0u32,
         )
     };

@@ -92,7 +92,10 @@ impl RateLimiter {
             minute_window
         };
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .expect("rate-limit state lock should not be poisoned");
         let timestamps = state
             .entry((agent_id.to_owned(), tool_name.to_owned()))
             .or_default();

@@ -57,7 +57,11 @@ impl CountingMockProvider {
     }
 
     fn next_result(&self) -> Result<(), ProviderError> {
-        self.results.lock().unwrap().pop_front().unwrap_or(Ok(()))
+        self.results
+            .lock()
+            .expect("mock provider result lock should not be poisoned")
+            .pop_front()
+            .unwrap_or(Ok(()))
     }
 }
 

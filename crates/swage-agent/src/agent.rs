@@ -376,7 +376,7 @@ impl Agent {
 
                 // Emit ToolEnd — final status and result.
                 let result_value: Value = serde_json::from_str(&result_content)
-                    .unwrap_or(Value::String(result_content.clone()));
+                    .unwrap_or_else(|_| Value::String(result_content.clone()));
                 let _ = event_tx.send(AgentEvent::ToolEnd {
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),

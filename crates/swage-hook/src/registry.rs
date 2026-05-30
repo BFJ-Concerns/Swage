@@ -244,6 +244,10 @@ impl HookRegistry {
     /// If the hook exceeds its timeout, the outcome is determined by the
     /// registration's failure mode. Panicking hooks are caught and treated
     /// identically to timeouts.
+    // The timeout wraps a JoinHandle, so timeout expiry detaches the hook task
+    // rather than aborting it mid-await. The failure mode below decides what the
+    // dispatcher reports while the detached hook finishes independently.
+    #[allow(clippy::disallowed_methods)]
     async fn execute_with_timeout(&self, reg: &HookRegistration, event: &HookEvent) -> HookOutcome {
         let hook = reg.hook.clone();
         let event_clone = event.clone();

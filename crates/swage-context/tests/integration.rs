@@ -116,7 +116,7 @@ fn default_assembly_produces_era_01_equivalent_output() {
 
     // Create elements
     let prompts_element = swage_context::prompts::PromptsElement::new(rules);
-    let history_element = swage_context::history::HistoryElement::new(history_messages.clone());
+    let history_element = swage_context::history::HistoryElement::new(history_messages);
 
     // Run the default assembly
     let config = swage_config::ContextConfig::default();

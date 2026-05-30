@@ -552,10 +552,16 @@ pub async fn spawn_transport_backed_host(
         )
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test server should bind to an ephemeral port");
+    let addr = listener
+        .local_addr()
+        .expect("test server should expose its local address");
     let join_handle = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router)
+            .await
+            .expect("test server should run");
     });
 
     TransportBackedHostHandle {
@@ -603,7 +609,7 @@ mod tests {
 
     fn test_secret_manager() -> crate::secret::SecretManager {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        crate::secret::SecretManager::new(storage.clone())
+        crate::secret::SecretManager::new(storage)
     }
 
     fn registered_host(host_id: &str, kind: ExecutionHostKind) -> RegisteredExecutionHost {

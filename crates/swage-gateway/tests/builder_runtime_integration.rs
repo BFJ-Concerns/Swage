@@ -1,4 +1,8 @@
-#![allow(clippy::await_holding_lock)]
+#![allow(
+    clippy::await_holding_lock,
+    clippy::unwrap_used,
+    clippy::disallowed_methods
+)]
 
 // These integration tests serialise process-env mutations with a std mutex.
 // The guard intentionally spans awaits because the gateway reads env during requests.

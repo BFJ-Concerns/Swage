@@ -679,7 +679,7 @@ mod tests {
         let material_content: String = conn
             .query_row(
                 "SELECT content_text FROM materials WHERE source_attachment_id = ?1",
-                params![attachment_id.clone()],
+                params![attachment_id],
                 |row| row.get(0),
             )
             .unwrap();

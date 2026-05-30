@@ -22,6 +22,8 @@
 //! This strategy is always marked experimental. The result carries
 //! `actual_strategy = "selective_evict"`.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 use swage_core::{ChatMessage, CompletionRequest, Role};
 use swage_provider::LlmProvider;
@@ -209,7 +211,7 @@ fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        prompt.push_str(&format!("[{i}] ({role_label}): {text}\n"));
+        let _ = writeln!(prompt, "[{i}] ({role_label}): {text}");
     }
 
     prompt.push_str("\nJSON output:");
@@ -229,7 +231,7 @@ fn parse_eviction_response(response: &str) -> Result<Vec<EvictionCandidate>, Str
         .trim()
         .strip_prefix("```json")
         .or_else(|| response.trim().strip_prefix("```"))
-        .unwrap_or(response.trim());
+        .unwrap_or_else(|| response.trim());
     let json = json.strip_suffix("```").unwrap_or(json).trim();
 
     serde_json::from_str::<Vec<EvictionCandidate>>(json)

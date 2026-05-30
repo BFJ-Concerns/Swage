@@ -4,6 +4,8 @@
 //! worker execution, nested tool dispatch, nested-tool event delivery, and
 //! persistence of `parent_call_id` for reloaded conversation detail.
 
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::pin::Pin;

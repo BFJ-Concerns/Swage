@@ -213,7 +213,7 @@ pub async fn operator_search(
                 let excerpt = run
                     .error_message
                     .clone()
-                    .or(run.output_text.clone())
+                    .or_else(|| run.output_text.clone())
                     .or_else(|| Some(run.state.to_string()));
                 if matches_query(
                     &search_text,
@@ -422,7 +422,9 @@ pub async fn operator_usage(
     let run = match (query.run_kind.as_deref(), query.run_id) {
         (Some("user_turn" | "delegated_turn"), Some(run_id)) => {
             turn_usage(state, run_id).await?.map(|usage| RunUsage {
-                kind: query.run_kind.unwrap(),
+                kind: query
+                    .run_kind
+                    .expect("run_kind was matched as present above"),
                 id: run_id.to_string(),
                 session_id: usage.0,
                 input_tokens: usage.1,

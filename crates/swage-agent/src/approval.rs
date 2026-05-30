@@ -157,6 +157,7 @@ mod tests {
         let cloned = d.clone();
         let debug = format!("{cloned:?}");
         assert!(debug.contains("Approved"));
+        assert!(matches!(d.decision, ApprovalDecisionValue::Approved));
     }
 
     #[tokio::test]

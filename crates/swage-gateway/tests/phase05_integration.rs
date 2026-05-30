@@ -3,9 +3,8 @@
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the gateway client library, runtime metadata, CLI
 //! dispatch, and gateway startup are wired together.
-//!
-//! Tests in this file are expected to FAIL until the phase 05 motes are
-//! implemented. Each test documents which motes must combine for it to pass.
+
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

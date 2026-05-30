@@ -637,11 +637,11 @@ fn validate_bench_slug(slug: &str) -> Result<BenchSlug, GatewayError> {
     })
 }
 
-/// Returns the base directory for all bench data: `~/.swage/benches/`.
-fn benches_base_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".swage").join("benches"))
+/// Returns the base directory for all bench data under the canonical Swage root.
+fn benches_base_dir() -> Result<PathBuf, GatewayError> {
+    swage_config::discovery::resolve_root()
+        .map(|root| root.join("benches"))
+        .map_err(|problem| GatewayError::ValidationError(problem.to_string()))
 }
 
 /// Mediates between HTTP bench handlers and storage.
@@ -680,19 +680,18 @@ impl BenchService {
 
         let slug = validate_bench_slug(&slugify(&req.name))?;
 
-        // Create the bench directory: ~/.swage/benches/{slug}/memory/
-        if let Some(base) = benches_base_dir() {
-            let bench_dir = base.join(&slug);
-            let memory_dir = bench_dir.join("memory");
-            // Non-fatal: best-effort directory creation.
-            if let Err(error) = std::fs::create_dir_all(&memory_dir) {
-                tracing::warn!(
-                %slug,
-                    path = %memory_dir.display(),
-                    %error,
-                    "failed to create bench memory directory"
-                );
-            }
+        // Create the bench directory under the canonical Swage root.
+        let base = benches_base_dir()?;
+        let bench_dir = base.join(&slug);
+        let memory_dir = bench_dir.join("memory");
+        // Non-fatal: best-effort directory creation.
+        if let Err(error) = std::fs::create_dir_all(&memory_dir) {
+            tracing::warn!(
+            %slug,
+                path = %memory_dir.display(),
+                %error,
+                "failed to create bench memory directory"
+            );
         }
 
         let bench = self
@@ -952,9 +951,11 @@ impl WorkspaceAttachmentService {
             .storage
             .get_workspace_attachment(workspace_id)
             .await?
-            .ok_or(GatewayError::ValidationError(format!(
-                "workspace attachment {workspace_id} not found"
-            )))?;
+            .ok_or_else(|| {
+                GatewayError::ValidationError(format!(
+                    "workspace attachment {workspace_id} not found"
+                ))
+            })?;
         if workspace.bench_id != bench_id {
             return Err(GatewayError::ValidationError(format!(
                 "workspace attachment {workspace_id} does not belong to bench {bench_id}"

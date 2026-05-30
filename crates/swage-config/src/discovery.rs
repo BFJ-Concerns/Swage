@@ -53,25 +53,44 @@ pub struct DiscoveredBench {
 /// 1. `$SWAGE_HOME` environment variable, if set.
 /// 2. `~/.swage/` (via `$HOME`).
 ///
-/// Returns `DiscoveryError` if the resolved path does not exist on disk,
-/// with a guidance message telling the user how to create it.
-pub fn resolve_root() -> Result<PathBuf, ConfigProblem> {
-    let root = if let Ok(home_override) = std::env::var("SWAGE_HOME") {
+/// This is a pure path calculation; use [`resolve_root`] when the caller needs
+/// the directory to exist.
+pub fn effective_root_path() -> PathBuf {
+    if let Ok(home_override) = std::env::var("SWAGE_HOME") {
         PathBuf::from(home_override)
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
         PathBuf::from(home).join(".swage")
-    };
+    }
+}
 
-    if !root.exists() {
+/// Returns the effective Swage root directory, creating it when needed.
+///
+/// Returns `DiscoveryError` only when the root cannot be created or the path is
+/// not a directory.
+pub fn resolve_root() -> Result<PathBuf, ConfigProblem> {
+    let root = effective_root_path();
+
+    if let Err(error) = fs::create_dir_all(&root) {
         return Err(ConfigProblem {
             file_path: root.clone(),
             field_path: None,
             kind: ConfigProblemKind::DiscoveryError {
                 message: format!(
-                    "Swage root directory '{}' does not exist — \
-                     create it to get started (e.g. mkdir -p '{}')",
+                    "failed to create Swage root directory '{}': {error}",
                     root.display(),
+                ),
+            },
+        });
+    }
+
+    if !root.is_dir() {
+        return Err(ConfigProblem {
+            file_path: root.clone(),
+            field_path: None,
+            kind: ConfigProblemKind::DiscoveryError {
+                message: format!(
+                    "Swage root path '{}' exists but is not a directory",
                     root.display(),
                 ),
             },
@@ -232,12 +251,16 @@ pub fn resolve_assembly(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // --- resolve_root ---
 
     #[test]
     fn resolve_root_uses_swage_home_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = TempDir::new().unwrap();
         // Safety: test-only env mutation; set_var is unsafe in edition 2024
         unsafe { std::env::set_var("SWAGE_HOME", tmp.path()) };
@@ -247,11 +270,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_root_errors_when_root_missing() {
-        unsafe { std::env::set_var("SWAGE_HOME", "/no/such/swage/root") };
+    fn resolve_root_creates_missing_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("new-swage-root");
+        unsafe { std::env::set_var("SWAGE_HOME", &root) };
         let result = resolve_root();
         unsafe { std::env::remove_var("SWAGE_HOME") };
-        assert!(result.is_err(), "missing root should produce an error");
+        assert_eq!(result.unwrap(), root);
+        assert!(root.is_dir(), "missing root should be created");
+    }
+
+    #[test]
+    fn resolve_root_errors_when_root_path_is_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("swage-file");
+        fs::write(&root, "not a directory").unwrap();
+        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+        let result = resolve_root();
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+        assert!(result.is_err(), "file root should produce an error");
         let err = result.unwrap_err();
         assert!(matches!(err.kind, ConfigProblemKind::DiscoveryError { .. }));
     }

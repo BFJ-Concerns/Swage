@@ -15,6 +15,8 @@
 //! | `missing_workspace_grants_inherit_global_permissions` | Missing workspace grant inheritance | turn permission build + workspace attachment store |
 //! | `workspace_gate_allows_file_read_with_trusted_read_attachment` | Workspace gate release | turn permission build + workspace attachment store |
 
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -636,13 +638,13 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     assert_eq!(tool_end.unwrap()["status"], "success");
 
     // Verify final text tokens arrived after tool round
-    let tokens: Vec<&str> = events
+    let has_tokens = events
         .iter()
         .filter(|e| e["type"] == "token")
-        .filter_map(|e| e["content"].as_str())
-        .collect();
+        .find_map(|e| e["content"].as_str())
+        .is_some();
     assert!(
-        !tokens.is_empty(),
+        has_tokens,
         "expected text tokens after tool round; events: {events:?}"
     );
 

@@ -8,6 +8,8 @@
 //! address in a browser loads the SPA, which then calls the API endpoints.
 //! Both must coexist on the same server.
 
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
 use axum::{

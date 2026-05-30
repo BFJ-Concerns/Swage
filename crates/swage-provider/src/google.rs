@@ -353,7 +353,7 @@ impl GoogleProvider {
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
                     .cloned()
-                    .unwrap_or(serde_json::json!({"type": "object"}));
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
                 Some(GeminiFunctionDeclaration {
                     name,
                     description,
@@ -407,7 +407,7 @@ impl GoogleProvider {
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
                     .cloned()
-                    .unwrap_or(serde_json::json!({"type": "object"}));
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
                 Some(GeminiFunctionDeclaration {
                     name,
                     description,

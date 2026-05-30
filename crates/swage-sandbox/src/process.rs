@@ -93,6 +93,10 @@ impl ChildProcessManager {
     ///
     /// If the child does not exit in time, falls back to SIGKILL and waits
     /// for the reap. Succeeds silently if the child has already exited.
+    ///
+    /// The timed future only waits on a child handle. On timeout this method
+    /// immediately sends SIGKILL and reaps the same child synchronously below.
+    #[allow(clippy::disallowed_methods)]
     pub async fn graceful_shutdown(&mut self, grace_period: Duration) -> Result<(), SandboxError> {
         // Nothing to do if already exited — idempotent.
         if !self.is_running() {

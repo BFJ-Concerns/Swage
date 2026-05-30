@@ -223,7 +223,7 @@ impl ToolUseAccumulator {
             Some("content_block_stop") => {
                 if let Some((call_id, name, json_buf)) = self.pending.take() {
                     let arguments = serde_json::from_str(&json_buf)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
                     Some(StreamChunk::ToolUse {
                         call_id,
                         name,

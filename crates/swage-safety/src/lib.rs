@@ -4,6 +4,8 @@
 //! and automatic redaction. Uses Aho-Corasick for literal pattern matching
 //! and regex for structured format detection, both operating in linear time.
 
+use std::fmt::Write as _;
+
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 use tracing::instrument;
@@ -183,7 +185,7 @@ impl LeakDetector {
 
         for (start, end, label) in merged {
             result.push_str(&text[last_end..start]);
-            result.push_str(&format!("[REDACTED:{label}]"));
+            let _ = write!(result, "[REDACTED:{label}]");
             last_end = end;
         }
         result.push_str(&text[last_end..]);

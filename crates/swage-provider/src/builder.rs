@@ -130,7 +130,10 @@ impl ProviderChainBuilder {
         failover_config: Option<FailoverConfig>,
     ) -> Box<dyn LlmProvider> {
         if providers.len() == 1 && failover_config.is_none() {
-            let arc = providers.into_iter().next().unwrap();
+            let arc = providers
+                .into_iter()
+                .next()
+                .expect("provider list length was checked above");
             Box::new(ArcProvider(arc))
         } else {
             let config = failover_config.unwrap_or_default();

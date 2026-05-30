@@ -23,7 +23,7 @@ Rust 2024 edition (requires 1.85+). Crates under `crates/`:
 - `swage-client` — typed gateway client (shared by CLI and TUI)
 - `swage-tui` — terminal UI (ratatui + crossterm)
 - `swage-topology` — graph/topology primitives
-- `swage` — legacy façade crate (edition 2021)
+- `swage` — façade crate: single `use swage::...` entry point re-exporting the underlying crates, plus `SwageBuilder` and convenience constructors
 
 Plus: `frontend/` (Svelte 5 SPA), `desktop/` (Node), `xtask/` (build tasks), `docs/`.
 
@@ -37,6 +37,47 @@ The HTTP API speaks of "conversations"; storage uses Session + a default Thread.
 - The storage supertrait composes `SessionStore` + `ThreadStore` + `TurnStore` + `MessageStore` + `ToolCallStore` + `SkillActivationStore` + `ApprovalStore`. `ProjectStore` is separate.
 - A default project is auto-created in migration — every conversation belongs to a project.
 - One active turn per conversation at a time.
+
+## Working Principles
+
+How to extend a workspace that spans many crates and several surfaces
+(gateway, TUI, CLI, web). These are about *where* behaviour should live.
+
+### Prefer the general path over the special case
+
+Unless it is genuinely unavoidable, don't add a special case where a general
+one would serve. When a requirement could be met either by a one-off branch or
+by extending a shared path that future work can reuse, extend the shared path.
+Special cases multiply — each becomes the template for the next, and the
+general capability that would have absorbed all of them never gets built. If a
+special case truly is unavoidable, say why at the call site.
+
+The turn loop is this principle in practice. Turn processing lives in one
+place — `Agent::process_turn_streaming` (`swage-agent`) — and surfaces consume
+its `AgentEvent` stream as data rather than reimplementing the loop: the
+gateway forwards events to clients, it doesn't run its own. Injection points
+like `ToolExecutionStrategy` (`swage-tool`) let a surface add behaviour — the
+gateway's secret resolution and sandbox execution — through the shared dispatch
+pipeline instead of forking it. New surface behaviour should arrive the same
+way: as data on the shared path, not parallel code per surface.
+
+### Name model-facing surfaces by function
+
+Anything the model reads should present itself by what it *is* or *does*, not
+by the component, codename, or mechanism behind it. This covers labels and
+headings (a context section title), the values inside them (a status, a
+category), and the framing around them (a tool description, the opening line of
+an agent prompt). The model can't distinguish an internal label from genuine
+guidance: `## Conversation Summary` says what the block is;
+`## Conversation Summary (Structured Extraction)` leaks the mechanism that
+produced it and tells the model nothing useful.
+
+Keep internal identifiers — agent ids, struct names, context element keys like
+`"prompts"` and `"history"` — in the code, where they address developers. Where
+the same concept crosses into the model's context, describe it by function. The
+built-in tool descriptions get this right (`file_read`: "Read the contents of a
+file in the workspace."); the assembly element keys stay inside the report and
+never reach the model.
 
 ## Gotchas
 

@@ -209,7 +209,7 @@ impl ThreadStore for SqliteStorage {
         let parent = self
             .get(parent_thread_id)
             .await?
-            .ok_or(StorageError::NotFound {
+            .ok_or_else(|| StorageError::NotFound {
                 entity: "Thread".into(),
                 id: parent_thread_id.to_string(),
             })?;
@@ -227,7 +227,7 @@ impl ThreadStore for SqliteStorage {
                 .optional()
             })
             .await?
-            .ok_or(StorageError::NotFound {
+            .ok_or_else(|| StorageError::NotFound {
                 entity: "Message".into(),
                 id: branched_from_message_id.to_string(),
             })?;

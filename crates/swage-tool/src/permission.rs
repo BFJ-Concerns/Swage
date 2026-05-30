@@ -356,7 +356,9 @@ mod tests {
             PermissionCheckResult::RequiresApproval { timeout_secs, .. } => {
                 assert_eq!(timeout_secs, Some(120));
             }
-            other => panic!("expected RequiresApproval, got: {other:?}"),
+            other @ PermissionCheckResult::Allowed => {
+                panic!("expected RequiresApproval, got: {other:?}");
+            }
         }
     }
 
@@ -378,7 +380,9 @@ mod tests {
             PermissionCheckResult::RequiresApproval { timeout_policy, .. } => {
                 assert_eq!(timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
             }
-            other => panic!("expected RequiresApproval, got: {other:?}"),
+            other @ PermissionCheckResult::Allowed => {
+                panic!("expected RequiresApproval, got: {other:?}");
+            }
         }
     }
 

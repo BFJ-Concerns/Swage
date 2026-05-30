@@ -694,7 +694,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     (
                         k,
                         ContextTransferTargetConfig {
-                            mode: v.mode.unwrap_or(resolved_mode.clone()),
+                            mode: v.mode.unwrap_or_else(|| resolved_mode.clone()),
                             allowed_fields: v
                                 .allowed_fields
                                 .unwrap_or_else(|| resolved_fields.clone()),
