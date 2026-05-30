@@ -72,9 +72,17 @@ impl ProviderChainBuilder {
     /// (`.with_retry()`, `.with_circuit_breaker()`) before moving on to the
     /// next provider or calling `.build()`.
     pub fn provider(self, p: impl LlmProvider + 'static) -> ProviderBuilder {
+        self.provider_boxed(Box::new(p))
+    }
+
+    /// Add an already type-erased provider to the chain.
+    ///
+    /// This keeps dynamic provider catalogues on the same reliability path as
+    /// statically assembled chains.
+    pub fn provider_boxed(self, p: Box<dyn LlmProvider>) -> ProviderBuilder {
         ProviderBuilder {
             chain: self,
-            current: Box::new(p),
+            current: p,
             retry_config: None,
             cb_config: None,
         }
@@ -175,10 +183,16 @@ impl ProviderBuilder {
 
     /// Finalize the current provider entry and begin configuring the next.
     pub fn provider(self, p: impl LlmProvider + 'static) -> ProviderBuilder {
+        self.provider_boxed(Box::new(p))
+    }
+
+    /// Finalize the current provider entry and begin configuring the next
+    /// already type-erased provider.
+    pub fn provider_boxed(self, p: Box<dyn LlmProvider>) -> ProviderBuilder {
         let chain = self.finalize_into_chain();
         ProviderBuilder {
             chain,
-            current: Box::new(p),
+            current: p,
             retry_config: None,
             cb_config: None,
         }
@@ -528,6 +542,28 @@ mod tests {
 
         let result = provider.complete(completion_req()).await.unwrap();
         assert_eq!(result.content, "auto-failover");
+    }
+
+    #[tokio::test]
+    async fn boxed_providers_use_the_same_failover_path() {
+        let p1 = TrackingProvider::new(
+            "p1",
+            vec![Err(ProviderError::Network {
+                provider: "p1".into(),
+                message: "down".into(),
+            })],
+        );
+        let p2 = TrackingProvider::new("p2", vec![Ok(ok_completion("boxed-failover"))]);
+
+        let provider = ProviderChainBuilder::new()
+            .provider_boxed(Box::new(p1))
+            .provider_boxed(Box::new(p2))
+            .build();
+
+        let result = provider.complete(completion_req()).await.unwrap();
+
+        assert_eq!(provider.model_id(), "p1");
+        assert_eq!(result.content, "boxed-failover");
     }
 
     // -----------------------------------------------------------------------

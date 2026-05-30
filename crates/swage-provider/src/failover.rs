@@ -105,7 +105,7 @@ impl FailoverProvider {
     /// Returns provider indices in the following order:
     /// - Non-cooled providers, preserving original insertion order.
     /// - Cooled providers, sorted by earliest cooldown start (most likely recovered).
-    fn compute_try_order(&self) -> Vec<usize> {
+    fn compute_try_order(&self, requested_model: Option<&str>) -> Vec<usize> {
         let now = Instant::now();
         let cooldowns = self
             .cooldowns
@@ -133,7 +133,7 @@ impl FailoverProvider {
         // Earliest start = longest in cooldown = most likely recovered.
         still_cooled.sort_by_key(|(since, _)| *since);
 
-        let mut order = available;
+        let mut order = prioritise_requested_model(&self.providers, available, requested_model);
         order.extend(still_cooled.into_iter().map(|(_, i)| i));
         order
     }
@@ -175,7 +175,7 @@ impl LlmProvider for FailoverProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let order = self.compute_try_order();
+        let order = self.compute_try_order(request.model.as_deref());
 
         if order.is_empty() {
             return Err(ProviderError::InvalidConfig {
@@ -216,7 +216,7 @@ impl LlmProvider for FailoverProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
-        let order = self.compute_try_order();
+        let order = self.compute_try_order(request.model.as_deref());
 
         if order.is_empty() {
             return Err(ProviderError::InvalidConfig {
@@ -289,7 +289,8 @@ impl LlmProvider for FailoverProvider {
                     }
 
                     still_cooled.sort_by_key(|(since, _)| *since);
-                    let mut o = available;
+                    let mut o =
+                        prioritise_requested_model(&providers, available, request.model.as_deref());
                     o.extend(still_cooled.into_iter().map(|(_, i)| i));
                     o
                 };
@@ -342,6 +343,22 @@ impl LlmProvider for FailoverProvider {
             .flat_map(futures::stream::iter),
         )
     }
+}
+
+fn prioritise_requested_model(
+    providers: &[Arc<dyn LlmProvider>],
+    order: Vec<usize>,
+    requested_model: Option<&str>,
+) -> Vec<usize> {
+    let Some(requested_model) = requested_model else {
+        return order;
+    };
+
+    let (mut matching, rest): (Vec<_>, Vec<_>) = order
+        .into_iter()
+        .partition(|idx| providers[*idx].model_id() == requested_model);
+    matching.extend(rest);
+    matching
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +517,23 @@ mod tests {
         assert_eq!(result.content, "from-p1");
         assert_eq!(*p1_calls.lock().unwrap(), 1);
         assert_eq!(*p2_calls.lock().unwrap(), 0, "p2 must not be called");
+    }
+
+    #[tokio::test]
+    async fn complete_prefers_requested_model_when_available() {
+        let p1 = SequencedProvider::new("primary-model", vec![Ok(ok_completion("primary"))]);
+        let p2 = SequencedProvider::new("selected-model", vec![Ok(ok_completion("selected"))]);
+        let p1_calls = Arc::clone(&p1.call_count);
+        let p2_calls = Arc::clone(&p2.call_count);
+
+        let failover = FailoverProvider::with_defaults(vec![p1, p2]);
+        let mut request = completion_req();
+        request.model = Some("selected-model".to_string());
+        let result = failover.complete(request).await.unwrap();
+
+        assert_eq!(result.content, "selected");
+        assert_eq!(*p1_calls.lock().unwrap(), 0);
+        assert_eq!(*p2_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]

@@ -73,10 +73,12 @@ export async function listConversations(
 /** Create a new conversation in the given bench and return its metadata. */
 export async function createConversation(
   benchId: string,
+  selectedModelId?: string | null,
 ): Promise<ConversationResponse> {
   const response = await request(
     `/api/benches/${benchId}/sessions`,
     "POST",
+    selectedModelId ? { selected_model_id: selectedModelId } : undefined,
   );
   return response.json() as Promise<ConversationResponse>;
 }

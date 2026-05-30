@@ -735,7 +735,7 @@ async fn build_turn_sandbox(
         }
     })?;
 
-    let provider = state.provider.clone();
+    let provider = state.active_provider();
     let llm_handler = HostLlmHandler::new(move |req: swage_core::CompletionRequest| {
         let provider = provider.clone();
         async move {
@@ -773,11 +773,13 @@ pub(crate) async fn build_gateway_dispatcher(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let startup_config = &state.config;
     let permissions =
-        build_permission_config(config, &state.config, bench_id, &session_approval_grants);
+        build_permission_config(config, startup_config, bench_id, &session_approval_grants);
 
+    let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
-        state.tool_dispatcher.registry().clone(),
+        base_dispatcher.registry().clone(),
         permissions,
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
@@ -876,6 +878,9 @@ pub(crate) fn build_agent_config_with_workspace(
 ) -> AgentConfig {
     let mut agent_config = AgentConfig::new(agent_id).with_workspace(workspace_root, allowed_paths);
     agent_config.skip_permissions = config.dangerously_skip_permissions;
+    if !config.default_model_id().is_empty() {
+        agent_config.model_id = Some(config.default_model_id().to_string());
+    }
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
@@ -978,7 +983,7 @@ pub(crate) fn load_session_config(
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let Ok(root) = swage_config::discovery::resolve_root() else {
-        return Ok(state.config.clone());
+        return Ok(state.active_config());
     };
 
     let bench_dir = root.join("benches").join(bench_slug);
@@ -990,11 +995,56 @@ pub(crate) fn load_session_config(
         .exists();
 
     if !bench_config_exists && !agent_config_exists {
-        return Ok(state.config.clone());
+        return Ok(state.active_config());
     }
 
     swage_config::load_resolved_config_from(&root, bench_slug, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
+}
+
+fn effective_session_config(
+    mut config: swage_config::ResolvedConfig,
+    selected_model_id: Option<&str>,
+) -> swage_config::ResolvedConfig {
+    let Some(selected_model_id) = selected_model_id.filter(|model_id| !model_id.trim().is_empty())
+    else {
+        return config;
+    };
+
+    if config.models.entries.contains_key(selected_model_id) {
+        config.models.default = selected_model_id.to_string();
+    } else {
+        tracing::warn!(
+            selected_model_id,
+            default_model_id = %config.models.default,
+            "Conversation selected an unknown model; falling back to the configured default"
+        );
+    }
+    config
+}
+
+fn ensure_selected_model_available(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    selected_model_id: Option<&str>,
+    session_id: Uuid,
+) -> Result<(), GatewayError> {
+    let Some(selected_model_id) = selected_model_id.filter(|model_id| !model_id.trim().is_empty())
+    else {
+        return Ok(());
+    };
+
+    if config.models.entries.contains_key(selected_model_id) {
+        return Ok(());
+    }
+
+    if state.restart_required() {
+        return Err(GatewayError::ConfigError(format!(
+            "Conversation {session_id} selected model '{selected_model_id}', but the running gateway has not loaded that model. Restart the gateway to apply the saved provider/model settings, or choose a model that existed before the last settings save."
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1141,7 +1191,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
         let executor = DelegationExecutor {
             storage: self.state.storage.clone(),
-            provider: self.state.provider.clone(),
+            provider: self.state.active_provider(),
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(build_approval_registrar(
@@ -1359,6 +1409,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // startup config, but present invalid config fails the turn before any
     // user message is written.
     let config = load_session_config(state, &bench_slug, &session.agent_id)?;
+    ensure_selected_model_available(
+        state,
+        &config,
+        session.selected_model_id.as_deref(),
+        session_id,
+    )?;
+    let config = effective_session_config(config, session.selected_model_id.as_deref());
 
     // Resolve the swage root once — skill discovery, bench memory loading,
     // and assembly search-path construction all depend on it.
@@ -1545,13 +1602,14 @@ pub(crate) async fn process_turn_with_existing_turn(
     // embedded interpreter.
     let assembly_runner =
         swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
+    let provider = state.active_provider();
     let output = swage_context::assembly::assemble_for_agent(
         &session.agent_id,
         &elements,
         &config.context,
         &tokeniser,
         &search_level_refs,
-        state.provider.as_ref(),
+        provider.as_ref(),
         Some(&assembly_runner),
     )
     .await;
@@ -1676,7 +1734,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Step 10: Build the Agent that will execute the turn.
     let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
-        .provider(state.provider.clone())
+        .provider(state.active_provider())
         .storage(state.storage.clone())
         .tool_dispatcher(dispatcher)
         .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
@@ -1739,7 +1797,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Spawn the agent on a tokio task — it manages turn creation, state
     // transitions, tool dispatch, and message storage internally.
     let activity_tracker = state.activity_tracker.clone();
-    let pricing_config = state.config.pricing.clone();
+    let pricing_config = state.active_config().pricing.clone();
     let model_name = config.default_model_id().to_string();
 
     let agent_handle =
@@ -3056,6 +3114,7 @@ pub(crate) mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 metadata: session.metadata,
+                selected_model_id: None,
                 active_workspace_attachment_id: session.active_workspace_attachment_id,
             };
             self.db.lock().await.sessions.insert(s.id, s.clone());
@@ -3118,6 +3177,24 @@ pub(crate) mod tests {
                     id: id.to_string(),
                 })?;
             session.active_workspace_attachment_id = workspace_id;
+            session.updated_at = chrono::Utc::now();
+            Ok(session.clone())
+        }
+
+        async fn set_session_selected_model(
+            &self,
+            id: Uuid,
+            selected_model_id: Option<String>,
+        ) -> Result<Session, StorageError> {
+            let mut db = self.db.lock().await;
+            let session = db
+                .sessions
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "session".to_string(),
+                    id: id.to_string(),
+                })?;
+            session.selected_model_id = selected_model_id;
             session.updated_at = chrono::Utc::now();
             Ok(session.clone())
         }
@@ -5553,42 +5630,14 @@ pub(crate) mod tests {
         .expect("create default thread");
 
         let provider = Arc::new(MockProvider::new(provider_chunks));
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
         (state, session_id)
     }
 
@@ -5628,42 +5677,14 @@ pub(crate) mod tests {
         .expect("create default thread");
 
         let provider = Arc::new(MockProvider::new(provider_chunks));
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            provider as Arc<dyn LlmProvider>,
             config,
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
         (state, session_id)
     }
 
@@ -5773,42 +5794,14 @@ pub(crate) mod tests {
         .await
         .expect("create default thread");
 
-        let state = Arc::new(AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        });
+        let state = Arc::new(AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        ));
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -6104,45 +6097,16 @@ pub(crate) mod tests {
 
         let provider = Arc::new(MultiRoundMockProvider::new(rounds));
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
-                EchoMockTool,
-            )
-                as Arc<dyn crate::tool::Tool>])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
         (state, session_id)
     }
 
@@ -6183,45 +6147,16 @@ pub(crate) mod tests {
 
         let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(provider) as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
-                EchoMockTool,
-            )
-                as Arc<dyn crate::tool::Tool>])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
 
         (state, session_id, captured)
     }
@@ -6454,48 +6389,18 @@ pub(crate) mod tests {
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
-                BlockingMockTool {
-                    started: started.clone(),
-                    release: release.clone(),
-                },
-            )
-                as Arc<dyn crate::tool::Tool>])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
+                started: started.clone(),
+                release: release.clone(),
+            })
+                as Arc<dyn crate::tool::Tool>]),
+            None,
+        );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let state = Arc::new(state);
@@ -6709,12 +6614,20 @@ pub(crate) mod tests {
             },
         ];
 
-        let (mut state, session_id, captured) =
+        let (state, session_id, captured) =
             make_state_with_capturing_tools(vec![round_1, round_2]).await;
-        state.config.tools.permissions.require_approval =
+        let mut runtime_config = state.active_config();
+        runtime_config.tools.permissions.require_approval =
             vec![swage_config::model::RequireApprovalEntry::Simple(
                 "echo".into(),
             )];
+        state.replace_runtime(
+            runtime_config,
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
 
         let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -7067,44 +6980,16 @@ pub(crate) mod tests {
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
                 capture_tool as Arc<dyn crate::tool::Tool>,
-            ])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            ]),
+            None,
+        );
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
@@ -7173,42 +7058,14 @@ pub(crate) mod tests {
         .await
         .expect("thread");
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(provider) as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
@@ -7223,12 +7080,162 @@ pub(crate) mod tests {
         .await
         .expect("turn ok");
 
-        // Verify the provider was invoked — the agent delegates model selection
-        // to the provider via model_id() rather than setting CompletionRequest.model.
+        // Verify the provider was invoked. No configured model exists in this
+        // test, so the request should still leave provider defaults in charge.
         let req = captured_request.lock().unwrap().take();
         assert!(
             req.is_some(),
             "provider should have been invoked for config-resolved turn"
+        );
+        assert_eq!(req.and_then(|request| request.model), None);
+    }
+
+    #[tokio::test]
+    async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
+        let _guard = SwageHomeGuard::isolate();
+        let chunks = vec![
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (provider, captured_request) = CapturingProvider::new(chunks);
+        let (storage, session_id) = make_storage_with_session().await;
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let runtime_config = swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "fast".to_string(),
+                entries: [(
+                    "fast".to_string(),
+                    swage_config::ModelEndpointConfig {
+                        provider_id: "local".to_string(),
+                        model_id: "fast-wire".to_string(),
+                        aliases: vec![],
+                        context_window: None,
+                        generation_preset: Some("quick".to_string()),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            generation: swage_config::GenerationConfig {
+                presets: [(
+                    "quick".to_string(),
+                    swage_config::GenerationPresetConfig {
+                        max_tokens: Some(123),
+                        temperature: Some(0.2),
+                        stop_sequences: vec!["STOP".to_string()],
+                        metadata: Some(serde_json::json!({"preset": "quick"})),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            context: swage_config::ContextConfig {
+                assembly: "default".to_string(),
+                timeout: 7,
+                budget: Some(2048),
+            },
+            ..Default::default()
+        };
+        state.replace_runtime(
+            runtime_config,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hi".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
+
+        let request = captured_request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("provider should receive the new-turn request");
+        assert_eq!(request.model.as_deref(), Some("fast-wire"));
+        assert_eq!(request.max_tokens, Some(123));
+        assert_eq!(request.temperature, Some(0.2));
+        assert_eq!(request.stop_sequences, Some(vec!["STOP".to_string()]));
+        assert_eq!(
+            request.metadata,
+            Some(serde_json::json!({"preset": "quick"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
+        let _guard = SwageHomeGuard::isolate();
+        let chunks = vec![
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (provider, captured_request) = CapturingProvider::new(chunks);
+        let (storage, session_id) = make_storage_with_session().await;
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let mut runtime_config = swage_config::ResolvedConfig::default();
+        runtime_config.tools.permissions.deny = vec!["file_read".to_string()];
+        state.replace_runtime(
+            runtime_config,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkspaceGatedReadTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn ok");
+
+        let request = captured_request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("provider should receive the new-turn request");
+        assert!(
+            request.tool_definitions.is_empty(),
+            "hot-applied deny policy should hide file_read from the next turn"
         );
     }
 
@@ -7245,45 +7252,16 @@ pub(crate) mod tests {
         let (provider, captured_request) = CapturingProvider::new(chunks);
         let (storage, session_id) = make_storage_with_session().await;
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(provider) as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
-                WorkingDirReadTool,
-            )
-                as Arc<dyn crate::tool::Tool>])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
@@ -7305,6 +7283,45 @@ pub(crate) mod tests {
             .expect("provider request should be captured");
         assert_eq!(req.tool_definitions.len(), 1);
         assert_eq!(req.tool_definitions[0]["name"], "working_dir_read");
+    }
+
+    #[test]
+    fn effective_session_config_uses_known_selected_model_as_default() {
+        let config = swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "global".to_string(),
+                entries: [
+                    (
+                        "global".to_string(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "openai".to_string(),
+                            model_id: "global-wire".to_string(),
+                            aliases: vec![],
+                            context_window: None,
+                            generation_preset: None,
+                        },
+                    ),
+                    (
+                        "conversation".to_string(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "openai".to_string(),
+                            model_id: "conversation-wire".to_string(),
+                            aliases: vec![],
+                            context_window: None,
+                            generation_preset: None,
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        let effective = effective_session_config(config, Some("conversation"));
+
+        assert_eq!(effective.models.default, "conversation");
+        assert_eq!(effective.default_model_id(), "conversation-wire");
     }
 
     #[tokio::test]
@@ -7557,45 +7574,16 @@ pub(crate) mod tests {
 
         let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: provider as Arc<dyn LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
-                WorkingDirReadTool,
-            )
-                as Arc<dyn crate::tool::Tool>])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
-                tx
-            },
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkingDirReadTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
@@ -8651,7 +8639,7 @@ pub(crate) mod tests {
                 finish_reason: None,
             },
         ];
-        let (mut state, session_id) = make_state_with_session(vec![]).await;
+        let (state, session_id) = make_state_with_session(vec![]).await;
         let secret = state
             .secret_manager
             .create_secret(crate::secret::CreateSecretRequest {
@@ -8667,26 +8655,27 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-        state.tool_dispatcher =
-            Arc::new(crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(SecretEchoTool) as Arc<dyn crate::tool::Tool>,
-            ]));
-
-        state.provider = Arc::new(MultiRoundMockProvider::new(vec![
-            vec![
-                StreamChunk::ToolUse {
-                    call_id: "secret-call".into(),
-                    name: "secret_echo".into(),
-                    arguments: serde_json::json!({
-                        "secret": secret.reference
-                    }),
-                },
-                StreamChunk::Done {
-                    finish_reason: Some(FinishReason::ToolUse),
-                },
-            ],
-            round_2.clone(),
-        ]));
+        state.replace_runtime(
+            state.active_config(),
+            Arc::new(MultiRoundMockProvider::new(vec![
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: "secret-call".into(),
+                        name: "secret_echo".into(),
+                        arguments: serde_json::json!({
+                            "secret": secret.reference
+                        }),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::ToolUse),
+                    },
+                ],
+                round_2.clone(),
+            ])) as Arc<dyn LlmProvider>,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(SecretEchoTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
 
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(

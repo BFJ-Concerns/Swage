@@ -39,32 +39,24 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{SqliteStorage, store::BenchStore};
 
-// Serialise tests that mutate SWAGE_HOME — it's process-wide state.
-static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 /// RAII guard that points SWAGE_HOME at an empty temporary root so tests do not
 /// read the developer's real app data.
 struct SwageHomeGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _env_guard: ProcessEnvGuard,
     _temp_dir: tempfile::TempDir,
 }
 
 impl SwageHomeGuard {
     fn isolate() -> Self {
-        let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::TempDir::new().unwrap();
-        // Safety: test-only env mutation; set_var is unsafe in edition 2024.
-        unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
+        let mut env_guard = ProcessEnvGuard::new();
+        env_guard.set_swage_home(temp_dir.path());
         Self {
-            _lock: lock,
+            _env_guard: env_guard,
             _temp_dir: temp_dir,
         }
-    }
-}
-
-impl Drop for SwageHomeGuard {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var("SWAGE_HOME") };
     }
 }
 

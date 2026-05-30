@@ -519,9 +519,7 @@
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       status =
         options.message ??
-        (settings.can_restart
-          ? "Saved. Restart the managed gateway to apply changes."
-          : "Saved. Restart the gateway manually to apply changes.");
+        "Saved. New turns will use the updated runtime.";
       return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to save settings.";
@@ -892,7 +890,7 @@
       </div>
     {:else if settings.restart_required}
       <div class="notice">
-        <span>Saved settings require a gateway restart to take effect.</span>
+        <span>Saved provider/model settings require a gateway restart before new turns can use them.</span>
         {#if settings.can_restart}
           <button type="button" class="notice-action" onclick={restart}>Restart</button>
         {/if}

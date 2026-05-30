@@ -4,16 +4,12 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::sync::Arc;
-use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::Stream;
 use tower::ServiceExt;
 
@@ -26,21 +22,17 @@ use swage_provider::LlmProvider;
 use swage_storage::store::{BenchStore, Storage};
 use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
 
-static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
-fn with_secret_env() -> MutexGuard<'static, ()> {
-    let guard = SECRET_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([11_u8; 32]));
-    }
+fn with_secret_env() -> ProcessEnvGuard {
+    let mut guard = ProcessEnvGuard::new();
+    guard.set_managed_secret_key(11);
     guard
 }
 
-fn without_secret_env() -> MutexGuard<'static, ()> {
-    let guard = SECRET_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::remove_var(MANAGED_SECRET_KEY_ENV);
-    }
+fn without_secret_env() -> ProcessEnvGuard {
+    let mut guard = ProcessEnvGuard::new();
+    guard.remove_managed_secret_key();
     guard
 }
 
@@ -130,10 +122,8 @@ async fn get_json(router: &Router, path: &str) -> (StatusCode, serde_json::Value
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_management_surface_covers_types_rotation_validation_and_audit() {
-    let _guard = with_secret_env();
-    unsafe {
-        std::env::set_var("SWAGE_TEST_PROVIDER_KEY", "env-provider-key");
-    }
+    let mut env_guard = with_secret_env();
+    env_guard.set_var("SWAGE_TEST_PROVIDER_KEY", "env-provider-key");
 
     let state = test_state();
     let router = build_router(state.clone());
@@ -324,10 +314,6 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
             && !audit_body.to_string().contains("env-provider-key"),
         "audit surface must not reveal raw secret values: {audit_body:?}"
     );
-
-    unsafe {
-        std::env::remove_var("SWAGE_TEST_PROVIDER_KEY");
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

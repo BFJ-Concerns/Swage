@@ -33,6 +33,8 @@ pub enum ClientEvent {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_model_id: Option<String>,
     },
     /// Human responds to a pending approval request.
     ///
@@ -440,7 +442,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // force_on from config so all events are delivered when the gateway is
     // running in development/debug mode without requiring explicit subscriptions.
     let subscription = Arc::new(Mutex::new(SubscriptionState::new(
-        state.config.observability.force_on,
+        state.active_config().observability.force_on,
     )));
 
     // Subscribe to the server-wide broadcast channel before spawning the
@@ -732,7 +734,24 @@ async fn dispatch_client_message(
             subscription.lock().await.unsubscribe(&channels);
         }
 
-        ClientEvent::SendMessage { content, thread_id } => {
+        ClientEvent::SendMessage {
+            content,
+            thread_id,
+            selected_model_id,
+        } => {
+            if let Some(selected_model_id) = normalise_selected_model_id(selected_model_id)
+                && let Err(error) = state
+                    .storage
+                    .set_session_selected_model(session_id, Some(selected_model_id))
+                    .await
+            {
+                let _ = tx.send(ServerEvent::Error {
+                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    message: error.to_string(),
+                });
+                return;
+            }
+
             // Check for a slash command before deciding whether to spawn a turn.
             match crate::skill::parse_slash_command(&content) {
                 SlashCommandResult::SkillActivation {
@@ -754,7 +773,8 @@ async fn dispatch_client_message(
 
                     if is_known {
                         // Activate the skill and forward any trailing text as a turn.
-                        let tok = TiktokenTokeniser::new(state.config.default_model_id());
+                        let config = state.active_config();
+                        let tok = TiktokenTokeniser::new(config.default_model_id());
                         match SkillManager::activate(
                             session_id,
                             &skill_name,
@@ -888,7 +908,8 @@ async fn dispatch_client_message(
                     return;
                 }
             };
-            let tok = TiktokenTokeniser::new(state.config.default_model_id());
+            let config = state.active_config();
+            let tok = TiktokenTokeniser::new(config.default_model_id());
 
             match SkillManager::activate(
                 session_id,
@@ -1119,6 +1140,12 @@ fn classify_gateway_error(err: &swage_core::GatewayError) -> (String, String) {
     }
 }
 
+fn normalise_selected_model_id(selected_model_id: Option<String>) -> Option<String> {
+    selected_model_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1127,9 +1154,7 @@ fn classify_gateway_error(err: &swage_core::GatewayError) -> (String, String) {
 mod tests {
     #![allow(clippy::await_holding_lock)]
 
-    use std::{collections::HashMap, sync::Arc};
-
-    use tokio::sync::Mutex;
+    use std::sync::Arc;
 
     use swage_provider::LlmProvider;
     use swage_storage::model::Session;
@@ -1719,43 +1744,18 @@ mod tests {
     /// Build an AppState with no sessions.
     fn make_empty_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let storage_arc: Arc<dyn swage_storage::store::Storage> =
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
         let bench_store: Arc<dyn swage_storage::store::BenchStore> =
             storage as Arc<dyn swage_storage::store::BenchStore>;
-        let (broadcast, _) = tokio::sync::broadcast::channel(16);
-        AppState {
-            storage: storage_arc.clone(),
+        AppState::new(
+            storage_arc,
             bench_store,
-            provider,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast,
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        }
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
     }
 
     /// Build an AppState with a pre-inserted session.
@@ -1779,47 +1779,23 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 metadata: None,
+                selected_model_id: None,
                 active_workspace_attachment_id: None,
             },
         );
 
-        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let storage_arc: Arc<dyn swage_storage::store::Storage> =
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
         let bench_store: Arc<dyn swage_storage::store::BenchStore> =
             storage as Arc<dyn swage_storage::store::BenchStore>;
-        let (broadcast, _) = tokio::sync::broadcast::channel(16);
-        let state = AppState {
-            storage: storage_arc.clone(),
+        let state = AppState::new(
+            storage_arc,
             bench_store,
-            provider,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast,
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(Arc::clone(&storage_arc))),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
 
         (state, session_id)
     }

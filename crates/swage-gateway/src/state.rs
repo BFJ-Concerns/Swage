@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -9,11 +9,12 @@ use std::{
 use chrono::{DateTime, Utc};
 
 use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_agent::ApprovalDecision;
-use swage_config::ResolvedConfig;
+use swage_config::{CommunicationConfig, ResolvedConfig};
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_storage::{
@@ -114,6 +115,20 @@ pub struct AppState {
     pub restart_required: Arc<AtomicBool>,
     /// Whether this process can restart itself via the desktop/runtime wrapper.
     pub managed_gateway: bool,
+    /// Hot-swapped runtime config used by new turns and settings reads.
+    pub runtime_config: Arc<RwLock<ResolvedConfig>>,
+    /// Hot-swapped provider catalogue used by new turns.
+    pub runtime_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
+    /// Hot-swapped base tool dispatcher used to build new turn dispatchers.
+    pub runtime_tool_dispatcher: Arc<RwLock<Arc<ToolDispatcher>>>,
+    /// Reschedulable inter-agent message expiry task.
+    agent_message_expiry: Arc<Mutex<Option<AgentMessageExpiryRuntime>>>,
+}
+
+struct AgentMessageExpiryRuntime {
+    communication: CommunicationConfig,
+    shutdown: CancellationToken,
+    _handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,17 +148,18 @@ impl AppState {
         let (broadcast, _) = broadcast::channel(16);
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
+        let tool_dispatcher = Arc::new(tool_dispatcher);
         Self {
             storage: storage.clone(),
             bench_store,
-            provider,
+            provider: provider.clone(),
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
             )),
-            config,
+            config: config.clone(),
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
-            tool_dispatcher: Arc::new(tool_dispatcher),
+            tool_dispatcher: tool_dispatcher.clone(),
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
@@ -161,15 +177,131 @@ impl AppState {
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            runtime_config: Arc::new(RwLock::new(config)),
+            runtime_provider: Arc::new(RwLock::new(provider)),
+            runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
+            agent_message_expiry: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn mark_restart_required(&self) {
-        self.restart_required.store(true, Ordering::SeqCst);
+    pub fn clear_restart_required(&self) {
+        self.restart_required.store(false, Ordering::SeqCst);
     }
 
     pub fn restart_required(&self) -> bool {
         self.restart_required.load(Ordering::SeqCst)
+    }
+
+    pub fn active_config(&self) -> ResolvedConfig {
+        self.runtime_config
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn active_provider(&self) -> Arc<dyn LlmProvider> {
+        self.runtime_provider
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn active_tool_dispatcher(&self) -> Arc<ToolDispatcher> {
+        self.runtime_tool_dispatcher
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn replace_runtime(
+        &self,
+        config: ResolvedConfig,
+        provider: Arc<dyn LlmProvider>,
+        tool_dispatcher: ToolDispatcher,
+    ) {
+        let previous_communication = self.active_config().communication;
+        let next_communication = config.communication.clone();
+        *self
+            .runtime_config
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = config;
+        *self
+            .runtime_provider
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = provider;
+        *self
+            .runtime_tool_dispatcher
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::new(tool_dispatcher);
+        self.reschedule_agent_message_expiry_if_needed(previous_communication, next_communication);
+        self.clear_restart_required();
+    }
+
+    pub fn start_agent_message_expiry(&self) {
+        self.replace_agent_message_expiry(self.active_config().communication);
+    }
+
+    pub fn stop_agent_message_expiry(&self) {
+        if let Some(runtime) = self
+            .agent_message_expiry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            runtime.shutdown.cancel();
+        }
+    }
+
+    fn reschedule_agent_message_expiry_if_needed(
+        &self,
+        previous: CommunicationConfig,
+        next: CommunicationConfig,
+    ) {
+        if previous == next {
+            return;
+        }
+        let should_reschedule = self
+            .agent_message_expiry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|runtime| runtime.communication != next);
+        if should_reschedule {
+            self.replace_agent_message_expiry(next);
+        }
+    }
+
+    fn replace_agent_message_expiry(&self, communication: CommunicationConfig) {
+        let ttl = std::time::Duration::from_secs(communication.message_ttl_secs);
+        let interval = std::time::Duration::from_secs(communication.expiry_interval_secs);
+        let shutdown = CancellationToken::new();
+        let handle = swage_agent::expiry::spawn_expiry_task_until_cancelled(
+            self.storage.clone(),
+            ttl,
+            interval,
+            shutdown.clone(),
+        );
+        let previous = self
+            .agent_message_expiry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(AgentMessageExpiryRuntime {
+                communication,
+                shutdown,
+                _handle: handle,
+            });
+        if let Some(previous) = previous {
+            previous.shutdown.cancel();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_agent_message_expiry_communication(&self) -> Option<CommunicationConfig> {
+        self.agent_message_expiry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.communication.clone())
     }
 }
 
@@ -219,7 +351,6 @@ impl ApprovalGrantKey {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use swage_agent::approval::ApprovalDecisionValue;
@@ -229,36 +360,14 @@ mod tests {
 
     fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        let (broadcast, _) = tokio::sync::broadcast::channel(16);
-        AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider: Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
-            voice_provider: Arc::new(UnsupportedVoiceProvider::new(
-                "voice is unavailable for the configured runtime",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
-            active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast,
-            shutdown_signal: CancellationToken::new(),
-            approval_channels: Arc::new(Mutex::new(HashMap::new())),
-            session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
-            hook_registry: None,
-            channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
-            presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
-            execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
-            pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
-            secret_manager: Arc::new(SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        }
+        AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
     }
 
     #[test]

@@ -17,7 +17,7 @@ export interface ConversationStore {
   // benchId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
   // threading benchId through every intermediate component.
-  createConversation(benchId?: string): Promise<void>;
+  createConversation(benchId?: string, selectedModelId?: string | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   appendOptimisticUserMessage(message: {
     content: string;
@@ -148,17 +148,18 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(benchId) {
+    async createConversation(benchId, selectedModelId) {
       if (!benchId) {
         throw new Error("benchId is required to create a conversation");
       }
 
-      const resp = await api.createConversation(benchId);
+      const resp = await api.createConversation(benchId, selectedModelId);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
         bench_id: resp.bench_id,
+        selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
         messages: [],
@@ -167,6 +168,7 @@ export function createConversationStore(): ConversationStore {
       // Build the summary for the list. The new conversation has no messages yet.
       const summary: ConversationSummary = {
         id: resp.id,
+        selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
         message_preview: null,

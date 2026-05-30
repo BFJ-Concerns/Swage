@@ -457,7 +457,7 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultBench.id);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultBench.id, undefined);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(

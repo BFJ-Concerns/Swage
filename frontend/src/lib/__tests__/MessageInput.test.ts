@@ -83,7 +83,7 @@ describe("MessageInput", () => {
       (document.querySelector(".action.send") as HTMLButtonElement).click();
     });
 
-    expect(store.startTurn).toHaveBeenCalledWith("Hello, Swage");
+    expect(store.startTurn).toHaveBeenCalledWith("Hello, Swage", null);
   });
 
   it("does not send whitespace-only input", () => {
@@ -113,7 +113,7 @@ describe("MessageInput", () => {
       );
     });
 
-    expect(store.startTurn).toHaveBeenCalledWith("Send via keyboard");
+    expect(store.startTurn).toHaveBeenCalledWith("Send via keyboard", null);
   });
 
   it("does not send on Shift+Enter", () => {

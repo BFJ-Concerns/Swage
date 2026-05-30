@@ -33,6 +33,12 @@ clippy:
 test:
     cargo run -p xtask -- test
 
+test-lib package *filter:
+    cargo run -p xtask -- test-lib {{ package }} {{ filter }}
+
+test-integration package target *filter:
+    cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
+
 ci:
     cargo run -p xtask -- ci
 

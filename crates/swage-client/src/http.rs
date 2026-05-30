@@ -576,6 +576,7 @@ impl GatewayClient {
 pub struct ConversationResponse {
     pub id: Uuid,
     pub bench_id: Uuid,
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
 }
@@ -584,6 +585,7 @@ pub struct ConversationResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConversationSummary {
     pub id: Uuid,
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     /// First few words of the most recent message, if any.
@@ -597,6 +599,7 @@ pub struct ConversationSummary {
 pub struct ConversationDetail {
     pub id: Uuid,
     pub bench_id: Uuid,
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub messages: Vec<MessageView>,
@@ -635,6 +638,12 @@ struct ConversationListEnvelope {
     conversations: Vec<ConversationSummary>,
 }
 
+#[derive(Debug, Serialize)]
+struct CreateConversationRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_model_id: Option<&'a str>,
+}
+
 // ---------------------------------------------------------------------------
 // Conversation CRUD methods on GatewayClient
 // ---------------------------------------------------------------------------
@@ -648,11 +657,22 @@ impl GatewayClient {
         &self,
         bench_id: Uuid,
     ) -> Result<ConversationResponse, ClientError> {
+        self.create_bench_conversation_with_model(bench_id, None)
+            .await
+    }
+
+    pub async fn create_bench_conversation_with_model(
+        &self,
+        bench_id: Uuid,
+        selected_model_id: Option<&str>,
+    ) -> Result<ConversationResponse, ClientError> {
         let url = format!("{}/api/benches/{bench_id}/sessions", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
+        let mut request = self.client.post(&url);
+        if selected_model_id.is_some() {
+            request = request.json(&CreateConversationRequest { selected_model_id });
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;
@@ -664,11 +684,20 @@ impl GatewayClient {
     ///
     /// Calls `POST /api/conversations`.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, ClientError> {
+        self.create_conversation_with_model(None).await
+    }
+
+    pub async fn create_conversation_with_model(
+        &self,
+        selected_model_id: Option<&str>,
+    ) -> Result<ConversationResponse, ClientError> {
         let url = format!("{}/api/conversations", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
+        let mut request = self.client.post(&url);
+        if selected_model_id.is_some() {
+            request = request.json(&CreateConversationRequest { selected_model_id });
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;

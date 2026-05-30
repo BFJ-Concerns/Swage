@@ -5,6 +5,8 @@ use swage_core::{CompletionRequest, CompletionResponse, FinishReason, SandboxErr
 use swage_sandbox::llm_handler::HostLlmHandler;
 use swage_sandbox::{FallbackSandbox, Sandbox, SandboxConfig};
 
+use crate::support::ProcessEnvGuard;
+
 fn test_llm_handler() -> HostLlmHandler {
     HostLlmHandler::new(|_req: CompletionRequest| async {
         Ok(CompletionResponse {
@@ -29,15 +31,14 @@ fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
 
 #[tokio::test]
 async fn fallback_sandbox_real_binary_strips_credentials_from_child_env() {
+    let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::tempdir().unwrap();
     let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
 
-    unsafe {
-        std::env::set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
-        std::env::set_var("OPENAI_API_KEY", "sk-test-host-key");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-host-key");
-        std::env::set_var("GOOGLE_API_KEY", "test-google-key");
-    }
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    env_guard.set_var("OPENAI_API_KEY", "sk-test-host-key");
+    env_guard.set_var("ANTHROPIC_API_KEY", "sk-ant-test-host-key");
+    env_guard.set_var("GOOGLE_API_KEY", "test-google-key");
 
     sandbox.spawn_agent().await.unwrap();
 
@@ -54,24 +55,16 @@ async fn fallback_sandbox_real_binary_strips_credentials_from_child_env() {
     }
 
     sandbox.shutdown().await.unwrap();
-
-    unsafe {
-        std::env::remove_var("SWAGE_SANDBOX_AGENT_BINARY");
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("GOOGLE_API_KEY");
-    }
 }
 
 #[tokio::test]
 async fn fallback_sandbox_real_binary_runs_workspace_tools() {
+    let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::tempdir().unwrap();
     std::fs::write(temp_dir.path().join("note.txt"), "hello from sandbox").unwrap();
     let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
 
-    unsafe {
-        std::env::set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
-    }
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
 
     sandbox.spawn_agent().await.unwrap();
 
@@ -110,20 +103,15 @@ async fn fallback_sandbox_real_binary_runs_workspace_tools() {
     );
 
     sandbox.shutdown().await.unwrap();
-
-    unsafe {
-        std::env::remove_var("SWAGE_SANDBOX_AGENT_BINARY");
-    }
 }
 
 #[tokio::test]
 async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
+    let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::tempdir().unwrap();
     let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
 
-    unsafe {
-        std::env::set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
-    }
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
 
     sandbox.spawn_agent().await.unwrap();
 
@@ -139,8 +127,4 @@ async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
     }
 
     sandbox.shutdown().await.unwrap();
-
-    unsafe {
-        std::env::remove_var("SWAGE_SANDBOX_AGENT_BINARY");
-    }
 }

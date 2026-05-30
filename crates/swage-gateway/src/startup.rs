@@ -5,7 +5,7 @@
 //! Consumed by both `--server-mode` (background daemon) and `--foreground`
 //! (inline execution).
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -106,16 +106,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5b: Start the inter-agent message expiry background task.
-    let expiry_handle = {
-        let interval = std::time::Duration::from_secs(config.communication.expiry_interval_secs);
-        swage_agent::expiry::spawn_expiry_task(
-            Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
-            message_ttl,
-            interval,
-        )
-    };
-
     // Step 6: Create provider clients from governed credential resolution.
     let startup_secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
@@ -142,6 +132,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
     );
     state.voice_provider = voice_provider;
+    state.start_agent_message_expiry();
     crate::execution_host::register_local_execution_host(&state).await;
     if let Err(error) = crate::execution_host::restore_registered_execution_hosts(&state).await {
         eprintln!("Failed to restore execution hosts: {error}");
@@ -210,7 +201,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // point where they stop.
     #[allow(clippy::disallowed_methods)]
     {
-        expiry_handle.abort();
+        state.stop_agent_message_expiry();
         scheduler_handle.abort();
         heartbeat_handle.abort();
         attachment_handle.abort();
@@ -419,7 +410,7 @@ fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
 }
 
 /// Build the tool dispatch pipeline with all built-in tools from configuration.
-fn build_tool_dispatcher(
+pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
@@ -531,15 +522,26 @@ fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
 }
 
 /// Create the LLM provider from resolved configuration.
-async fn create_provider(
+pub(crate) async fn create_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
 ) -> Arc<dyn swage_provider::LlmProvider> {
-    use swage_provider::ProviderConfig;
-    use swage_provider::builder::ProviderChainBuilder;
-    use swage_provider::retry::RetryConfig;
+    create_provider_with_retry(
+        config,
+        secret_manager,
+        swage_provider::retry::RetryConfig::default(),
+    )
+    .await
+}
 
-    let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
+async fn create_provider_with_retry(
+    config: &swage_config::ResolvedConfig,
+    secret_manager: &crate::secret::SecretManager,
+    retry: swage_provider::retry::RetryConfig,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    use swage_provider::ProviderConfig;
+
+    if default_provider_model(config).is_none() {
         tracing::warn!(
             "No default provider/model pair is configured. \
              Messaging will fail until configuration is fixed."
@@ -547,15 +549,38 @@ async fn create_provider(
         return Arc::new(swage_provider::UnsupportedLlmProvider::new(
             "no default provider/model pair is configured",
         ));
-    };
-    let provider_config =
-        match resolve_provider_config(provider_endpoint, model_endpoint, secret_manager).await {
+    }
+
+    let mut providers = Vec::new();
+    for model_id in ordered_runtime_model_ids(config) {
+        let Some(model_endpoint) = config.models.entries.get(&model_id) else {
+            continue;
+        };
+        let Some(provider_endpoint) = config.providers.entries.get(&model_endpoint.provider_id)
+        else {
+            tracing::warn!(
+                model_id,
+                provider_id = %model_endpoint.provider_id,
+                "Skipping model because its provider entry is missing"
+            );
+            continue;
+        };
+
+        let provider_config = match resolve_provider_config(
+            provider_endpoint,
+            model_endpoint,
+            secret_manager,
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
+                    model_id,
+                    provider_id = %model_endpoint.provider_id,
                     "Provider not fully configured: {e}. \
-                 The server will start, but messaging will fail \
-                 until the API key is set."
+                     The server will start, but this model will fail \
+                     until its API key is set."
                 );
                 ProviderConfig::keyless(
                     &model_endpoint.model_id,
@@ -563,32 +588,88 @@ async fn create_provider(
                 )
             }
         };
+        providers.push(concrete_provider(
+            provider_endpoint.protocol.clone(),
+            provider_config,
+        ));
+    }
 
-    let retry = RetryConfig::default();
+    if providers.is_empty() {
+        tracing::warn!(
+            "No usable provider/model pairs are configured. \
+             Messaging will fail until configuration is fixed."
+        );
+        return Arc::new(swage_provider::UnsupportedLlmProvider::new(
+            "no usable provider/model pairs are configured",
+        ));
+    }
 
-    let provider: Box<dyn swage_provider::LlmProvider> = match provider_endpoint.protocol {
-        swage_config::Protocol::Anthropic => ProviderChainBuilder::new()
-            .provider(swage_provider::anthropic::AnthropicProvider::from_config(
-                provider_config,
-            ))
-            .with_retry(retry)
-            .build(),
-        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => {
-            ProviderChainBuilder::new()
-                .provider(swage_provider::openai::OpenAiProvider::from_config(
-                    provider_config,
-                ))
-                .with_retry(retry)
-                .build()
-        }
-        swage_config::Protocol::Google => ProviderChainBuilder::new()
-            .provider(swage_provider::google::GoogleProvider::from_config(
-                provider_config,
-            ))
-            .with_retry(retry)
-            .build(),
+    build_provider_chain(providers, retry)
+}
+
+fn ordered_runtime_model_ids(config: &swage_config::ResolvedConfig) -> Vec<String> {
+    let mut ordered = Vec::new();
+    if !config.models.default.is_empty() {
+        ordered.push(config.models.default.clone());
+    }
+
+    let default_seen = ordered.first().cloned();
+    let remaining: BTreeSet<_> = config
+        .models
+        .entries
+        .keys()
+        .filter(|id| Some(id.as_str()) != default_seen.as_deref())
+        .cloned()
+        .collect();
+    ordered.extend(remaining);
+    ordered
+}
+
+fn concrete_provider(
+    protocol: swage_config::Protocol,
+    provider_config: swage_provider::ProviderConfig,
+) -> Box<dyn swage_provider::LlmProvider> {
+    match protocol {
+        swage_config::Protocol::Anthropic => Box::new(
+            swage_provider::anthropic::AnthropicProvider::from_config(provider_config),
+        ),
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Box::new(
+            swage_provider::openai::OpenAiProvider::from_config(provider_config),
+        ),
+        swage_config::Protocol::Google => Box::new(
+            swage_provider::google::GoogleProvider::from_config(provider_config),
+        ),
+    }
+}
+
+fn build_provider_chain(
+    providers: Vec<Box<dyn swage_provider::LlmProvider>>,
+    retry: swage_provider::retry::RetryConfig,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    use swage_provider::builder::ProviderChainBuilder;
+    use swage_provider::failover::FailoverConfig;
+
+    let mut providers = providers.into_iter();
+    let Some(first) = providers.next() else {
+        return Arc::new(swage_provider::UnsupportedLlmProvider::new(
+            "no usable provider/model pairs are configured",
+        ));
     };
 
+    let mut chain = ProviderChainBuilder::new()
+        .provider_boxed(first)
+        .with_retry(retry.clone());
+    let mut count = 1usize;
+    for provider in providers {
+        chain = chain.provider_boxed(provider).with_retry(retry.clone());
+        count += 1;
+    }
+
+    let provider = if count > 1 {
+        chain.with_failover(FailoverConfig::default()).build()
+    } else {
+        chain.build()
+    };
     Arc::from(provider)
 }
 
@@ -599,9 +680,16 @@ async fn create_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use swage_config::LogLevel;
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use swage_config::{
+        LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
+        ProviderEndpointConfig,
+    };
     use swage_storage::store::AuditStore;
+    use tokio::net::TcpListener;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -673,6 +761,232 @@ mod tests {
     #[test]
     fn select_log_override_falls_back_to_legacy_name() {
         assert_eq!(select_log_override(None, Some("warn")), Some("warn"));
+    }
+
+    #[test]
+    fn ordered_runtime_model_ids_keeps_default_first_then_sorts_the_rest() {
+        let mut config = swage_config::ResolvedConfig {
+            models: ModelCatalogConfig {
+                default: "primary".to_string(),
+                entries: [
+                    ("zeta".to_string(), model("provider", "zeta-model")),
+                    ("primary".to_string(), model("provider", "primary-model")),
+                    ("alpha".to_string(), model("provider", "alpha-model")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ordered_runtime_model_ids(&config),
+            vec!["primary", "alpha", "zeta"]
+        );
+
+        config.models.default = "missing".to_string();
+        assert_eq!(
+            ordered_runtime_model_ids(&config),
+            vec!["missing", "alpha", "primary", "zeta"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_provider_uses_configured_models_as_failover_candidates() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let secondary_calls = Arc::new(AtomicUsize::new(0));
+        let primary_base_url = spawn_openai_compatible_server(
+            Arc::clone(&primary_calls),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "primary unavailable",
+        )
+        .await;
+        let secondary_base_url = spawn_openai_compatible_server(
+            Arc::clone(&secondary_calls),
+            StatusCode::OK,
+            "secondary response",
+        )
+        .await;
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "primary".to_string(),
+                entries: [
+                    (
+                        "primary".to_string(),
+                        ProviderEndpointConfig {
+                            protocol: Protocol::OpenAi,
+                            api_key_secret_ref: None,
+                            api_key_env: None,
+                            base_url: Some(primary_base_url),
+                        },
+                    ),
+                    (
+                        "secondary".to_string(),
+                        ProviderEndpointConfig {
+                            protocol: Protocol::OpenAi,
+                            api_key_secret_ref: None,
+                            api_key_env: None,
+                            base_url: Some(secondary_base_url),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "primary-model".to_string(),
+                entries: [
+                    (
+                        "primary-model".to_string(),
+                        model("primary", "primary-wire"),
+                    ),
+                    (
+                        "secondary-model".to_string(),
+                        model("secondary", "secondary-wire"),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+        let retry = swage_provider::retry::RetryConfig {
+            max_retries: 0,
+            initial_backoff: std::time::Duration::ZERO,
+            max_backoff: std::time::Duration::ZERO,
+        };
+
+        let provider = create_provider_with_retry(&config, &secret_manager, retry).await;
+        let response = provider
+            .complete(swage_core::CompletionRequest {
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            })
+            .await
+            .expect("secondary provider should satisfy the request");
+
+        assert_eq!(provider.model_id(), "primary-wire");
+        assert_eq!(response.content, "secondary response");
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn create_provider_candidates_preserve_default_provider_as_primary() {
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "anthropic".to_string(),
+                entries: [
+                    (
+                        "openai".to_string(),
+                        ProviderEndpointConfig {
+                            protocol: Protocol::OpenAi,
+                            api_key_secret_ref: None,
+                            api_key_env: None,
+                            base_url: Some("http://localhost/openai".to_string()),
+                        },
+                    ),
+                    (
+                        "anthropic".to_string(),
+                        ProviderEndpointConfig {
+                            protocol: Protocol::Anthropic,
+                            api_key_secret_ref: None,
+                            api_key_env: None,
+                            base_url: Some("http://localhost/anthropic".to_string()),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "claude".to_string(),
+                entries: [
+                    ("gpt".to_string(), model("openai", "gpt-test")),
+                    ("claude".to_string(), model("anthropic", "claude-test")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        let ids = ordered_runtime_model_ids(&config);
+
+        assert_eq!(ids, vec!["claude", "gpt"]);
+    }
+
+    fn model(provider_id: &str, model_id: &str) -> ModelEndpointConfig {
+        ModelEndpointConfig {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+            aliases: vec![],
+            context_window: None,
+            generation_preset: None,
+        }
+    }
+
+    async fn spawn_openai_compatible_server(
+        calls: Arc<AtomicUsize>,
+        status: StatusCode,
+        content: &'static str,
+    ) -> String {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(_body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if status.is_success() {
+                        (
+                            status,
+                            Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 0,
+                                "model": "mock-model",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": content,
+                                    },
+                                    "finish_reason": "stop",
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 2,
+                                    "total_tokens": 3,
+                                },
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (status, content).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider");
+        let addr = listener.local_addr().expect("mock provider addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock provider");
+        });
+        format!("http://{addr}")
     }
 
     #[tokio::test]

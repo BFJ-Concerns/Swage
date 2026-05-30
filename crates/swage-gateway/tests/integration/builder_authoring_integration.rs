@@ -4,8 +4,6 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::path::Path;
 use std::sync::Arc;
 
@@ -28,7 +26,7 @@ use swage_storage::{
     store::{BenchStore, Storage},
 };
 
-static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 struct MockProvider;
 
@@ -134,16 +132,14 @@ async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-authoring.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let state = test_state(&db_path);
     let router = build_router(state);
@@ -369,22 +365,18 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
         "Adds durable builder-focused bench guidance."
     );
     assert_eq!(authored_skill["tools"], json!(["shell", "file_read"]));
-
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_extensions_are_not_trusted_until_builder_approves_import() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-governance.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(workspace.join(".swage/extensions/workspace-skill")).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     std::fs::write(
         workspace.join(".swage/extensions/workspace-skill/SKILL.md"),
@@ -520,20 +512,16 @@ Stay local until a builder approves import.
             .any(|skill| skill["name"] == "workspace-skill"),
         "approved workspace extension should activate through the managed config tree"
     );
-
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtime() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let db_path = temp.path().join("durable-authoring.db");
     std::fs::create_dir_all(&swage_home).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let router = build_router(test_state(&db_path));
     let (bench_status, bench_body) = post_json(
@@ -716,6 +704,4 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
             .any(|definition| definition["name"] == "triage-context"
                 && definition["config"]["timeout"] == 10)
     );
-
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 }

@@ -33,6 +33,8 @@ use crate::{
 pub struct ConversationResponse {
     pub id: Uuid,
     pub bench_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
 }
@@ -41,6 +43,8 @@ pub struct ConversationResponse {
 #[derive(Debug, Serialize)]
 pub struct ConversationSummary {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     /// Content of the most recent message in the conversation, if any.
@@ -54,6 +58,8 @@ pub struct ConversationSummary {
 pub struct ConversationDetail {
     pub id: Uuid,
     pub bench_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub messages: Vec<MessageView>,
@@ -151,9 +157,16 @@ impl ConversationService {
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, GatewayError> {
+        self.create_conversation_with_model(None).await
+    }
+
+    pub async fn create_conversation_with_model(
+        &self,
+        selected_model_id: Option<String>,
+    ) -> Result<ConversationResponse, GatewayError> {
         let bench = self.bench_store.get_or_create_default().await?;
         let active_workspace_attachment_id = self.default_workspace_for_bench(bench.id).await?;
-        let session = self
+        let mut session = self
             .storage
             .create_session(NewSession {
                 bench_id: bench.id,
@@ -162,6 +175,12 @@ impl ConversationService {
                 active_workspace_attachment_id,
             })
             .await?;
+        if let Some(selected_model_id) = normalise_selected_model_id(selected_model_id) {
+            session = self
+                .storage
+                .set_session_selected_model(session.id, Some(selected_model_id))
+                .await?;
+        }
 
         // Create the conversation's root thread. Additional branch threads may
         // be added later under the same session.
@@ -175,6 +194,7 @@ impl ConversationService {
         Ok(ConversationResponse {
             id: session.id,
             bench_id: session.bench_id,
+            selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
@@ -199,6 +219,7 @@ impl ConversationService {
 
             summaries.push(ConversationSummary {
                 id: session.id,
+                selected_model_id: session.selected_model_id,
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,
@@ -278,6 +299,7 @@ impl ConversationService {
         Ok(ConversationDetail {
             id: session.id,
             bench_id: session.bench_id,
+            selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
             messages: message_views,
@@ -312,6 +334,7 @@ impl ConversationService {
 
             summaries.push(ConversationSummary {
                 id: session.id,
+                selected_model_id: session.selected_model_id,
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,
@@ -329,6 +352,15 @@ impl ConversationService {
         &self,
         bench_id: Uuid,
     ) -> Result<ConversationResponse, GatewayError> {
+        self.create_session_in_bench_with_model(bench_id, None)
+            .await
+    }
+
+    pub async fn create_session_in_bench_with_model(
+        &self,
+        bench_id: Uuid,
+        selected_model_id: Option<String>,
+    ) -> Result<ConversationResponse, GatewayError> {
         // Verify the bench exists — return 404 rather than a FK constraint error.
         self.bench_store
             .get(bench_id)
@@ -336,7 +368,7 @@ impl ConversationService {
             .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
         let active_workspace_attachment_id = self.default_workspace_for_bench(bench_id).await?;
 
-        let session = self
+        let mut session = self
             .storage
             .create_session(NewSession {
                 bench_id,
@@ -345,6 +377,12 @@ impl ConversationService {
                 active_workspace_attachment_id,
             })
             .await?;
+        if let Some(selected_model_id) = normalise_selected_model_id(selected_model_id) {
+            session = self
+                .storage
+                .set_session_selected_model(session.id, Some(selected_model_id))
+                .await?;
+        }
 
         // Create the default thread for the new session.
         self.storage
@@ -357,6 +395,7 @@ impl ConversationService {
         Ok(ConversationResponse {
             id: session.id,
             bench_id: session.bench_id,
+            selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
@@ -1757,6 +1796,12 @@ fn thread_branch_to_response(branch: ThreadBranch) -> ConversationBranchResponse
         branched_from_message_id: branch.branched_from_message_id,
         created_at: branch.created_at,
     }
+}
+
+fn normalise_selected_model_id(selected_model_id: Option<String>) -> Option<String> {
+    selected_model_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 // ---------------------------------------------------------------------------

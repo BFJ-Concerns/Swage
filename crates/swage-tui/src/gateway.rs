@@ -243,6 +243,7 @@ impl ConnectionManager {
             .send(ClientEvent::SendMessage {
                 content,
                 thread_id: None,
+                selected_model_id: None,
             })
             .await
     }

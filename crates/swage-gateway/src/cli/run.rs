@@ -80,12 +80,15 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
     let url = resolve_gateway_url(args);
     let message = read_message(args).await?;
     let client = GatewayClient::new(&url);
-    let conversation = client.create_conversation().await?;
+    let conversation = client
+        .create_conversation_with_model(args.model.as_deref())
+        .await?;
     let mut ws = GatewayWebSocket::connect(&url, conversation.id).await?;
 
     ws.send(ClientEvent::SendMessage {
         content: message,
         thread_id: None,
+        selected_model_id: args.model.clone(),
     })
     .await?;
 
@@ -192,6 +195,7 @@ mod tests {
             audio_output: None,
             audio_mime_type: "audio/wav".into(),
             voice: None,
+            model: None,
             audio_format: "wav".into(),
             message: Some("hello".into()),
         };

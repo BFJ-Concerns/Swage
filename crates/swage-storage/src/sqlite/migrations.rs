@@ -84,6 +84,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS,
         ),
         ("039_bench_description", ADD_BENCH_DESCRIPTION),
+        ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
     ]
 }
 
@@ -891,6 +892,10 @@ const ADD_TURN_STRUCTURED_OUTPUT_COLUMN: &str = "
 /// Additive migration: opaque host-managed session metadata stored as JSON.
 const ADD_SESSION_METADATA_COLUMN: &str = "
     ALTER TABLE sessions ADD COLUMN metadata_json TEXT;
+";
+
+const ADD_SESSION_SELECTED_MODEL: &str = "
+    ALTER TABLE sessions ADD COLUMN selected_model_id TEXT;
 ";
 
 /// Scheduled jobs and their recorded executions.

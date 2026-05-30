@@ -18,15 +18,17 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
     let bench_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
     let metadata_json: Option<String> = row.get(3)?;
-    let active_workspace_attachment_id: Option<String> = row.get(4)?;
-    let created: String = row.get(5)?;
-    let updated: String = row.get(6)?;
+    let selected_model_id: Option<String> = row.get(4)?;
+    let active_workspace_attachment_id: Option<String> = row.get(5)?;
+    let created: String = row.get(6)?;
+    let updated: String = row.get(7)?;
 
     Ok(Session {
         id: parse_uuid(&id)?,
         bench_id: parse_uuid(&bench_id)?,
         agent_id,
         metadata: parse_metadata(metadata_json.as_deref())?,
+        selected_model_id,
         active_workspace_attachment_id: active_workspace_attachment_id
             .as_deref()
             .map(parse_uuid)
@@ -109,6 +111,7 @@ impl SessionStore for SqliteStorage {
                 bench_id: session.bench_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
+                selected_model_id: None,
                 active_workspace_attachment_id: session.active_workspace_attachment_id,
                 created_at: now,
                 updated_at: now,
@@ -120,7 +123,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 row_to_session,
@@ -133,7 +136,7 @@ impl SessionStore for SqliteStorage {
     async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE bench_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -150,7 +153,7 @@ impl SessionStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE agent_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -217,6 +220,36 @@ impl SessionStore for SqliteStorage {
             })
     }
 
+    async fn set_session_selected_model(
+        &self,
+        id: Uuid,
+        selected_model_id: Option<String>,
+    ) -> Result<Session, StorageError> {
+        let affected = self
+            .with_conn(move |conn| {
+                let now_str = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE sessions
+                     SET selected_model_id = ?2, updated_at = ?3
+                     WHERE id = ?1",
+                    params![id.to_string(), selected_model_id, now_str],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            });
+        }
+        self.get_session(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })
+    }
+
     async fn find_session_by_channel_origin(
         &self,
         integration: &str,
@@ -228,7 +261,7 @@ impl SessionStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, bench_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, bench_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions
                  WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
                    AND json_extract(metadata_json, '$.channel_origin.account') = ?2

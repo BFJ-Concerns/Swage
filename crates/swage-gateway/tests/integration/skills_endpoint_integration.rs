@@ -3,8 +3,6 @@
     clippy::unwrap_used,
     clippy::disallowed_methods
 )]
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 //! Integration tests for GET /api/skills — skill listing with hierarchy resolution.
 
 use std::sync::Arc;
@@ -20,9 +18,7 @@ use swage_gateway::state::AppState;
 use swage_storage::store::BenchStore;
 use swage_storage::{SqliteStorage, model::NewBench};
 
-// Setting SWAGE_HOME is process-level; concurrent tests that mutate it will
-// race. Serialise all env-var-dependent tests with this mutex.
-static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 // ---------------------------------------------------------------------------
 // Stub provider — skills tests don't exercise LLM streaming
@@ -156,13 +152,9 @@ async fn known_bench_fresh_config_root_returns_empty() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("fresh-swage-root");
-    // Serialise env-var mutations: SWAGE_HOME is process-level and would race
-    // if tests ran concurrently without coordination.
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Safety: test-only env mutation; scoped by this test's execution.
-    unsafe { std::env::set_var("SWAGE_HOME", &root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(&root);
     let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK);
     let skills = body["skills"]
@@ -194,10 +186,9 @@ async fn global_skills_appear_in_listing() {
         .await
         .unwrap();
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { std::env::set_var("SWAGE_HOME", root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -238,10 +229,9 @@ async fn bench_skills_appear_in_listing() {
         &["read_file"],
     );
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { std::env::set_var("SWAGE_HOME", root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -282,14 +272,13 @@ async fn agent_skills_have_always_active_true() {
         .join("gateway");
     create_skill(&agent_dir, "persona", "Core personality and behaviour", &[]);
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
     let (status, body) = get(
         &router,
         &format!("/api/skills?bench_id={}&agent_id=gateway", bench.id),
     )
     .await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -334,10 +323,9 @@ async fn bench_skill_shadows_global() {
         &["read_file", "search"],
     );
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?bench_id={}", bench.id)).await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -390,14 +378,13 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
         .join("gw");
     create_skill(&agent_dir, "persona", "Agent persona skill", &[]);
 
-    let _guard = SWAGE_HOME_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", root) };
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
     let (status, body) = get(
         &router,
         &format!("/api/skills?bench_id={}&agent_id=gw", bench.id),
     )
     .await;
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();

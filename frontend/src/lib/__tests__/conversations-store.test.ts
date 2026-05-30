@@ -438,6 +438,6 @@ describe("createConversation (bench-scoped)", () => {
 
     await store.createConversation("proj-1");
 
-    expect(api.createConversation).toHaveBeenCalledWith("proj-1");
+    expect(api.createConversation).toHaveBeenCalledWith("proj-1", undefined);
   });
 });

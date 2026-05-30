@@ -123,7 +123,7 @@ describe("startTurn", () => {
 
     store.startTurn("Tell me about Svelte");
 
-    expect(conn.sendMessage).toHaveBeenCalledWith("Tell me about Svelte");
+    expect(conn.sendMessage).toHaveBeenCalledWith("Tell me about Svelte", undefined);
   });
 
   it("does not throw when no dependencies are injected", () => {

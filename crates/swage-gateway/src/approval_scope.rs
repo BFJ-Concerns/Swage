@@ -90,7 +90,7 @@ pub(crate) async fn apply_approval_scope(
                             access: None,
                         });
                     crate::settings::persist_permanent_tool_approval_for_bench(
-                        state, &config, &bench, tool_name,
+                        &config, &bench, tool_name,
                     )
                     .await
                 }

@@ -250,6 +250,8 @@ pub enum ClientEvent {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_model_id: Option<String>,
     },
     /// Cancel the currently active turn.
     Cancel {},
@@ -854,6 +856,7 @@ mod tests {
         let event = ClientEvent::SendMessage {
             content: "hello".to_string(),
             thread_id: None,
+            selected_model_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

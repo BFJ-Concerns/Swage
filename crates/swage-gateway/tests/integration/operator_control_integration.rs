@@ -4,17 +4,13 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::Stream;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -36,18 +32,15 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, MANAGED_SECRET_KEY_ENV, NewApprovalRequest, NewDeliveryRecord, NewTurn,
-    SqliteStorage, TurnState,
+    ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
     store::{BenchStore, Storage},
 };
 
-static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
-fn with_secret_env() -> MutexGuard<'static, ()> {
-    let guard = SECRET_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([17_u8; 32]));
-    }
+fn with_secret_env() -> ProcessEnvGuard {
+    let mut guard = ProcessEnvGuard::new();
+    guard.set_managed_secret_key(17);
     guard
 }
 

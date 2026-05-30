@@ -4,8 +4,6 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -29,7 +27,7 @@ use swage_storage::{
     store::{BenchStore, Storage},
 };
 
-static SWAGE_HOME_LOCK: Mutex<()> = Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 struct MockStreamingProvider {
     responses: Mutex<VecDeque<Vec<StreamChunk>>>,
@@ -127,14 +125,12 @@ async fn request_json(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn team_authoring_persists_agents_and_tasks_and_drives_topology_runs() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let db_path = temp.path().join("agent-task-authoring.db");
     std::fs::create_dir_all(&swage_home).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockStreamingProvider::new(vec![vec![
         StreamChunk::Delta {

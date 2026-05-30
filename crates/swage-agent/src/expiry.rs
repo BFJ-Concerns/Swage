@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use swage_storage::Storage;
+use tokio_util::sync::CancellationToken;
 
 /// Default message TTL: 24 hours.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -37,6 +38,16 @@ pub fn spawn_expiry_task(
     ttl: Duration,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_expiry_task_until_cancelled(storage, ttl, interval, CancellationToken::new())
+}
+
+/// Spawn an expiry task that stops cooperatively when `shutdown` is cancelled.
+pub fn spawn_expiry_task_until_cancelled(
+    storage: Arc<dyn Storage>,
+    ttl: Duration,
+    interval: Duration,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip missed ticks rather than bursting — a background cleanup task
@@ -44,7 +55,10 @@ pub fn spawn_expiry_task(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
 
             match expire_stale_messages(&storage, ttl).await {
                 Ok(0) => {} // Nothing to expire — common case, no log noise.

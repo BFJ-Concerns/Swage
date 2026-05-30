@@ -713,12 +713,13 @@ async fn execute_agent_node(
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
     let assembly_runner =
         swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
+    let provider = state.active_provider();
     let output = swage_context::assembly::assemble(
         &elements,
         &config.context,
         &tokeniser,
         &search_level_refs,
-        state.provider.as_ref(),
+        provider.as_ref(),
         Some(&assembly_runner),
     )
     .await;
@@ -757,7 +758,7 @@ async fn execute_agent_node(
     let dispatcher = dispatcher_build.dispatcher;
     let mut agent_builder = AgentBuilder::new()
         .config(agent_config)
-        .provider(state.provider.clone())
+        .provider(state.active_provider())
         .storage(state.storage.clone())
         .tool_dispatcher(dispatcher)
         .approval_registrar(crate::turn::build_approval_registrar(
@@ -860,7 +861,7 @@ async fn execute_agent_node(
                 .update_structured_output(turn_id, output)
                 .await?;
         }
-        if let Some(cost) = state.config.pricing.compute_cost(
+        if let Some(cost) = state.active_config().pricing.compute_cost(
             config.default_model_id(),
             outbound.input_tokens,
             outbound.output_tokens,
@@ -949,7 +950,7 @@ fn load_topology_node_config(
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
     let Ok(root) = swage_config::discovery::resolve_root() else {
-        return Ok(state.config.clone());
+        return Ok(state.active_config());
     };
 
     let bench_dir = root.join("benches").join(&bench.slug);
@@ -961,7 +962,7 @@ fn load_topology_node_config(
         || agent_dir.join("config.toml").exists();
 
     if !has_filesystem_config {
-        return Ok(state.config.clone());
+        return Ok(state.active_config());
     }
 
     swage_config::load_resolved_config_from_with_team(
@@ -1202,10 +1203,7 @@ fn broadcast_topology_event(state: &AppState, event: ServerEvent) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
-
-    use tokio::sync::Mutex;
 
     use async_trait::async_trait;
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -1215,7 +1213,6 @@ mod tests {
     use swage_topology::TopologyNodeKind;
 
     use super::*;
-    use crate::lifecycle::ActivityTracker;
     use crate::turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider};
 
     fn team_agents(ids: &[&str]) -> Vec<swage_storage::model::TeamAgentDefinition> {
@@ -1248,40 +1245,14 @@ mod tests {
 
     fn make_state(provider: Arc<dyn swage_provider::LlmProvider>) -> (AppState, Arc<MockStorage>) {
         let storage = Arc::new(MockStorage::new());
-        let (broadcast, _) = tokio::sync::broadcast::channel(16);
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
             provider,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(ActivityTracker::new()),
-            broadcast,
-            shutdown_signal: CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
         (state, storage)
     }
 

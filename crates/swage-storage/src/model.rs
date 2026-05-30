@@ -398,6 +398,8 @@ pub struct Session {
     /// This stays outside prompt and WebSocket transport surfaces unless a
     /// caller explicitly reads it through storage or a higher-level API.
     pub metadata: Option<serde_json::Value>,
+    /// Optional configured model key selected for this conversation.
+    pub selected_model_id: Option<String>,
     pub active_workspace_attachment_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -2765,6 +2767,7 @@ mod tests {
             bench_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
+            selected_model_id: None,
             active_workspace_attachment_id: None,
             created_at: now,
             updated_at: now,

@@ -4,18 +4,14 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -36,9 +32,11 @@ use swage_gateway::{
     state::AppState,
 };
 use swage_provider::LlmProvider;
-use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
+use swage_storage::SqliteStorage;
 use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
+
+use crate::support::ProcessEnvGuard;
 
 struct ChannelProvider {
     receivers:
@@ -112,13 +110,9 @@ impl Tool for HostIdentityTool {
     }
 }
 
-static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn with_secret_env() -> MutexGuard<'static, ()> {
-    let guard = SECRET_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([15_u8; 32]));
-    }
+fn with_secret_env() -> ProcessEnvGuard {
+    let mut guard = ProcessEnvGuard::new();
+    guard.set_managed_secret_key(15);
     guard
 }
 

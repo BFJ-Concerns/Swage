@@ -96,6 +96,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub voice: Option<String>,
 
+    /// Configured model key to use for this conversation.
+    #[arg(long)]
+    pub model: Option<String>,
+
     /// Output format for synthesized speech.
     #[arg(long, default_value = "wav")]
     pub audio_format: String,

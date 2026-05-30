@@ -18,6 +18,9 @@ const FRONTEND_DIST_INDEX: &str = "frontend/dist/index.html";
 const FRONTEND_DEPS_STAMP: &str = "target/xtask/frontend-deps.sha256";
 const FRONTEND_RELEASE_STAMP: &str = "target/xtask/frontend-release.sha256";
 const DESKTOP_DEPS_STAMP: &str = "target/xtask/desktop-deps.sha256";
+const TARGET_MAX_SIZE_MB_ARG: &str = "50000";
+const TARGET_MAX_SIZE_BYTES: u64 = 50_000 * 1024 * 1024;
+const DEBUG_INCREMENTAL_DIR: &str = "target/debug/incremental";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -46,8 +49,10 @@ fn run() -> Result<()> {
         Some("check") => check(),
         Some("clippy") => clippy(),
         Some("test") => test(),
+        Some("test-lib") => test_lib(args),
+        Some("test-integration") => test_integration(args),
         Some("ci") => ci(),
-        Some("sweep") => cargo_sweep(),
+        Some("sweep") => run_sweep(),
         Some("release" | "build") => {
             let options = ReleaseOptions::parse(args)?;
             release(&options)
@@ -309,6 +314,10 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
+    run_with_final_sweep("test", run_test_suite)
+}
+
+fn run_test_suite() -> Result<()> {
     setup()?;
     run_command(
         "Running Rust tests",
@@ -327,12 +336,72 @@ fn test() -> Result<()> {
     Ok(())
 }
 
+fn test_lib(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let package = args
+        .next()
+        .ok_or("usage: cargo run -p xtask -- test-lib <package> [filter...]")?;
+    let filters: Vec<String> = args.collect();
+    let mut command = Command::new("cargo");
+    command
+        .arg("test")
+        .arg("-p")
+        .arg(&package)
+        .arg("--lib")
+        .args(&filters);
+    run_command(
+        &format!("Running {package} library tests{}", filter_label(&filters)),
+        command,
+    )
+}
+
+fn test_integration(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let package = args.next().ok_or(
+        "usage: cargo run -p xtask -- test-integration <package> <test-target> [filter...]",
+    )?;
+    let target = args.next().ok_or(
+        "usage: cargo run -p xtask -- test-integration <package> <test-target> [filter...]",
+    )?;
+    let filters: Vec<String> = args.collect();
+    let mut command = Command::new("cargo");
+    command
+        .arg("test")
+        .arg("-p")
+        .arg(&package)
+        .arg("--test")
+        .arg(&target)
+        .args(&filters);
+    run_command(
+        &format!(
+            "Running {package} integration test target {target}{}",
+            filter_label(&filters)
+        ),
+        command,
+    )
+}
+
+fn filter_label(filters: &[String]) -> String {
+    if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" matching {}", filters.join(" "))
+    }
+}
+
 fn ci() -> Result<()> {
-    fmt_check()?;
-    check()?;
-    clippy()?;
-    test()?;
-    Ok(())
+    run_with_final_sweep("ci", || {
+        fmt_check()?;
+        check()?;
+        clippy()?;
+        run_test_suite()
+    })
+}
+
+fn run_sweep() -> Result<()> {
+    let before = ArtifactBudgetSnapshot::capture()?;
+    let result = cargo_sweep();
+    let after = ArtifactBudgetSnapshot::capture()?;
+    print_artifact_budget_summary("sweep", &before, &after);
+    result
 }
 
 fn release(options: &ReleaseOptions) -> Result<()> {
@@ -660,9 +729,144 @@ fn cargo_sweep() -> Result<()> {
     }
 
     run_command(
-        "Capping target/ at 50 GiB",
-        command("cargo", ["sweep", "--maxsize", "50000"]),
-    )
+        "Capping target/ at 50 GB",
+        command("cargo", ["sweep", "--maxsize", TARGET_MAX_SIZE_MB_ARG]),
+    )?;
+    prune_debug_incremental_if_needed()
+}
+
+fn prune_debug_incremental_if_needed() -> Result<()> {
+    if allocated_disk_usage(Path::new("target"))? <= TARGET_MAX_SIZE_BYTES {
+        return Ok(());
+    }
+
+    let incremental_dir = Path::new(DEBUG_INCREMENTAL_DIR);
+    if !incremental_dir.is_dir() {
+        return Ok(());
+    }
+
+    println!(
+        "==> Removing {DEBUG_INCREMENTAL_DIR} because target/ is still above 50 GB after cargo sweep"
+    );
+    fs::remove_dir_all(incremental_dir)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactBudgetSnapshot {
+    target: u64,
+    debug_deps: u64,
+    debug_incremental: u64,
+}
+
+impl ArtifactBudgetSnapshot {
+    fn capture() -> io::Result<Self> {
+        Ok(Self {
+            target: allocated_disk_usage(Path::new("target"))?,
+            debug_deps: allocated_disk_usage(Path::new("target/debug/deps"))?,
+            debug_incremental: allocated_disk_usage(Path::new(DEBUG_INCREMENTAL_DIR))?,
+        })
+    }
+}
+
+fn print_artifact_budget_summary(
+    label: &str,
+    before: &ArtifactBudgetSnapshot,
+    after: &ArtifactBudgetSnapshot,
+) {
+    let cleaned = before.target.saturating_sub(after.target);
+    let growth = after.target.saturating_sub(before.target);
+
+    println!("==> Build artifact budget after {label}");
+    println!(
+        "    target/debug/deps:        {}",
+        format_bytes(after.debug_deps)
+    );
+    println!(
+        "    target/debug/incremental: {}",
+        format_bytes(after.debug_incremental)
+    );
+    println!(
+        "    target total:             {}",
+        format_bytes(after.target)
+    );
+    if cleaned > 0 {
+        println!("    cleaned:                  {}", format_bytes(cleaned));
+    } else if growth > 0 {
+        println!(
+            "    cleaned:                  0 B (grew by {})",
+            format_bytes(growth)
+        );
+    } else {
+        println!("    cleaned:                  0 B");
+    }
+}
+
+fn allocated_disk_usage(path: &Path) -> io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let metadata = fs::symlink_metadata(path)?;
+    let mut size = allocated_size(&metadata);
+    if !metadata.file_type().is_dir() {
+        return Ok(size);
+    }
+
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        size += allocated_disk_usage(&path)?;
+    }
+    Ok(size)
+}
+
+fn run_with_final_sweep(label: &str, action: impl FnOnce() -> Result<()>) -> Result<()> {
+    let before = ArtifactBudgetSnapshot::capture()?;
+    let action_result = action();
+
+    // Rust test links can leave large temporary artefacts even when the command
+    // fails, so the cleanup is intentionally a final step rather than a success
+    // path afterthought.
+    let sweep_result = cargo_sweep();
+    let after = ArtifactBudgetSnapshot::capture()?;
+    print_artifact_budget_summary(label, &before, &after);
+
+    match (action_result, sweep_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(action_error), Err(sweep_error)) => Err(format!(
+            "{label} failed: {action_error}; final cargo sweep also failed: {sweep_error}"
+        )
+        .into()),
+    }
+}
+
+#[cfg(unix)]
+fn allocated_size(metadata: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.blocks() * 512
+}
+
+#[cfg(not(unix))]
+fn allocated_size(metadata: &fs::Metadata) -> u64 {
+    metadata.len()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn ensure_file(path: &str, message: &str) -> Result<()> {
@@ -813,6 +1017,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  ci\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  ci\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }

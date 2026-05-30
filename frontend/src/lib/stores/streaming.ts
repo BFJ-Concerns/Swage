@@ -49,7 +49,7 @@ export interface StreamingStore {
   // matching the Riso workup view 03.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
-  startTurn(content: string): void;
+  startTurn(content: string, selectedModelId?: string | null): void;
   cancelTurn(): void;
 }
 
@@ -77,7 +77,7 @@ export interface StreamingStoreOptions {
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
-    sendMessage(content: string): void;
+    sendMessage(content: string, selectedModelId?: string | null): void;
     cancelTurn(): void;
   };
 }
@@ -409,7 +409,7 @@ export function createStreamingStore(
       }
     },
 
-    startTurn(content: string): void {
+    startTurn(content: string, selectedModelId?: string | null): void {
       // Clear state from any previous turn.
       streamedContentStore.set("");
       turnErrorStore.set(null);
@@ -428,7 +428,7 @@ export function createStreamingStore(
       });
 
       // Dispatch the outgoing message over the WebSocket.
-      options?.connectionStore?.sendMessage(content);
+      options?.connectionStore?.sendMessage(content, selectedModelId);
     },
 
     cancelTurn(): void {

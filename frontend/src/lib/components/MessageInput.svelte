@@ -8,12 +8,20 @@
   interface Props {
     // Injected by App.svelte once all stores are wired.
     store?: StreamingStore;
+    selectedModelId?: string | null;
+    modelOptions?: string[];
   }
 
-  let { store }: Props = $props();
+  let { store, selectedModelId = null, modelOptions = [] }: Props = $props();
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
+  let selectedModel = $state("");
+
+  $effect(() => {
+    const fallback = selectedModelId ?? modelOptions[0] ?? "";
+    if (!selectedModel || !modelOptions.includes(selectedModel)) selectedModel = fallback;
+  });
 
   // Direct reference to the textarea DOM node for height adjustment and refocus.
   let textarea: HTMLTextAreaElement | undefined = $state(undefined);
@@ -35,7 +43,7 @@
     // Guard: no-op when there is nothing to send or a turn is in progress.
     if (!store || !trimmed || store.isStreaming) return;
 
-    store.startTurn(trimmed);
+    store.startTurn(trimmed, selectedModel || null);
 
     // Clear draft and return focus to the textarea so the user can keep typing.
     content = "";
@@ -58,6 +66,18 @@
 -->
 <div class="message-input" class:disabled={!store}>
   <span class="input-label" aria-hidden="true">Write</span>
+  {#if modelOptions.length > 0}
+    <select
+      class="model-select"
+      bind:value={selectedModel}
+      aria-label="Model"
+      disabled={!store || store?.isStreaming}
+    >
+      {#each modelOptions as modelId (modelId)}
+        <option value={modelId}>{modelId}</option>
+      {/each}
+    </select>
+  {/if}
   <textarea
     bind:this={textarea}
     bind:value={content}
@@ -125,6 +145,18 @@
     line-height: 1;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+
+  .model-select {
+    align-self: stretch;
+    max-width: min(34vw, 18rem);
+    border: 0;
+    border-right: 2px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.78rem;
+    padding: 0 0.55rem;
   }
 
   textarea {

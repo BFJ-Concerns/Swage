@@ -108,6 +108,11 @@ pub trait SessionStore: Send + Sync {
         id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<Session, StorageError>;
+    async fn set_session_selected_model(
+        &self,
+        id: Uuid,
+        selected_model_id: Option<String>,
+    ) -> Result<Session, StorageError>;
     /// Find a session whose metadata records the given external channel origin.
     async fn find_session_by_channel_origin(
         &self,
@@ -1008,6 +1013,13 @@ mod tests {
             &self,
             _: Uuid,
             _: Option<Uuid>,
+        ) -> Result<Session, StorageError> {
+            unimplemented!()
+        }
+        async fn set_session_selected_model(
+            &self,
+            _: Uuid,
+            _: Option<String>,
         ) -> Result<Session, StorageError> {
             unimplemented!()
         }

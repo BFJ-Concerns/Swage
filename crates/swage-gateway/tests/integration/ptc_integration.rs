@@ -90,8 +90,9 @@ impl LlmProvider for MultiRoundProvider {
 /// the mock `shell` tool below.
 async fn start_ptc_test_server(
     provider: impl LlmProvider + 'static,
-) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+) -> (Router, SocketAddr, Arc<SqliteStorage>, tempfile::TempDir) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let workspace = tempfile::tempdir().expect("PTC workspace should be created");
 
     // Build the sub-dispatcher: echo and shell, but NOT python_execute.
     // This prevents recursion when Python code dispatches sub-tool calls.
@@ -135,16 +136,20 @@ async fn start_ptc_test_server(
         .get_or_create_default()
         .await
         .expect("default bench should be seeded for PTC harness");
-    storage
+    let workspace_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             bench_id: default_bench.id,
             label: "ptc-test-workspace".to_string(),
-            path: "/tmp/ptc".to_string(),
+            path: workspace.path().to_string_lossy().into_owned(),
             permissions: vec!["read".to_string(), "write".to_string()],
             is_trusted: true,
         })
         .await
         .expect("trusted workspace attachment should attach to default bench");
+    storage
+        .set_bench_default_workspace(default_bench.id, Some(workspace_attachment.id))
+        .await
+        .expect("PTC workspace should be the default active workspace");
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
@@ -163,7 +168,7 @@ async fn start_ptc_test_server(
         axum::serve(listener, serve_router).await.unwrap();
     });
 
-    (router, addr, storage)
+    (router, addr, storage, workspace)
 }
 
 /// Mock tool echoing its "text" argument — sub-tool target in PTC tests.
@@ -350,7 +355,7 @@ print(f"{result1.strip()} {result2.strip()}")
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
-    let (_, addr, _) = start_ptc_test_server(provider).await;
+    let (_, addr, _, _workspace) = start_ptc_test_server(provider).await;
 
     // Create conversation + open WebSocket.
     let client = reqwest::Client::new();
@@ -446,7 +451,7 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
-    let (_, addr, _) = start_ptc_test_server(provider).await;
+    let (_, addr, _, _workspace) = start_ptc_test_server(provider).await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -552,7 +557,7 @@ x = 1 / 0  # ZeroDivisionError
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
-    let (_, addr, _) = start_ptc_test_server(provider).await;
+    let (_, addr, _, _workspace) = start_ptc_test_server(provider).await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -641,7 +646,7 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
     ];
 
     let provider = MultiRoundProvider::new(vec![round_1, round_2]);
-    let (router, addr, _) = start_ptc_test_server(provider).await;
+    let (router, addr, _, _workspace) = start_ptc_test_server(provider).await;
 
     let client = reqwest::Client::new();
     let resp = client

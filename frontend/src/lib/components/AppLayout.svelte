@@ -67,6 +67,8 @@
     displayPreferences?: DisplayPreferences;
     onSelectTheme?: (mode: ThemeMode) => void;
     activeModelContextWindow?: number | null;
+    modelOptions?: string[];
+    defaultModelId?: string | null;
     route?: Route;
     onNavigate?: (path: string) => void;
   }
@@ -91,6 +93,8 @@
     displayPreferences,
     onSelectTheme,
     activeModelContextWindow = null,
+    modelOptions = [],
+    defaultModelId = null,
     route,
     onNavigate,
   }: Props = $props();
@@ -591,7 +595,11 @@
           <!-- Approval replaces the input box (workup view 03). -->
           <ApprovalCard approval={streamingStore.pendingApproval} />
         {:else}
-          <MessageInput store={streamingStore} />
+          <MessageInput
+            store={streamingStore}
+            modelOptions={modelOptions}
+            selectedModelId={activeConversation?.selected_model_id ?? defaultModelId}
+          />
         {/if}
         <footer class="conv-meta" aria-hidden="false">
           <span class="conv-meta-tokens">

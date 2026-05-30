@@ -996,6 +996,12 @@ pub struct ConversationListResponse {
     pub conversations: Vec<ConversationSummary>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateConversationRequest {
+    #[serde(default)]
+    pub selected_model_id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
@@ -1005,9 +1011,13 @@ pub struct ConversationListResponse {
 /// Returns 201 Created with the new conversation's metadata.
 pub async fn create_conversation(
     State(state): State<AppState>,
+    payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.bench_store);
-    let resp: ConversationResponse = svc.create_conversation().await?;
+    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
+    let resp: ConversationResponse = svc
+        .create_conversation_with_model(selected_model_id)
+        .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -1052,9 +1062,13 @@ pub async fn list_bench_sessions(
 pub async fn create_bench_session(
     State(state): State<AppState>,
     Path(bench_id): Path<Uuid>,
+    payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.bench_store);
-    let resp = svc.create_session_in_bench(bench_id).await?;
+    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
+    let resp = svc
+        .create_session_in_bench_with_model(bench_id, selected_model_id)
+        .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -2089,7 +2103,7 @@ async fn execute_external_delegate_message(
 
     let executor = DelegationExecutor {
         storage: state.storage.clone(),
-        provider: state.provider.clone(),
+        provider: state.active_provider(),
         hook_registry: state.hook_registry.clone(),
         leak_detector: None,
         approval_registrar: Some(crate::turn::build_approval_registrar(
@@ -2561,10 +2575,10 @@ mod tests {
     // path after assertions have observed the gateway behaviour.
     #![allow(clippy::disallowed_methods)]
 
-    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+    use std::{net::SocketAddr, sync::Arc};
 
     use axum::{Router, body::to_bytes, extract::ConnectInfo, http::Request};
-    use tokio::sync::{Mutex, broadcast};
+    use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -2628,40 +2642,14 @@ mod tests {
         provider: Arc<dyn LlmProvider>,
         storage: Arc<MockStorage>,
     ) -> (Router, Arc<MockStorage>) {
-        let (broadcast, _) = tokio::sync::broadcast::channel(16);
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn BenchStore>,
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn BenchStore>,
             provider,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast,
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
         (build_router(state), storage)
     }
 
@@ -4478,39 +4466,16 @@ def build_topology():
         let provider = Arc::new(MockProvider::new(vec![]));
         let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
         let shutdown_signal = CancellationToken::new();
-        let state = AppState {
-            storage: Arc::clone(&storage) as Arc<dyn Storage>,
-            bench_store: Arc::clone(&storage) as Arc<dyn BenchStore>,
-            provider: provider as Arc<dyn swage_provider::LlmProvider>,
-            voice_provider: Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice is unavailable for tests",
-            )) as Arc<dyn swage_provider::VoiceProvider>,
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
-            active_connections: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            tool_dispatcher: Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            hook_registry: None,
-            activity_tracker: Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: broadcast_tx,
-            shutdown_signal: shutdown_signal.clone(),
-            approval_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            channel_routes: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(Mutex::new(crate::presence::PresenceRuntime::default())),
-            execution_hosts: Arc::new(Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
-            secret_manager: Arc::new(crate::secret::SecretManager::new(
-                Arc::clone(&storage) as Arc<dyn Storage>
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+        let mut state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            provider as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        state.broadcast = broadcast_tx;
+        state.shutdown_signal = shutdown_signal.clone();
         (build_router(state), storage, shutdown_signal, broadcast_rx)
     }
 

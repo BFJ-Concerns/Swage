@@ -64,6 +64,23 @@ function emptySettings(): SettingsResponse {
     models: {},
     default_model: "",
     generation_presets: {},
+    tool_runtime: {
+      shell_timeout_secs: 30,
+      python_execute: {
+        enabled: true,
+        timeout_secs: 30,
+        startup_timeout_secs: 10,
+        idle_ttl_secs: 60,
+        warm_target: 1,
+        max_workers: 1,
+        runtime_policy: "bundled_then_system",
+        runtime_path: null,
+        require_sandbox: true,
+      },
+      max_output_bytes: 100_000,
+      plugin_directory: null,
+      search: null,
+    },
     tool_permissions: {
       allow: ["*"],
       deny: [],
@@ -82,6 +99,22 @@ function emptySettings(): SettingsResponse {
       timeout: 5,
       budget: null,
     },
+    pricing: {
+      models: {},
+    },
+    observability: {
+      force_on: false,
+    },
+    communication: {
+      context_transfer: {
+        mode: "none",
+        allowed_fields: [],
+        summary_budget: null,
+        targets: {},
+      },
+      message_ttl_secs: 86_400,
+      expiry_interval_secs: 60,
+    },
     restart_required: false,
     can_restart: false,
   };
@@ -99,10 +132,14 @@ describe("SettingsPage", () => {
       models: payload.models,
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
+      tool_runtime: payload.tool_runtime ?? emptySettings().tool_runtime,
       tool_permissions: payload.tool_permissions,
       hitl: payload.hitl,
       sandbox: payload.sandbox,
       context: payload.context,
+      pricing: payload.pricing ?? emptySettings().pricing,
+      observability: payload.observability ?? emptySettings().observability,
+      communication: payload.communication ?? emptySettings().communication,
       restart_required: true,
       can_restart: false,
     }));

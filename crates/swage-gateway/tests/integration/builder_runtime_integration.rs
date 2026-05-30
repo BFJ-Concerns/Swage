@@ -4,8 +4,6 @@
     clippy::disallowed_methods
 )]
 
-// These integration tests serialise process-env mutations with a std mutex.
-// The guard intentionally spans awaits because the gateway reads env during requests.
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -29,7 +27,7 @@ use swage_storage::{
     store::{AuditStore, BenchStore, Storage},
 };
 
-static SWAGE_HOME_LOCK: Mutex<()> = Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 struct MockProvider {
     responses: Mutex<VecDeque<String>>,
@@ -150,16 +148,14 @@ async fn attach_workspace(router: &Router, bench_id: &str, workspace: &Path) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn conversational_builder_proposes_applies_and_survives_restart() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-runtime.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![json!({
         "summary": "Create a review workspace with a new lens, delivery team, and bench brief bundle.",
@@ -302,16 +298,14 @@ async fn conversational_builder_proposes_applies_and_survives_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn visual_and_conversational_builder_writes_share_canonical_audit_service() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-audit.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![
         json!({
@@ -429,16 +423,14 @@ async fn visual_and_conversational_builder_writes_share_canonical_audit_service(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn conversational_builder_can_author_agents_and_tasks() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-agent-task.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![
         json!({
@@ -558,16 +550,14 @@ async fn conversational_builder_can_author_agents_and_tasks() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-config-versioning.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
 
@@ -686,16 +676,14 @@ async fn configuration_versions_cover_lens_team_agent_and_extension_changes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn configuration_version_rollback_restores_state_and_survives_restart() {
-    let _guard = SWAGE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let swage_home = temp.path().join("swage-home");
     let workspace = temp.path().join("workspace");
     let db_path = temp.path().join("builder-config-rollback.db");
     std::fs::create_dir_all(&swage_home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", &swage_home) };
+    env_guard.set_swage_home(&swage_home);
 
     let router = build_router(test_state(&db_path, Arc::new(MockProvider::new(vec![]))));
 

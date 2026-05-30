@@ -10,34 +10,21 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-// Global lock to serialise tests that mutate SWAGE_HOME env var.
-// Edition 2024: set_var is unsafe due to process-wide env mutation.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::support::ProcessEnvGuard;
 
 /// RAII guard that sets SWAGE_HOME for a test and restores it on drop.
 struct SwageHomeGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _guard: ProcessEnvGuard,
 }
 
 impl SwageHomeGuard {
     fn set(path: &std::path::Path) -> Self {
-        // Use unwrap_or_else to recover from a poisoned mutex — a prior test
-        // may have panicked while holding the lock, but we still need to
-        // serialise env var access.
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Safety: test-only env mutation; serialised by ENV_LOCK.
-        unsafe { std::env::set_var("SWAGE_HOME", path) };
-        Self { _lock: lock }
-    }
-}
-
-impl Drop for SwageHomeGuard {
-    fn drop(&mut self) {
-        // Safety: test-only env cleanup; still holding ENV_LOCK.
-        unsafe { std::env::remove_var("SWAGE_HOME") };
+        let mut guard = ProcessEnvGuard::new();
+        guard.set_swage_home(path);
+        Self { _guard: guard }
     }
 }
 

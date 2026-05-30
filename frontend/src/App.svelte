@@ -157,6 +157,8 @@
   let stageModules = $state<LensStageModulePlacement[]>([]);
   let currentRoute = $state<Route>(router.currentRoute);
   let activeModelContextWindow = $state<number | null>(null);
+  let modelOptions = $state<string[]>([]);
+  let defaultModelId = $state<string | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
   // ---------------------------------------------------------------------------
@@ -349,6 +351,8 @@
         return null;
       });
       activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
+      modelOptions = Object.keys(settings?.models ?? {});
+      defaultModelId = settings?.default_model ?? null;
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its bench into scope along the way.
@@ -400,6 +404,8 @@
     {displayPreferences}
     onSelectTheme={setThemeMode}
     {activeModelContextWindow}
+    {modelOptions}
+    {defaultModelId}
     route={currentRoute}
     onNavigate={navigate}
     />

@@ -23,7 +23,7 @@
 // call. The guarded state is process env, not cancellation-sensitive data.
 #![allow(clippy::await_holding_lock)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -35,11 +35,11 @@ use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
 use swage_storage::SqliteStorage;
 
+use crate::support::ProcessEnvGuard;
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a router backed by in-memory SQLite storage.
 /// Returns the router and storage handle for inspection.
@@ -244,9 +244,9 @@ async fn sessions_are_isolated_between_benches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_is_isolated_between_benches() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::TempDir::new().unwrap();
-    unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
+    env_guard.set_swage_home(temp_dir.path());
 
     let (router, _storage) = make_test_router();
 
@@ -310,8 +310,6 @@ async fn memory_is_isolated_between_benches() {
         mem_dir_a.join("context.md").exists(),
         "bench A should have the memory file"
     );
-
-    unsafe { std::env::remove_var("SWAGE_HOME") };
 }
 
 // ---------------------------------------------------------------------------

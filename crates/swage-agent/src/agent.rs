@@ -199,7 +199,7 @@ impl Agent {
         // 4. Build initial CompletionRequest from the assembled context.
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
-            model: None,
+            model: self.config.model_id.clone(),
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stop_sequences: self.config.stop_sequences.clone(),

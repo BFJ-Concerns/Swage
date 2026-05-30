@@ -81,16 +81,82 @@ export interface GenerationPresetConfig {
   metadata?: unknown | null;
 }
 
+export interface ToolRuntimeSettings {
+  shell_timeout_secs: number;
+  python_execute: PythonExecuteToolConfig;
+  max_output_bytes: number;
+  plugin_directory?: string | null;
+  search?: SearchProviderConfig | null;
+}
+
+export interface PythonExecuteToolConfig {
+  enabled: boolean;
+  timeout_secs: number;
+  startup_timeout_secs: number;
+  idle_ttl_secs: number;
+  warm_target: number;
+  max_workers: number;
+  runtime_policy: "bundled_then_system";
+  runtime_path?: string | null;
+  require_sandbox: boolean;
+}
+
+export interface SearchProviderConfig {
+  provider_type: string;
+  base_url: string;
+  api_key?: string | null;
+}
+
+export interface PricingConfig {
+  models: Record<string, ModelPricing>;
+}
+
+export interface ModelPricing {
+  input_price_per_mtok: number;
+  output_price_per_mtok: number;
+}
+
+export interface ObservabilityConfig {
+  force_on: boolean;
+}
+
+export interface CommunicationConfig {
+  context_transfer: ContextTransferConfig;
+  message_ttl_secs: number;
+  expiry_interval_secs: number;
+}
+
+export interface ContextTransferConfig {
+  mode: ContextTransferMode;
+  allowed_fields: ContextTransferField[];
+  summary_budget?: number | null;
+  targets: Record<string, ContextTransferTargetConfig>;
+}
+
+export interface ContextTransferTargetConfig {
+  mode: ContextTransferMode;
+  allowed_fields: ContextTransferField[];
+  summary_budget?: number | null;
+}
+
+export type ContextTransferMode = "none" | "explicit" | "summary";
+
+export type ContextTransferField = "system" | "user" | "assistant";
+
 export interface SettingsResponse {
   providers: Record<string, ProviderSettings>;
   default_provider: string;
   models: Record<string, ModelSettings>;
   default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
+  tool_runtime: ToolRuntimeSettings;
   tool_permissions: ToolPermissionConfig;
   hitl: HitlConfig;
   sandbox: SandboxConfig;
   context: ContextConfig;
+  pricing: PricingConfig;
+  observability: ObservabilityConfig;
+  communication: CommunicationConfig;
   restart_required: boolean;
   can_restart: boolean;
 }
@@ -101,10 +167,14 @@ export interface SettingsPayload {
   models: Record<string, ModelSettings>;
   default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
+  tool_runtime?: ToolRuntimeSettings;
   tool_permissions: ToolPermissionConfig;
   hitl: HitlConfig;
   sandbox: SandboxConfig;
   context: ContextConfig;
+  pricing?: PricingConfig;
+  observability?: ObservabilityConfig;
+  communication?: CommunicationConfig;
 }
 
 export interface ToolPermissionConfig {
@@ -161,6 +231,7 @@ export interface RestartStatusResponse {
 /** Compact conversation entry for the list view. */
 export interface ConversationSummary {
   id: string;
+  selected_model_id?: string | null;
   created_at: string;
   last_activity: string;
   message_preview: string | null;
@@ -171,6 +242,7 @@ export interface ConversationSummary {
 export interface ConversationDetail {
   id: string;
   bench_id: string;
+  selected_model_id?: string | null;
   created_at: string;
   last_activity: string;
   messages: MessageView[];
@@ -227,6 +299,7 @@ export interface MessageView {
 export interface ConversationResponse {
   id: string;
   bench_id: string;
+  selected_model_id?: string | null;
   created_at: string;
   last_activity: string;
 }
@@ -769,7 +842,7 @@ export interface OperatorOverview {
 
 /** Client → Server events. */
 export type ClientEvent =
-  | { type: "send_message"; content: string; thread_id?: string }
+  | { type: "send_message"; content: string; thread_id?: string; selected_model_id?: string }
   | { type: "cancel" }
   // Subscribe to one or more observability channels (e.g. "tools", "context").
   | { type: "subscribe"; channels: string[] }

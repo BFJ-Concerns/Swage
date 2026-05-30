@@ -34,6 +34,12 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     pub stop_sequences: Option<Vec<String>>,
     pub generation_metadata: Option<Value>,
+    /// Configured model key or provider model identifier for this turn.
+    ///
+    /// When unset, providers use their own default model. Gateway-created
+    /// agents set this from the effective conversation model so failover can
+    /// route to the matching provider before trying fallbacks.
+    pub model_id: Option<String>,
     /// When true, the turn loop pre-approves every gate so tool, location,
     /// and hook approval prompts are bypassed. Mirrors the gateway-level
     /// `dangerously_skip_permissions` setting; intended for callers that
@@ -62,6 +68,7 @@ impl AgentConfig {
             temperature: None,
             stop_sequences: None,
             generation_metadata: None,
+            model_id: None,
             skip_permissions: false,
         }
     }

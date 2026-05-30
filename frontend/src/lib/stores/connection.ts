@@ -15,7 +15,7 @@ export interface ConnectionStore {
   readonly errorMessage: string | null;
   connectTo(conversationId: string): void;
   disconnect(): void;
-  sendMessage(content: string): void;
+  sendMessage(content: string, selectedModelId?: string | null): void;
   cancelTurn(): void;
   onServerEvent(handler: (event: ServerEvent) => void): void;
 }
@@ -96,8 +96,12 @@ export function createConnectionStore(
       wsClient.disconnect();
     },
 
-    sendMessage(content: string): void {
-      wsClient.send({ type: "send_message", content });
+    sendMessage(content: string, selectedModelId?: string | null): void {
+      wsClient.send({
+        type: "send_message",
+        content,
+        ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),
+      });
     },
 
     cancelTurn(): void {

@@ -15,10 +15,14 @@ pub struct SettingsResponse {
     pub models: HashMap<String, ModelSettings>,
     pub default_model: String,
     pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
+    pub tool_runtime: ToolRuntimeSettings,
     pub tool_permissions: swage_config::ToolPermissionConfig,
     pub hitl: swage_config::HitlConfig,
     pub sandbox: swage_config::SandboxConfig,
     pub context: swage_config::ContextConfig,
+    pub pricing: swage_config::PricingConfig,
+    pub observability: swage_config::ObservabilityConfig,
+    pub communication: swage_config::CommunicationConfig,
     pub restart_required: bool,
     pub can_restart: bool,
 }
@@ -41,6 +45,27 @@ pub struct ModelSettings {
     pub generation_preset: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRuntimeSettings {
+    pub shell_timeout_secs: u64,
+    pub python_execute: swage_config::PythonExecuteToolConfig,
+    pub max_output_bytes: usize,
+    pub plugin_directory: Option<String>,
+    pub search: Option<swage_config::SearchProviderConfig>,
+}
+
+impl From<&swage_config::ToolConfig> for ToolRuntimeSettings {
+    fn from(config: &swage_config::ToolConfig) -> Self {
+        Self {
+            shell_timeout_secs: config.shell_timeout_secs,
+            python_execute: config.python_execute.clone(),
+            max_output_bytes: config.max_output_bytes,
+            plugin_directory: config.plugin_directory.clone(),
+            search: config.search.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaveSettingsRequest {
     pub default_provider: String,
@@ -50,6 +75,8 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
     #[serde(default)]
+    pub tool_runtime: Option<ToolRuntimeSettings>,
+    #[serde(default)]
     pub tool_permissions: Option<swage_config::ToolPermissionConfig>,
     #[serde(default)]
     pub hitl: Option<swage_config::HitlConfig>,
@@ -57,6 +84,12 @@ pub struct SaveSettingsRequest {
     pub sandbox: Option<swage_config::SandboxConfig>,
     #[serde(default)]
     pub context: Option<swage_config::ContextConfig>,
+    #[serde(default)]
+    pub pricing: Option<swage_config::PricingConfig>,
+    #[serde(default)]
+    pub observability: Option<swage_config::ObservabilityConfig>,
+    #[serde(default)]
+    pub communication: Option<swage_config::CommunicationConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,8 +123,8 @@ pub struct RestartStatusResponse {
 }
 
 pub async fn load_settings(state: &AppState) -> SettingsResponse {
-    let providers = state
-        .config
+    let config = state.active_config();
+    let providers = config
         .providers
         .entries
         .iter()
@@ -110,8 +143,7 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
         })
         .collect();
 
-    let models = state
-        .config
+    let models = config
         .models
         .entries
         .iter()
@@ -131,14 +163,18 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
 
     SettingsResponse {
         providers,
-        default_provider: state.config.providers.default.clone(),
+        default_provider: config.providers.default.clone(),
         models,
-        default_model: state.config.models.default.clone(),
-        generation_presets: state.config.generation.presets.clone(),
-        tool_permissions: state.config.tools.permissions.clone(),
-        hitl: state.config.hitl.clone(),
-        sandbox: state.config.sandbox.clone(),
-        context: state.config.context.clone(),
+        default_model: config.models.default.clone(),
+        generation_presets: config.generation.presets.clone(),
+        tool_runtime: ToolRuntimeSettings::from(&config.tools),
+        tool_permissions: config.tools.permissions.clone(),
+        hitl: config.hitl.clone(),
+        sandbox: config.sandbox.clone(),
+        context: config.context.clone(),
+        pricing: config.pricing.clone(),
+        observability: config.observability.clone(),
+        communication: config.communication,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
     }
@@ -155,10 +191,14 @@ pub async fn save_settings(
         default_model,
         models: requested_models,
         generation_presets,
+        tool_runtime,
         tool_permissions,
         hitl,
         sandbox,
         context,
+        pricing,
+        observability,
+        communication,
     } = request;
 
     let mut providers = HashMap::new();
@@ -216,10 +256,14 @@ pub async fn save_settings(
     };
     apply_runtime_settings_to_partial(
         &mut partial,
+        tool_runtime.clone(),
         tool_permissions.clone(),
         hitl.clone(),
         sandbox.clone(),
         context.clone(),
+        pricing.clone(),
+        observability.clone(),
+        communication.clone(),
     );
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
@@ -227,34 +271,60 @@ pub async fn save_settings(
         .await
         .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
 
-    state.mark_restart_required();
     let saved_providers = partial
         .providers
         .as_ref()
         .and_then(|providers| providers.entries.as_ref())
         .expect("settings save always writes provider entries");
-    Ok(settings_response_from_saved_config(
-        state,
-        default_provider,
-        saved_providers,
-        default_model,
-        requested_models,
-        generation_presets,
-        tool_permissions.unwrap_or_else(|| state.config.tools.permissions.clone()),
-        hitl.unwrap_or_else(|| state.config.hitl.clone()),
-        sandbox.unwrap_or_else(|| state.config.sandbox.clone()),
-        context.unwrap_or_else(|| state.config.context.clone()),
-    ))
+    let mut runtime_config = state.active_config();
+    runtime_config.providers.default = default_provider;
+    runtime_config.providers.entries = saved_providers.clone();
+    runtime_config.models.default = default_model;
+    runtime_config.models.entries = requested_models
+        .into_iter()
+        .map(|(id, model)| {
+            (
+                id,
+                swage_config::ModelEndpointConfig {
+                    provider_id: model.provider_id,
+                    model_id: model.model_id,
+                    aliases: model.aliases,
+                    context_window: model.context_window,
+                    generation_preset: model.generation_preset,
+                },
+            )
+        })
+        .collect();
+    runtime_config.generation.presets = generation_presets;
+    if let Some(tool_runtime) = tool_runtime {
+        apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime);
+    }
+    runtime_config.tools.permissions =
+        tool_permissions.unwrap_or_else(|| runtime_config.tools.permissions.clone());
+    runtime_config.hitl = hitl.unwrap_or_else(|| runtime_config.hitl.clone());
+    runtime_config.sandbox = sandbox.unwrap_or_else(|| runtime_config.sandbox.clone());
+    runtime_config.context = context.unwrap_or_else(|| runtime_config.context.clone());
+    runtime_config.pricing = pricing.unwrap_or_else(|| runtime_config.pricing.clone());
+    runtime_config.observability =
+        observability.unwrap_or_else(|| runtime_config.observability.clone());
+    runtime_config.communication =
+        communication.unwrap_or_else(|| runtime_config.communication.clone());
+
+    let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
+    let tool_dispatcher =
+        crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
+    state.replace_runtime(runtime_config, provider, tool_dispatcher);
+
+    Ok(load_settings(state).await)
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_bench(
-    state: &AppState,
     config: &swage_config::ResolvedConfig,
     bench: &swage_storage::model::Bench,
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = bench_config_path(&bench.slug)?;
-    persist_permanent_tool_approval_to_path(state, config, tool_name, path).await
+    persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_globally(
@@ -262,11 +332,10 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = global_config_path()?;
-    persist_permanent_tool_approval_to_path(state, &state.config, tool_name, path).await
+    persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
 }
 
 async fn persist_permanent_tool_approval_to_path(
-    state: &AppState,
     config: &swage_config::ResolvedConfig,
     tool_name: &str,
     path: PathBuf,
@@ -287,7 +356,6 @@ async fn persist_permanent_tool_approval_to_path(
         .await
         .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
 
-    state.mark_restart_required();
     Ok(())
 }
 
@@ -424,6 +492,7 @@ impl SaveProviderSettings {
     }
 }
 
+#[cfg(test)]
 fn settings_response_from_saved_config(
     state: &AppState,
     default_provider: String,
@@ -436,6 +505,7 @@ fn settings_response_from_saved_config(
     sandbox: swage_config::SandboxConfig,
     context: swage_config::ContextConfig,
 ) -> SettingsResponse {
+    let active_config = state.active_config();
     let providers = providers
         .iter()
         .map(|(id, provider)| {
@@ -459,10 +529,14 @@ fn settings_response_from_saved_config(
         models,
         default_model,
         generation_presets,
+        tool_runtime: ToolRuntimeSettings::from(&active_config.tools),
         tool_permissions,
         hitl,
         sandbox,
         context,
+        pricing: active_config.pricing,
+        observability: active_config.observability,
+        communication: active_config.communication,
         restart_required: true,
         can_restart: state.managed_gateway,
     }
@@ -472,7 +546,8 @@ async fn provider_for_discovery(
     state: &AppState,
     provider_id: &str,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
-    if let Some(provider) = state.config.providers.entries.get(provider_id) {
+    let config = state.active_config();
+    if let Some(provider) = config.providers.entries.get(provider_id) {
         return Ok(provider.clone());
     }
 
@@ -493,10 +568,12 @@ pub fn restart_status(state: &AppState) -> RestartStatusResponse {
     RestartStatusResponse {
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
-        guidance: if state.managed_gateway {
-            "Settings are saved. Restart the managed gateway to apply them.".to_string()
+        guidance: if !state.restart_required() {
+            "Settings are saved and active for new turns.".to_string()
+        } else if state.managed_gateway {
+            "Settings are saved, but the running gateway is still using the provider/model runtime from startup. Restart the managed gateway to apply them.".to_string()
         } else {
-            "Settings are saved. Restart the gateway process manually to apply them.".to_string()
+            "Settings are saved, but the running gateway is still using the provider/model runtime from startup. Restart the gateway process manually to apply them.".to_string()
         },
     }
 }
@@ -540,6 +617,9 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     if let Some(tool_permissions) = &request.tool_permissions {
         validate_tool_permissions(tool_permissions)?;
     }
+    if let Some(tool_runtime) = &request.tool_runtime {
+        validate_tool_runtime_settings(tool_runtime)?;
+    }
     if let Some(hitl) = &request.hitl
         && hitl.timeout == 0
     {
@@ -564,16 +644,45 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
             ));
         }
     }
+    if let Some(communication) = &request.communication
+        && (communication.message_ttl_secs == 0 || communication.expiry_interval_secs == 0)
+    {
+        return Err(ApiError::validation(
+            "communication TTL and expiry interval must be positive".to_string(),
+        ));
+    }
     Ok(())
 }
 
 fn apply_runtime_settings_to_partial(
     partial: &mut swage_config::PartialConfig,
+    tool_runtime: Option<ToolRuntimeSettings>,
     tool_permissions: Option<swage_config::ToolPermissionConfig>,
     hitl: Option<swage_config::HitlConfig>,
     sandbox: Option<swage_config::SandboxConfig>,
     context: Option<swage_config::ContextConfig>,
+    pricing: Option<swage_config::PricingConfig>,
+    observability: Option<swage_config::ObservabilityConfig>,
+    communication: Option<swage_config::CommunicationConfig>,
 ) {
+    if let Some(tool_runtime) = tool_runtime {
+        let tools = partial.tools.get_or_insert_with(Default::default);
+        tools.shell_timeout_secs = Some(tool_runtime.shell_timeout_secs);
+        tools.python_execute = Some(swage_config::merge::PartialPythonExecuteToolConfig {
+            enabled: Some(tool_runtime.python_execute.enabled),
+            timeout_secs: Some(tool_runtime.python_execute.timeout_secs),
+            startup_timeout_secs: Some(tool_runtime.python_execute.startup_timeout_secs),
+            idle_ttl_secs: Some(tool_runtime.python_execute.idle_ttl_secs),
+            warm_target: Some(tool_runtime.python_execute.warm_target),
+            max_workers: Some(tool_runtime.python_execute.max_workers),
+            runtime_policy: Some(tool_runtime.python_execute.runtime_policy),
+            runtime_path: Some(tool_runtime.python_execute.runtime_path),
+            require_sandbox: Some(tool_runtime.python_execute.require_sandbox),
+        });
+        tools.max_output_bytes = Some(tool_runtime.max_output_bytes);
+        tools.plugin_directory = Some(tool_runtime.plugin_directory);
+        tools.search = Some(tool_runtime.search);
+    }
     if let Some(tool_permissions) = tool_permissions {
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.allow = Some(tool_permissions.allow);
@@ -599,6 +708,117 @@ fn apply_runtime_settings_to_partial(
             budget: Some(context.budget),
         });
     }
+    if let Some(pricing) = pricing {
+        partial.pricing = Some(swage_config::merge::PartialPricingConfig {
+            models: Some(pricing.models),
+        });
+    }
+    if let Some(observability) = observability {
+        partial.observability = Some(swage_config::merge::PartialObservabilityConfig {
+            force_on: Some(observability.force_on),
+        });
+    }
+    if let Some(communication) = communication {
+        partial.communication = Some(swage_config::merge::PartialCommunicationConfig {
+            context_transfer: Some(swage_config::merge::PartialContextTransferConfig {
+                mode: Some(communication.context_transfer.mode),
+                allowed_fields: Some(communication.context_transfer.allowed_fields),
+                summary_budget: communication.context_transfer.summary_budget,
+                targets: if communication.context_transfer.targets.is_empty() {
+                    None
+                } else {
+                    Some(
+                        communication
+                            .context_transfer
+                            .targets
+                            .into_iter()
+                            .map(|(id, target)| {
+                                (
+                                    id,
+                                    swage_config::merge::PartialContextTransferTargetConfig {
+                                        mode: Some(target.mode),
+                                        allowed_fields: Some(target.allowed_fields),
+                                        summary_budget: target.summary_budget,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                },
+            }),
+            message_ttl_secs: Some(communication.message_ttl_secs),
+            expiry_interval_secs: Some(communication.expiry_interval_secs),
+        });
+    }
+}
+
+fn apply_tool_runtime_settings(
+    config: &mut swage_config::ToolConfig,
+    runtime: ToolRuntimeSettings,
+) {
+    config.shell_timeout_secs = runtime.shell_timeout_secs;
+    config.python_execute = runtime.python_execute;
+    config.max_output_bytes = runtime.max_output_bytes;
+    config.plugin_directory = runtime.plugin_directory;
+    config.search = runtime.search;
+}
+
+fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), ApiError> {
+    if runtime.shell_timeout_secs == 0 {
+        return Err(ApiError::validation(
+            "tool shell timeout must be positive".to_string(),
+        ));
+    }
+    if runtime.max_output_bytes == 0 {
+        return Err(ApiError::validation(
+            "tool max output bytes must be positive".to_string(),
+        ));
+    }
+    if let Some(directory) = runtime.plugin_directory.as_deref() {
+        if directory.trim().is_empty() {
+            return Err(ApiError::validation(
+                "tool plugin directory must not be empty".to_string(),
+            ));
+        }
+        let path = PathBuf::from(directory);
+        if !path.is_dir() {
+            return Err(ApiError::validation(format!(
+                "tool plugin directory does not exist: {directory}"
+            )));
+        }
+    }
+    if let Some(search) = &runtime.search
+        && (search.provider_type.trim().is_empty() || search.base_url.trim().is_empty())
+    {
+        return Err(ApiError::validation(
+            "tool search provider type and base URL must not be empty".to_string(),
+        ));
+    }
+
+    let python = &runtime.python_execute;
+    if python.timeout_secs == 0
+        || python.startup_timeout_secs == 0
+        || python.idle_ttl_secs == 0
+        || python.warm_target == 0
+        || python.max_workers == 0
+    {
+        return Err(ApiError::validation(
+            "python_execute timeouts, warm target, and max workers must be positive".to_string(),
+        ));
+    }
+    if let Some(runtime_path) = python.runtime_path.as_deref() {
+        if runtime_path.trim().is_empty() {
+            return Err(ApiError::validation(
+                "python_execute runtime path must not be empty".to_string(),
+            ));
+        }
+        if !PathBuf::from(runtime_path).exists() {
+            return Err(ApiError::validation(format!(
+                "python_execute runtime path does not exist: {runtime_path}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_tool_permissions(
@@ -831,8 +1051,6 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use serde_json::json;
 
     use super::*;
@@ -873,45 +1091,16 @@ mod tests {
 
     #[test]
     fn settings_response_from_saved_config_echoes_secret_refs_without_raw_keys() {
-        let state = AppState {
-            storage: std::sync::Arc::new(crate::turn::tests::MockStorage::new())
-                as std::sync::Arc<dyn swage_storage::store::Storage>,
-            bench_store: std::sync::Arc::new(crate::turn::tests::MockStorage::new())
-                as std::sync::Arc<dyn swage_storage::store::BenchStore>,
-            provider: std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
-            voice_provider: std::sync::Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                "voice unavailable in test",
-            )),
-            config: swage_config::ResolvedConfig::default(),
-            active_turns: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            active_connections: std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            tool_dispatcher: std::sync::Arc::new(crate::tool::ToolDispatcher::allow_all(vec![])),
-            activity_tracker: std::sync::Arc::new(crate::lifecycle::ActivityTracker::new()),
-            broadcast: tokio::sync::broadcast::channel(16).0,
-            shutdown_signal: tokio_util::sync::CancellationToken::new(),
-            approval_channels: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_approval_grants: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
-            hook_registry: None,
-            channel_routes: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            presence: std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::presence::PresenceRuntime::default(),
-            )),
-            execution_hosts: std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::execution_host::ExecutionHostRuntime::default(),
-            )),
-            pairing_codes: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            secret_manager: std::sync::Arc::new(crate::secret::SecretManager::new(
-                std::sync::Arc::new(crate::turn::tests::MockStorage::new())
-                    as std::sync::Arc<dyn swage_storage::store::Storage>,
-            )),
-            recovery_exports: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            workflow_capabilities: crate::capabilities::WorkflowCapabilities::default(),
-            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            managed_gateway: false,
-        };
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
         let mut providers = HashMap::new();
         providers.insert(
             "llama-cpp".to_string(),
@@ -947,6 +1136,324 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_settings_hot_applies_model_runtime_without_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let request = SaveSettingsRequest {
+            default_provider: "local".to_string(),
+            providers: [(
+                "local".to_string(),
+                SaveProviderSettings {
+                    protocol: swage_config::Protocol::OpenAi,
+                    base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                    api_key_secret_ref: None,
+                    api_key_env: None,
+                    api_key: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            default_model: "local:fast".to_string(),
+            models: [(
+                "local:fast".to_string(),
+                ModelSettings {
+                    provider_id: "local".to_string(),
+                    model_id: "fast-wire".to_string(),
+                    aliases: vec![],
+                    context_window: Some(4096),
+                    generation_preset: Some("quick".to_string()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            generation_presets: [(
+                "quick".to_string(),
+                swage_config::GenerationPresetConfig {
+                    max_tokens: Some(123),
+                    temperature: Some(0.2),
+                    stop_sequences: vec![],
+                    metadata: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            tool_runtime: None,
+            tool_permissions: Some(swage_config::ToolPermissionConfig {
+                allow: vec!["file_read".to_string()],
+                deny: vec!["shell".to_string()],
+                bundles: HashMap::new(),
+                require_approval: vec![],
+            }),
+            hitl: Some(swage_config::HitlConfig::default()),
+            sandbox: Some(swage_config::SandboxConfig { enabled: false }),
+            context: Some(swage_config::ContextConfig {
+                assembly: "default".to_string(),
+                timeout: 7,
+                budget: Some(2048),
+            }),
+            pricing: None,
+            observability: None,
+            communication: None,
+        };
+
+        let response = save_settings(&state, request)
+            .await
+            .expect("settings should save and hot-apply");
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+
+        assert!(!response.restart_required);
+        assert_eq!(response.default_model, "local:fast");
+        assert_eq!(state.active_config().default_model_id(), "fast-wire");
+        assert_eq!(state.active_config().context.timeout, 7);
+        assert_eq!(state.active_config().tools.permissions.deny, vec!["shell"]);
+        assert!(!state.restart_required());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_settings_hot_rebuilds_tool_runtime_without_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+
+        let plugin_dir = temp.path().join("plugins").join("echo-plugin");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin directory");
+        std::fs::write(
+            plugin_dir.join("capability.json"),
+            serde_json::json!({
+                "description": "Echo plugin",
+                "tool": {
+                    "name": "echo_plugin",
+                    "description": "Echo plugin",
+                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+                    "executable": "run.py"
+                }
+            })
+            .to_string(),
+        )
+        .expect("plugin manifest");
+        std::fs::write(
+            plugin_dir.join("run.py"),
+            "#!/usr/bin/env python3\nprint('{}')\n",
+        )
+        .expect("plugin executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(plugin_dir.join("run.py"))
+                .expect("plugin metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(plugin_dir.join("run.py"), permissions)
+                .expect("plugin executable permissions");
+        }
+
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert!(
+            state
+                .active_tool_dispatcher()
+                .registry()
+                .get("echo_plugin")
+                .is_none()
+        );
+
+        let python_execute = swage_config::PythonExecuteToolConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let plugin_root = temp.path().join("plugins").display().to_string();
+        let request = SaveSettingsRequest {
+            default_provider: "local".to_string(),
+            providers: [(
+                "local".to_string(),
+                SaveProviderSettings {
+                    protocol: swage_config::Protocol::OpenAi,
+                    base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                    api_key_secret_ref: None,
+                    api_key_env: None,
+                    api_key: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            default_model: "local:fast".to_string(),
+            models: [(
+                "local:fast".to_string(),
+                ModelSettings {
+                    provider_id: "local".to_string(),
+                    model_id: "fast-wire".to_string(),
+                    aliases: vec![],
+                    context_window: None,
+                    generation_preset: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            generation_presets: HashMap::new(),
+            tool_runtime: Some(ToolRuntimeSettings {
+                shell_timeout_secs: 2,
+                python_execute,
+                max_output_bytes: 12_345,
+                plugin_directory: Some(plugin_root.clone()),
+                search: Some(swage_config::SearchProviderConfig {
+                    provider_type: "searxng".to_string(),
+                    base_url: "http://127.0.0.1:8080".to_string(),
+                    api_key: None,
+                }),
+            }),
+            tool_permissions: None,
+            hitl: None,
+            sandbox: None,
+            context: None,
+            pricing: None,
+            observability: None,
+            communication: None,
+        };
+
+        let response = save_settings(&state, request)
+            .await
+            .expect("settings should save and hot-rebuild tools");
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+
+        assert!(!response.restart_required);
+        assert_eq!(response.tool_runtime.shell_timeout_secs, 2);
+        assert_eq!(state.active_config().tools.shell_timeout_secs, 2);
+        assert_eq!(state.active_config().tools.max_output_bytes, 12_345);
+        assert_eq!(
+            state.active_config().tools.plugin_directory.as_deref(),
+            Some(plugin_root.as_str())
+        );
+        assert!(
+            state
+                .active_tool_dispatcher()
+                .registry()
+                .get("echo_plugin")
+                .is_some(),
+            "hot-rebuilt dispatcher should include tools from the saved plugin directory"
+        );
+        assert!(!state.restart_required());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_settings_hot_applies_observability_pricing_and_communication() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        state.start_agent_message_expiry();
+
+        let pricing = swage_config::PricingConfig {
+            models: [(
+                "fast-wire".to_string(),
+                swage_config::ModelPricing {
+                    input_price_per_mtok: 10,
+                    output_price_per_mtok: 25,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let observability = swage_config::ObservabilityConfig { force_on: true };
+        let communication = swage_config::CommunicationConfig {
+            context_transfer: swage_config::ContextTransferConfig {
+                mode: swage_config::ContextTransferMode::Explicit,
+                allowed_fields: vec![swage_config::ContextTransferField::User],
+                summary_budget: None,
+                targets: HashMap::new(),
+            },
+            message_ttl_secs: 42,
+            expiry_interval_secs: 3,
+        };
+
+        let request = SaveSettingsRequest {
+            default_provider: "local".to_string(),
+            providers: [(
+                "local".to_string(),
+                SaveProviderSettings {
+                    protocol: swage_config::Protocol::OpenAi,
+                    base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                    api_key_secret_ref: None,
+                    api_key_env: None,
+                    api_key: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            default_model: "local:fast".to_string(),
+            models: [(
+                "local:fast".to_string(),
+                ModelSettings {
+                    provider_id: "local".to_string(),
+                    model_id: "fast-wire".to_string(),
+                    aliases: vec![],
+                    context_window: None,
+                    generation_preset: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            generation_presets: HashMap::new(),
+            tool_runtime: None,
+            tool_permissions: None,
+            hitl: None,
+            sandbox: None,
+            context: None,
+            pricing: Some(pricing),
+            observability: Some(observability),
+            communication: Some(communication.clone()),
+        };
+
+        let response = save_settings(&state, request)
+            .await
+            .expect("settings should hot-apply observability and communication");
+        unsafe { std::env::remove_var("SWAGE_HOME") };
+
+        assert!(response.observability.force_on);
+        assert_eq!(
+            state
+                .active_config()
+                .pricing
+                .compute_cost("fast-wire", 1_000_000, 2_000_000),
+            Some(60)
+        );
+        assert_eq!(state.active_config().communication, communication);
+        assert_eq!(
+            state.active_agent_message_expiry_communication(),
+            Some(communication)
+        );
+        assert!(!state.restart_required());
+        state.stop_agent_message_expiry();
+    }
+
     #[test]
     fn validate_settings_rejects_invalid_runtime_controls() {
         let mut request = SaveSettingsRequest {
@@ -955,6 +1462,7 @@ mod tests {
             default_model: String::new(),
             models: HashMap::new(),
             generation_presets: HashMap::new(),
+            tool_runtime: None,
             tool_permissions: Some(swage_config::ToolPermissionConfig {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
@@ -964,6 +1472,9 @@ mod tests {
             hitl: Some(swage_config::HitlConfig::default()),
             sandbox: Some(swage_config::SandboxConfig::default()),
             context: Some(swage_config::ContextConfig::default()),
+            pricing: None,
+            observability: None,
+            communication: None,
         };
 
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
@@ -986,6 +1497,32 @@ mod tests {
         let error = validate_settings_request(&request)
             .expect_err("context timeout above range is invalid");
         assert!(error.0.to_string().contains("context timeout"));
+
+        request.context = Some(swage_config::ContextConfig::default());
+        request.tool_runtime = Some(ToolRuntimeSettings {
+            shell_timeout_secs: 0,
+            python_execute: swage_config::PythonExecuteToolConfig::default(),
+            max_output_bytes: 100_000,
+            plugin_directory: None,
+            search: None,
+        });
+        let error = validate_settings_request(&request).expect_err("zero shell timeout is invalid");
+        assert!(error.0.to_string().contains("shell timeout"));
+
+        let python_execute = swage_config::PythonExecuteToolConfig {
+            runtime_path: Some("/definitely/missing/python".to_string()),
+            ..Default::default()
+        };
+        request.tool_runtime = Some(ToolRuntimeSettings {
+            shell_timeout_secs: 30,
+            python_execute,
+            max_output_bytes: 100_000,
+            plugin_directory: None,
+            search: None,
+        });
+        let error =
+            validate_settings_request(&request).expect_err("missing python runtime is invalid");
+        assert!(error.0.to_string().contains("runtime path does not exist"));
     }
 
     #[test]
@@ -1006,6 +1543,7 @@ mod tests {
 
         apply_runtime_settings_to_partial(
             &mut partial,
+            None,
             Some(permissions),
             Some(swage_config::HitlConfig {
                 timeout: 600,
@@ -1017,6 +1555,9 @@ mod tests {
                 timeout: 10,
                 budget: Some(8192),
             }),
+            None,
+            None,
+            None,
         );
 
         let body = toml::to_string(&partial).expect("partial config should serialise");
