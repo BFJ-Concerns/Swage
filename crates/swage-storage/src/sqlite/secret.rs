@@ -589,7 +589,6 @@ impl SecretStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::await_holding_lock)]
 
     use super::*;
     use crate::store::SecretStore;
