@@ -1,8 +1,4 @@
-#![allow(
-    clippy::await_holding_lock,
-    clippy::unwrap_used,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used)]
 //! Integration tests for GET /api/skills — skill listing with hierarchy resolution.
 
 use std::sync::Arc;

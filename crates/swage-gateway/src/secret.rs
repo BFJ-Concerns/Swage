@@ -514,7 +514,6 @@ fn make_base32_secret(minimum_length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::await_holding_lock)]
 
     use std::sync::{Mutex, MutexGuard};
 

@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::path::Path;
 use std::pin::Pin;

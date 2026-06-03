@@ -6,7 +6,7 @@
 //! integration (WebSocket events, slash commands, turn assembly) are all
 //! working together.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

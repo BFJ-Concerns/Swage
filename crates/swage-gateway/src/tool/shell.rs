@@ -114,7 +114,6 @@ impl Tool for ShellTool {
         // output buffers — no shared or persisted state. The timeout arm below
         // kills the child and discards the partial buffers, so dropping the
         // future leaves nothing half-written.
-        #[allow(clippy::disallowed_methods)]
         let read_result = tokio::time::timeout(self.timeout, read_fut).await;
 
         match read_result {

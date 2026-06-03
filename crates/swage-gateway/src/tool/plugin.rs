@@ -89,7 +89,6 @@ impl Tool for PluginTool {
 
         // `kill_on_drop` makes timeout cancellation terminate the consumed child
         // handle inside `wait_with_output` instead of leaving a plugin running.
-        #[allow(clippy::disallowed_methods)]
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await
             .map_err(|_| ToolError::Timeout {

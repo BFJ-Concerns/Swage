@@ -4,7 +4,7 @@
 //! that emerges only when the gateway client library, runtime metadata, CLI
 //! dispatch, and gateway startup are wired together.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

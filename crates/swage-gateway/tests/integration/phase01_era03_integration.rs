@@ -15,7 +15,7 @@
 //! | `missing_workspace_grants_inherit_global_permissions` | Missing workspace grant inheritance | turn permission build + workspace attachment store |
 //! | `workspace_gate_allows_file_read_with_trusted_read_attachment` | Workspace gate release | turn permission build + workspace attachment store |
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

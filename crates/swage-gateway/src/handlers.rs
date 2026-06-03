@@ -2573,7 +2573,6 @@ pub async fn list_turns(
 mod tests {
     // Test HTTP servers are scoped to individual tests; abort is the cleanup
     // path after assertions have observed the gateway behaviour.
-    #![allow(clippy::disallowed_methods)]
 
     use std::{net::SocketAddr, sync::Arc};
 

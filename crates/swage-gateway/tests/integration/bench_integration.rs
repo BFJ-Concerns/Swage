@@ -17,11 +17,10 @@
 //!
 //! Core Journey proved: #3 (Bench Workspace) — benches are genuinely isolated.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 // The env-serialisation guard intentionally spans awaits: it locks out other
 // tests for the whole request, since the gateway reads SWAGE_HOME during the
 // call. The guarded state is process env, not cancellation-sensitive data.
-#![allow(clippy::await_holding_lock)]
 
 use std::sync::Arc;
 

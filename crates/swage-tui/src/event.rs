@@ -126,7 +126,6 @@ pub enum AppEvent {
 mod tests {
     // These timeouts bound test waits around single-event receives; expiry only
     // drops the receive future and does not abandon shared state mutation.
-    #![allow(clippy::disallowed_methods)]
 
     use super::*;
     use std::time::Duration;

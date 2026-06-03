@@ -4,7 +4,7 @@
 //! that emerges only when the full stack is wired together. Each test identifies
 //! which tasks it spans and which Core Journey or Delivery Closure item it proves.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;

@@ -508,7 +508,6 @@ pub async fn assemble_for_agent(
     // Assembly is built to be all-or-nothing: outputs are returned only after
     // the awaited provider/Python work completes, and timeout reports failure
     // without committing a partial assembled context.
-    #[allow(clippy::disallowed_methods)]
     let timed_output = tokio::time::timeout(timeout_duration, run).await;
 
     match timed_output {

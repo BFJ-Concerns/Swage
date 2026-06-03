@@ -15,7 +15,7 @@
 //! | `hook_triggered_approval_uses_custom_prompt` | Hook RequestApproval → approval with hook prompt | hook [ut1s, d90q] + agent gate [3c77] + events [bm2t] |
 //! | `agent_scoped_routing_isolates_approval_events` | Agent B approval → only Agent B clients see it | state [rqzr] + WS routing [agent-scoped mote] |
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

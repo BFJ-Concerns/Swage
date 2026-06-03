@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::pin::Pin;
 use std::sync::Arc;

@@ -173,7 +173,6 @@ fn is_pid_dead(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::await_holding_lock)]
 
     use super::*;
     use std::sync::Mutex;

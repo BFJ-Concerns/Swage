@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use serde_json::json;
 use swage_core::{CompletionRequest, CompletionResponse, FinishReason, SandboxError};

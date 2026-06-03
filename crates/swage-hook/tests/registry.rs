@@ -461,11 +461,16 @@ async fn empty_registry_returns_continue() {
 
 // -- Default trait ----------------------------------------------------------
 
-#[test]
-fn hook_registry_default_creates_empty_registry() {
+#[tokio::test]
+async fn hook_registry_default_creates_empty_registry() {
     let registry = HookRegistry::default();
-    // Just verify it compiles and creates without panic
-    drop(registry);
+    let outcome = registry
+        .dispatch(HookEvent::SessionStart {
+            session_id: "s".into(),
+        })
+        .await;
+
+    assert!(matches!(outcome, HookOutcome::Continue));
 }
 
 // -- RequestApproval dispatch priority --------------------------------------

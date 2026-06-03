@@ -272,7 +272,6 @@ pub(crate) fn backoff_delay(attempt: u32) -> std::time::Duration {
 mod tests {
     // Test servers are short-lived Axum tasks owned by the individual test; abort
     // is the cleanup path once assertions have observed the client behaviour.
-    #![allow(clippy::disallowed_methods)]
 
     use super::*;
     use axum::{

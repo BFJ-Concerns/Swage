@@ -4,7 +4,7 @@
 //! Terminal rendering tests live in the swage-tui crate; these tests verify
 //! the wiring between the combined binary's CLI dispatch and the gateway.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use clap::Parser;
 use swage_gateway::cli::{Cli, Command};

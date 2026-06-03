@@ -1,8 +1,4 @@
-#![allow(
-    clippy::await_holding_lock,
-    clippy::unwrap_used,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

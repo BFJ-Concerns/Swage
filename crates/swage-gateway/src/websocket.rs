@@ -1152,7 +1152,6 @@ fn normalise_selected_model_id(selected_model_id: Option<String>) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::await_holding_lock)]
 
     use std::sync::Arc;
 

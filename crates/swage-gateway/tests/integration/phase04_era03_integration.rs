@@ -7,7 +7,7 @@
 //! contract enforcement) verify the infrastructure wiring and routing rather
 //! than end-to-end execution — the LLM is not invoked.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -29,17 +29,12 @@ rust-version = "1.95"
 # bugs, needless allocations, or genuine redundancy; drop what is purely
 # stylistic or fires falsely on provably-correct code.
 #
-# `pedantic` runs as a group (with an allow-list below). `nursery` does NOT —
-# its lints are still under development and ship with false positives - so the
-# handful of nursery lints worth having are opted in individually.
+# `pedantic` runs as a group (with an allow-list below). `nursery` stays off
+# entirely - its lints are still under development and ship with false positives,
+# and the perf-oriented ones we tried (redundant_clone, or_fun_call,
+# needless_collect) fired falsely on provably-correct code more than they paid.
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-
-# --- Nursery lints opted in individually (real perf wins, not style) ---
-redundant_clone = "warn"   # catches clones whose value is never used after
-or_fun_call = "warn"       # eager `unwrap_or(expensive())` -> lazy `_else`
-needless_collect = "warn"  # collecting only to immediately re-iterate
-disallowed_methods = "warn" # configured in clippy.toml for async abandonment hazards
 
 # --- Pedantic allowed: stylistic preferences with no correctness payoff ---
 doc_markdown = "allow"              # backticks in doc comments - a rendering nicety
@@ -102,14 +97,17 @@ semicolon_if_nothing_returned = "allow"
 format_collect = "allow"
 format_push_string = "allow"
 
-# --- Async cancellation safety (deny: pure tripwires) ---
-# Guard the "task abandoned mid-mutation" and "future silently dropped" failure
-# modes. If these don't fire on your tree today, denying only ever bites a future
-# regression. See clippy.toml for the disallowed-method counterparts.
-await_holding_lock = "deny"        # lock guard held across .await - the lock-shaped footgun
-await_holding_refcell_ref = "deny" # same hazard via a RefCell borrow across .await
-async_yields_async = "deny"        # returned a future where you meant to await one
-let_underscore_future = "deny"     # `let _ = async_fn();` drops the future - it never runs
+# --- Async tripwires silenced (allow: false-positive prone) ---
+# These are on by default (clippy's `suspicious`/`complexity` groups warn out of
+# the box), and they fire on provably-correct code: a guard deliberately held
+# across an await, a future intentionally returned rather than awaited. Left at
+# their default warn level they force a per-site `#[allow]` with a justification
+# at every legitimate occurrence. Set to allow so correct code needs no override;
+# the abandoned-future hazard they guarded is covered by tests, not these lints.
+await_holding_lock = "allow"        # lock guard held across .await - often intentional
+await_holding_refcell_ref = "allow" # same hazard via a RefCell borrow across .await
+async_yields_async = "allow"        # returning a future from an async block can be deliberate
+let_underscore_future = "allow"     # `let _ = fut;` is sometimes a deliberate drop
 
 # --- Hygiene (deny: leftovers that should never be committed) ---
 # NB: `unimplemented` is intentionally NOT denied - it's the correct macro for

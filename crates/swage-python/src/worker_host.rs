@@ -86,7 +86,6 @@ impl PythonWorkerRuntime {
 
     // Startup timeout only cancels the socket accept; the error path below
     // terminates and reaps the just-spawned worker before returning.
-    #[allow(clippy::disallowed_methods)]
     pub async fn spawn_ready_worker(
         &self,
         sandboxed: bool,
@@ -244,7 +243,6 @@ impl PythonWorkerRuntime {
 
     // Execution timeout intentionally abandons the in-flight protocol receive
     // because this path immediately kills the worker and removes it from reuse.
-    #[allow(clippy::disallowed_methods)]
     async fn run_payload_with_timeout(
         &self,
         worker: &mut ReadyWorker,
@@ -454,7 +452,6 @@ impl WorkerTransport {
 
     // Worker messages are line-framed; dropping `read_until` preserves buffered
     // bytes for a later receive instead of committing partial protocol state.
-    #[allow(clippy::disallowed_methods)]
     async fn receive_timeout(
         &mut self,
         timeout: Duration,
@@ -576,7 +573,6 @@ fn apply_environment(command: &mut Command, environment: &BTreeMap<String, Strin
 mod tests {
     // Test timeouts bound polling loops around dedicated worker processes; the
     // assertions verify those processes have already been terminated.
-    #![allow(clippy::disallowed_methods)]
 
     use super::*;
 

@@ -13,7 +13,7 @@
 //! | `no_schema_preserves_existing_behaviour` | No-schema preserved behaviour | config absence + gateway [i59a, z4ov] |
 //! | `tokens_stream_during_both_initial_and_retry_attempts` | Streaming during validation proof | validation [xya3] + gateway [i59a] |
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

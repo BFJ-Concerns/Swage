@@ -4,7 +4,7 @@
 //! that emerges only when the gateway's sandbox routing, structured logging,
 //! and lifecycle management are wired together.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::pin::Pin;
