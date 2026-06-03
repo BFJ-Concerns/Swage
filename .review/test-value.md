@@ -3,9 +3,9 @@
 ## The concern
 
 Tests are an asset only when they earn their maintenance cost. This brief judges
-whether each test added or changed on the branch is worth keeping and sits at the
-right level — not whether the code it covers is correct (that is `/code-review`'s
-job), and not whether enough tests exist (a separate concern).
+whether each test is worth keeping and sits at the right level — not whether the
+code it covers is correct (that is `/code-review`'s job), and not whether enough
+tests exist (a separate concern).
 
 A test earns its place when it would catch a real regression in observable
 behaviour, and when it is the cheapest honest way to do so. Tests that fail that
@@ -49,12 +49,12 @@ the more serious failure: it reads as coverage but verifies nothing.
 panic" where a returned value should have been checked, or assertions on a
 constant the test itself defined.
 
-**Redundant tests.** A new test that covers exactly what an existing one already
-does, adding suite time without adding a distinct failure it would catch.
+**Redundant tests.** A test that covers exactly what another already does,
+adding suite time without a distinct failure it would catch.
 
 ## Out of scope
 
-- Correctness of the code under test, or whether new code is missing tests — not
+- Correctness of the code under test, or whether code is missing tests — not
   this brief.
 - Test naming, formatting, or file placement conventions — mechanical.
 - Flakiness, timing, or test-infrastructure gaps.
