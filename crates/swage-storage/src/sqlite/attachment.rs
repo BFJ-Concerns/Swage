@@ -523,6 +523,26 @@ impl BackgroundJobStore for SqliteStorage {
         })
         .await
     }
+
+    async fn recover_running_background_jobs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError> {
+        self.with_conn(|conn| {
+            let now = Utc::now().to_rfc3339();
+            let changed = conn.execute(
+                "UPDATE background_jobs
+                 SET state = 'retried',
+                     error_message = ?1,
+                     updated_at = ?2,
+                     completed_at = NULL
+                 WHERE state = 'running'",
+                params![error_message, now],
+            )?;
+            Ok(changed as u64)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -612,6 +632,82 @@ mod tests {
         assert_eq!(failed.state, BackgroundJobState::Failed);
         let retried = storage.retry_background_job(second_job_id).await.unwrap();
         assert_eq!(retried.state, BackgroundJobState::Retried);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_retries_running_background_jobs() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let running_attachment_id = Uuid::new_v4();
+        let running_job_id = Uuid::new_v4();
+        storage
+            .queue_attachment_ingestion(
+                NewAttachment {
+                    id: running_attachment_id,
+                    scope_kind: AttachmentScopeKind::Session,
+                    session_id: None,
+                    bench_id: None,
+                    kind: AttachmentKind::Document,
+                    filename: "note.txt".into(),
+                    mime_type: "text/plain".into(),
+                    bytes: b"hello".to_vec(),
+                },
+                NewBackgroundJob {
+                    id: running_job_id,
+                    kind: BackgroundJobKind::AttachmentIngestion,
+                    attachment_id: Some(running_attachment_id),
+                    payload: json!({"attachment_id": running_attachment_id}),
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .mark_background_job_running(running_job_id)
+            .await
+            .unwrap();
+
+        let queued_attachment_id = Uuid::new_v4();
+        let queued_job_id = Uuid::new_v4();
+        storage
+            .queue_attachment_ingestion(
+                NewAttachment {
+                    id: queued_attachment_id,
+                    scope_kind: AttachmentScopeKind::Session,
+                    session_id: None,
+                    bench_id: None,
+                    kind: AttachmentKind::Document,
+                    filename: "queued.txt".into(),
+                    mime_type: "text/plain".into(),
+                    bytes: b"queued".to_vec(),
+                },
+                NewBackgroundJob {
+                    id: queued_job_id,
+                    kind: BackgroundJobKind::AttachmentIngestion,
+                    attachment_id: Some(queued_attachment_id),
+                    payload: json!({"attachment_id": queued_attachment_id}),
+                },
+            )
+            .await
+            .unwrap();
+
+        let count = storage
+            .recover_running_background_jobs("gateway stopped")
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let recovered = storage
+            .get_background_job(running_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, BackgroundJobState::Retried);
+        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+        assert!(recovered.completed_at.is_none());
+
+        let runnable = storage.list_runnable_background_jobs().await.unwrap();
+        assert_eq!(runnable.len(), 2);
+        assert!(runnable.iter().any(|job| job.id == running_job_id));
+        assert!(runnable.iter().any(|job| job.id == queued_job_id));
     }
 
     #[test]

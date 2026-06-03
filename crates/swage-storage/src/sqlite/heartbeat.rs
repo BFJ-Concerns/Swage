@@ -372,6 +372,25 @@ impl HeartbeatStore for SqliteStorage {
         })
         .await
     }
+
+    async fn recover_incomplete_heartbeat_runs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError> {
+        self.with_conn(|conn| {
+            let now = Utc::now().to_rfc3339();
+            let changed = conn.execute(
+                "UPDATE heartbeat_runs
+                 SET state = 'failed',
+                     error_message = ?1,
+                     completed_at = ?2
+                 WHERE state IN ('pending', 'running')",
+                params![error_message, now],
+            )?;
+            Ok(changed as u64)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +502,93 @@ mod tests {
         assert_eq!(fetched.state, HeartbeatRunState::Completed);
         assert_eq!(fetched.output_text.as_deref(), Some("done"));
         assert!(fetched.completed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_fails_incomplete_heartbeat_runs() {
+        let (storage, session_id) = make_storage_with_session().await;
+        let heartbeat = storage
+            .create_heartbeat(NewHeartbeat {
+                session_id,
+                agent_id: "gateway".into(),
+                message: "beat".into(),
+                interval_seconds: 60,
+                status: HeartbeatStatus::Enabled,
+                last_beat_at: None,
+                next_beat_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+        let running = storage
+            .create_heartbeat_run(NewHeartbeatRun {
+                heartbeat_id: heartbeat.id,
+                state: HeartbeatRunState::Running,
+                scheduled_for: Some(Utc::now()),
+                turn_id: Some(Uuid::new_v4()),
+                output_text: None,
+                error_message: None,
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+        let pending = storage
+            .create_heartbeat_run(NewHeartbeatRun {
+                heartbeat_id: heartbeat.id,
+                state: HeartbeatRunState::Pending,
+                scheduled_for: Some(Utc::now()),
+                turn_id: None,
+                output_text: None,
+                error_message: None,
+                started_at: None,
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+        let completed = storage
+            .create_heartbeat_run(NewHeartbeatRun {
+                heartbeat_id: heartbeat.id,
+                state: HeartbeatRunState::Completed,
+                scheduled_for: None,
+                turn_id: Some(Uuid::new_v4()),
+                output_text: Some("done".into()),
+                error_message: None,
+                started_at: Some(Utc::now()),
+                completed_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        let count = storage
+            .recover_incomplete_heartbeat_runs("gateway stopped")
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let recovered = storage
+            .get_heartbeat_run(running.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, HeartbeatRunState::Failed);
+        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+        assert!(recovered.completed_at.is_some());
+
+        let recovered = storage
+            .get_heartbeat_run(pending.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, HeartbeatRunState::Failed);
+        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+        assert!(recovered.completed_at.is_some());
+
+        let untouched = storage
+            .get_heartbeat_run(completed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.state, HeartbeatRunState::Completed);
+        assert_eq!(untouched.output_text.as_deref(), Some("done"));
     }
 }

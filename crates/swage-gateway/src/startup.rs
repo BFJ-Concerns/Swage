@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use swage_client::runtime::RuntimeMetadata;
 use swage_config::LogLevel;
+use tokio_util::sync::CancellationToken;
 
 /// Run the gateway to completion.
 ///
@@ -70,6 +71,33 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
         Err(e) => {
             eprintln!("Startup recovery failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    match crate::shutdown::recover_orphaned_background_runs(&*raw_storage).await {
+        Ok(counts) => {
+            if counts.scheduled_runs_failed > 0 {
+                info!(
+                    "Recovered {} orphaned scheduled run(s) from a previous shutdown",
+                    counts.scheduled_runs_failed
+                );
+            }
+            if counts.heartbeat_runs_failed > 0 {
+                info!(
+                    "Recovered {} orphaned heartbeat run(s) from a previous shutdown",
+                    counts.heartbeat_runs_failed
+                );
+            }
+            if counts.background_jobs_retried > 0 {
+                info!(
+                    "Recovered {} orphaned background job(s) from a previous shutdown",
+                    counts.background_jobs_retried
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Background startup recovery failed: {e}");
             std::process::exit(1);
         }
     }
@@ -139,9 +167,19 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         std::process::exit(1);
     }
     let router = crate::server::build_router(state.clone());
-    let scheduler_handle = crate::schedule::spawn_scheduler_loop(state.clone());
-    let heartbeat_handle = crate::heartbeat::spawn_heartbeat_loop(state.clone());
-    let attachment_handle = crate::attachment::spawn_ingestion_loop(state.clone());
+    let background_shutdown = CancellationToken::new();
+    let scheduler_handle = crate::schedule::spawn_scheduler_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
+    let heartbeat_handle = crate::heartbeat::spawn_heartbeat_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
+    let attachment_handle = crate::attachment::spawn_ingestion_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
 
     // Step 10: Bind the TCP listener.
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -196,15 +234,18 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     .await
     .expect("server error");
 
-    // Step 12b: These background loops only wait for interval ticks and then
-    // perform independent maintenance transactions; gateway shutdown owns the
-    // point where they stop.
-    #[allow(clippy::disallowed_methods)]
     {
         state.stop_agent_message_expiry();
-        scheduler_handle.abort();
-        heartbeat_handle.abort();
-        attachment_handle.abort();
+        background_shutdown.cancel();
+        for (name, handle) in [
+            ("scheduler", scheduler_handle),
+            ("heartbeat", heartbeat_handle),
+            ("attachment ingestion", attachment_handle),
+        ] {
+            if let Err(error) = handle.await {
+                warn!(%error, "background {name} loop did not shut down cleanly");
+            }
+        }
     }
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.

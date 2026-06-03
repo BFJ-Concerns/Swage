@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::GatewayError;
@@ -228,14 +228,25 @@ pub async fn tick_once(state: &AppState) -> Result<usize, GatewayError> {
 }
 
 pub fn spawn_ingestion_loop(state: AppState) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if let Err(error) = tick_once(&state).await {
-                warn!(%error, "attachment ingestion tick failed");
+    spawn_ingestion_loop_until_cancelled(state, CancellationToken::new())
+}
+
+pub fn spawn_ingestion_loop_until_cancelled(
+    state: AppState,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    crate::background_loop::spawn_periodic_loop(
+        ATTACHMENT_POLL_INTERVAL,
+        shutdown,
+        "attachment ingestion tick failed",
+        move || {
+            let state = state.clone();
+            async move {
+                tick_once(&state).await?;
+                Ok(())
             }
-            tokio::time::sleep(ATTACHMENT_POLL_INTERVAL).await;
-        }
-    })
+        },
+    )
 }
 
 fn classify_attachment_kind(

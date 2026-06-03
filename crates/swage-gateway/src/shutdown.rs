@@ -13,6 +13,9 @@
 //! - [`recover_orphaned_turns`] — runs once at startup to transition any turns
 //!   left in an in-progress state by a previous unclean exit to `Interrupted`.
 //!
+//! - [`recover_orphaned_background_runs`] — runs once at startup to repair
+//!   maintenance rows left in `running` by a previous unclean exit.
+//!
 //! Typical call sequence at shutdown:
 //! ```text
 //! graceful_shutdown().await;
@@ -122,6 +125,36 @@ pub async fn recover_orphaned_turns(
     }
 
     Ok(recovered_turn_ids.len())
+}
+
+/// Counts returned by [`recover_orphaned_background_runs`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BackgroundRunRecoveryCounts {
+    pub scheduled_runs_failed: u64,
+    pub heartbeat_runs_failed: u64,
+    pub background_jobs_retried: u64,
+}
+
+/// Repair background maintenance rows left mid-run by an unclean shutdown.
+///
+/// Scheduled and heartbeat runs are marked failed because their durable run row
+/// already belongs to a previous process. Attachment jobs are moved back to
+/// `retried`, which is already part of the runnable-job selector and lets
+/// ingestion safely resume on the next tick.
+pub async fn recover_orphaned_background_runs(
+    storage: &dyn Storage,
+) -> Result<BackgroundRunRecoveryCounts, StorageError> {
+    Ok(BackgroundRunRecoveryCounts {
+        scheduled_runs_failed: storage
+            .recover_incomplete_scheduled_runs("gateway stopped while scheduled run was running")
+            .await?,
+        heartbeat_runs_failed: storage
+            .recover_incomplete_heartbeat_runs("gateway stopped while heartbeat run was running")
+            .await?,
+        background_jobs_retried: storage
+            .recover_running_background_jobs("gateway stopped while background job was running")
+            .await?,
+    })
 }
 
 /// Counts returned by [`recover_expired_approvals`].

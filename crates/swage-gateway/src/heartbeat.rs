@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_core::GatewayError;
@@ -234,14 +234,25 @@ pub async fn tick_once(state: &AppState, now: DateTime<Utc>) -> Result<usize, Ga
 }
 
 pub fn spawn_heartbeat_loop(state: AppState) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if let Err(error) = tick_once(&state, Utc::now()).await {
-                warn!(%error, "heartbeat tick failed");
+    spawn_heartbeat_loop_until_cancelled(state, CancellationToken::new())
+}
+
+pub fn spawn_heartbeat_loop_until_cancelled(
+    state: AppState,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    crate::background_loop::spawn_periodic_loop(
+        HEARTBEAT_POLL_INTERVAL,
+        shutdown,
+        "heartbeat tick failed",
+        move || {
+            let state = state.clone();
+            async move {
+                tick_once(&state, Utc::now()).await?;
+                Ok(())
             }
-            tokio::time::sleep(HEARTBEAT_POLL_INTERVAL).await;
-        }
-    })
+        },
+    )
 }
 
 async fn execute_heartbeat(

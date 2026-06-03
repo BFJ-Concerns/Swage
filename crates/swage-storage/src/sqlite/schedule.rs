@@ -426,6 +426,25 @@ impl ScheduleStore for SqliteStorage {
         })
         .await
     }
+
+    async fn recover_incomplete_scheduled_runs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError> {
+        self.with_conn(|conn| {
+            let now = Utc::now().to_rfc3339();
+            let changed = conn.execute(
+                "UPDATE scheduled_runs
+                 SET state = 'failed',
+                     error_message = ?1,
+                     completed_at = ?2
+                 WHERE state IN ('pending', 'running')",
+                params![error_message, now],
+            )?;
+            Ok(changed as u64)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -547,5 +566,98 @@ mod tests {
         assert_eq!(fetched.state, ScheduledRunState::Completed);
         assert_eq!(fetched.output_text.as_deref(), Some("done"));
         assert!(fetched.completed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_fails_incomplete_scheduled_runs() {
+        let (storage, session_id) = make_storage_with_session().await;
+        let job = storage
+            .create_scheduled_job(NewScheduledJob {
+                session_id,
+                agent_id: "gateway".into(),
+                message: "run".into(),
+                status: ScheduledJobStatus::Active,
+                kind: ScheduledJobKind::OneShot,
+                schedule_expression: "2026-04-17T12:00:00Z".into(),
+                delivery_routing: serde_json::json!({"store_local_output": true}),
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let running = storage
+            .create_scheduled_run(NewScheduledRun {
+                job_id: job.id,
+                trigger: ScheduledRunTrigger::Scheduled,
+                state: ScheduledRunState::Running,
+                scheduled_for: Some(Utc::now()),
+                turn_id: Some(Uuid::new_v4()),
+                output_text: None,
+                error_message: None,
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+        let pending = storage
+            .create_scheduled_run(NewScheduledRun {
+                job_id: job.id,
+                trigger: ScheduledRunTrigger::Scheduled,
+                state: ScheduledRunState::Pending,
+                scheduled_for: Some(Utc::now()),
+                turn_id: None,
+                output_text: None,
+                error_message: None,
+                started_at: None,
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+        let completed = storage
+            .create_scheduled_run(NewScheduledRun {
+                job_id: job.id,
+                trigger: ScheduledRunTrigger::Manual,
+                state: ScheduledRunState::Completed,
+                scheduled_for: None,
+                turn_id: Some(Uuid::new_v4()),
+                output_text: Some("done".into()),
+                error_message: None,
+                started_at: Some(Utc::now()),
+                completed_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        let count = storage
+            .recover_incomplete_scheduled_runs("gateway stopped")
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let recovered = storage
+            .get_scheduled_run(running.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, ScheduledRunState::Failed);
+        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+        assert!(recovered.completed_at.is_some());
+
+        let recovered = storage
+            .get_scheduled_run(pending.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, ScheduledRunState::Failed);
+        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+        assert!(recovered.completed_at.is_some());
+
+        let untouched = storage
+            .get_scheduled_run(completed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.state, ScheduledRunState::Completed);
+        assert_eq!(untouched.output_text.as_deref(), Some("done"));
     }
 }

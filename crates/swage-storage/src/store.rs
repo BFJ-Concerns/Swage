@@ -298,6 +298,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         attachment_id: Uuid,
     ) -> Result<Vec<BackgroundJob>, StorageError>;
+    async fn recover_running_background_jobs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError>;
 }
 
 #[async_trait]
@@ -830,6 +834,10 @@ pub trait ScheduleStore: Send + Sync {
         output_text: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
+    async fn recover_incomplete_scheduled_runs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError>;
 }
 
 #[async_trait]
@@ -864,6 +872,10 @@ pub trait HeartbeatStore: Send + Sync {
         output_text: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
+    async fn recover_incomplete_heartbeat_runs(
+        &self,
+        error_message: &str,
+    ) -> Result<u64, StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,6 +1397,10 @@ mod tests {
         ) -> Result<Vec<BackgroundJob>, StorageError> {
             unimplemented!()
         }
+
+        async fn recover_running_background_jobs(&self, _: &str) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -1847,6 +1863,10 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+
+        async fn recover_incomplete_scheduled_runs(&self, _: &str) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -1899,6 +1919,10 @@ mod tests {
             _: Option<&str>,
             _: Option<&str>,
         ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn recover_incomplete_heartbeat_runs(&self, _: &str) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }

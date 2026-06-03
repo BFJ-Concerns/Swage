@@ -3794,6 +3794,27 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+
+        async fn recover_incomplete_scheduled_runs(
+            &self,
+            error_message: &str,
+        ) -> Result<u64, StorageError> {
+            let mut db = self.db.lock().await;
+            let now = chrono::Utc::now();
+            let mut recovered = 0;
+            for run in db.scheduled_runs.values_mut() {
+                if matches!(
+                    run.state,
+                    ScheduledRunState::Pending | ScheduledRunState::Running
+                ) {
+                    run.state = ScheduledRunState::Failed;
+                    run.error_message = Some(error_message.to_string());
+                    run.completed_at = Some(now);
+                    recovered += 1;
+                }
+            }
+            Ok(recovered)
+        }
     }
 
     #[async_trait]
@@ -3971,6 +3992,27 @@ pub(crate) mod tests {
                 run.completed_at = Some(chrono::Utc::now());
             }
             Ok(())
+        }
+
+        async fn recover_incomplete_heartbeat_runs(
+            &self,
+            error_message: &str,
+        ) -> Result<u64, StorageError> {
+            let mut db = self.db.lock().await;
+            let now = chrono::Utc::now();
+            let mut recovered = 0;
+            for run in db.heartbeat_runs.values_mut() {
+                if matches!(
+                    run.state,
+                    HeartbeatRunState::Pending | HeartbeatRunState::Running
+                ) {
+                    run.state = HeartbeatRunState::Failed;
+                    run.error_message = Some(error_message.to_string());
+                    run.completed_at = Some(now);
+                    recovered += 1;
+                }
+            }
+            Ok(recovered)
         }
     }
 
@@ -4201,6 +4243,25 @@ pub(crate) mod tests {
                 .collect();
             jobs.sort_by_key(|job| job.created_at);
             Ok(jobs)
+        }
+
+        async fn recover_running_background_jobs(
+            &self,
+            error_message: &str,
+        ) -> Result<u64, StorageError> {
+            let mut db = self.db.lock().await;
+            let now = chrono::Utc::now();
+            let mut recovered = 0;
+            for job in db.background_jobs.values_mut() {
+                if job.state == swage_storage::BackgroundJobState::Running {
+                    job.state = swage_storage::BackgroundJobState::Retried;
+                    job.error_message = Some(error_message.to_string());
+                    job.completed_at = None;
+                    job.updated_at = now;
+                    recovered += 1;
+                }
+            }
+            Ok(recovered)
         }
     }
 

@@ -46,6 +46,7 @@ pub mod attachment;
 pub mod audit;
 pub mod authoring_definition;
 pub mod automated_turn;
+pub mod background_loop;
 pub mod bench_extension;
 pub mod builder_runtime;
 pub mod capabilities;
