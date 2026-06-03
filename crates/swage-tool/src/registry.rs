@@ -14,6 +14,7 @@ use crate::tool::Tool;
 const PROTECTED_NAMES: &[&str] = &[
     "agent_memory",
     "shell",
+    "file_edit",
     "file_read",
     "file_write",
     "file_search",

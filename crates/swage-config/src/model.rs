@@ -194,7 +194,7 @@ impl Default for ToolPermissionConfig {
 }
 
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    ["shell", "file_write", "python_execute"]
+    ["shell", "file_edit", "file_write", "python_execute"]
         .into_iter()
         .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
         .collect()
@@ -1003,7 +1003,7 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_write", "python_execute"]
+            vec!["shell", "file_edit", "file_write", "python_execute"]
         );
     }
 
@@ -1171,7 +1171,7 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_write", "python_execute"]
+            vec!["shell", "file_edit", "file_write", "python_execute"]
         );
     }
 

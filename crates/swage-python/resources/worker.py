@@ -78,6 +78,9 @@ def _make_python_execute_module(connection, reader, request_id):
     module.write_file = lambda path, content: _dispatch_tool(
         connection, reader, request_id, "file_write", {"path": path, "content": content}
     )
+    module.edit_files = lambda changes: _dispatch_tool(
+        connection, reader, request_id, "file_edit", {"changes": changes}
+    )
     module.list_files = lambda path: _dispatch_tool(
         connection, reader, request_id, "file_list", {"path": path}
     )

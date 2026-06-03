@@ -456,10 +456,10 @@ pub(crate) fn build_tool_dispatcher(
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, agent_memory::AgentMemoryTool, file_list::FileListTool, file_read::FileReadTool,
-        file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool, shell::ShellTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        Tool, agent_memory::AgentMemoryTool, file_edit::FileEditTool, file_list::FileListTool,
+        file_read::FileReadTool, file_search::FileSearchTool, file_write::FileWriteTool,
+        memory::MemoryTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        shell::ShellTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -474,6 +474,7 @@ pub(crate) fn build_tool_dispatcher(
         Arc::new(FileReadTool {
             max_output_bytes: max_output,
         }),
+        Arc::new(FileEditTool),
         Arc::new(FileWriteTool),
         Arc::new(FileSearchTool {
             max_output_bytes: max_output,

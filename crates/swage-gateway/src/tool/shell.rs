@@ -166,14 +166,10 @@ impl Tool for ShellTool {
                 let (content, _truncated, _total_bytes) =
                     truncate_output(&combined, self.max_output_bytes);
 
-                if !exit_status.success() {
-                    return Err(ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message: content,
-                    });
-                }
-
-                Ok(json!({"output": content}))
+                Ok(json!({
+                    "output": content,
+                    "exit_code": exit_status.code(),
+                }))
             }
         }
     }
@@ -243,28 +239,32 @@ mod tests {
         let result = t.execute(json!({"command": "echo hello"}), &ctx()).await;
         let val = result.expect("echo should succeed");
         assert_eq!(val["output"].as_str().unwrap().trim(), "hello");
+        assert_eq!(val["exit_code"], json!(0));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn nonzero_exit_returns_err() {
+    async fn nonzero_exit_returns_exit_code() {
         let t = tool(5);
         // `false` always exits with code 1.
         let result = t.execute(json!({"command": "false"}), &ctx()).await;
-        assert!(result.is_err(), "non-zero exit should produce an error");
+        let val = result.expect("non-zero exit should still return tool data");
+        assert_eq!(val["output"], json!(""));
+        assert_eq!(val["exit_code"], json!(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn stderr_output_included_in_error() {
+    async fn stderr_output_included_for_nonzero_exit() {
         let t = tool(5);
         let result = t
             .execute(json!({"command": "echo errout >&2; exit 1"}), &ctx())
             .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let val = result.expect("non-zero exit should still return tool data");
+        let output = val["output"].as_str().unwrap();
         assert!(
-            msg.contains("errout"),
-            "stderr should appear in error message: {msg:?}"
+            output.contains("errout"),
+            "stderr should appear in output: {output:?}"
         );
+        assert_eq!(val["exit_code"], json!(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -308,6 +308,7 @@ mod tests {
             .await;
         let val = result.expect("command should succeed");
         let output = val["output"].as_str().unwrap();
+        assert_eq!(val["exit_code"], json!(0));
         assert!(
             output.len() <= 10,
             "content should be capped: len={}",
@@ -329,6 +330,7 @@ mod tests {
         let val = result.expect("pwd should succeed");
         let canonical = dir.path().canonicalize().unwrap();
         let output = val["output"].as_str().unwrap().trim();
+        assert_eq!(val["exit_code"], json!(0));
         assert!(
             output.contains(canonical.to_str().unwrap())
                 || canonical.to_str().unwrap().contains(output),

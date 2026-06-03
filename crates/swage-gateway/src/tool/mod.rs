@@ -5,6 +5,7 @@
 //! without updating every import site.
 
 pub mod agent_memory;
+pub mod file_edit;
 pub mod file_list;
 pub mod file_read;
 pub mod file_search;

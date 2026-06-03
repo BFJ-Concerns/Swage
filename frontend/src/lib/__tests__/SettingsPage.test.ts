@@ -85,7 +85,7 @@ function emptySettings(): SettingsResponse {
       allow: ["*"],
       deny: [],
       bundles: {},
-      require_approval: ["shell", "file_write", "python_execute"],
+      require_approval: ["shell", "file_edit", "file_write", "python_execute"],
     },
     hitl: {
       timeout: 300,
