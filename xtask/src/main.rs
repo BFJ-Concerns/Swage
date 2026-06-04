@@ -460,8 +460,7 @@ fn install(options: &InstallOptions) -> Result<()> {
 
     fs::create_dir_all(&options.prefix)?;
     let installed_binary = options.prefix.join(BINARY_NAME);
-    fs::copy("target/release/swage", &installed_binary)?;
-    make_executable(&installed_binary)?;
+    publish_binary_atomically(Path::new("target/release/swage"), &installed_binary)?;
     println!("==> Installed swage to {}", installed_binary.display());
 
     if options.lan_mode {
@@ -478,8 +477,55 @@ fn install(options: &InstallOptions) -> Result<()> {
         })?;
     }
 
+    hot_swap_gateway_if_running(&installed_binary)?;
     print_install_next_steps(&options.prefix, options.lan_mode);
     Ok(())
+}
+
+fn publish_binary_atomically(source: &Path, installed_binary: &Path) -> Result<()> {
+    let temp_binary = temporary_install_path(installed_binary)?;
+
+    fs::copy(source, &temp_binary)?;
+    make_executable(&temp_binary)?;
+
+    // Replacing the path keeps a running old executable mapped while new
+    // starts resolve to the freshly installed binary. A direct overwrite can
+    // fail with ETXTBSY when the installed binary is the live gateway process.
+    fs::rename(&temp_binary, installed_binary).inspect_err(|_error| {
+        let _ = fs::remove_file(&temp_binary);
+    })?;
+    Ok(())
+}
+
+fn temporary_install_path(installed_binary: &Path) -> Result<PathBuf> {
+    let file_name = installed_binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "installed binary path has no valid file name: {}",
+                installed_binary.display()
+            )
+        })?;
+    Ok(installed_binary.with_file_name(format!(".{file_name}.installing.{}", std::process::id())))
+}
+
+fn hot_swap_gateway_if_running(installed_binary: &Path) -> Result<()> {
+    let status = Command::new(installed_binary)
+        .args(["gateway", "status"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    if !status.success() {
+        return Ok(());
+    }
+
+    run_command("Hot-swapping running gateway", {
+        let mut command = Command::new(installed_binary);
+        command.args(["gateway", "restart"]);
+        command
+    })
 }
 
 fn install_frontend_deps_if_needed() -> Result<()> {
