@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -51,9 +52,11 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 2: Initialise logging from (possibly overridden) configuration.
     init_logging(&config);
 
-    // Step 3: Resolve database path under the canonical Swage data root.
-    let db_path = {
-        match swage_database_path() {
+    // Step 3: Resolve the canonical Swage data root and make sure managed
+    // secrets have an encryption key before migrations or provider setup can
+    // read/write encrypted rows.
+    let root = {
+        match swage_config::discovery::resolve_root() {
             Ok(path) => path,
             Err(problem) => {
                 eprintln!("{problem}");
@@ -61,6 +64,11 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
             }
         }
     };
+    if let Err(problem) = ensure_managed_secret_key(&root) {
+        eprintln!("{problem}");
+        std::process::exit(1);
+    }
+    let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
     let raw_storage = open_storage(&db_path);
@@ -563,6 +571,91 @@ fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<Pat
     }
 }
 
+fn ensure_managed_secret_key(root: &std::path::Path) -> Result<PathBuf, String> {
+    if std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV).is_some() {
+        return Ok(root.join("secrets").join("managed-secret.key"));
+    }
+
+    let key_path = root.join("secrets").join("managed-secret.key");
+    let encoded = if key_path.exists() {
+        std::fs::read_to_string(&key_path).map_err(|error| {
+            format!(
+                "failed to read managed secret key at {}: {error}",
+                key_path.display()
+            )
+        })?
+    } else {
+        let mut key = [0_u8; 32];
+        rand::fill(&mut key);
+        let encoded = BASE64.encode(key);
+        if let Some(parent) = key_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create managed secret key directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        write_managed_secret_key(&key_path, &encoded)?;
+        encoded
+    };
+
+    let encoded = encoded.trim();
+    let bytes = BASE64.decode(encoded).map_err(|error| {
+        format!(
+            "managed secret key at {} is invalid base64: {error}",
+            key_path.display()
+        )
+    })?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "managed secret key at {} must decode to exactly 32 bytes",
+            key_path.display()
+        ));
+    }
+
+    // SAFETY: this runs during gateway startup before serving requests. The
+    // storage encryption code intentionally reads the key from the process
+    // environment, so the local key file is bridged into that existing path.
+    unsafe { std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, encoded) };
+    Ok(key_path)
+}
+
+#[cfg(unix)]
+fn write_managed_secret_key(path: &std::path::Path, encoded: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "failed to create managed secret key at {}: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(encoded.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write managed secret key at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn write_managed_secret_key(path: &std::path::Path, encoded: &str) -> Result<(), String> {
+    std::fs::write(path, encoded).map_err(|error| {
+        format!(
+            "failed to write managed secret key at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
 fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
     swage_config::discovery::resolve_root().map(|root| root.join("swage.db"))
 }
@@ -752,6 +845,64 @@ mod tests {
             root.is_dir(),
             "database path resolution should auto-create root"
         );
+    }
+
+    #[test]
+    fn ensure_managed_secret_key_creates_local_key_when_env_is_missing() {
+        let _swage_home = SwageHomeGuard::new();
+        let previous_key = std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV);
+        unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) };
+
+        let result = ensure_managed_secret_key(_swage_home.path());
+
+        let key_path = result.expect("managed secret key should be provisioned");
+        let encoded = std::fs::read_to_string(&key_path).expect("key file should exist");
+        let decoded = BASE64
+            .decode(encoded.trim())
+            .expect("key should be base64 encoded");
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(
+            std::env::var(swage_storage::MANAGED_SECRET_KEY_ENV).unwrap(),
+            encoded.trim()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        match previous_key {
+            Some(value) => unsafe {
+                std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, value)
+            },
+            None => unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) },
+        }
+    }
+
+    #[test]
+    fn ensure_managed_secret_key_uses_existing_env_key() {
+        let _swage_home = SwageHomeGuard::new();
+        let previous_key = std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV);
+        let explicit_key = BASE64.encode([23_u8; 32]);
+        unsafe { std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, &explicit_key) };
+
+        let result = ensure_managed_secret_key(_swage_home.path());
+
+        let key_path = result.expect("explicit managed secret key should be accepted");
+        assert!(!key_path.exists());
+        assert_eq!(
+            std::env::var(swage_storage::MANAGED_SECRET_KEY_ENV).unwrap(),
+            explicit_key
+        );
+
+        match previous_key {
+            Some(value) => unsafe {
+                std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, value)
+            },
+            None => unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) },
+        }
     }
 
     // log_level_to_directive must map every LogLevel variant correctly.

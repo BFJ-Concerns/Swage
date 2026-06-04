@@ -3303,6 +3303,7 @@ dependencies = [
  "html2text",
  "libc",
  "mime_guess",
+ "rand 0.10.1",
  "reqwest",
  "rust-embed",
  "serde",
