@@ -20,13 +20,24 @@ use swage_client::{
 /// - `Ok(())` (exit 0): gateway is running and health check passed
 /// - `Err(_)` (exit non-zero): not running, stale, or unresponsive
 pub async fn run() -> Result<(), ClientError> {
+    let installed = super::install::load_install_config()?;
     let meta = match RuntimeMetadata::load() {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("Gateway is not running");
-            return Err(ClientError::GatewayNotRunning {
-                reason: "no metadata file found".to_string(),
-            });
+            match super::recovery::recover_configured_gateway_metadata(
+                installed.as_ref().and_then(|config| config.host.as_deref()),
+                installed.as_ref().and_then(|config| config.port),
+            )
+            .await
+            {
+                Some(metadata) => metadata,
+                None => {
+                    eprintln!("Gateway is not running");
+                    return Err(ClientError::GatewayNotRunning {
+                        reason: "no metadata file found".to_string(),
+                    });
+                }
+            }
         }
         Err(e) => return Err(ClientError::MetadataIo { source: e }),
     };

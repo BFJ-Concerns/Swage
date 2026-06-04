@@ -7,6 +7,7 @@
 
 pub mod completions;
 pub mod install;
+pub mod recovery;
 pub mod restart;
 pub mod run;
 pub mod start;

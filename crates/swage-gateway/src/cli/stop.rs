@@ -24,14 +24,26 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// `Err(GatewayNotRunning)` when there is no gateway to stop.
 /// Other `ClientError` variants surface HTTP or I/O failures.
 pub async fn run(args: &StopArgs) -> Result<(), ClientError> {
+    let installed = super::install::load_install_config()?;
+
     // Load metadata — a missing or unreadable file means the gateway isn't running.
     let meta = match RuntimeMetadata::load() {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("Gateway is not running");
-            return Err(ClientError::GatewayNotRunning {
-                reason: "no metadata file found".to_string(),
-            });
+            match super::recovery::recover_configured_gateway_metadata(
+                installed.as_ref().and_then(|config| config.host.as_deref()),
+                installed.as_ref().and_then(|config| config.port),
+            )
+            .await
+            {
+                Some(metadata) => metadata,
+                None => {
+                    eprintln!("Gateway is not running");
+                    return Err(ClientError::GatewayNotRunning {
+                        reason: "no metadata file found".to_string(),
+                    });
+                }
+            }
         }
         Err(e) => return Err(ClientError::MetadataIo { source: e }),
     };

@@ -51,8 +51,24 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
                 ),
             });
         }
-        // No metadata file — gateway is not running, proceed normally.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // No metadata file. Before spawning, recover a daemon that is already
+        // serving at the configured address but lost its runtime metadata.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(meta) = super::recovery::recover_configured_gateway_metadata(
+                effective_host.as_deref(),
+                effective_port,
+            )
+            .await
+            {
+                eprintln!("Gateway is already running (PID {})", meta.pid);
+                return Err(ClientError::GatewayNotRunning {
+                    reason: format!(
+                        "gateway is already running at {} (PID {})",
+                        meta.address, meta.pid
+                    ),
+                });
+            }
+        }
         Err(e) => return Err(ClientError::MetadataIo { source: e }),
     }
 
