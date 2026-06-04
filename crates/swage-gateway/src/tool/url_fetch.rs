@@ -11,9 +11,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
+use tokio::io::AsyncWriteExt;
 
 use crate::tool::Tool;
-use crate::tool::workspace::truncate_output;
+use crate::tool::workspace::{
+    continuable_output_value, create_tool_output_artifact, tool_output_artifact_path,
+    truncated_output_value,
+};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -25,6 +29,7 @@ pub struct UrlFetchTool {
 }
 
 const BLOCKED_HOSTNAMES: &[&str] = &["localhost", "metadata.google.internal"];
+const RAW_HTML_ARTIFACT_FILENAME: &str = "raw-body.html";
 
 impl Default for UrlFetchTool {
     fn default() -> Self {
@@ -52,6 +57,11 @@ impl Tool for UrlFetchTool {
                 "url": {
                     "type": "string",
                     "description": "The URL to fetch."
+                },
+                "offset_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset into a text or JSON response. Use next_offset_bytes from a truncated result to continue."
                 }
             },
             "required": ["url"]
@@ -62,7 +72,7 @@ impl Tool for UrlFetchTool {
         true
     }
 
-    async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let url = params["url"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidParameters {
@@ -70,6 +80,7 @@ impl Tool for UrlFetchTool {
                 message: "Missing required argument: url".to_owned(),
             })?
             .to_string();
+        let offset_bytes = optional_offset_bytes(&params, self.name())?;
 
         let parsed_url = parse_fetch_url(&url, self.name())?;
         ensure_url_target_is_safe(&parsed_url, self.name()).await?;
@@ -124,10 +135,37 @@ impl Tool for UrlFetchTool {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        // Stream the response body with a running byte counter, stopping when
-        // max_output_bytes is reached. Avoids buffering the entire response
-        // before the cap is applied — large fast responses could exhaust RAM.
+        let is_html = content_type.contains("text/html");
+        let is_text_response =
+            content_type.contains("text/") || content_type.contains("application/json");
+        if offset_bytes > 0 && is_html {
+            return Err(ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message: "offset_bytes is only supported for text and JSON responses".to_owned(),
+            });
+        }
+
+        // Stream the response body with a running byte counter. Store the page
+        // needed for the requested offset, but keep draining under the request
+        // timeout so returned metadata can say that bytes were omitted.
+        let capture_limit = if is_html {
+            self.max_output_bytes
+        } else {
+            offset_bytes.saturating_add(self.max_output_bytes)
+        };
+        let raw_body_artifact_path =
+            is_html.then(|| tool_output_artifact_path(ctx, RAW_HTML_ARTIFACT_FILENAME));
+        let mut raw_body_artifact_writer = match raw_body_artifact_path.as_ref() {
+            Some(path) => Some(create_tool_output_artifact(&path.absolute).await.map_err(
+                |error| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to create raw HTML artifact: {error}"),
+                },
+            )?),
+            None => None,
+        };
         let mut body_bytes: Vec<u8> = Vec::new();
+        let mut total_body_bytes = 0usize;
         loop {
             let chunk = response
                 .chunk()
@@ -137,20 +175,44 @@ impl Tool for UrlFetchTool {
                     message: format!("Failed to read response body: {e}"),
                 })?;
             let Some(chunk) = chunk else { break };
-            let remaining = self.max_output_bytes.saturating_sub(body_bytes.len());
-            if remaining == 0 {
-                // Cap reached — stop collecting and drop the rest of the body.
-                break;
+            if let Some(writer) = raw_body_artifact_writer.as_mut() {
+                writer
+                    .write_all(&chunk)
+                    .await
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        name: self.name().to_owned(),
+                        message: format!("Failed to write raw HTML artifact: {error}"),
+                    })?;
             }
+            total_body_bytes += chunk.len();
+            let remaining = capture_limit.saturating_sub(body_bytes.len());
             let to_take = chunk.len().min(remaining);
             body_bytes.extend_from_slice(&chunk[..to_take]);
         }
+        if let Some(writer) = raw_body_artifact_writer.as_mut() {
+            writer
+                .flush()
+                .await
+                .map_err(|error| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to write raw HTML artifact: {error}"),
+                })?;
+        }
+        drop(raw_body_artifact_writer);
+        let raw_body_artifact_relative_path = if total_body_bytes > body_bytes.len() {
+            raw_body_artifact_path.map(|path| path.relative)
+        } else {
+            if let Some(path) = raw_body_artifact_path {
+                let _ = tokio::fs::remove_file(path.absolute).await;
+            }
+            None
+        };
 
         // Dispatch on content type.
-        let text = if content_type.contains("text/html") {
+        let text = if is_html {
             // Convert HTML to readable plain text.
             html_to_text(&body_bytes)
-        } else if content_type.contains("text/") || content_type.contains("application/json") {
+        } else if is_text_response {
             // Plain text and JSON can be returned as-is.
             String::from_utf8_lossy(&body_bytes).into_owned()
         } else {
@@ -161,10 +223,119 @@ impl Tool for UrlFetchTool {
             });
         };
 
-        let (content, _truncated, _total_bytes) = truncate_output(&text, self.max_output_bytes);
-
-        Ok(json!({"output": content}))
+        if is_html {
+            Ok(fetch_html_output_value(
+                &text,
+                self.max_output_bytes,
+                total_body_bytes,
+                body_bytes.len(),
+                raw_body_artifact_relative_path.as_deref(),
+            ))
+        } else {
+            fetch_text_output_value(
+                &text,
+                &url,
+                self.max_output_bytes,
+                offset_bytes,
+                total_body_bytes,
+            )
+            .map_err(|message| ToolError::InvalidParameters {
+                name: self.name().to_owned(),
+                message,
+            })
+        }
     }
+}
+
+fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolError> {
+    match params.get("offset_bytes") {
+        Some(Value::Number(number)) => {
+            let offset = number
+                .as_u64()
+                .ok_or_else(|| ToolError::InvalidParameters {
+                    name: tool_name.to_owned(),
+                    message: "offset_bytes must be a non-negative integer".to_owned(),
+                })?;
+            usize::try_from(offset).map_err(|_| ToolError::InvalidParameters {
+                name: tool_name.to_owned(),
+                message: "offset_bytes is too large for this platform".to_owned(),
+            })
+        }
+        Some(Value::Null) | None => Ok(0),
+        Some(_) => Err(ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "offset_bytes must be a non-negative integer".to_owned(),
+        }),
+    }
+}
+
+fn fetch_html_output_value(
+    text: &str,
+    max_output_bytes: usize,
+    total_body_bytes: usize,
+    stored_body_bytes: usize,
+    raw_body_artifact_path: Option<&str>,
+) -> Value {
+    let mut value = truncated_output_value(text, max_output_bytes);
+    if total_body_bytes > stored_body_bytes {
+        value["truncated"] = json!(true);
+        value["total_bytes"] = json!(total_body_bytes);
+    }
+    if let Some(path) = raw_body_artifact_path {
+        value["raw_body_artifact_path"] = json!(path);
+        value["raw_body_follow_up"] = file_read_follow_up(path);
+    }
+    value
+}
+
+fn fetch_text_output_value(
+    text: &str,
+    url: &str,
+    max_output_bytes: usize,
+    offset_bytes: usize,
+    total_body_bytes: usize,
+) -> Result<Value, String> {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("url".to_string(), json!(url));
+    let mut value =
+        continuable_output_value(text, max_output_bytes, offset_bytes, "url_fetch", arguments)?;
+
+    let output_len = value
+        .get("output")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or(0);
+    let next_offset = offset_bytes + output_len;
+    if total_body_bytes > next_offset {
+        let object = value
+            .as_object_mut()
+            .expect("continuable_output_value always returns an object");
+        object.insert("truncated".to_string(), json!(true));
+        object.insert("offset_bytes".to_string(), json!(offset_bytes));
+        object.insert("total_bytes".to_string(), json!(total_body_bytes));
+        object.insert("next_offset_bytes".to_string(), json!(next_offset));
+        object.insert(
+            "follow_up".to_string(),
+            json!({
+                "tool": "url_fetch",
+                "arguments": {
+                    "url": url,
+                    "offset_bytes": next_offset,
+                },
+            }),
+        );
+    }
+
+    Ok(value)
+}
+
+fn file_read_follow_up(path: &str) -> Value {
+    json!({
+        "tool": "file_read",
+        "arguments": {
+            "path": path
+        }
+    })
 }
 
 fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url, ToolError> {
@@ -371,6 +542,7 @@ mod tests {
         assert!(t.description().contains("HTML"));
         let params = t.parameters();
         assert!(params["properties"]["url"].is_object());
+        assert!(params["properties"]["offset_bytes"].is_object());
         assert_eq!(params["required"][0].as_str(), Some("url"));
     }
 
@@ -447,12 +619,70 @@ mod tests {
 
     #[tokio::test]
     async fn truncates_large_response() {
-        // Test truncation logic directly via the truncate_output helper which
-        // url_fetch delegates to — the real HTTP path can't be exercised in unit tests.
-        let large = "a".repeat(200);
-        let (out, truncated, total) = truncate_output(&large, 100);
-        assert_eq!(out.len(), 100);
-        assert!(truncated);
-        assert_eq!(total, 200);
+        let capped_text = "a".repeat(100);
+        let value = fetch_html_output_value(&capped_text, 100, 200, 100, None);
+
+        assert_eq!(value["output"].as_str().unwrap().len(), 100);
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["total_bytes"], json!(200));
+    }
+
+    #[test]
+    fn html_fetch_output_returns_raw_body_follow_up() {
+        let value = fetch_html_output_value(
+            "Rendered text",
+            100,
+            200,
+            100,
+            Some(".swage/tool-output/turn/call/raw-body.html"),
+        );
+
+        assert_eq!(
+            value["raw_body_artifact_path"],
+            json!(".swage/tool-output/turn/call/raw-body.html")
+        );
+        assert_eq!(value["raw_body_follow_up"]["tool"], json!("file_read"));
+        assert_eq!(
+            value["raw_body_follow_up"]["arguments"]["path"],
+            json!(".swage/tool-output/turn/call/raw-body.html")
+        );
+    }
+
+    #[test]
+    fn text_fetch_output_returns_follow_up_offset() {
+        let value = fetch_text_output_value("abcdefghij", "https://example.com/data.txt", 4, 0, 10)
+            .expect("continuable text output");
+
+        assert_eq!(value["output"], json!("abcd"));
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["total_bytes"], json!(10));
+        assert_eq!(value["offset_bytes"], json!(0));
+        assert_eq!(value["next_offset_bytes"], json!(4));
+        assert_eq!(value["follow_up"]["tool"], json!("url_fetch"));
+        assert_eq!(
+            value["follow_up"]["arguments"]["url"],
+            json!("https://example.com/data.txt")
+        );
+        assert_eq!(value["follow_up"]["arguments"]["offset_bytes"], json!(4));
+    }
+
+    #[test]
+    fn offset_text_fetch_output_continues_from_prior_truncation() {
+        let value = fetch_text_output_value("abcdefghij", "https://example.com/data.txt", 4, 4, 10)
+            .expect("continuable text output");
+
+        assert_eq!(value["output"], json!("efgh"));
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["total_bytes"], json!(10));
+        assert_eq!(value["offset_bytes"], json!(4));
+        assert_eq!(value["next_offset_bytes"], json!(8));
+    }
+
+    #[test]
+    fn small_text_fetch_output_keeps_simple_shape() {
+        let value = fetch_text_output_value("abc", "https://example.com/data.txt", 100, 0, 3)
+            .expect("small text output");
+
+        assert_eq!(value, json!({ "output": "abc" }));
     }
 }

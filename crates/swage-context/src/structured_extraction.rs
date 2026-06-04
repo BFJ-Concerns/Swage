@@ -8,7 +8,10 @@
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use swage_core::{ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role};
+use swage_core::{
+    ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role,
+    render_message_for_model_context, role_label_for_model_context,
+};
 use swage_provider::LlmProvider;
 
 use crate::tokeniser::Tokeniser;
@@ -174,21 +177,8 @@ fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
     );
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = match message.role() {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        let text = message
-            .content()
-            .iter()
-            .filter_map(|part| match part {
-                swage_core::ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let role_label = role_label_for_model_context(message.role());
+        let text = render_message_for_model_context(message);
         let _ = writeln!(prompt, "[Turn {i}] ({role_label}): {text}");
     }
 
@@ -295,7 +285,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use swage_core::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role,
-        StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolResult,
+        build_tool_round_messages,
     };
     use swage_provider::LlmProvider;
 
@@ -442,6 +433,30 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn extraction_prompt_includes_structured_tool_replay() {
+        let messages = build_tool_round_messages(
+            &[ToolCall {
+                call_id: "call_read".into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({"path": "Cargo.toml"}),
+            }],
+            &[ToolResult {
+                call_id: "call_read".into(),
+                content: "contents".into(),
+                is_error: false,
+            }],
+            "",
+        );
+
+        let prompt = build_extraction_prompt(&messages);
+
+        assert!(prompt.contains("tool_use id=call_read name=file_read"));
+        assert!(prompt.contains(r#""path":"Cargo.toml""#));
+        assert!(prompt.contains("tool_result tool_use_id=call_read"));
+        assert!(prompt.contains(r#""contents""#));
     }
 
     // ── Extraction succeeds with mock provider ───────────────────────────────

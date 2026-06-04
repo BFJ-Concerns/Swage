@@ -2081,6 +2081,11 @@ async fn execute_external_delegate_message(
     )
     .await;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+    let target_instructions = crate::turn::delegated_target_instructions_for_bench(
+        &target_resolved.instructions,
+        &bench.slug,
+        &delegate_msg.recipient_agent_id,
+    );
 
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
@@ -2122,6 +2127,7 @@ async fn execute_external_delegate_message(
             sender_turn_id,
             bench_id,
             target_agent_config,
+            target_instructions,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
             tokio_util::sync::CancellationToken::new(),
@@ -2592,7 +2598,10 @@ mod tests {
     use crate::{
         server::build_router,
         state::AppState,
-        turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider},
+        test_support::SwageHomeGuard,
+        turn::tests::{
+            CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
+        },
         websocket::ServerEvent,
     };
 
@@ -2925,6 +2934,79 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_message_includes_target_agent_level_skills() {
+        use swage_agent::MessageRouter;
+        use swage_core::{FinishReason, MessageKind, StreamChunk};
+        use swage_storage::model::NewAgentMessage;
+
+        let swage_home = SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("benches/default/agents/agent-b/skills/delegated-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Delegated specialist behaviour\n---\nUse the external delegated specialist skill.\n",
+        )
+        .expect("write delegated skill");
+
+        let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "External delegate answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]]);
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("get default bench");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = MessageRouter::new(state.storage.clone(), None);
+        let delegate_msg = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".to_string(),
+                recipient_agent_id: "agent-b".to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "summarise externally" }),
+            })
+            .await
+            .expect("create external delegate message");
+
+        execute_external_delegate_message(state, delegate_msg, bench.id, None)
+            .await
+            .expect("external delegation should complete");
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let request_text = captured_requests[0]
+            .messages
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            request_text.contains("Active Skills"),
+            "external delegated provider request should include target agent active skills: {request_text}"
+        );
+        assert!(
+            request_text.contains("Use the external delegated specialist skill."),
+            "external delegated provider request should include target agent skill instructions: {request_text}"
+        );
     }
 
     #[tokio::test]

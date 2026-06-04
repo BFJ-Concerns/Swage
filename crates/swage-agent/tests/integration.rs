@@ -13,7 +13,7 @@ use swage_agent::context::TurnExecutionContext;
 use swage_agent::{AgentBuilder, AgentConfig, AgentEvent, TurnRequest};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role,
-    StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
+    StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse, ToolError,
 };
 use swage_hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
 use swage_provider::LlmProvider;
@@ -21,8 +21,10 @@ use swage_safety::LeakDetector;
 use swage_storage::sqlite::SqliteStorage;
 use swage_storage::{
     Bench, BenchStore, MessageStore, NewSession, NewThread, NewTurn, Session, SessionStore, Thread,
-    ThreadState, ThreadStore, TurnState, TurnStore,
+    ThreadState, ThreadStore, ToolCallStore, TurnState, TurnStore,
 };
+use swage_tool::dispatch::ToolDispatcher;
+use swage_tool::tool::Tool;
 
 struct StreamingProvider {
     rounds: Mutex<Vec<Vec<StreamChunk>>>,
@@ -60,6 +62,13 @@ impl CompactionStreamingProvider {
             .lock()
             .expect("mock provider message lock should not be poisoned")
             .len()
+    }
+
+    fn last_stream_messages(&self) -> Vec<ChatMessage> {
+        self.last_stream_messages
+            .lock()
+            .expect("mock provider message lock should not be poisoned")
+            .clone()
     }
 }
 
@@ -144,6 +153,46 @@ impl LlmProvider for StreamingProvider {
 
 struct AppendAfterResponseHook {
     suffix: String,
+}
+
+struct TruncatedMetadataTool;
+
+#[async_trait]
+impl Tool for TruncatedMetadataTool {
+    fn name(&self) -> &str {
+        "truncated_metadata"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a deliberately shortened result."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(json!({
+            "output": "preview",
+            "truncated": true,
+            "total_bytes": 4096,
+            "follow_up": {
+                "tool": "file_read",
+                "arguments": {
+                    "path": "large.txt",
+                    "offset_bytes": 128
+                }
+            }
+        }))
+    }
 }
 
 #[async_trait]
@@ -244,7 +293,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
     ]]));
     let agent = AgentBuilder::new()
         .config(resolved_config("agent-a"))
-        .provider(provider)
+        .provider(provider.clone())
         .storage(storage.clone())
         .build()
         .expect("agent");
@@ -303,6 +352,131 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
             ..
         } if *turn_id == outbound.turn_id && *input_tokens == 11 && *output_tokens == 7
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_ignores_reasoning_chunks_in_visible_response() {
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![vec![
+        StreamChunk::Reasoning {
+            content: "private thought".into(),
+            details: Some(json!({"kind": "summary"})),
+        },
+        StreamChunk::Delta {
+            content: "visible".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]));
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .build()
+        .expect("agent");
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(bench.id, session.id, thread.id, "Hello agent", None),
+            event_tx,
+        )
+        .await
+        .expect("streaming turn should succeed");
+
+    assert_eq!(outbound.response, "visible");
+    let messages = storage
+        .list_messages_by_thread(thread.id)
+        .await
+        .expect("thread messages");
+    assert_eq!(messages[0].content, "visible");
+
+    let events = drain_events(event_rx);
+    let tokens = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Token { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tokens, ["visible"]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderReasoningCaptured {
+            content,
+            details: Some(details),
+            ..
+        } if content == "private thought" && details["kind"] == "summary"
+    )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_persists_tool_result_truncation_metadata() {
+    let (storage, bench, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(CompactionStreamingProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call-truncated".into(),
+                name: "truncated_metadata".into(),
+                arguments: json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]));
+    let dispatcher = ToolDispatcher::allow_all([Arc::new(TruncatedMetadataTool) as Arc<dyn Tool>]);
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(bench.id, session.id, thread.id, "Use the tool", None),
+            event_tx,
+        )
+        .await
+        .expect("streaming turn should succeed");
+
+    let tool_calls = storage
+        .list_tool_calls_by_turn(outbound.turn_id)
+        .await
+        .expect("tool calls");
+    assert_eq!(tool_calls.len(), 1);
+    assert!(tool_calls[0].truncated);
+    assert_eq!(tool_calls[0].total_bytes, Some(4096));
+
+    let second_request_messages = provider.last_stream_messages();
+    let tool_result_content = second_request_messages
+        .iter()
+        .find_map(|message| {
+            message.tool_replay()?.iter().find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+        })
+        .expect("second provider request should include tool-result replay");
+    let tool_result: serde_json::Value =
+        serde_json::from_str(tool_result_content).expect("tool result should be JSON");
+    assert_eq!(tool_result["follow_up"]["tool"], json!("file_read"));
+    assert_eq!(
+        tool_result["follow_up"]["arguments"]["offset_bytes"],
+        json!(128)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

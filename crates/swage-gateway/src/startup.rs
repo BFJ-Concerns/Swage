@@ -459,7 +459,8 @@ pub(crate) fn build_tool_dispatcher(
         Tool, agent_memory::AgentMemoryTool, file_edit::FileEditTool, file_list::FileListTool,
         file_read::FileReadTool, file_search::FileSearchTool, file_write::FileWriteTool,
         memory::MemoryTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        shell::ShellTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
+        web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -484,6 +485,9 @@ pub(crate) fn build_tool_dispatcher(
             provider_config: config.tools.search.clone(),
         }),
         Arc::new(UrlFetchTool::default()),
+        Arc::new(ToolResultReadTool {
+            max_output_bytes: max_output,
+        }),
         Arc::new(swage_tool::delegate::DelegateTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
@@ -975,6 +979,7 @@ mod tests {
             aliases: vec![],
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         }
     }
 
@@ -1113,6 +1118,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: swage_config::ModelCapabilitiesConfig::default(),
             },
         );
 
@@ -1174,6 +1180,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
         let config = resolve_provider_config(&provider, &model, &secret_manager)

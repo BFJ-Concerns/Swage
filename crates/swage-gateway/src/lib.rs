@@ -83,3 +83,60 @@ pub mod topology;
 pub mod turn;
 pub mod voice;
 pub mod websocket;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
+    pub(crate) struct SwageHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp_dir: Option<tempfile::TempDir>,
+        root: PathBuf,
+    }
+
+    impl SwageHomeGuard {
+        pub(crate) fn new() -> Self {
+            let lock = SWAGE_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
+            let root = temp_dir.path().to_path_buf();
+            unsafe { std::env::set_var("SWAGE_HOME", &root) };
+            Self {
+                _lock: lock,
+                _temp_dir: Some(temp_dir),
+                root,
+            }
+        }
+
+        pub(crate) fn set_to(path: impl AsRef<Path>) -> Self {
+            let lock = SWAGE_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let root = path.as_ref().to_path_buf();
+            unsafe { std::env::set_var("SWAGE_HOME", &root) };
+            Self {
+                _lock: lock,
+                _temp_dir: None,
+                root,
+            }
+        }
+
+        pub(crate) fn isolate() -> Self {
+            Self::new()
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for SwageHomeGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("SWAGE_HOME") };
+        }
+    }
+}

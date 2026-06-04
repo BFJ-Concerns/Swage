@@ -978,8 +978,16 @@ pub struct ToolCallRecord {
     pub tool: String,
     /// Tool arguments serialised as a JSON string.
     pub arguments: String,
+    /// Compact provider-visible replay envelope for the tool arguments.
+    ///
+    /// Kept separate from `arguments`, which remains the raw debugger/storage
+    /// payload.
+    #[serde(default)]
+    pub model_arguments: String,
     /// Raw output returned by the tool, if it has completed.
     pub result: Option<String>,
+    /// Compact provider-visible replay envelope for the tool result.
+    pub model_result: Option<String>,
     /// Execution outcome ("success", "error", etc.).
     pub status: Option<String>,
     /// Wall-clock execution time in milliseconds.
@@ -988,6 +996,13 @@ pub struct ToolCallRecord {
     pub truncated: bool,
     /// Total byte count of the untruncated result, for reporting.
     pub total_bytes: Option<i64>,
+    /// Provider request round that produced this tool call within the turn.
+    ///
+    /// Multiple calls can share a round when the model requests several tools in
+    /// one response. Nested calls may be recorded before their parent call is
+    /// persisted and can inherit the parent round during replay reconstruction.
+    #[serde(default)]
+    pub provider_round: i32,
     /// Ordering index within the parent turn.
     pub position: i32,
     pub created_at: DateTime<Utc>,
@@ -1009,11 +1024,14 @@ pub struct NewToolCall {
     pub call_id: String,
     pub tool: String,
     pub arguments: String,
+    pub model_arguments: String,
     pub result: Option<String>,
+    pub model_result: Option<String>,
     pub status: Option<String>,
     pub duration_ms: Option<i64>,
     pub truncated: bool,
     pub total_bytes: Option<i64>,
+    pub provider_round: i32,
     pub position: i32,
     /// call_id of the enclosing tool call, if this is a sub-tool invocation.
     ///
@@ -2146,11 +2164,14 @@ mod tests {
             call_id: "toolu_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"ls"}"#.to_string(),
+            model_arguments: "compact arguments".to_string(),
             result: Some("file1\nfile2".to_string()),
+            model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
             duration_ms: Some(42),
             truncated: false,
             total_bytes: Some(20),
+            provider_round: 2,
             position: 0,
             created_at: now,
             parent_call_id: None,
@@ -2166,11 +2187,14 @@ mod tests {
         assert_eq!(back.call_id, "toolu_01");
         assert_eq!(back.tool, "shell");
         assert_eq!(back.arguments, r#"{"command":"ls"}"#);
+        assert_eq!(back.model_arguments, "compact arguments");
         assert_eq!(back.result, Some("file1\nfile2".to_string()));
+        assert_eq!(back.model_result, Some("compact result".to_string()));
         assert_eq!(back.status, Some("success".to_string()));
         assert_eq!(back.duration_ms, Some(42));
         assert!(!back.truncated);
         assert_eq!(back.total_bytes, Some(20));
+        assert_eq!(back.provider_round, 2);
         assert_eq!(back.position, 0);
     }
 
@@ -2183,11 +2207,14 @@ mod tests {
             call_id: "toolu_02".to_string(),
             tool: "file_read".to_string(),
             arguments: r#"{"path":"/tmp/x"}"#.to_string(),
+            model_arguments: "compact arguments".to_string(),
             result: None,
+            model_result: None,
             status: None,
             duration_ms: None,
             truncated: false,
             total_bytes: None,
+            provider_round: 0,
             position: 1,
             created_at: Utc::now(),
             parent_call_id: None,
@@ -2198,9 +2225,11 @@ mod tests {
             serde_json::from_str(&json).expect("deserialisation should succeed");
 
         assert!(back.result.is_none());
+        assert!(back.model_result.is_none());
         assert!(back.status.is_none());
         assert!(back.duration_ms.is_none());
         assert!(back.total_bytes.is_none());
+        assert_eq!(back.provider_round, 0);
         assert_eq!(back.position, 1);
     }
 
@@ -2212,11 +2241,14 @@ mod tests {
             call_id: "toolu_03".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"pwd"}"#.to_string(),
+            model_arguments: "compact arguments".to_string(),
             result: Some("ok".to_string()),
+            model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
             duration_ms: Some(10),
             truncated: false,
             total_bytes: Some(2),
+            provider_round: 1,
             position: 0,
             parent_call_id: None,
         };
@@ -2236,11 +2268,14 @@ mod tests {
             call_id: "toolu_sub".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"ls"}"#.to_string(),
+            model_arguments: "compact arguments".to_string(),
             result: None,
+            model_result: None,
             status: None,
             duration_ms: None,
             truncated: false,
             total_bytes: None,
+            provider_round: 1,
             position: 0,
             created_at: Utc::now(),
             parent_call_id: Some(parent_id.clone()),
@@ -2261,11 +2296,14 @@ mod tests {
             call_id: "sub_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{}"#.to_string(),
+            model_arguments: "compact arguments".to_string(),
             result: None,
+            model_result: None,
             status: None,
             duration_ms: None,
             truncated: false,
             total_bytes: None,
+            provider_round: 1,
             position: 0,
             parent_call_id: Some("parent_01".to_string()),
         };

@@ -7,11 +7,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 use super::Tool;
-use super::workspace::truncate_output;
+use super::workspace::{
+    ToolOutputArtifactPath, create_tool_output_artifact, tool_output_artifact_path,
+    truncated_output_value,
+};
 
 // ---------------------------------------------------------------------------
 // ShellTool
@@ -80,6 +83,7 @@ impl Tool for ShellTool {
 
         let cap = self.max_output_bytes;
         let tool_name = self.name().to_owned();
+        let artifact_paths = shell_output_artifact_paths(ctx);
 
         // Read stdout and stderr concurrently to prevent pipe-buffer deadlocks.
         // Each stream is bounded at max_output_bytes so a high-throughput command
@@ -89,25 +93,23 @@ impl Tool for ShellTool {
         let read_fut = async move {
             let (stdout_res, stderr_res) = tokio::join!(
                 // join! drives both reads concurrently — critical to avoid deadlock.
-                read_bounded(&mut stdout_pipe, cap),
-                read_bounded(&mut stderr_pipe, cap),
+                read_bounded(&mut stdout_pipe, cap, artifact_paths.stdout_path),
+                read_bounded(&mut stderr_pipe, cap, artifact_paths.stderr_path),
             );
 
             // Propagate I/O errors rather than panicking — a panic inside
             // tokio::spawn is silently swallowed, leaving the turn in
             // Processing state forever.
-            let (stdout_bytes, stdout_over) =
-                stdout_res.map_err(|e| ToolError::ExecutionFailed {
-                    name: tool_name.clone(),
-                    message: format!("Failed to read command stdout: {e}"),
-                })?;
-            let (stderr_bytes, stderr_over) =
-                stderr_res.map_err(|e| ToolError::ExecutionFailed {
-                    name: tool_name,
-                    message: format!("Failed to read command stderr: {e}"),
-                })?;
+            let stdout = stdout_res.map_err(|e| ToolError::ExecutionFailed {
+                name: tool_name.clone(),
+                message: format!("Failed to read command stdout: {e}"),
+            })?;
+            let stderr = stderr_res.map_err(|e| ToolError::ExecutionFailed {
+                name: tool_name,
+                message: format!("Failed to read command stderr: {e}"),
+            })?;
 
-            Ok::<_, ToolError>((stdout_bytes, stderr_bytes, stdout_over, stderr_over))
+            Ok::<_, ToolError>((stdout, stderr))
         };
 
         // Safe to abandon on timeout: read_fut owns only local pipe handles and
@@ -132,23 +134,23 @@ impl Tool for ShellTool {
                 Err(e)
             }
 
-            Ok(Ok((stdout_bytes, stderr_bytes, stdout_over, stderr_over))) => {
+            Ok(Ok((stdout, stderr))) => {
                 // Reap the child to get the exit status.
                 let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
                     message: format!("Failed to wait for command: {e}"),
                 })?;
 
-                let stdout_str = String::from_utf8_lossy(&stdout_bytes);
-                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+                let stdout_str = String::from_utf8_lossy(&stdout.bytes);
+                let stderr_str = String::from_utf8_lossy(&stderr.bytes);
 
                 // Append truncation notes so the model knows the stream was cut.
-                let stdout_display = if stdout_over {
+                let stdout_display = if stdout.truncated {
                     format!("{stdout_str}\n[stdout truncated: exceeded {cap} bytes]")
                 } else {
                     stdout_str.into_owned()
                 };
-                let stderr_display = if stderr_over {
+                let stderr_display = if stderr.truncated {
                     format!("{stderr_str}\n[stderr truncated: exceeded {cap} bytes]")
                 } else {
                     stderr_str.into_owned()
@@ -163,34 +165,85 @@ impl Tool for ShellTool {
                     format!("{stdout_display}stderr: {stderr_display}")
                 };
 
-                let (content, _truncated, _total_bytes) =
-                    truncate_output(&combined, self.max_output_bytes);
-
-                Ok(json!({
-                    "output": content,
-                    "exit_code": exit_status.code(),
-                }))
+                let mut output = truncated_output_value(&combined, self.max_output_bytes);
+                output["exit_code"] = json!(exit_status.code());
+                if stdout.truncated {
+                    output["stdout_truncated"] = json!(true);
+                    output["stdout_total_bytes"] = json!(stdout.total_bytes);
+                    if let Some(path) = stdout.artifact_relative_path {
+                        output["stdout_artifact_path"] = json!(path);
+                        output["stdout_follow_up"] = shell_output_follow_up(&path);
+                    }
+                }
+                if stderr.truncated {
+                    output["stderr_truncated"] = json!(true);
+                    output["stderr_total_bytes"] = json!(stderr.total_bytes);
+                    if let Some(path) = stderr.artifact_relative_path {
+                        output["stderr_artifact_path"] = json!(path);
+                        output["stderr_follow_up"] = shell_output_follow_up(&path);
+                    }
+                }
+                Ok(output)
             }
         }
     }
 }
 
+struct BoundedRead {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+    truncated: bool,
+    artifact_relative_path: Option<String>,
+}
+
+struct ShellOutputArtifactPaths {
+    stdout_path: Option<ToolOutputArtifactPath>,
+    stderr_path: Option<ToolOutputArtifactPath>,
+}
+
+fn shell_output_artifact_paths(ctx: &dyn ToolContext) -> ShellOutputArtifactPaths {
+    ShellOutputArtifactPaths {
+        stdout_path: Some(tool_output_artifact_path(ctx, "stdout.txt")),
+        stderr_path: Some(tool_output_artifact_path(ctx, "stderr.txt")),
+    }
+}
+
+fn shell_output_follow_up(path: &str) -> Value {
+    json!({
+        "tool": "file_read",
+        "arguments": {
+            "path": path
+        }
+    })
+}
+
 /// Reads from `reader` until EOF, storing at most `cap` bytes.
 ///
 /// Continues draining after the cap so the child process never stalls on a
-/// full pipe buffer. Returns `(buffer, was_truncated)`.
-async fn read_bounded<R>(reader: &mut R, cap: usize) -> io::Result<(Vec<u8>, bool)>
+/// full pipe buffer.
+async fn read_bounded<R>(
+    reader: &mut R,
+    cap: usize,
+    artifact_path: Option<ToolOutputArtifactPath>,
+) -> io::Result<BoundedRead>
 where
     R: AsyncReadExt + Unpin,
 {
     let mut buf = Vec::with_capacity(cap.min(65536));
     let mut tmp = [0u8; 4096];
     let mut total = 0usize;
+    let mut artifact_writer = match artifact_path.as_ref() {
+        Some(path) => Some(create_tool_output_artifact(&path.absolute).await?),
+        None => None,
+    };
 
     loop {
         let n = reader.read(&mut tmp).await?;
         if n == 0 {
             break; // EOF
+        }
+        if let Some(writer) = artifact_writer.as_mut() {
+            writer.write_all(&tmp[..n]).await?;
         }
         // Store bytes up to the cap; keep reading (but discarding) beyond it
         // so the child's writes never block on a full pipe buffer.
@@ -201,7 +254,22 @@ where
         total += n;
     }
 
-    Ok((buf, total > cap))
+    if let Some(writer) = artifact_writer.as_mut() {
+        writer.flush().await?;
+    }
+    let truncated = total > cap;
+    if !truncated && let Some(path) = artifact_path.as_ref() {
+        let _ = tokio::fs::remove_file(&path.absolute).await;
+    }
+
+    Ok(BoundedRead {
+        bytes: buf,
+        total_bytes: total,
+        truncated,
+        artifact_relative_path: truncated
+            .then(|| artifact_path.map(|path| path.relative))
+            .flatten(),
+    })
 }
 
 /// Kill a child process, ignoring errors (it may have already exited).
@@ -231,6 +299,14 @@ mod tests {
 
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
+    }
+
+    fn ctx_in_dir_with_ids(dir: &tempfile::TempDir) -> MockToolContext {
+        let mut ctx = MockToolContext::new("agent-test", "sess-test");
+        ctx.working_directory = dir.path().to_path_buf();
+        ctx.turn_id = Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap());
+        ctx.call_id = Some("call/with spaces".to_string());
+        ctx
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -314,6 +390,107 @@ mod tests {
             "content should be capped: len={}",
             output.len()
         );
+        assert_eq!(val["truncated"], json!(true));
+        assert!(val["total_bytes"].as_u64().unwrap() > 10);
+        assert_eq!(val["stdout_truncated"], json!(true));
+        assert!(val["stdout_total_bytes"].as_u64().unwrap() > 10);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn truncated_stdout_writes_full_artifact_and_follow_up() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = ctx_in_dir_with_ids(&dir);
+        let t = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 10,
+        };
+
+        let val = t
+            .execute(
+                json!({"command": "printf '%0.s1234567890' $(seq 1 10)"}),
+                &ctx,
+            )
+            .await
+            .expect("command should succeed");
+
+        let artifact_path = val["stdout_artifact_path"]
+            .as_str()
+            .expect("truncated stdout should expose an artifact path");
+        assert_eq!(
+            val["stdout_follow_up"]["arguments"]["path"],
+            json!(artifact_path)
+        );
+        assert!(
+            artifact_path.contains("call_with_spaces"),
+            "call_id should be path-safe: {artifact_path}"
+        );
+
+        let full = std::fs::read_to_string(dir.path().join(artifact_path))
+            .expect("stdout artifact should be readable");
+        assert_eq!(
+            full.len(),
+            val["stdout_total_bytes"].as_u64().unwrap() as usize
+        );
+        assert_eq!(full, "1234567890".repeat(10));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn large_stderr_reports_stream_truncation_metadata() {
+        let t = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 10,
+        };
+        let result = t
+            .execute(
+                json!({"command": "printf '%0.s1234567890' $(seq 1 100) >&2; exit 1"}),
+                &ctx(),
+            )
+            .await;
+        let val = result.expect("command should return captured stderr");
+        let output = val["output"].as_str().unwrap();
+        assert_eq!(val["exit_code"], json!(1));
+        assert!(
+            output.len() <= 10,
+            "content should be capped: len={}",
+            output.len()
+        );
+        assert_eq!(val["truncated"], json!(true));
+        assert_eq!(val["stderr_truncated"], json!(true));
+        assert!(val["stderr_total_bytes"].as_u64().unwrap() > 10);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn truncated_stderr_writes_full_artifact_and_follow_up() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = ctx_in_dir_with_ids(&dir);
+        let t = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 10,
+        };
+
+        let val = t
+            .execute(
+                json!({"command": "printf '%0.sERR' $(seq 1 20) >&2; exit 1"}),
+                &ctx,
+            )
+            .await
+            .expect("command should return captured stderr");
+
+        let artifact_path = val["stderr_artifact_path"]
+            .as_str()
+            .expect("truncated stderr should expose an artifact path");
+        assert_eq!(
+            val["stderr_follow_up"]["arguments"]["path"],
+            json!(artifact_path)
+        );
+
+        let full = std::fs::read_to_string(dir.path().join(artifact_path))
+            .expect("stderr artifact should be readable");
+        assert_eq!(
+            full.len(),
+            val["stderr_total_bytes"].as_u64().unwrap() as usize
+        );
+        assert_eq!(full, "ERR".repeat(20));
     }
 
     #[tokio::test(flavor = "multi_thread")]

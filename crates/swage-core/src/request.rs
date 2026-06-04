@@ -1,35 +1,20 @@
 //! Request and response types for LLM completions.
 //!
 //! Two complementary APIs coexist here:
-//! - `LlmRequest`/`LlmResponse` with builder pattern, tool history, and
-//!   streaming — the primary API used by the gateway and provider layers.
+//! - `LlmRequest`/`LlmResponse` with builder pattern and streaming, kept for
+//!   legacy provider entry points.
 //! - `CompletionRequest`/`CompletionResponse` and
 //!   `ToolCompletionRequest`/`ToolCompletionResponse` — lower-level types
-//!   for direct provider interaction.
+//!   used by active gateway and provider paths.
 
 use serde::{Deserialize, Serialize};
 
 use crate::message::ChatMessage;
-use crate::tool::{ToolCall, ToolDefinition, ToolResult};
+use crate::tool::{ToolCall, ToolDefinition};
 
 // ---------------------------------------------------------------------------
 // LLM request / response (primary API)
 // ---------------------------------------------------------------------------
-
-/// One completed tool-use round: the model's output and the execution results.
-///
-/// After each round where the model invokes one or more tools, the gateway
-/// records the round here. Follow-up provider requests include these rounds so
-/// the model can see its previous tool invocations and their outcomes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolRound {
-    /// Any text the model produced before invoking tools in this round.
-    pub assistant_text: String,
-    /// Tool calls the model made in this round.
-    pub tool_calls: Vec<ToolCall>,
-    /// Results from executing each tool call.
-    pub tool_results: Vec<ToolResult>,
-}
 
 /// Request to an LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,13 +27,6 @@ pub struct LlmRequest {
     pub stream: bool,
     /// Tool definitions available to the model. Empty vec means no tools.
     pub tools: Vec<ToolDefinition>,
-    /// Completed tool-use rounds from the current turn.
-    ///
-    /// Each entry becomes two Anthropic messages (assistant tool_use +
-    /// user tool_result) appended after the regular conversation history.
-    /// Empty for text-only turns; grows with each tool execution round.
-    #[serde(default)]
-    pub tool_history: Vec<ToolRound>,
 }
 
 impl LlmRequest {
@@ -62,7 +40,6 @@ impl LlmRequest {
             temperature: None,
             stream: true,
             tools: Vec::new(),
-            tool_history: Vec::new(),
         }
     }
 }
@@ -76,7 +53,6 @@ pub struct LlmRequestBuilder {
     temperature: Option<f32>,
     stream: bool,
     tools: Vec<ToolDefinition>,
-    tool_history: Vec<ToolRound>,
 }
 
 impl LlmRequestBuilder {
@@ -110,11 +86,6 @@ impl LlmRequestBuilder {
         self
     }
 
-    pub fn tool_history(mut self, history: Vec<ToolRound>) -> Self {
-        self.tool_history = history;
-        self
-    }
-
     pub fn build(self) -> LlmRequest {
         LlmRequest {
             model: self.model,
@@ -124,7 +95,6 @@ impl LlmRequestBuilder {
             temperature: self.temperature,
             stream: self.stream,
             tools: self.tools,
-            tool_history: self.tool_history,
         }
     }
 }
@@ -149,6 +119,16 @@ pub struct LlmResponse {
 pub enum StreamChunk {
     /// A piece of the assistant's response text.
     Delta { content: String },
+    /// Provider reasoning side-channel content.
+    ///
+    /// This is not visible assistant text and must not be merged into the
+    /// response transcript unless a caller explicitly opts into reasoning
+    /// replay.
+    Reasoning {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+    },
     /// Token usage for the request (sent with or after Done).
     Usage(TokenUsage),
     /// Stream complete — no more chunks will follow.
@@ -366,6 +346,10 @@ mod tests {
         let chunks = vec![
             StreamChunk::Delta {
                 content: "hello".into(),
+            },
+            StreamChunk::Reasoning {
+                content: "private chain".into(),
+                details: Some(serde_json::json!([{"type": "summary"}])),
             },
             StreamChunk::Usage(TokenUsage {
                 input_tokens: 5,

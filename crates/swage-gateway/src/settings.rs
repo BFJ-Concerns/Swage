@@ -43,6 +43,8 @@ pub struct ModelSettings {
     pub aliases: Vec<String>,
     pub context_window: Option<u32>,
     pub generation_preset: Option<String>,
+    #[serde(default)]
+    pub capabilities: swage_config::ModelCapabilitiesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +158,7 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    capabilities: model.capabilities.clone(),
                 },
             )
         })
@@ -226,6 +229,7 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    capabilities: model.capabilities.clone(),
                 },
             )
         })
@@ -291,6 +295,7 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
+                    capabilities: model.capabilities,
                 },
             )
         })
@@ -1175,6 +1180,9 @@ mod tests {
                     aliases: vec![],
                     context_window: Some(4096),
                     generation_preset: Some("quick".to_string()),
+                    capabilities: swage_config::ModelCapabilitiesConfig {
+                        reasoning_replay: true,
+                    },
                 },
             )]
             .into_iter()
@@ -1217,6 +1225,11 @@ mod tests {
         assert!(!response.restart_required);
         assert_eq!(response.default_model, "local:fast");
         assert_eq!(state.active_config().default_model_id(), "fast-wire");
+        assert!(
+            state.active_config().models.entries["local:fast"]
+                .capabilities
+                .reasoning_replay
+        );
         assert_eq!(state.active_config().context.timeout, 7);
         assert_eq!(state.active_config().tools.permissions.deny, vec!["shell"]);
         assert!(!state.restart_required());
@@ -1305,6 +1318,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1417,6 +1431,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()

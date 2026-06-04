@@ -5,11 +5,16 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use swage_core::{ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use swage_core::{
+    ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role, ToolCall, ToolResult,
+    build_tool_round_messages,
+};
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
-    NewTurn, TurnState,
+    NewTurn, ToolCallRecord, TurnState,
 };
 
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
@@ -50,6 +55,206 @@ fn map_turn_creation_error(error: swage_core::StorageError, session_id: Uuid) ->
         }
         other => GatewayError::Storage(other),
     }
+}
+
+async fn rebuild_thread_history_messages(
+    storage: &dyn swage_storage::store::Storage,
+    thread_id: Uuid,
+) -> Result<Vec<ChatMessage>, GatewayError> {
+    let stored_history = storage.list_messages_by_thread(thread_id).await?;
+    let mut rebuilt = Vec::new();
+    let mut replay_inserted_for_turn = HashSet::new();
+
+    for message in stored_history {
+        if message.role == Role::Assistant
+            && let Some(turn_id) = message.turn_id
+            && replay_inserted_for_turn.insert(turn_id)
+        {
+            let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
+            rebuilt.extend(compact_tool_replay_messages(&tool_calls));
+        }
+
+        match message.role {
+            Role::Tool => {
+                if let Some(call_id) = message.tool_call_id {
+                    rebuilt.push(ChatMessage::tool_result(call_id, message.content));
+                }
+            }
+            role => rebuilt.push(ChatMessage::new(role, message.content)),
+        }
+    }
+
+    Ok(rebuilt)
+}
+
+fn compact_tool_replay_messages(records: &[ToolCallRecord]) -> Vec<ChatMessage> {
+    let parent_rounds: HashMap<&str, i32> = records
+        .iter()
+        .filter(|record| record.parent_call_id.is_none())
+        .map(|record| (record.call_id.as_str(), record.provider_round))
+        .collect();
+    let mut records_by_round: BTreeMap<i32, Vec<&ToolCallRecord>> = BTreeMap::new();
+
+    for record in records
+        .iter()
+        .filter(|record| record.model_result.is_some())
+    {
+        let effective_round = record
+            .parent_call_id
+            .as_deref()
+            .and_then(|parent_call_id| parent_rounds.get(parent_call_id))
+            .copied()
+            .unwrap_or(record.provider_round);
+        records_by_round
+            .entry(effective_round)
+            .or_default()
+            .push(record);
+    }
+
+    let mut replay_messages = Vec::new();
+    for mut round_records in records_by_round.into_values() {
+        round_records.sort_by_key(|record| record.position);
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
+
+        for record in round_records {
+            tool_calls.push(ToolCall {
+                call_id: record.call_id.clone(),
+                name: record.tool.clone(),
+                arguments: parse_model_arguments(record),
+            });
+            tool_results.push(ToolResult {
+                call_id: record.call_id.clone(),
+                content: record
+                    .model_result
+                    .clone()
+                    .unwrap_or_else(|| record.result.clone().unwrap_or_default()),
+                is_error: record.status.as_deref() != Some("success"),
+            });
+        }
+
+        if !tool_calls.is_empty() {
+            replay_messages.extend(build_tool_round_messages(&tool_calls, &tool_results, ""));
+        }
+    }
+
+    replay_messages
+}
+
+fn append_provider_visible_request(
+    report_json: &mut serde_json::Value,
+    round: usize,
+    request: serde_json::Value,
+) {
+    provider_visible_array(report_json, "requests").push(serde_json::json!({
+        "round": round,
+        "request": request,
+    }));
+}
+
+fn append_provider_visible_reasoning(
+    report_json: &mut serde_json::Value,
+    round: usize,
+    content: String,
+    details: Option<serde_json::Value>,
+) {
+    provider_visible_array(report_json, "reasoning").push(serde_json::json!({
+        "round": round,
+        "content": content,
+        "details": details,
+    }));
+}
+
+fn provider_visible_array<'a>(
+    report_json: &'a mut serde_json::Value,
+    key: &str,
+) -> &'a mut Vec<serde_json::Value> {
+    if !report_json.is_object() {
+        let previous = std::mem::replace(report_json, serde_json::json!({}));
+        report_json["assembly_report"] = previous;
+    }
+
+    let object = report_json
+        .as_object_mut()
+        .expect("report_json was normalised to an object");
+    let provider_visible = object
+        .entry("provider_visible".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !provider_visible.is_object() {
+        *provider_visible = serde_json::json!({});
+    }
+
+    let provider_visible = provider_visible
+        .as_object_mut()
+        .expect("provider_visible was normalised to an object");
+    let values = provider_visible
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !values.is_array() {
+        *values = serde_json::json!([]);
+    }
+    values
+        .as_array_mut()
+        .expect("provider-visible value was normalised to an array")
+}
+
+fn parse_model_arguments(record: &ToolCallRecord) -> serde_json::Value {
+    serde_json::from_str(&record.model_arguments).unwrap_or_else(|_| {
+        serde_json::from_str(&record.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(record.arguments.clone()))
+    })
+}
+
+fn delegated_target_instructions(
+    target_instructions: &str,
+    available_skills: &[swage_config::skill::SkillDefinition],
+) -> String {
+    let agent_skills = available_skills
+        .iter()
+        .enumerate()
+        .filter(|(_, skill)| skill.level == HierarchyLevel::Agent)
+        .map(|(order, skill)| ActiveSkill {
+            name: skill.name.clone(),
+            instructions: skill.instructions.clone(),
+            level: skill.level.clone(),
+            is_agent_level: true,
+            activation_order: order as u32,
+        })
+        .collect::<Vec<_>>();
+    let skill_context = SkillsElement::new(agent_skills)
+        .content()
+        .into_iter()
+        .map(|message| message.text_content())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    match (target_instructions.trim(), skill_context.trim()) {
+        ("", "") => String::new(),
+        (instructions, "") => instructions.to_string(),
+        ("", skills) => format!("Active Skills\n\n{skills}"),
+        (instructions, skills) => format!("{instructions}\n\nActive Skills\n\n{skills}"),
+    }
+}
+
+pub(crate) fn delegated_target_instructions_for_bench(
+    target_instructions: &str,
+    bench_slug: &str,
+    target_agent_id: &str,
+) -> String {
+    resolve_swage_root()
+        .map(|root| {
+            let bench_dir = root.join("benches").join(bench_slug);
+            let agent_dir = bench_dir.join("agents").join(target_agent_id);
+            let agent_dir_opt = if agent_dir.is_dir() {
+                Some(agent_dir.as_path())
+            } else {
+                None
+            };
+            let (available, _warnings) =
+                SkillManager::discover_available(&root, &bench_dir, agent_dir_opt);
+            delegated_target_instructions(target_instructions, &available)
+        })
+        .unwrap_or_else(|| target_instructions.to_string())
 }
 
 /// Build the context assembly elements for a turn.
@@ -884,18 +1089,20 @@ pub(crate) fn build_agent_config_with_workspace(
     if let Some(schema) = output_schema_override.or_else(|| config.output.schema.clone()) {
         agent_config = agent_config.with_output_schema(schema, config.output.max_retries);
     }
-    if let Some(model) = config.models.default_model()
-        && let Some(preset_id) = model.generation_preset.as_deref()
-        && let Some(preset) = config.generation.presets.get(preset_id)
-    {
-        agent_config.max_tokens = preset.max_tokens;
-        agent_config.temperature = preset.temperature;
-        agent_config.stop_sequences = if preset.stop_sequences.is_empty() {
-            None
-        } else {
-            Some(preset.stop_sequences.clone())
-        };
-        agent_config.generation_metadata = preset.metadata.clone();
+    if let Some(model) = config.models.default_model() {
+        agent_config.replay_reasoning = model.capabilities.reasoning_replay;
+        if let Some(preset_id) = model.generation_preset.as_deref()
+            && let Some(preset) = config.generation.presets.get(preset_id)
+        {
+            agent_config.max_tokens = preset.max_tokens;
+            agent_config.temperature = preset.temperature;
+            agent_config.stop_sequences = if preset.stop_sequences.is_empty() {
+                None
+            } else {
+                Some(preset.stop_sequences.clone())
+            };
+            agent_config.generation_metadata = preset.metadata.clone();
+        }
     }
     agent_config
 }
@@ -1098,7 +1305,7 @@ pub(crate) async fn dispatch_before_inbound(
     }
 }
 
-fn resolve_swage_root() -> Option<PathBuf> {
+pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
     match swage_config::discovery::resolve_root() {
         Ok(root) => Some(root),
         Err(error) => {
@@ -1108,6 +1315,61 @@ fn resolve_swage_root() -> Option<PathBuf> {
             );
             None
         }
+    }
+}
+
+pub(crate) async fn load_active_skills_for_agent(
+    state: &AppState,
+    session_id: Uuid,
+    bench_slug: &str,
+    agent_id: &str,
+    swage_root: Option<&Path>,
+    include_user_activated: bool,
+) -> Vec<ActiveSkill> {
+    let Some(root) = swage_root else {
+        return vec![];
+    };
+    let bench_dir = root.join("benches").join(bench_slug);
+    let agent_dir = bench_dir.join("agents").join(agent_id);
+    let agent_dir_opt = if agent_dir.is_dir() {
+        Some(agent_dir.as_path())
+    } else {
+        None
+    };
+    let (available, _warnings) = SkillManager::discover_available(root, &bench_dir, agent_dir_opt);
+
+    // Agent-level skills are automatic for the current agent context. Store
+    // them idempotently so the normal activation ordering and filtering path is
+    // shared by foreground, delegated, and topology turns.
+    if let Err(e) =
+        SkillManager::auto_activate_agent_skills(session_id, &available, state.storage.as_ref())
+            .await
+    {
+        tracing::warn!(
+            error = ?e,
+            "failed to auto-activate agent-level skills; proceeding"
+        );
+    }
+
+    match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref()).await {
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "failed to load active skills; proceeding without skills"
+            );
+            vec![]
+        }
+        Ok(infos) => infos
+            .into_iter()
+            .filter(|info| include_user_activated || info.is_agent_level)
+            .map(|info| ActiveSkill {
+                name: info.name,
+                instructions: info.instructions,
+                level: info.level,
+                is_agent_level: info.is_agent_level,
+                activation_order: info.activation_order as u32,
+            })
+            .collect(),
     }
 }
 
@@ -1163,6 +1425,11 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        let target_instructions = delegated_target_instructions_for_bench(
+            &target_resolved.instructions,
+            &bench.slug,
+            target_agent_id,
+        );
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
 
         // Delegated child agents execute within the gateway runtime, but their
@@ -1246,6 +1513,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 Some(sender_turn_id),
                 bench_id,
                 target_agent_config,
+                target_instructions,
                 target_context_transfer_config,
                 Some(target_dispatcher),
                 child_cancel_token,
@@ -1423,61 +1691,15 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Fail-open: a warning is logged and each consumer falls back gracefully.
     let swage_root_opt = resolve_swage_root();
 
-    // Discover available skills for this bench+agent context, then build the
-    // active skill set by matching stored activation records against definitions.
-    //
-    // Missing skill definitions for recorded activations are silently skipped
-    // by SkillManager::build_active_skills.
-    let active_skills: Vec<ActiveSkill> = if let Some(root) = &swage_root_opt {
-        let bench_dir = root.join("benches").join(&bench_slug);
-        // The session's agent_id (typically "gateway") maps to the agents
-        // subdirectory under the bench.
-        let agent_dir = bench_dir.join("agents").join(&session.agent_id);
-        let agent_dir_opt = if agent_dir.is_dir() {
-            Some(agent_dir.as_path())
-        } else {
-            None
-        };
-        let (available, _warnings) =
-            SkillManager::discover_available(root, &bench_dir, agent_dir_opt);
-
-        // Ensure agent-level skills are activated for this session.
-        // Idempotent — INSERT OR IGNORE in storage means repeated calls
-        // on subsequent turns are harmless.
-        if let Err(e) =
-            SkillManager::auto_activate_agent_skills(session_id, &available, state.storage.as_ref())
-                .await
-        {
-            tracing::warn!(
-                error = ?e,
-                "failed to auto-activate agent-level skills; proceeding"
-            );
-        }
-
-        match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref())
-            .await
-        {
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "failed to load active skills; proceeding without skills"
-                );
-                vec![]
-            }
-            Ok(infos) => infos
-                .into_iter()
-                .map(|info| ActiveSkill {
-                    name: info.name,
-                    instructions: info.instructions,
-                    level: info.level,
-                    is_agent_level: info.is_agent_level,
-                    activation_order: info.activation_order as u32,
-                })
-                .collect(),
-        }
-    } else {
-        vec![]
-    };
+    let active_skills = load_active_skills_for_agent(
+        state,
+        session_id,
+        &bench_slug,
+        &session.agent_id,
+        swage_root_opt.as_deref(),
+        true,
+    )
+    .await;
 
     // Step 4: Ensure the turn exists before any hook execution so the raw
     // input is recorded durably even when inbound processing blocks the turn.
@@ -1549,11 +1771,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     // Loads thread history, bench memory, and constructs typed elements.
     // Runs fail-open assembly: custom Python configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
-    let stored_history = state.storage.list_messages_by_thread(thread_id).await?;
-    let history_messages: Vec<ChatMessage> = stored_history
-        .into_iter()
-        .map(|m| ChatMessage::new(m.role, m.content))
-        .collect();
+    let history_messages =
+        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
     // Load bench memory from the filesystem. Returns an empty string when
     // no memory directory or files exist — MemoryElement handles empty content.
@@ -1625,7 +1844,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     // The ContextAssembled event and snapshot persistence require a turn_id,
     // which is not available until the agent creates the Turn record and emits
     // TurnStarted. We prepare the report now and emit it in the event loop.
-    let report_json = serde_json::to_value(&assembly_report).unwrap_or_else(|e| {
+    let mut report_json = serde_json::to_value(&assembly_report).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialise assembly report");
         serde_json::json!({ "error": "serialisation failed" })
     });
@@ -1841,6 +2060,41 @@ pub(crate) async fn process_turn_with_existing_turn(
             AgentEvent::Token { content } => {
                 activity_tracker.record_activity();
                 let _ = ws_tx.send(ServerEvent::Token { content });
+            }
+            AgentEvent::ProviderRequestPrepared {
+                turn_id: snapshot_turn_id,
+                round,
+                request,
+            } => {
+                append_provider_visible_request(&mut report_json, round, request);
+                if let Err(e) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to persist provider-visible context snapshot"
+                    );
+                }
+            }
+            AgentEvent::ProviderReasoningCaptured {
+                turn_id: snapshot_turn_id,
+                round,
+                content,
+                details,
+            } => {
+                append_provider_visible_reasoning(&mut report_json, round, content, details);
+                if let Err(e) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to persist provider reasoning context snapshot"
+                    );
+                }
             }
             AgentEvent::ToolStart {
                 call_id,
@@ -2242,48 +2496,10 @@ pub(crate) mod tests {
     use swage_sandbox::ToolCallResult;
 
     use super::*;
-    use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerEvent};
-
-    // -----------------------------------------------------------------------
-    // SWAGE_HOME isolation for config tests
-    // -----------------------------------------------------------------------
-
-    /// Serialise tests that mutate SWAGE_HOME - it's process-wide state.
-    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that points SWAGE_HOME at an empty temporary root so tests do
-    /// not read the developer's real app data.
-    struct SwageHomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _temp_dir: Option<tempfile::TempDir>,
-    }
-
-    impl SwageHomeGuard {
-        fn set_to(path: impl AsRef<std::path::Path>) -> Self {
-            let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            unsafe { std::env::set_var("SWAGE_HOME", path.as_ref()) };
-            Self {
-                _lock: lock,
-                _temp_dir: None,
-            }
-        }
-
-        fn isolate() -> Self {
-            let lock = SWAGE_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let temp_dir = tempfile::TempDir::new().unwrap();
-            unsafe { std::env::set_var("SWAGE_HOME", temp_dir.path()) };
-            Self {
-                _lock: lock,
-                _temp_dir: Some(temp_dir),
-            }
-        }
-    }
-
-    impl Drop for SwageHomeGuard {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var("SWAGE_HOME") };
-        }
-    }
+    use crate::{
+        state::AppState, subscription::SubscriptionState, test_support::SwageHomeGuard,
+        websocket::ServerEvent,
+    };
 
     // -----------------------------------------------------------------------
     // Sandbox guard
@@ -4943,11 +5159,14 @@ pub(crate) mod tests {
                 call_id: tool_call.call_id,
                 tool: tool_call.tool,
                 arguments: tool_call.arguments,
+                model_arguments: tool_call.model_arguments,
                 result: tool_call.result,
+                model_result: tool_call.model_result,
                 status: tool_call.status,
                 duration_ms: tool_call.duration_ms,
                 truncated: tool_call.truncated,
                 total_bytes: tool_call.total_bytes,
+                provider_round: tool_call.provider_round,
                 position: tool_call.position,
                 created_at: chrono::Utc::now(),
                 parent_call_id: tool_call.parent_call_id,
@@ -4959,6 +5178,19 @@ pub(crate) mod tests {
         async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             let db = self.db.lock().await;
             Ok(db.tool_calls.iter().find(|tc| tc.id == id).cloned())
+        }
+
+        async fn get_tool_call_by_turn_and_call_id(
+            &self,
+            turn_id: Uuid,
+            call_id: &str,
+        ) -> Result<Option<ToolCallRecord>, StorageError> {
+            let db = self.db.lock().await;
+            Ok(db
+                .tool_calls
+                .iter()
+                .find(|tc| tc.turn_id == turn_id && tc.call_id == call_id)
+                .cloned())
         }
 
         async fn update_tool_call_result(
@@ -4978,6 +5210,11 @@ pub(crate) mod tests {
                 .find(|tc| tc.call_id == call_id && tc.turn_id == turn_id)
             {
                 tc.result = Some(result.to_string());
+                tc.model_result = Some(swage_core::compact_tool_result_for_model_with_reference(
+                    result,
+                    status != "success",
+                    swage_core::tool_result_reference(&turn_id.to_string(), call_id),
+                ));
                 tc.status = Some(status.to_string());
                 tc.duration_ms = Some(duration_ms);
                 tc.truncated = truncated;
@@ -6644,14 +6881,941 @@ pub(crate) mod tests {
         assert_eq!(second.messages.len(), 3);
         assert_eq!(second.messages[1].role(), Role::Assistant);
         assert!(
-            second.messages[1].content_blocks().is_some(),
-            "assistant tool-use message should retain content_blocks"
+            second.messages[1].tool_replay().is_some(),
+            "assistant tool-use message should retain canonical replay"
         );
         assert_eq!(second.messages[2].role(), Role::User);
         assert!(
-            second.messages[2].content_blocks().is_some(),
-            "tool-result message should retain content_blocks"
+            second.messages[2].tool_replay().is_some(),
+            "tool-result message should retain canonical replay"
         );
+    }
+
+    #[tokio::test]
+    async fn second_tool_round_request_does_not_replay_reasoning_by_default() {
+        let round_1 = vec![
+            StreamChunk::Reasoning {
+                content: "Private provider reasoning".into(),
+                details: Some(serde_json::json!({ "source": "test" })),
+            },
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+
+        let (state, session_id, captured) =
+            make_state_with_capturing_tools(vec![round_1, round_2]).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "expected two provider requests");
+        assert!(
+            !requests[1].messages.iter().any(|message| {
+                message.tool_replay().is_some_and(|replay| {
+                    replay
+                        .iter()
+                        .any(|part| matches!(part, swage_core::ToolReplayPart::Reasoning { .. }))
+                })
+            }),
+            "reasoning side-channels must stay out of replay unless the model opts in"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_in() {
+        let round_1 = vec![
+            StreamChunk::Reasoning {
+                content: "Private provider reasoning".into(),
+                details: Some(serde_json::json!({ "source": "test" })),
+            },
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let round_2 = vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+
+        let (state, session_id, captured) =
+            make_state_with_capturing_tools(vec![round_1, round_2]).await;
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "reasoner".to_string();
+        config.models.entries = [(
+            "reasoner".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "mock".to_string(),
+                model_id: "mock-reasoning".to_string(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    reasoning_replay: true,
+                },
+            },
+        )]
+        .into_iter()
+        .collect();
+        state.replace_runtime(
+            config,
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "expected two provider requests");
+        let assistant_replay = requests[1]
+            .messages
+            .iter()
+            .find(|message| {
+                message.role() == Role::Assistant
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay.iter().any(|part| {
+                            matches!(part, swage_core::ToolReplayPart::Reasoning { .. })
+                        })
+                    })
+            })
+            .and_then(|message| message.tool_replay())
+            .expect("opted-in model should receive reasoning replay");
+
+        assert!(matches!(
+            assistant_replay.first(),
+            Some(swage_core::ToolReplayPart::Reasoning { content, details })
+                if content == "Private provider reasoning"
+                    && details.as_ref().is_some_and(|details| details["source"] == "test")
+        ));
+        assert!(
+            assistant_replay
+                .iter()
+                .any(|part| matches!(part, swage_core::ToolReplayPart::ToolCall { .. })),
+            "reasoning replay should travel with the assistant tool-use replay"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("create default bench");
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create default thread");
+
+        let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "c1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "first" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "first complete".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]));
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            first_provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("first turn should complete");
+
+        let (second_provider, captured) = CapturingProvider::new(vec![
+            StreamChunk::Delta {
+                content: "second complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]);
+        state.replace_runtime(
+            state.active_config(),
+            Arc::new(second_provider) as Arc<dyn LlmProvider>,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Continue".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("second turn should complete");
+
+        let captured = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("second provider request should be captured");
+        let assistant_tool_message = captured
+            .messages
+            .iter()
+            .find(|message| {
+                message.role() == Role::Assistant
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay
+                            .iter()
+                            .any(|part| matches!(part, swage_core::ToolReplayPart::ToolCall { .. }))
+                    })
+            })
+            .expect("later turn should include assistant tool-use replay");
+        let tool_use = assistant_tool_message
+            .tool_replay()
+            .unwrap()
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } => Some((call_id, name, arguments)),
+                _ => None,
+            })
+            .expect("tool-use replay");
+        assert_eq!(tool_use.0, "c1");
+        assert_eq!(tool_use.1, "echo");
+        assert_eq!(tool_use.2["kind"], "tool_arguments");
+        assert_eq!(tool_use.2["preview"], r#"{"text":"first"}"#);
+
+        let tool_result_message = captured
+            .messages
+            .iter()
+            .find(|message| {
+                message.role() == Role::User
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay.iter().any(|part| {
+                            matches!(part, swage_core::ToolReplayPart::ToolResult { .. })
+                        })
+                    })
+            })
+            .expect("later turn should include user tool-result replay");
+        let tool_result = tool_result_message
+            .tool_replay()
+            .unwrap()
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } => Some((call_id, content)),
+                _ => None,
+            })
+            .expect("tool-result replay");
+        assert_eq!(tool_result.0, "c1");
+        let envelope: swage_core::CompactToolReplay = serde_json::from_str(tool_result.1)
+            .expect("tool result content should be compact replay JSON");
+        assert_eq!(envelope.kind, "tool_result");
+        assert_eq!(envelope.preview, r#"{"output":"first"}"#);
+        assert!(
+            envelope
+                .full_result_ref
+                .as_deref()
+                .is_some_and(|reference| reference.ends_with(":c1:result")),
+            "persisted replay should include a durable full-result reference"
+        );
+        assert_eq!(envelope.is_error, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("create default bench");
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create default thread");
+
+        let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "c1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "first" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "c2".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "second" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]));
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            first_provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo twice".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("first turn should complete");
+
+        let threads = storage
+            .list_by_session(session_id)
+            .await
+            .expect("list threads");
+        let turns = storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .expect("list turns");
+        let first_turn_calls = storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .expect("list first-turn tool calls");
+        assert_eq!(
+            first_turn_calls
+                .iter()
+                .map(|call| (call.call_id.as_str(), call.provider_round))
+                .collect::<Vec<_>>(),
+            vec![("c1", 1), ("c2", 2)]
+        );
+
+        let (second_provider, captured) = CapturingProvider::new(vec![
+            StreamChunk::Delta {
+                content: "second complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]);
+        state.replace_runtime(
+            state.active_config(),
+            Arc::new(second_provider) as Arc<dyn LlmProvider>,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Continue".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("second turn should complete");
+
+        let captured = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("second provider request should be captured");
+        let replay_tool_use_ids: Vec<Vec<String>> = captured
+            .messages
+            .iter()
+            .filter(|message| message.role() == Role::Assistant)
+            .filter_map(|message| message.tool_replay())
+            .map(|replay| {
+                replay
+                    .iter()
+                    .filter_map(|part| match part {
+                        swage_core::ToolReplayPart::ToolCall { call_id, .. } => {
+                            Some(call_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty())
+            .collect();
+
+        assert_eq!(
+            replay_tool_use_ids,
+            vec![vec!["c1".to_string()], vec!["c2".to_string()]],
+            "later-turn replay must preserve provider tool-round boundaries"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("create default bench");
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        let parent_thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create parent thread");
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent_thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Completed,
+                user_input: Some("Use echo".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create parent turn");
+        storage
+            .create_message(NewMessage {
+                thread_id: parent_thread.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::User,
+                content: "Use echo".to_string(),
+                position: 0,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create parent user message");
+        let assistant_message = storage
+            .create_message(NewMessage {
+                thread_id: parent_thread.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                content: "Echo complete".to_string(),
+                position: 1,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create parent assistant message");
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: parent_turn.id,
+                agent_id: "gateway".to_string(),
+                call_id: "call_1".to_string(),
+                tool: "echo".to_string(),
+                arguments: r#"{"text":"first"}"#.to_string(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(
+                    &serde_json::json!({ "text": "first" }),
+                ),
+                result: Some(r#"{"output":"first"}"#.to_string()),
+                model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
+                    r#"{"output":"first"}"#,
+                    false,
+                    "turn:parent:call_1:result",
+                )),
+                status: Some("success".to_string()),
+                duration_ms: Some(12),
+                truncated: false,
+                total_bytes: Some(18),
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+            })
+            .await
+            .expect("create parent tool call");
+
+        let branch = storage
+            .create_branch(parent_thread.id, assistant_message.id)
+            .await
+            .expect("create branch");
+        let child_turn = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .expect("list child turns")
+            .into_iter()
+            .next()
+            .expect("branch should copy parent turn");
+        let (provider, captured) = CapturingProvider::new(vec![
+            StreamChunk::Delta {
+                content: "branch complete".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            Some(branch.child_thread_id),
+            "Continue from branch".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("branch turn should complete");
+
+        let captured = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider request should be captured");
+        let assistant_tool_replay = captured
+            .messages
+            .iter()
+            .find(|message| {
+                message.role() == Role::Assistant
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay
+                            .iter()
+                            .any(|part| matches!(part, swage_core::ToolReplayPart::ToolCall { .. }))
+                    })
+            })
+            .and_then(|message| message.tool_replay())
+            .expect("branch history should rebuild assistant tool replay");
+        assert!(assistant_tool_replay.iter().any(|part| matches!(
+            part,
+            swage_core::ToolReplayPart::ToolCall { call_id, name, arguments }
+                if call_id == "call_1"
+                    && name == "echo"
+                    && arguments["kind"] == "tool_arguments"
+                    && arguments["preview"] == r#"{"text":"first"}"#
+        )));
+
+        let tool_result_replay = captured
+            .messages
+            .iter()
+            .find(|message| {
+                message.role() == Role::User
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay.iter().any(|part| {
+                            matches!(part, swage_core::ToolReplayPart::ToolResult { .. })
+                        })
+                    })
+            })
+            .and_then(|message| message.tool_replay())
+            .expect("branch history should rebuild tool result replay");
+        let result_content = tool_result_replay
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } if call_id == "call_1" => Some(content),
+                _ => None,
+            })
+            .expect("tool result replay for copied branch call");
+        let envelope: swage_core::CompactToolReplay =
+            serde_json::from_str(result_content).expect("tool result replay should stay compact");
+        assert_eq!(envelope.preview, r#"{"output":"first"}"#);
+        let expected_ref = swage_core::tool_result_reference(&child_turn.id.to_string(), "call_1");
+        assert_eq!(
+            envelope.full_result_ref.as_deref(),
+            Some(expected_ref.as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn later_turn_rebuilds_failed_tool_replay_as_error() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("create default bench");
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id;
+
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .expect("create thread");
+        let failed_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Completed,
+                user_input: Some("Run the command".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create failed-call turn");
+        storage
+            .create_message(NewMessage {
+                thread_id: thread.id,
+                turn_id: Some(failed_turn.id),
+                role: Role::User,
+                content: "Run the command".to_string(),
+                position: 0,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create user message");
+        storage
+            .create_message(NewMessage {
+                thread_id: thread.id,
+                turn_id: Some(failed_turn.id),
+                role: Role::Assistant,
+                content: "Trying the command".to_string(),
+                position: 1,
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("create assistant message");
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: failed_turn.id,
+                agent_id: "gateway".to_string(),
+                call_id: "call_fail".to_string(),
+                tool: "shell".to_string(),
+                arguments: r#"{"command":"missing-command"}"#.to_string(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(
+                    &serde_json::json!({ "command": "missing-command" }),
+                ),
+                result: Some("command not found".to_string()),
+                model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
+                    "command not found",
+                    true,
+                    "turn:failed:call_fail:result",
+                )),
+                status: Some("error".to_string()),
+                duration_ms: Some(7),
+                truncated: false,
+                total_bytes: Some(17),
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+            })
+            .await
+            .expect("create failed tool call");
+
+        let (provider, captured) = CapturingProvider::new(vec![
+            StreamChunk::Delta {
+                content: "next answer".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            Some(thread.id),
+            "Continue".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("later turn should complete");
+
+        let captured = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider request should be captured");
+        let failed_replay = captured
+            .messages
+            .iter()
+            .find_map(|message| {
+                message.tool_replay().and_then(|replay| {
+                    replay.iter().find_map(|part| match part {
+                        swage_core::ToolReplayPart::ToolResult {
+                            call_id,
+                            content,
+                            is_error,
+                        } if call_id == "call_fail" => Some((content, *is_error)),
+                        _ => None,
+                    })
+                })
+            })
+            .expect("failed tool result should be replayed");
+
+        assert!(failed_replay.1, "failed calls must replay as error results");
+        let envelope: swage_core::CompactToolReplay =
+            serde_json::from_str(failed_replay.0).expect("failed tool replay should stay compact");
+        assert_eq!(envelope.preview, "command not found");
+        assert_eq!(envelope.is_error, Some(true));
+        assert_eq!(
+            envelope.full_result_ref.as_deref(),
+            Some("turn:failed:call_fail:result")
+        );
+    }
+
+    #[test]
+    fn compact_tool_replay_messages_includes_nested_compact_rows() {
+        let turn_id = Uuid::new_v4();
+        let top_level_call_id = "python_parent".to_string();
+        let records = vec![
+            ToolCallRecord {
+                id: Uuid::new_v4(),
+                turn_id,
+                agent_id: "gateway".to_string(),
+                call_id: top_level_call_id.clone(),
+                tool: "python_execute".to_string(),
+                arguments: r#"{"code":"run()"}"#.to_string(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(
+                    &serde_json::json!({"code": "run()"}),
+                ),
+                result: Some(r#"{"ok":true}"#.to_string()),
+                model_result: Some(swage_core::compact_tool_result_for_model(
+                    r#"{"ok":true}"#,
+                    false,
+                )),
+                status: Some("success".to_string()),
+                duration_ms: Some(20),
+                truncated: false,
+                total_bytes: Some(11),
+                provider_round: 2,
+                position: 0,
+                created_at: chrono::Utc::now(),
+                parent_call_id: None,
+            },
+            ToolCallRecord {
+                id: Uuid::new_v4(),
+                turn_id,
+                agent_id: "gateway".to_string(),
+                call_id: "nested_read".to_string(),
+                tool: "file_read".to_string(),
+                arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(
+                    &serde_json::json!({"path": "Cargo.toml"}),
+                ),
+                result: Some(r#"{"content":"workspace"}"#.to_string()),
+                model_result: Some(swage_core::compact_tool_result_for_model(
+                    r#"{"content":"workspace"}"#,
+                    false,
+                )),
+                status: Some("success".to_string()),
+                duration_ms: Some(3),
+                truncated: false,
+                total_bytes: Some(23),
+                provider_round: 0,
+                position: 1,
+                created_at: chrono::Utc::now(),
+                parent_call_id: Some(top_level_call_id),
+            },
+        ];
+
+        let replay = compact_tool_replay_messages(&records);
+        assert_eq!(replay.len(), 2);
+
+        let assistant_replay = replay[0]
+            .tool_replay()
+            .expect("assistant replay should use canonical tool replay");
+        let tool_use_ids: Vec<_> = assistant_replay
+            .iter()
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_use_ids, vec!["python_parent", "nested_read"]);
+
+        let result_replay = replay[1]
+            .tool_replay()
+            .expect("tool result replay should use canonical tool replay");
+        let result_ids: Vec<_> = result_replay
+            .iter()
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(result_ids, vec!["python_parent", "nested_read"]);
+
+        let nested_result = result_replay
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } if call_id == "nested_read" => Some(content),
+                _ => None,
+            })
+            .expect("nested tool result should be present");
+        let envelope: swage_core::CompactToolReplay = serde_json::from_str(nested_result)
+            .expect("nested result should contain compact replay JSON");
+        assert_eq!(envelope.preview, r#"{"content":"workspace"}"#);
     }
 
     #[tokio::test]
@@ -6739,13 +7903,13 @@ pub(crate) mod tests {
         assert_eq!(second.messages.len(), 3);
         assert_eq!(second.messages[1].role(), Role::Assistant);
         assert!(
-            second.messages[1].content_blocks().is_some(),
-            "assistant tool-use message should retain content_blocks after approval"
+            second.messages[1].tool_replay().is_some(),
+            "assistant tool-use message should retain canonical replay after approval"
         );
         assert_eq!(second.messages[2].role(), Role::User);
         assert!(
-            second.messages[2].content_blocks().is_some(),
-            "tool-result message should retain content_blocks after approval"
+            second.messages[2].tool_replay().is_some(),
+            "tool-result message should retain canonical replay after approval"
         );
     }
 
@@ -6807,16 +7971,32 @@ pub(crate) mod tests {
             },
         ];
 
-        let provider = Arc::new(MultiRoundMockProvider::new(vec![
-            parent_round,
-            child_round,
-            parent_resume_round,
-        ]));
+        let (provider, captured_requests) =
+            CapturingMultiRoundProvider::new(vec![parent_round, child_round, parent_resume_round]);
 
         let swage_home = tempfile::TempDir::new().expect("temp swage home");
-        std::fs::create_dir_all(swage_home.path().join("benches/default/agents/agent-b"))
+        let bench_skill_dir = swage_home
+            .path()
+            .join("benches/default/skills/foreground-only");
+        std::fs::create_dir_all(&bench_skill_dir).expect("create foreground skill directory");
+        std::fs::write(
+            bench_skill_dir.join("SKILL.md"),
+            "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
+        )
+        .expect("write foreground skill");
+        let target_agent_dir = swage_home.path().join("benches/default/agents/agent-b");
+        std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
             .expect("create delegated agent directory");
+        std::fs::write(
+            target_agent_dir.join("skills/delegated-specialist/SKILL.md"),
+            "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
+        )
+        .expect("write delegated agent skill");
         let _guard = SwageHomeGuard::set_to(swage_home.path());
+        storage
+            .activate_skill(session_id, "foreground-only")
+            .await
+            .expect("activate foreground skill");
 
         let dispatcher =
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -6826,8 +8006,19 @@ pub(crate) mod tests {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
-            provider as Arc<dyn LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig {
+                communication: swage_config::CommunicationConfig {
+                    context_transfer: swage_config::ContextTransferConfig {
+                        mode: swage_config::ContextTransferMode::Explicit,
+                        allowed_fields: vec![swage_config::ContextTransferField::User],
+                        summary_budget: None,
+                        targets: std::collections::HashMap::new(),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             dispatcher,
             None,
         );
@@ -6903,6 +8094,67 @@ pub(crate) mod tests {
         assert_eq!(
             child_turns[0].assistant_response.as_deref(),
             Some("Delegate answer")
+        );
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(
+            captured_requests.len(),
+            3,
+            "expected parent, child, and resumed-parent provider requests"
+        );
+        let parent_request_text = captured_requests[0]
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            parent_request_text.contains("Use the parent foreground skill."),
+            "parent provider request should include the activated foreground skill: {parent_request_text}"
+        );
+        let child_request_text = captured_requests[1]
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            child_request_text.contains("Inherited Background Context"),
+            "delegated provider request should include transferred context: {child_request_text}"
+        );
+        assert!(
+            child_request_text.contains("Delegate this"),
+            "explicit user context transfer should carry the parent request: {child_request_text}"
+        );
+        assert!(
+            child_request_text.contains("Delegated Task\n\nSummarise this request"),
+            "delegated provider request should fence the task separately: {child_request_text}"
+        );
+        assert!(
+            child_request_text.contains("Active Skills"),
+            "delegated provider request should include target agent active skills: {child_request_text}"
+        );
+        assert!(
+            child_request_text.contains("Use the delegated specialist skill."),
+            "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+        );
+        assert!(
+            !child_request_text.contains("Use the parent foreground skill."),
+            "delegated provider request must not inherit user-activated parent skills: {child_request_text}"
+        );
+        assert!(
+            !child_request_text.contains("Parent resumed after delegation"),
+            "child provider request must not inherit future parent continuation"
+        );
+        let resumed_parent_request_text = captured_requests[2]
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            !resumed_parent_request_text.contains("Use the delegated specialist skill."),
+            "target agent skill instructions must not bleed into the resumed parent request"
         );
     }
 
@@ -7184,6 +8436,7 @@ pub(crate) mod tests {
                         aliases: vec![],
                         context_window: None,
                         generation_preset: Some("quick".to_string()),
+                        capabilities: swage_config::ModelCapabilitiesConfig::default(),
                     },
                 )]
                 .into_iter()
@@ -7360,6 +8613,7 @@ pub(crate) mod tests {
                             aliases: vec![],
                             context_window: None,
                             generation_preset: None,
+                            capabilities: swage_config::ModelCapabilitiesConfig::default(),
                         },
                     ),
                     (
@@ -7370,6 +8624,7 @@ pub(crate) mod tests {
                             aliases: vec![],
                             context_window: None,
                             generation_preset: None,
+                            capabilities: swage_config::ModelCapabilitiesConfig::default(),
                         },
                     ),
                 ]
@@ -8646,6 +9901,155 @@ pub(crate) mod tests {
             parsed.get("elements").is_some(),
             "snapshot should contain elements key"
         );
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert_eq!(
+            provider_request["request"]["stream"],
+            serde_json::json!(true)
+        );
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "provider-visible snapshot should include converted request messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_placeholder_turn_receives_provider_visible_snapshot() {
+        let chunks = vec![
+            StreamChunk::Delta {
+                content: "Async answer".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let thread = state
+            .storage
+            .list_by_session(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("session should have a thread");
+        let placeholder = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("Async hello".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create placeholder turn");
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn_with_existing_turn(
+            &state,
+            session_id,
+            Some(thread.id),
+            "Async hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+            Some(placeholder.id),
+        )
+        .await
+        .expect("placeholder turn should complete");
+
+        let turns = state
+            .storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .expect("list turns");
+        assert_eq!(turns.len(), 1, "existing placeholder must be reused");
+        assert_eq!(turns[0].id, placeholder.id);
+        assert_eq!(turns[0].state, TurnState::Completed);
+        assert_eq!(turns[0].assistant_response.as_deref(), Some("Async answer"));
+
+        let snapshot = state
+            .storage
+            .get_snapshot(placeholder.id)
+            .await
+            .expect("get snapshot")
+            .expect("provider-visible snapshot should be persisted on placeholder turn");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("snapshot should be valid JSON");
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "provider-visible request should be attached to the reused turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_reasoning_is_persisted_in_context_snapshot_not_visible_response() {
+        let chunks = vec![
+            StreamChunk::Reasoning {
+                content: "private thought".to_string(),
+                details: Some(serde_json::json!({"kind": "summary"})),
+            },
+            StreamChunk::Delta {
+                content: "Visible answer".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let (state, session_id) = make_state_with_session(chunks).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let threads = state.storage.list_by_session(session_id).await.unwrap();
+        let messages = state
+            .storage
+            .list_messages_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.role == Role::Assistant
+                    && message.content == "Visible answer"),
+            "visible assistant transcript should contain only visible content"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.content.contains("private thought")),
+            "reasoning side channel must not be persisted as transcript text"
+        );
+
+        let turns = state
+            .storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .unwrap();
+        let snapshot = state
+            .storage
+            .get_snapshot(turns[0].id)
+            .await
+            .expect("get_snapshot should succeed")
+            .expect("snapshot should be persisted");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("snapshot should be valid JSON");
+        let reasoning = &parsed["provider_visible"]["reasoning"][0];
+        assert_eq!(reasoning["round"], serde_json::json!(1));
+        assert_eq!(reasoning["content"], "private thought");
+        assert_eq!(reasoning["details"]["kind"], "summary");
     }
 
     #[tokio::test]

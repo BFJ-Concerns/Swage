@@ -3,7 +3,7 @@
 //! Provides synchronous token estimation for assembly budget management.
 //! The trait is extensible for provider-specific counting in future.
 
-use swage_core::message::{ChatMessage, ContentPart};
+use swage_core::{message::ChatMessage, render_message_for_model_context};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 
 /// Synchronous token counting over text and message sequences.
@@ -80,13 +80,12 @@ impl Tokeniser for TiktokenTokeniser {
                 .encode_with_special_tokens(&msg.role().to_string())
                 .len();
 
-            // Count text parts; image URL references carry no token cost here
-            // since the model bills image tokens separately via vision pricing.
-            for part in msg.content() {
-                if let ContentPart::Text { text } = part {
-                    total += self.bpe.encode_with_special_tokens(text).len();
-                }
-            }
+            // Image URL references carry no token cost here since the model bills
+            // image tokens separately via vision pricing.
+            total += self
+                .bpe
+                .encode_with_special_tokens(&render_message_for_model_context(msg))
+                .len();
 
             // An explicit name field occupies its own tokens plus one separator.
             if let Some(name) = msg.name() {
@@ -102,7 +101,7 @@ impl Tokeniser for TiktokenTokeniser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_core::message::Role;
+    use swage_core::{ContentPart, ToolCall, ToolResult, build_tool_round_messages, message::Role};
 
     fn text_message(role: Role, text: &str) -> ChatMessage {
         ChatMessage::new_parts(
@@ -212,6 +211,30 @@ mod tests {
         assert!(
             t.count_messages(&long) > t.count_messages(&short),
             "longer message content should produce a higher token count"
+        );
+    }
+
+    #[test]
+    fn count_messages_includes_structured_tool_replay() {
+        let t = TiktokenTokeniser::new("gpt-4");
+        let empty_message = vec![ChatMessage::new(Role::Assistant, "")];
+        let tool_replay = build_tool_round_messages(
+            &[ToolCall {
+                call_id: "call_1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }],
+            &[ToolResult {
+                call_id: "call_1".into(),
+                content: "result text".into(),
+                is_error: false,
+            }],
+            "",
+        );
+
+        assert!(
+            t.count_messages(&tool_replay) > t.count_messages(&empty_message),
+            "structured tool replay should contribute to context token estimates"
         );
     }
 

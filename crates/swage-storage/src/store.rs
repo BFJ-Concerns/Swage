@@ -505,6 +505,13 @@ pub trait ToolCallStore: Send + Sync {
     /// Fetch a single tool call by id. Returns `None` if not found.
     async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError>;
 
+    /// Fetch a single tool call by provider call id, scoped to the owning turn.
+    async fn get_tool_call_by_turn_and_call_id(
+        &self,
+        turn_id: Uuid,
+        call_id: &str,
+    ) -> Result<Option<ToolCallRecord>, StorageError>;
+
     /// Write the completed result back onto an in-progress tool call.
     ///
     /// Matched by `call_id` scoped to `turn_id` to avoid cross-turn collisions.
@@ -1714,6 +1721,13 @@ mod tests {
             unimplemented!()
         }
         async fn get_tool_call(&self, _: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_tool_call_by_turn_and_call_id(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
         async fn update_tool_call_result(

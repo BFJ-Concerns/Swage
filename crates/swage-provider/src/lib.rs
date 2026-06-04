@@ -21,6 +21,8 @@ pub mod retry;
 // Model resolution
 pub mod registry;
 
+mod tool_schema;
+
 pub use provider::{LlmProvider, ProviderConfig, UnsupportedLlmProvider};
 pub use registry::{Registry, RegistryError, ResolvedModel};
 pub use voice::{

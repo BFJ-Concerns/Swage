@@ -76,3 +76,48 @@ pub async fn run_placeholder_turn(
         GatewayError::ValidationError("automated turn completed without assistant response".into())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use swage_core::{FinishReason, StreamChunk};
+
+    use super::*;
+    use crate::turn::tests::make_state_with_session;
+
+    #[tokio::test]
+    async fn automated_placeholder_turn_receives_provider_visible_snapshot() {
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Automated answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Automated hello")
+            .await
+            .expect("create automated placeholder");
+        let response = run_placeholder_turn(&state, session_id, "Automated hello", turn_id)
+            .await
+            .expect("automated turn should complete");
+
+        assert_eq!(response, "Automated answer");
+        let snapshot = state
+            .storage
+            .get_snapshot(turn_id)
+            .await
+            .expect("get snapshot")
+            .expect("automated placeholder should receive context snapshot");
+        let parsed: Value = serde_json::from_str(&snapshot).expect("snapshot should be JSON");
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "automated turn snapshot should include provider-visible messages"
+        );
+    }
+}

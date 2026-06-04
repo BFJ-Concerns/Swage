@@ -2,8 +2,7 @@
 //!
 //! Defines `ChatMessage`, `ContentPart`, `Role`, `ToolCall`, and
 //! `sanitize_tool_messages` for representing conversation history across LLM
-//! providers. Supports text and image content, along with Anthropic-specific
-//! structured content blocks used in tool-use rounds.
+//! providers. Supports text and image content plus provider-neutral tool replay.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -79,17 +78,15 @@ pub enum ContentPart {
 /// A single message in a conversation, potentially containing multimodal content.
 ///
 /// The `content` field holds structured `ContentPart`s for text and image input.
-/// The `content_blocks` field holds Anthropic-specific JSON blocks used when
-/// representing tool_use/tool_result pairs in the conversation history — these
-/// are built by `crate::tool::build_tool_round_messages`.
+/// Tool replay is carried in a provider-neutral shape so adapters do not need
+/// to reverse-engineer another provider's wire blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Provider-independent message identifier.
     id: Uuid,
     /// Who sent the message.
     role: Role,
-    /// Content parts — may be empty for messages that only carry tool calls
-    /// or structured `content_blocks`.
+    /// Content parts — may be empty for messages that only carry tool calls.
     content: Vec<ContentPart>,
     /// When the message was created (UTC).
     created_at: DateTime<Utc>,
@@ -102,12 +99,33 @@ pub struct ChatMessage {
     /// Tool calls requested by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<crate::tool::ToolCall>>,
-    /// Anthropic-specific structured content blocks (tool_use, tool_result).
-    ///
-    /// When present, providers use these instead of the `content` vec.
-    /// Built by `crate::tool::build_tool_round_messages`.
+    /// Provider-neutral replay of a tool-use round.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    content_blocks: Option<Vec<serde_json::Value>>,
+    tool_replay: Option<Vec<ToolReplayPart>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolReplayPart {
+    Text {
+        text: String,
+    },
+    Reasoning {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        call_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
 }
 
 impl ChatMessage {
@@ -129,19 +147,15 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-            content_blocks: None,
+            tool_replay: None,
         }
     }
 
-    /// Create a message with structured Anthropic content blocks instead of
-    /// plain text parts.
-    ///
-    /// The `content` field is left empty since the blocks carry the actual
-    /// payload. Providers check `content_blocks` first.
-    pub fn with_blocks(role: Role, blocks: Vec<serde_json::Value>) -> Self {
+    /// Create a message with provider-neutral tool replay.
+    pub fn with_tool_replay(role: Role, replay: Vec<ToolReplayPart>) -> Self {
         assert!(
             matches!(role, Role::Assistant | Role::User),
-            "structured content blocks are only valid for assistant and user messages"
+            "tool replay is only valid for assistant and user messages"
         );
         Self {
             id: Uuid::new_v4(),
@@ -151,7 +165,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-            content_blocks: Some(blocks),
+            tool_replay: Some(replay),
         }
     }
 
@@ -172,7 +186,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-            content_blocks: None,
+            tool_replay: None,
         }
     }
 
@@ -194,7 +208,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: Some(tool_calls),
-            content_blocks: None,
+            tool_replay: None,
         }
     }
 
@@ -210,7 +224,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: None,
-            content_blocks: None,
+            tool_replay: None,
         }
     }
 
@@ -247,8 +261,8 @@ impl ChatMessage {
         self.tool_calls.as_deref()
     }
 
-    pub fn content_blocks(&self) -> Option<&[serde_json::Value]> {
-        self.content_blocks.as_deref()
+    pub fn tool_replay(&self) -> Option<&[ToolReplayPart]> {
+        self.tool_replay.as_deref()
     }
 
     pub fn text_content(&self) -> String {
@@ -273,8 +287,16 @@ impl PartialEq for ChatMessage {
             && self.name == other.name
             && self.tool_call_id == other.tool_call_id
             && self.tool_calls == other.tool_calls
-            && self.content_blocks == other.content_blocks
+            && self.tool_replay == other.tool_replay
     }
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive borrowed field values"
+)]
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Ensures tool-result messages (Role::Tool) always follow a corresponding
@@ -338,7 +360,6 @@ mod tests {
         // created_at should be recent (within last 5 seconds)
         let age = Utc::now() - msg.created_at;
         assert!(age.num_seconds() < 5);
-        assert!(msg.content_blocks.is_none());
     }
 
     #[test]
@@ -347,7 +368,6 @@ mod tests {
         assert!(msg.name.is_none());
         assert!(msg.tool_call_id.is_none());
         assert!(msg.tool_calls.is_none());
-        assert!(msg.content_blocks.is_none());
     }
 
     #[test]
@@ -368,12 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn with_blocks_sets_blocks_and_empty_content() {
-        let blocks = vec![serde_json::json!({ "type": "text", "text": "hi" })];
-        let msg = ChatMessage::with_blocks(Role::Assistant, blocks.clone());
+    fn with_tool_replay_sets_canonical_replay_without_compatibility_blocks() {
+        let replay = vec![ToolReplayPart::ToolCall {
+            call_id: "call_1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"text": "hi"}),
+        }];
+
+        let msg = ChatMessage::with_tool_replay(Role::Assistant, replay.clone());
+
         assert_eq!(msg.role, Role::Assistant);
         assert!(msg.content.is_empty());
-        assert_eq!(msg.content_blocks, Some(blocks));
+        assert_eq!(msg.tool_replay, Some(replay));
     }
 
     // -- Serialisation round-trip ---------------------------------------------
@@ -440,7 +466,7 @@ mod tests {
         assert!(!json.contains("\"name\""));
         assert!(!json.contains("tool_call_id"));
         assert!(!json.contains("tool_calls"));
-        assert!(!json.contains("content_blocks"));
+        assert!(!json.contains("tool_replay"));
     }
 
     #[test]
@@ -470,24 +496,33 @@ mod tests {
     }
 
     #[test]
-    fn chat_message_with_blocks_serde_round_trip() {
-        let blocks = vec![serde_json::json!({
-            "type": "tool_use", "id": "call_1", "name": "echo", "input": {}
-        })];
-        let msg = ChatMessage::with_blocks(Role::Assistant, blocks);
+    fn chat_message_with_tool_replay_serde_round_trip() {
+        let replay = vec![
+            ToolReplayPart::Text {
+                text: "Running a tool.".into(),
+            },
+            ToolReplayPart::ToolCall {
+                call_id: "call_1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "hi"}),
+            },
+        ];
+        let msg = ChatMessage::with_tool_replay(Role::Assistant, replay);
+
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("content_blocks"));
+        assert!(json.contains("tool_replay"));
         let decoded: ChatMessage = serde_json::from_str(&json).unwrap();
+
         assert_eq!(msg, decoded);
     }
 
     #[test]
-    fn chat_message_without_content_blocks_deserialises_from_legacy_json() {
-        // JSON produced before content_blocks existed must still deserialise.
+    fn chat_message_deserialises_from_legacy_json_without_tool_replay() {
+        // JSON produced before tool_replay existed must still deserialise.
         let json = r#"{"id":"00000000-0000-0000-0000-000000000001","role":"user","content":[{"type":"text","text":"hi"}],"created_at":"2024-01-01T00:00:00Z"}"#;
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.content, vec![ContentPart::Text { text: "hi".into() }]);
-        assert!(msg.content_blocks.is_none());
+        assert!(msg.tool_replay.is_none());
     }
 
     // -- sanitize_tool_messages -----------------------------------------------

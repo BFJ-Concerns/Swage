@@ -2,10 +2,11 @@
 use crate::model::Protocol;
 use crate::model::{
     ContextConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
-    ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
-    PricingConfig, ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig,
-    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
-    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
+    ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
+    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
+    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
+    ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -573,6 +574,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;
     }
@@ -913,6 +915,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()
@@ -943,6 +946,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             },
         )]);
 
@@ -978,6 +982,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
             }),
@@ -994,6 +999,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()
@@ -1021,6 +1027,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
             }),
@@ -1036,6 +1043,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()

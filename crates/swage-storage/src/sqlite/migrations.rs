@@ -1,5 +1,8 @@
 use rusqlite::{Connection, params};
-use swage_core::StorageError;
+use swage_core::{
+    StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model_with_reference,
+    tool_result_reference,
+};
 
 /// Track which migrations have been applied.
 const CREATE_MIGRATIONS_TABLE: &str = "
@@ -85,6 +88,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("039_bench_description", ADD_BENCH_DESCRIPTION),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
+        ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
+        ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
     ]
 }
 
@@ -843,8 +848,8 @@ const COMPLETE_SCHEMA: &str = "
         status         TEXT,
         duration_ms    INTEGER,
         truncated      INTEGER NOT NULL DEFAULT 0,
-        total_bytes    INTEGER,
-        position       INTEGER NOT NULL,
+	        total_bytes    INTEGER,
+	        position       INTEGER NOT NULL,
         parent_call_id TEXT,
         created_at     TEXT    NOT NULL
     );
@@ -896,6 +901,15 @@ const ADD_SESSION_METADATA_COLUMN: &str = "
 
 const ADD_SESSION_SELECTED_MODEL: &str = "
     ALTER TABLE sessions ADD COLUMN selected_model_id TEXT;
+";
+
+const ADD_TOOL_CALL_MODEL_REPLAY: &str = "
+    ALTER TABLE tool_calls ADD COLUMN model_arguments TEXT;
+    ALTER TABLE tool_calls ADD COLUMN model_result TEXT;
+";
+
+const ADD_TOOL_CALL_PROVIDER_ROUND: &str = "
+    ALTER TABLE tool_calls ADD COLUMN provider_round INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Scheduled jobs and their recorded executions.
@@ -1264,6 +1278,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
         } else if name == "030_team_agent_and_task_authoring" {
             super::team::migrate_team_authoring_model(conn)?;
+        } else if name == "041_tool_call_model_replay" {
+            migrate_tool_call_model_replay(conn)?;
         } else {
             // Apply migration inside a transaction for atomicity.
             conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
@@ -1281,6 +1297,63 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 
     // Seed the default bench if it does not already exist.
     seed_default_bench(conn)
+}
+
+fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(&format!("BEGIN; {ADD_TOOL_CALL_MODEL_REPLAY} COMMIT;"))
+        .map_err(|e| {
+            StorageError::MigrationFailed(format!(
+                "migration '041_tool_call_model_replay' failed: {e}"
+            ))
+        })?;
+
+    let legacy_rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, turn_id, call_id, arguments, result, status
+                 FROM tool_calls
+                 WHERE model_arguments IS NULL
+                    OR (result IS NOT NULL AND model_result IS NULL)",
+            )
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?
+    };
+
+    for (id, turn_id, call_id, arguments, result, status) in legacy_rows {
+        let argument_value = serde_json::from_str(&arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+        let model_arguments = compact_tool_arguments_for_model(&argument_value);
+        let model_result = result.as_ref().map(|result| {
+            compact_tool_result_for_model_with_reference(
+                result,
+                status.as_deref() != Some("success"),
+                tool_result_reference(&turn_id, &call_id),
+            )
+        });
+
+        conn.execute(
+            "UPDATE tool_calls
+             SET model_arguments = ?1, model_result = ?2
+             WHERE id = ?3",
+            params![model_arguments, model_result, id],
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    }
+
+    Ok(())
 }
 
 /// Insert the default bench on first run. Idempotent via INSERT OR IGNORE.
@@ -1310,6 +1383,42 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory DB");
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         super::run_migrations(&conn).expect("migrations should succeed");
+        conn
+    }
+
+    fn open_migrated_until_exclusive(stop_name: &str) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory DB");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(super::CREATE_MIGRATIONS_TABLE)
+            .expect("create migrations table");
+
+        for (name, sql) in super::migrations() {
+            if name == stop_name {
+                break;
+            }
+
+            if name == "023_encrypt_managed_secrets_at_rest" {
+                super::super::secret::migrate_managed_secret_storage(&conn)
+                    .expect("managed secret migration");
+            } else if name == "028_deduplicate_attachment_ingestion_content" {
+                super::super::attachment::migrate_attachment_ingested_markdown_dedup(&conn)
+                    .expect("attachment dedup migration");
+            } else if name == "030_team_agent_and_task_authoring" {
+                super::super::team::migrate_team_authoring_model(&conn)
+                    .expect("team authoring migration");
+            } else {
+                conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
+                    .unwrap_or_else(|error| panic!("migration {name} should apply: {error}"));
+            }
+
+            conn.execute(
+                "INSERT INTO _swage_migrations (name, applied_at) VALUES (?1, datetime('now'))",
+                rusqlite::params![name],
+            )
+            .expect("record applied migration");
+        }
+
+        super::seed_default_bench(&conn).expect("seed default bench");
         conn
     }
 
@@ -1784,6 +1893,77 @@ mod tests {
             )
             .expect("pragma_table_info query");
         assert_eq!(col_count, 1, "tool_calls.agent_id column should exist");
+    }
+
+    #[test]
+    fn tool_calls_replay_columns_exist() {
+        let conn = open_migrated();
+        for column in &["model_arguments", "model_result", "provider_round"] {
+            let col_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name=?1",
+                    rusqlite::params![column],
+                    |r| r.get(0),
+                )
+                .expect("pragma_table_info query");
+            assert_eq!(col_count, 1, "tool_calls.{column} column should exist");
+        }
+    }
+
+    #[test]
+    fn tool_call_model_replay_migration_backfills_legacy_rows() {
+        let conn = open_migrated_until_exclusive("041_tool_call_model_replay");
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
+        let call_id = "legacy_call";
+
+        conn.execute(
+            "INSERT INTO tool_calls
+             (id, turn_id, call_id, tool, arguments, agent_id, result, status,
+              duration_ms, truncated, total_bytes, position, created_at)
+             VALUES (?1, ?2, ?3, 'shell', ?4, 'agent-test', ?5, 'error',
+                     12, 0, 17, 0, ?6)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                &turn_id,
+                call_id,
+                r#"{"cmd":"missing-command"}"#,
+                "command not found",
+                now,
+            ],
+        )
+        .expect("insert legacy tool call");
+
+        super::run_migrations(&conn).expect("remaining migrations should apply");
+
+        let (model_arguments, model_result): (String, String) = conn
+            .query_row(
+                "SELECT model_arguments, model_result
+                 FROM tool_calls
+                 WHERE call_id = ?1",
+                rusqlite::params![call_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("select backfilled replay columns");
+
+        let arguments: swage_core::CompactToolReplay =
+            serde_json::from_str(&model_arguments).expect("arguments compact replay");
+        assert_eq!(arguments.kind, "tool_arguments");
+        assert_eq!(arguments.preview, r#"{"cmd":"missing-command"}"#);
+
+        let result: swage_core::CompactToolReplay =
+            serde_json::from_str(&model_result).expect("result compact replay");
+        assert_eq!(result.kind, "tool_result");
+        assert_eq!(result.preview, "command not found");
+        assert_eq!(result.is_error, Some(true));
+        let expected_ref = swage_core::tool_result_reference(&turn_id, call_id);
+        assert_eq!(
+            result.full_result_ref.as_deref(),
+            Some(expected_ref.as_str())
+        );
     }
 
     #[test]

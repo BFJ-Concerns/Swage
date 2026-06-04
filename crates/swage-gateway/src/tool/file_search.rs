@@ -13,7 +13,7 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    is_binary_content, location_approval_error, resolve_context_path, truncate_output,
+    continuable_output_value, is_binary_content, location_approval_error, resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +57,11 @@ impl Tool for FileSearchTool {
                 "path": {
                     "type": "string",
                     "description": "Subdirectory relative to workspace root to restrict the search. Defaults to \".\" (entire workspace)."
+                },
+                "offset_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset into the search result stream. Use next_offset_bytes from a truncated result to continue."
                 }
             },
             "required": ["pattern"]
@@ -68,15 +73,18 @@ impl Tool for FileSearchTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        let pattern = params["pattern"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "Missing required argument: pattern".to_owned(),
-            })?
-            .to_lowercase();
+        let pattern_arg =
+            params["pattern"]
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidParameters {
+                    name: self.name().to_owned(),
+                    message: "Missing required argument: pattern".to_owned(),
+                })?;
+        let pattern = pattern_arg.to_lowercase();
+        let offset_bytes = optional_offset_bytes(&params, self.name())?;
 
         // Optional subdirectory — default to workspace root.
+        let path_arg = params["path"].as_str().unwrap_or(".");
         let resolved = match params["path"].as_str() {
             Some(sub) => resolve_context_path(ctx, sub)
                 .map_err(|_| location_approval_error(self.name(), ctx, sub, "read"))?,
@@ -92,9 +100,44 @@ impl Tool for FileSearchTool {
         }
 
         let raw = matches.join("\n");
-        let (content, _truncated, _total_bytes) = truncate_output(&raw, self.max_output_bytes);
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("pattern".to_string(), json!(pattern_arg));
+        if params["path"].as_str().is_some() {
+            arguments.insert("path".to_string(), json!(path_arg));
+        }
+        continuable_output_value(
+            &raw,
+            self.max_output_bytes,
+            offset_bytes,
+            "file_search",
+            arguments,
+        )
+        .map_err(|message| ToolError::InvalidParameters {
+            name: self.name().to_owned(),
+            message,
+        })
+    }
+}
 
-        Ok(json!({"output": content}))
+fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolError> {
+    match params.get("offset_bytes") {
+        Some(Value::Number(number)) => {
+            let offset = number
+                .as_u64()
+                .ok_or_else(|| ToolError::InvalidParameters {
+                    name: tool_name.to_owned(),
+                    message: "offset_bytes must be a non-negative integer".to_owned(),
+                })?;
+            usize::try_from(offset).map_err(|_| ToolError::InvalidParameters {
+                name: tool_name.to_owned(),
+                message: "offset_bytes is too large for this platform".to_owned(),
+            })
+        }
+        Some(Value::Null) | None => Ok(0),
+        Some(_) => Err(ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "offset_bytes must be a non-negative integer".to_owned(),
+        }),
     }
 }
 
@@ -284,6 +327,61 @@ mod tests {
             "output should be truncated: len={}",
             output.len()
         );
+        assert_eq!(val["truncated"], json!(true));
+        assert!(val["total_bytes"].as_u64().unwrap() > 50);
+    }
+
+    #[tokio::test]
+    async fn truncated_search_returns_follow_up_offset() {
+        let dir = TempDir::new().unwrap();
+        let content: String = (1..=20).map(|i| format!("match line {i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), content.as_bytes()).unwrap();
+
+        let val = tool_with_limit(&dir, 40)
+            .execute(json!({ "pattern": "match", "path": "." }), &ctx(&dir))
+            .await
+            .unwrap();
+
+        assert_eq!(val["truncated"], json!(true));
+        assert_eq!(val["offset_bytes"], json!(0));
+        let next_offset = val["next_offset_bytes"]
+            .as_u64()
+            .expect("truncated search should include next offset");
+        assert!(next_offset > 0);
+        assert_eq!(val["follow_up"]["tool"], json!("file_search"));
+        assert_eq!(val["follow_up"]["arguments"]["pattern"], json!("match"));
+        assert_eq!(val["follow_up"]["arguments"]["path"], json!("."));
+        assert_eq!(
+            val["follow_up"]["arguments"]["offset_bytes"],
+            json!(next_offset)
+        );
+    }
+
+    #[tokio::test]
+    async fn offset_search_continues_from_prior_truncation() {
+        let dir = TempDir::new().unwrap();
+        let content: String = (1..=20).map(|i| format!("match line {i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), content.as_bytes()).unwrap();
+
+        let first = tool_with_limit(&dir, 40)
+            .execute(json!({ "pattern": "match" }), &ctx(&dir))
+            .await
+            .unwrap();
+        let next_offset = first["next_offset_bytes"]
+            .as_u64()
+            .expect("first page should be truncated");
+
+        let second = tool_with_limit(&dir, 40)
+            .execute(
+                json!({ "pattern": "match", "offset_bytes": next_offset }),
+                &ctx(&dir),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(first["output"], second["output"]);
+        assert_eq!(second["offset_bytes"], json!(next_offset));
+        assert_eq!(second["total_bytes"], first["total_bytes"]);
     }
 
     #[tokio::test]

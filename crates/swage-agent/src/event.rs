@@ -53,6 +53,29 @@ pub enum AgentEvent {
         success: bool,
     },
 
+    /// A provider-visible request body has been prepared for a model call.
+    ///
+    /// This is diagnostic data for context snapshots. It is emitted before the
+    /// provider stream is opened and after agent-side context compaction or
+    /// tool-round replay has shaped the request.
+    ProviderRequestPrepared {
+        turn_id: Uuid,
+        round: usize,
+        request: serde_json::Value,
+    },
+
+    /// Provider reasoning side-channel content was received.
+    ///
+    /// Consumers may persist this for diagnostics, but must not display or
+    /// replay it as visible assistant text unless an explicit provider/model
+    /// capability says that is required.
+    ProviderReasoningCaptured {
+        turn_id: Uuid,
+        round: usize,
+        content: String,
+        details: Option<serde_json::Value>,
+    },
+
     /// A tool call has started; consumers can show a "running…" indicator.
     ToolStart {
         call_id: String,

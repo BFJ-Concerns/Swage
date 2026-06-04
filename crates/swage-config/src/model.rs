@@ -80,6 +80,20 @@ pub struct ModelEndpointConfig {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "ModelCapabilitiesConfig::is_empty")]
+    pub capabilities: ModelCapabilitiesConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ModelCapabilitiesConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_replay: bool,
+}
+
+impl ModelCapabilitiesConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.reasoning_replay
+    }
 }
 
 /// Configured LLM models keyed by app-level model id.
@@ -640,6 +654,7 @@ impl ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;
     }

@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use swage_core::StorageError;
+use swage_core::{
+    StorageError, compact_tool_result_for_model_with_reference, tool_result_reference,
+};
 
 use crate::model::{NewThread, Thread, ThreadBranch, ThreadState};
 use crate::sqlite::SqliteStorage;
@@ -66,6 +69,96 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         .map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
+}
+
+fn copy_tool_calls_for_branch(
+    conn: &rusqlite::Connection,
+    source_turn_id: &str,
+    child_turn_id: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
+                duration_ms, truncated, total_bytes, provider_round, position, created_at,
+                parent_call_id
+         FROM tool_calls
+         WHERE turn_id = ?1
+         ORDER BY provider_round ASC, position ASC",
+    )?;
+    let rows = stmt.query_map(params![source_turn_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, i32>(10)?,
+            row.get::<_, i32>(11)?,
+            row.get::<_, String>(12)?,
+            row.get::<_, Option<String>>(13)?,
+        ))
+    })?;
+    let calls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for (
+        agent_id,
+        call_id,
+        tool,
+        arguments,
+        model_arguments,
+        result,
+        status,
+        duration_ms,
+        truncated,
+        total_bytes,
+        provider_round,
+        position,
+        created_at,
+        parent_call_id,
+    ) in calls
+    {
+        let model_result = result.as_deref().map(|result| {
+            compact_tool_result_for_model_with_reference(
+                result,
+                status.as_deref() != Some("success"),
+                tool_result_reference(child_turn_id, &call_id),
+            )
+        });
+
+        conn.execute(
+            "INSERT INTO tool_calls
+	             (id, turn_id, agent_id, call_id, tool, arguments, model_arguments, result,
+	              model_result, status, duration_ms, truncated, total_bytes, provider_round,
+	              position, created_at, parent_call_id)
+	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                Uuid::new_v4().to_string(),
+                child_turn_id,
+                agent_id,
+                call_id,
+                tool,
+                arguments,
+                model_arguments,
+                result,
+                model_result,
+                status,
+                duration_ms,
+                truncated,
+                total_bytes,
+                provider_round,
+                position,
+                created_at,
+                parent_call_id,
+            ],
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Wraps a bare `String` as a `std::error::Error` for row-mapping conversions.
@@ -270,16 +363,110 @@ impl ThreadStore for SqliteStorage {
                     ))
                 },
             )?;
+            let messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
 
-            for row in rows {
-                let (turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at) = row?;
+            let turn_ids_with_assistant_messages: HashSet<&str> = messages
+                .iter()
+                .filter_map(|(turn_id, role, ..)| {
+                    (role == "assistant").then_some(turn_id.as_deref()).flatten()
+                })
+                .collect();
+            let mut turn_id_map: HashMap<String, String> = HashMap::new();
+            for original_turn_id in messages
+                .iter()
+                .filter_map(|(turn_id, ..)| turn_id.as_ref())
+            {
+                if turn_id_map.contains_key(original_turn_id) {
+                    continue;
+                }
+
+                let child_turn_id = Uuid::new_v4().to_string();
+                let turn = conn
+                    .query_row(
+                        "SELECT agent_id, user_input, inbound_audit, assistant_response,
+                                input_tokens, output_tokens, state, created_at, completed_at,
+                                cost_microcents, structured_output, parent_turn_id
+                         FROM turns WHERE id = ?1",
+                        params![original_turn_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, Option<i64>>(4)?,
+                                row.get::<_, Option<i64>>(5)?,
+                                row.get::<_, String>(6)?,
+                                row.get::<_, String>(7)?,
+                                row.get::<_, Option<String>>(8)?,
+                                row.get::<_, Option<i64>>(9)?,
+                                row.get::<_, Option<String>>(10)?,
+                                row.get::<_, Option<String>>(11)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+
+                if let Some((
+                    agent_id,
+                    user_input,
+                    inbound_audit,
+                    assistant_response,
+                    input_tokens,
+                    output_tokens,
+                    state,
+                    created_at,
+                    completed_at,
+                    cost_microcents,
+                    structured_output,
+                    parent_turn_id,
+                )) = turn
+                {
+                    conn.execute(
+                        "INSERT INTO turns
+                         (id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
+                          input_tokens, output_tokens, state, created_at, completed_at,
+                          cost_microcents, structured_output, parent_turn_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        params![
+                            &child_turn_id,
+                            child_thread_id.to_string(),
+                            agent_id,
+                            user_input,
+                            inbound_audit,
+                            assistant_response,
+                            input_tokens,
+                            output_tokens,
+                            state,
+                            created_at,
+                            completed_at,
+                            cost_microcents,
+                            structured_output,
+                            parent_turn_id,
+                        ],
+                    )?;
+
+                    if turn_ids_with_assistant_messages.contains(original_turn_id.as_str()) {
+                        copy_tool_calls_for_branch(conn, original_turn_id, &child_turn_id)?;
+                    }
+                    turn_id_map.insert(original_turn_id.clone(), child_turn_id);
+                }
+            }
+
+            for row in messages {
+                let (turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at) = row;
+                let child_turn_id = turn_id
+                    .as_ref()
+                    .and_then(|turn_id| turn_id_map.get(turn_id))
+                    .cloned();
                 conn.execute(
                     "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
-                        turn_id,
+                        child_turn_id,
                         role,
                         content,
                         position,
@@ -353,10 +540,12 @@ impl ThreadStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::NewMessage;
-    use crate::model::{NewBench, NewSession};
-    use crate::store::{BenchStore, MessageStore, SessionStore};
-    use swage_core::Role;
+    use crate::model::{NewBench, NewMessage, NewSession, NewToolCall, NewTurn, TurnState};
+    use crate::store::{BenchStore, MessageStore, SessionStore, ToolCallStore, TurnStore};
+    use swage_core::{
+        Role, compact_tool_arguments_for_model, compact_tool_result_for_model,
+        compact_tool_result_for_model_with_reference, tool_result_reference,
+    };
 
     use super::*;
 
@@ -719,6 +908,197 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.parent_thread_id, parent.id);
         assert_eq!(fetched.branched_from_message_id, first.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_copies_turns_and_compact_tool_replay() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Completed,
+                user_input: Some("use a tool".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::User,
+                content: "use a tool".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let assistant_message = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                content: "done".into(),
+                position: 1,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let expected_model_arguments =
+            compact_tool_arguments_for_model(&serde_json::json!({"cmd": "pwd"}));
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: parent_turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "shell".into(),
+                arguments: r#"{"cmd":"pwd"}"#.into(),
+                model_arguments: expected_model_arguments.clone(),
+                result: Some("workspace".into()),
+                model_result: Some(compact_tool_result_for_model("workspace", false)),
+                status: Some("success".into()),
+                duration_ms: Some(12),
+                truncated: false,
+                total_bytes: Some(9),
+                provider_round: 2,
+                position: 0,
+                parent_call_id: None,
+            })
+            .await
+            .unwrap();
+
+        let branch = storage
+            .create_branch(parent.id, assistant_message.id)
+            .await
+            .unwrap();
+        let child_turns = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap();
+        assert_eq!(child_turns.len(), 1);
+        assert_ne!(child_turns[0].id, parent_turn.id);
+        assert_eq!(child_turns[0].user_input.as_deref(), Some("use a tool"));
+
+        let child_messages = storage
+            .list_messages_by_thread(branch.child_thread_id)
+            .await
+            .unwrap();
+        assert_eq!(child_messages.len(), 2);
+        assert_eq!(child_messages[0].turn_id, Some(child_turns[0].id));
+        assert_eq!(child_messages[1].turn_id, Some(child_turns[0].id));
+
+        let child_tool_calls = storage
+            .list_tool_calls_by_turn(child_turns[0].id)
+            .await
+            .unwrap();
+        assert_eq!(child_tool_calls.len(), 1);
+        let expected_model_result = compact_tool_result_for_model_with_reference(
+            "workspace",
+            false,
+            tool_result_reference(&child_turns[0].id.to_string(), "call_1"),
+        );
+        assert_eq!(child_tool_calls[0].call_id, "call_1");
+        assert_eq!(
+            child_tool_calls[0].model_arguments,
+            expected_model_arguments
+        );
+        assert_eq!(
+            child_tool_calls[0].model_result.as_deref(),
+            Some(expected_model_result.as_str())
+        );
+        assert_eq!(child_tool_calls[0].provider_round, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_from_user_message_does_not_copy_future_tool_replay() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Completed,
+                user_input: Some("use a tool".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let user_message = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::User,
+                content: "use a tool".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                content: "done".into(),
+                position: 1,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: parent_turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_future".into(),
+                tool: "shell".into(),
+                arguments: r#"{"cmd":"pwd"}"#.into(),
+                model_arguments: compact_tool_arguments_for_model(&serde_json::json!({
+                    "cmd": "pwd"
+                })),
+                result: Some("workspace".into()),
+                model_result: Some(compact_tool_result_for_model("workspace", false)),
+                status: Some("success".into()),
+                duration_ms: Some(12),
+                truncated: false,
+                total_bytes: Some(9),
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+            })
+            .await
+            .unwrap();
+
+        let branch = storage
+            .create_branch(parent.id, user_message.id)
+            .await
+            .unwrap();
+        let child_turns = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap();
+        assert_eq!(child_turns.len(), 1);
+
+        let child_messages = storage
+            .list_messages_by_thread(branch.child_thread_id)
+            .await
+            .unwrap();
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].turn_id, Some(child_turns[0].id));
+
+        let child_tool_calls = storage
+            .list_tool_calls_by_turn(child_turns[0].id)
+            .await
+            .unwrap();
+        assert!(
+            child_tool_calls.is_empty(),
+            "branching before the assistant response must not copy future tool replay"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

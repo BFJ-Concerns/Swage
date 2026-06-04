@@ -593,6 +593,8 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::turn::tests::make_state_with_session;
+    use swage_core::{FinishReason, StreamChunk};
 
     #[test]
     fn home_target_defaults_to_origin() {
@@ -673,5 +675,54 @@ mod tests {
         .expect_err("missing origin should fail");
 
         assert!(error.to_string().contains("without an origin"));
+    }
+
+    #[tokio::test]
+    async fn channel_turn_receives_provider_visible_snapshot() {
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Channel answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+
+        let response = run_channel_turn(&state, session_id, "Channel hello".into())
+            .await
+            .expect("channel turn should complete");
+
+        assert_eq!(response, "Channel answer");
+        let thread = state
+            .storage
+            .list_by_session(session_id)
+            .await
+            .expect("list session threads")
+            .into_iter()
+            .next()
+            .expect("session should have a thread");
+        let turn = state
+            .storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .expect("list turns")
+            .into_iter()
+            .next()
+            .expect("channel turn should be persisted");
+        let snapshot = state
+            .storage
+            .get_snapshot(turn.id)
+            .await
+            .expect("get snapshot")
+            .expect("channel turn should receive context snapshot");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("snapshot should be JSON");
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "channel turn snapshot should include provider-visible messages"
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use swage_core::Role;
+use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
 use swage_storage::model::NewBench;
 use swage_storage::store::{
     BenchStore, MessageStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
@@ -94,16 +94,26 @@ async fn create_full_hierarchy(
             call_id: "toolu_int_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"echo hi"}"#.to_string(),
+            model_arguments: compact_tool_arguments_for_model(
+                &serde_json::json!({"cmd": "echo hi"}),
+            ),
             result: Some("hi".to_string()),
+            model_result: Some(compact_tool_result_for_model("hi", false)),
             status: Some("success".to_string()),
             duration_ms: Some(5),
             truncated: false,
             total_bytes: Some(2),
+            provider_round: 1,
             position: 0,
             parent_call_id: None,
         })
         .await
         .expect("create tool call");
+    let expected_model_result = compact_tool_result_for_model("hi", false);
+    assert_eq!(
+        tool_call.model_result.as_deref(),
+        Some(expected_model_result.as_str())
+    );
 
     (session.id, thread.id, turn.id, message.id, tool_call.id)
 }

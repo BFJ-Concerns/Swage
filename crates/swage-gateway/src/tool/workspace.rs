@@ -4,6 +4,8 @@
 //! workspace directory. This module provides the shared logic for resolving the
 //! workspace root and validating that paths don't escape it.
 
+use serde_json::{Value, json};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use swage_config::ResolvedConfig;
 use swage_core::ToolError;
@@ -30,6 +32,39 @@ pub fn resolve_workspace_root(config: &ResolvedConfig) -> PathBuf {
 pub struct ResolvedToolPath {
     pub root: PathBuf,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputArtifactPath {
+    pub absolute: PathBuf,
+    pub relative: String,
+}
+
+/// Builds a workspace-local path for a full tool-output artefact.
+///
+/// The path includes the turn id and tool-call id where available so repeated
+/// calls do not overwrite each other while remaining readable by `file_read`.
+pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolOutputArtifactPath {
+    let turn_id = ctx
+        .turn_id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "adhoc".to_string());
+    let call_id = ctx
+        .call_id()
+        .map(sanitise_path_segment)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let relative = format!(".swage/tool-output/{turn_id}/{call_id}/{filename}");
+    let absolute = ctx.working_directory().join(&relative);
+
+    ToolOutputArtifactPath { absolute, relative }
+}
+
+/// Creates a tool-output artefact file and any missing parent directories.
+pub async fn create_tool_output_artifact(path: &Path) -> io::Result<tokio::fs::File> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::File::create(path).await
 }
 
 pub fn location_approval_error(
@@ -203,6 +238,82 @@ pub fn truncate_output(content: &str, max_bytes: usize) -> (String, bool, usize)
     (content[..cut].to_string(), true, total)
 }
 
+/// Builds the standard JSON result for tools that may shorten textual output.
+///
+/// `output` is always capped before it is returned. Truncation metadata is only
+/// included when bytes were actually omitted, preserving the long-standing shape
+/// for ordinary small results while making shortened responses explicit.
+pub fn truncated_output_value(content: &str, max_bytes: usize) -> Value {
+    let (output, truncated, total_bytes) = truncate_output(content, max_bytes);
+    if truncated {
+        json!({
+            "output": output,
+            "truncated": true,
+            "total_bytes": total_bytes,
+        })
+    } else {
+        json!({ "output": output })
+    }
+}
+
+/// Builds JSON output for a textual result that can be continued by calling a
+/// follow-up tool with a byte offset.
+///
+/// Small first-page results keep the historical `{ "output": ... }` shape.
+/// Offset or truncated results include the offset, total byte count, and a
+/// ready-to-use follow-up invocation when more content remains.
+pub fn continuable_output_value(
+    content: &str,
+    max_bytes: usize,
+    offset_bytes: usize,
+    follow_up_tool: &str,
+    mut follow_up_arguments: serde_json::Map<String, Value>,
+) -> Result<Value, String> {
+    if max_bytes == 0 {
+        return Err("max_output_bytes must be positive".to_owned());
+    }
+    if offset_bytes > content.len() || !content.is_char_boundary(offset_bytes) {
+        return Err(
+            "offset_bytes must be a valid UTF-8 byte boundary within the result".to_owned(),
+        );
+    }
+
+    let remaining = &content[offset_bytes..];
+    let mut value = truncated_output_value(remaining, max_bytes);
+    let output_len = value
+        .get("output")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or(0);
+    let next_offset = offset_bytes + output_len;
+
+    if offset_bytes > 0 || next_offset < content.len() {
+        let object = value
+            .as_object_mut()
+            .expect("truncated_output_value always returns an object");
+        object.insert("offset_bytes".to_string(), json!(offset_bytes));
+        object.insert("total_bytes".to_string(), json!(content.len()));
+    }
+
+    if next_offset < content.len() {
+        follow_up_arguments.insert("offset_bytes".to_string(), json!(next_offset));
+        let object = value
+            .as_object_mut()
+            .expect("truncated_output_value always returns an object");
+        object.insert("truncated".to_string(), json!(true));
+        object.insert("next_offset_bytes".to_string(), json!(next_offset));
+        object.insert(
+            "follow_up".to_string(),
+            json!({
+                "tool": follow_up_tool,
+                "arguments": follow_up_arguments,
+            }),
+        );
+    }
+
+    Ok(value)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -263,6 +374,24 @@ fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(root)
+}
+
+fn sanitise_path_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        segment
+    }
 }
 
 fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<String> {
@@ -462,6 +591,13 @@ mod tests {
         let content = "hello";
         let (_, _, total) = truncate_output(content, 2);
         assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn continuable_output_rejects_zero_limit() {
+        let result = continuable_output_value("abcdef", 0, 0, "file_read", serde_json::Map::new());
+
+        assert_eq!(result.unwrap_err(), "max_output_bytes must be positive");
     }
 
     // --- resolve_workspace_root ---

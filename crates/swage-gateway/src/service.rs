@@ -1814,6 +1814,7 @@ mod tests {
 
     use uuid::Uuid;
 
+    use swage_core::{compact_tool_arguments_for_model, compact_tool_result_for_model};
     use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
     use swage_storage::sqlite::SqliteStorage;
 
@@ -1826,6 +1827,15 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             storage as Arc<dyn BenchStore>,
         )
+    }
+
+    fn model_arguments(raw: &str) -> String {
+        let value = serde_json::from_str(raw).unwrap_or_else(|_| JsonValue::String(raw.into()));
+        compact_tool_arguments_for_model(&value)
+    }
+
+    fn model_result(raw: &str) -> String {
+        compact_tool_result_for_model(raw, false)
     }
 
     async fn make_workspace_service() -> (WorkspaceAttachmentService, Uuid) {
@@ -2318,11 +2328,14 @@ mod tests {
                 call_id: "toolu_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"ls"}"#.into(),
+                model_arguments: model_arguments(r#"{"cmd":"ls"}"#),
                 result: Some("file1\nfile2".into()),
+                model_result: Some(model_result("file1\nfile2")),
                 status: Some("success".into()),
                 duration_ms: Some(10),
                 truncated: false,
                 total_bytes: Some(12),
+                provider_round: 1,
                 position: 0,
                 parent_call_id: None,
             })
@@ -2397,11 +2410,14 @@ mod tests {
                 call_id: "py_01".into(),
                 tool: "python_execute".into(),
                 arguments: r#"{"code":"1+1"}"#.into(),
+                model_arguments: model_arguments(r#"{"code":"1+1"}"#),
                 result: None,
+                model_result: None,
                 status: None,
                 duration_ms: None,
                 truncated: false,
                 total_bytes: None,
+                provider_round: 1,
                 position: 0,
                 parent_call_id: None,
             })
@@ -2416,11 +2432,14 @@ mod tests {
                 call_id: "sub_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"echo hi"}"#.into(),
+                model_arguments: model_arguments(r#"{"cmd":"echo hi"}"#),
                 result: Some("hi".into()),
+                model_result: Some(model_result("hi")),
                 status: Some("success".into()),
                 duration_ms: Some(5),
                 truncated: false,
                 total_bytes: Some(2),
+                provider_round: 0,
                 position: 1,
                 parent_call_id: Some("py_01".into()),
             })
