@@ -785,12 +785,6 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
                 "tool plugin directory must not be empty".to_string(),
             ));
         }
-        let path = PathBuf::from(directory);
-        if !path.is_dir() {
-            return Err(ApiError::validation(format!(
-                "tool plugin directory does not exist: {directory}"
-            )));
-        }
     }
     if let Some(search) = &runtime.search
         && (search.provider_type.trim().is_empty() || search.base_url.trim().is_empty())
@@ -1538,6 +1532,16 @@ mod tests {
         let error =
             validate_settings_request(&request).expect_err("missing python runtime is invalid");
         assert!(error.0.to_string().contains("runtime path does not exist"));
+
+        request.tool_runtime = Some(ToolRuntimeSettings {
+            shell_timeout_secs: 30,
+            python_execute: swage_config::PythonExecuteToolConfig::default(),
+            max_output_bytes: 100_000,
+            plugin_directory: Some("/definitely/missing/plugins".to_string()),
+            search: None,
+        });
+        validate_settings_request(&request)
+            .expect("missing plugin directory should not block unrelated settings saves");
     }
 
     #[test]

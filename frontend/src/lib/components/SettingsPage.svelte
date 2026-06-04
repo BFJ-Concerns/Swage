@@ -292,7 +292,7 @@
     const id = nextProviderId(slugifyProviderName(kind.label));
     settings.providers[id] = {
       protocol: kind.protocol,
-      base_url: null,
+      base_url: kind.id === "OpenRouter" ? "https://openrouter.ai/api/v1" : null,
       api_key_secret_ref: null,
       api_key_env: null,
       has_credential: false,
@@ -868,6 +868,9 @@
         <p class="sub">{heading.sub}</p>
       </div>
       <div class="head-actions">
+        <!-- TODO Autosave hot settings pages -->
+        <!-- Pages whose changes hot-apply should persist automatically instead of relying on this global Save action. -->
+        <!-- --- -->
         <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
           {isPersisting ? "Saving..." : "Save"}
         </button>
@@ -990,6 +993,9 @@
       {#each providerIds as id, ix (id)}
         {@const provider = settings.providers[id]}
         {@const modelsForProvider = providerModels(id)}
+        <!-- TODO Collapse provider settings sections -->
+        <!-- Provider sections should collapse so long provider lists stay scannable. -->
+        <!-- --- -->
         <section class="provider-section" aria-label={`Provider ${id}`}>
           <div class="provider-head">
             <div class="provider-head-text">

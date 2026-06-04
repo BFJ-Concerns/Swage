@@ -186,6 +186,32 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("gpt-4.1-mini");
   });
 
+  it("adds OpenRouter with its canonical base URL", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    buttonContaining("Add provider").click();
+    await flushUi();
+    buttonContaining("OpenRouter").click();
+    await flushUi();
+    buttonNamed("Save").click();
+    await flushUi();
+
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providers: expect.objectContaining({
+          openrouter: expect.objectContaining({
+            protocol: "openrouter",
+            base_url: "https://openrouter.ai/api/v1",
+          }),
+        }),
+      }),
+    );
+  });
+
   it("lists, triggers, and downloads recovery exports", async () => {
     const createObjectUrl = vi.fn(() => "blob:swage-recovery");
     const revokeObjectUrl = vi.fn();

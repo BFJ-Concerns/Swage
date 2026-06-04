@@ -4,6 +4,13 @@ Shared context for agentic coding tools. `AGENTS.md` symlinks to this file — e
 
 Build, test, and run instructions live in a project skill, not here.
 
+## Status
+
+Private alpha — internal dogfooding, no external users. Don't build
+backward-compatibility or data-migration paths for schema and format
+changes; change them freely and let the fresh migration rebuild. This is a
+deliberate "for now": it lifts the day there are users with data to migrate.
+
 ## Workspace
 
 Rust 2024 edition (requires 1.85+). Crates under `crates/`:
@@ -78,6 +85,38 @@ the same concept crosses into the model's context, describe it by function. The
 built-in tool descriptions get this right (`file_read`: "Read the contents of a
 file in the workspace."); the assembly element keys stay inside the report and
 never reach the model.
+
+### Build for experimentation and audit
+
+A core purpose of Swage is to A/B test and record how it works — which
+prompt, which tool implementation, which setting produces the better
+result. Build for that from the start: when you add or change anything the
+system does, ask how it will be recorded and how it could be varied.
+
+Two consequences for new work:
+
+- **Record to one unified, local audit trail.** Whatever a change does — a
+  turn, a tool call, an assembly decision, the selection of a variant —
+  should be reconstructable afterwards from a single local record, not
+  scattered across ad-hoc logs or lost. Everything stays on the machine.
+- **Express the choice as a swappable variant, hidden from user and
+  model.** Where a behaviour could be done more than one way — a prompt for
+  a task, an entire alternative tool implementation, a tunable setting —
+  model the alternatives as variants selected per session or per task
+  behind a stable surface. The user and the model see the function; neither
+  sees which variant is running. This is "Name model-facing surfaces by
+  function" applied to experiments: the variant is the mechanism, and the
+  mechanism stays hidden.
+
+Experimentation must be switchable off. There has to be a backend plug to
+disable it globally and per location — down to a single important task that
+shouldn't become anyone's sample. The frontend control isn't built yet; the
+backend capability is the requirement, so leave the seam for it even though
+nothing toggles it from the UI today.
+
+None of this audit-and-experiment machinery exists yet — these are
+constraints on how new work should be shaped, not a description of what's
+there. Design new surfaces so it can slot in later without reworking them.
 
 ## Gotchas
 
