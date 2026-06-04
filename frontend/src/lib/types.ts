@@ -683,6 +683,10 @@ export interface ContextSnapshotSharedReferencePayload {
   budget: number | null;
   warnings: string[];
   elements: ContextSnapshotElementReference[];
+  provider_visible?: {
+    requests?: unknown[];
+    reasoning?: unknown[];
+  };
 }
 
 export interface SharedReferenceObject {

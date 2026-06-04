@@ -88,6 +88,20 @@ describe("SharedReferenceStudio", () => {
                 child_count: 0,
               },
             ],
+            provider_visible: {
+              requests: [
+                {
+                  round: 1,
+                  request: {
+                    provider: "openai",
+                    body: {
+                      messages: [{ role: "user", content: "hello" }],
+                    },
+                  },
+                },
+              ],
+              reasoning: [{ round: 1, content: "private summary" }],
+            },
           },
         },
         interactions: [
@@ -193,5 +207,28 @@ describe("SharedReferenceStudio", () => {
       members: ["builder", "reviewer", "qa"],
     });
     expect(onTeamTopologyUpdated).toHaveBeenCalled();
+  });
+
+  it("renders provider-visible debugger data for context snapshots", async () => {
+    component = mount(SharedReferenceStudio, {
+      target: document.body,
+      props: {
+        benchId: "bench-1",
+      },
+    });
+
+    await flushUi();
+
+    (
+      Array.from(document.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Context turn-1"),
+      ) as HTMLButtonElement
+    ).click();
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Provider Visible");
+    expect(document.body.textContent).toContain("1 request(s)");
+    expect(document.body.textContent).toContain("1 reasoning event(s)");
+    expect(document.body.textContent).toContain("\"provider\": \"openai\"");
   });
 });
