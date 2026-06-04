@@ -1050,6 +1050,8 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::SwageHomeGuard;
+
     use serde_json::json;
 
     use super::*;
@@ -1137,8 +1139,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_model_runtime_without_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
@@ -1214,7 +1215,6 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should save and hot-apply");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(!response.restart_required);
         assert_eq!(response.default_model, "local:fast");
@@ -1231,10 +1231,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_rebuilds_tool_runtime_without_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let swage_home = SwageHomeGuard::new();
 
-        let plugin_dir = temp.path().join("plugins").join("echo-plugin");
+        let plugin_dir = swage_home.path().join("plugins").join("echo-plugin");
         std::fs::create_dir_all(&plugin_dir).expect("plugin directory");
         std::fs::write(
             plugin_dir.join("capability.json"),
@@ -1288,7 +1287,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let plugin_root = temp.path().join("plugins").display().to_string();
+        let plugin_root = swage_home.path().join("plugins").display().to_string();
         let request = SaveSettingsRequest {
             default_provider: "local".to_string(),
             providers: [(
@@ -1341,7 +1340,6 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should save and hot-rebuild tools");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(!response.restart_required);
         assert_eq!(response.tool_runtime.shell_timeout_secs, 2);
@@ -1364,8 +1362,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_observability_pricing_and_communication() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
@@ -1444,7 +1441,6 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should hot-apply observability and communication");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(response.observability.force_on);
         assert_eq!(

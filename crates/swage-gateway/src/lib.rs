@@ -86,9 +86,12 @@ pub mod websocket;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::{Path, PathBuf};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
-    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
     pub(crate) struct SwageHomeGuard {
@@ -99,7 +102,7 @@ pub(crate) mod test_support {
 
     impl SwageHomeGuard {
         pub(crate) fn new() -> Self {
-            let lock = SWAGE_HOME_LOCK
+            let lock = PROCESS_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
@@ -113,7 +116,7 @@ pub(crate) mod test_support {
         }
 
         pub(crate) fn set_to(path: impl AsRef<Path>) -> Self {
-            let lock = SWAGE_HOME_LOCK
+            let lock = PROCESS_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let root = path.as_ref().to_path_buf();
@@ -137,6 +140,44 @@ pub(crate) mod test_support {
     impl Drop for SwageHomeGuard {
         fn drop(&mut self) {
             unsafe { std::env::remove_var("SWAGE_HOME") };
+        }
+    }
+
+    /// Serialises tests that mutate `XDG_RUNTIME_DIR`, which controls runtime
+    /// gateway metadata discovery.
+    pub(crate) struct XdgRuntimeDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp_dir: tempfile::TempDir,
+        previous: Option<OsString>,
+    }
+
+    impl XdgRuntimeDirGuard {
+        pub(crate) fn new() -> Self {
+            let lock = PROCESS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let temp_dir = tempfile::TempDir::new().expect("temporary runtime dir");
+            let previous = std::env::var_os("XDG_RUNTIME_DIR");
+            unsafe { std::env::set_var("XDG_RUNTIME_DIR", temp_dir.path()) };
+            Self {
+                _lock: lock,
+                _temp_dir: temp_dir,
+                previous,
+            }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            self._temp_dir.path()
+        }
+    }
+
+    impl Drop for XdgRuntimeDirGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe { std::env::set_var("XDG_RUNTIME_DIR", previous) };
+            } else {
+                unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+            }
         }
     }
 }

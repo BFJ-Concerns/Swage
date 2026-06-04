@@ -725,11 +725,13 @@ fn build_provider_chain(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::SwageHomeGuard;
+
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig,
@@ -737,18 +739,14 @@ mod tests {
     use swage_storage::store::AuditStore;
     use tokio::net::TcpListener;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn swage_database_path_uses_swage_root() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let temp_dir = tempfile::TempDir::new().unwrap();
         let root = temp_dir.path().join("app-data");
-        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+        let _swage_home = SwageHomeGuard::set_to(&root);
 
         let path = swage_database_path().unwrap();
 
-        unsafe { std::env::remove_var("SWAGE_HOME") };
         assert_eq!(path, root.join("swage.db"));
         assert!(
             root.is_dir(),

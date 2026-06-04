@@ -173,25 +173,16 @@ fn is_pid_dead(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::XdgRuntimeDirGuard;
 
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialise env-touching tests to prevent XDG_RUNTIME_DIR races. The guard
-    // intentionally spans awaits because runtime metadata reads process env.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn stop_with_no_metadata_returns_gateway_not_running() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        // SAFETY: single-threaded within the lock.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        let _runtime_dir = XdgRuntimeDirGuard::new();
 
         let args = StopArgs { force: false };
         let result = run(&args).await;
-
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
 
         match result {
             Err(ClientError::GatewayNotRunning { .. }) => {}
@@ -201,14 +192,10 @@ mod tests {
 
     #[tokio::test]
     async fn stop_force_with_no_metadata_returns_gateway_not_running() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        let _runtime_dir = XdgRuntimeDirGuard::new();
 
         let args = StopArgs { force: true };
         let result = run(&args).await;
-
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
 
         match result {
             Err(ClientError::GatewayNotRunning { .. }) => {}
@@ -218,9 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_with_stale_pid_cleans_up_and_returns_not_running() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        let _runtime_dir = XdgRuntimeDirGuard::new();
 
         // Write metadata with a PID that will never exist.
         let meta = RuntimeMetadata {
@@ -232,8 +217,6 @@ mod tests {
 
         let args = StopArgs { force: false };
         let result = run(&args).await;
-
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
 
         #[cfg(target_os = "linux")]
         {
@@ -249,9 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn force_stop_terminates_spawned_process_and_cleans_metadata() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        let runtime_dir = XdgRuntimeDirGuard::new();
 
         // Spawn a long-running process to simulate the gateway.
         let mut child = std::process::Command::new("sleep")
@@ -267,12 +248,10 @@ mod tests {
         let result = run(&args).await;
         let _ = child.wait();
 
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
-
         assert!(result.is_ok(), "force stop should succeed: {result:?}");
 
         // Metadata file should be gone after confirmed process exit.
-        let meta_path = tmpdir.path().join("swage").join("metadata.json");
+        let meta_path = runtime_dir.path().join("swage").join("metadata.json");
         assert!(
             !meta_path.exists(),
             "metadata file should be removed after force stop"

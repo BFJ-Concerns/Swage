@@ -216,19 +216,15 @@ pub(crate) fn build_spawn_args(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::Mutex;
+    use crate::test_support::{SwageHomeGuard, XdgRuntimeDirGuard};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::*;
 
     #[test]
     fn log_path_uses_swage_root() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("SWAGE_HOME", dir.path()) };
+        let swage_home = SwageHomeGuard::new();
         let path = gateway_log_path();
-        unsafe { std::env::remove_var("SWAGE_HOME") };
-        assert_eq!(path, dir.path().join("gateway.log"));
+        assert_eq!(path, swage_home.path().join("gateway.log"));
     }
 
     // When no flags are given, only --server-mode should appear.
@@ -289,6 +285,7 @@ mod tests {
     #[tokio::test]
     async fn poll_until_ready_times_out_with_no_gateway() {
         use std::time::Duration;
+        let _runtime_dir = XdgRuntimeDirGuard::new();
         // Use a 50ms timeout — fast enough for a unit test.
         let result = poll_until_ready(Duration::from_millis(50)).await;
         assert!(result.is_err(), "expected timeout error, got: {result:?}");
