@@ -632,6 +632,7 @@ fn validate_catalog_references(table: &Table, file_path: &Path) -> Vec<ConfigPro
     if let Some(providers) = table.get("providers").and_then(Value::as_table)
         && let Some(default_provider) = providers.get("default").and_then(Value::as_str)
         && let Some(provider_entries) = providers.get("entries").and_then(Value::as_table)
+        && !default_provider.is_empty()
         && !provider_entries.contains_key(default_provider)
     {
         problems.push(make_problem(
@@ -651,6 +652,9 @@ fn validate_catalog_references(table: &Table, file_path: &Path) -> Vec<ConfigPro
     let Some(default_model) = models.get("default").and_then(Value::as_str) else {
         return problems;
     };
+    if default_model.is_empty() {
+        return problems;
+    }
     let Some(model_entries) = models.get("entries").and_then(Value::as_table) else {
         return problems;
     };
@@ -1094,6 +1098,32 @@ model_id = "claude-sonnet-4-20250514"
                     && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
             }),
             "missing default model entry should produce SemanticError, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn empty_catalogue_defaults_are_treated_as_unset() {
+        let toml = r#"
+[providers]
+default = ""
+
+[providers.entries.openrouter]
+protocol = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+
+[models]
+default = ""
+
+[models.entries]
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().all(|problem| {
+                problem.field_path.as_deref() != Some("providers.default")
+                    && problem.field_path.as_deref() != Some("models.default")
+            }),
+            "empty catalogue defaults should be treated as unset, got: {problems:?}"
         );
     }
 
