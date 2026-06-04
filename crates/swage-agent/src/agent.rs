@@ -98,6 +98,16 @@ mod tests {
         assert!(!detail.contains('\n'));
         assert!(!detail.contains("ignored"));
     }
+
+    #[test]
+    fn compact_tool_error_detail_keeps_traceback_exception_tail() {
+        let detail = compact_tool_error_detail(
+            "Traceback (most recent call last):\n  File \"x.py\", line 1\nZeroDivisionError: division by zero",
+        );
+
+        assert!(detail.contains("Traceback (most recent call last):"));
+        assert!(detail.contains("ZeroDivisionError: division by zero"));
+    }
 }
 // Agent struct
 // ---------------------------------------------------------------------------
@@ -998,12 +1008,21 @@ fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
 fn compact_tool_error_detail(message: &str) -> String {
     const MAX_DETAIL_CHARS: usize = 320;
 
-    let first_line = message
+    let lines = message
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no further detail");
-    let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let first_line = lines.first().copied().unwrap_or("no further detail");
+    let detail = if first_line.starts_with("Traceback")
+        && let Some(last_line) = lines.last()
+        && *last_line != first_line
+    {
+        format!("{first_line} {last_line}")
+    } else {
+        first_line.to_string()
+    };
+    let compact = detail.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if compact.chars().count() <= MAX_DETAIL_CHARS {
         return compact;

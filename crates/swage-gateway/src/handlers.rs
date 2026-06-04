@@ -2598,7 +2598,6 @@ mod tests {
     use crate::{
         server::build_router,
         state::AppState,
-        test_support::SwageHomeGuard,
         turn::tests::{
             CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
         },
@@ -2937,21 +2936,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn external_delegate_message_includes_target_agent_level_skills() {
+    async fn external_delegate_message_includes_target_instructions() {
         use swage_agent::MessageRouter;
         use swage_core::{FinishReason, MessageKind, StreamChunk};
         use swage_storage::model::NewAgentMessage;
-
-        let swage_home = SwageHomeGuard::new();
-        let skill_dir = swage_home
-            .path()
-            .join("benches/default/agents/agent-b/skills/delegated-specialist");
-        std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: Delegated specialist behaviour\n---\nUse the external delegated specialist skill.\n",
-        )
-        .expect("write delegated skill");
 
         let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
             StreamChunk::Delta {
@@ -2967,11 +2955,15 @@ mod tests {
             .get_or_create_default()
             .await
             .expect("get default bench");
+        let config = swage_config::ResolvedConfig {
+            instructions: "Use the external delegated specialist instructions.".to_string(),
+            ..swage_config::ResolvedConfig::default()
+        };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn BenchStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -3000,12 +2992,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert!(
-            request_text.contains("Active Skills"),
-            "external delegated provider request should include target agent active skills: {request_text}"
-        );
-        assert!(
-            request_text.contains("Use the external delegated specialist skill."),
-            "external delegated provider request should include target agent skill instructions: {request_text}"
+            request_text.contains("Use the external delegated specialist instructions."),
+            "external delegated provider request should include target agent instructions: {request_text}"
         );
     }
 

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{env, mem};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -150,6 +151,82 @@ fn append_provider_visible_request(
         "round": round,
         "request": request,
     }));
+}
+
+async fn redact_provider_visible_request(
+    state: &AppState,
+    mut request: serde_json::Value,
+) -> serde_json::Value {
+    let secret_values = known_secret_values(state).await;
+    if !secret_values.is_empty() {
+        redact_secret_values(&mut request, &secret_values);
+    }
+    request
+}
+
+async fn known_secret_values(state: &AppState) -> Vec<String> {
+    let records = match state.storage.list_secrets().await {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to list secrets while redacting provider-visible snapshot"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut values = Vec::new();
+    for record in records
+        .into_iter()
+        .filter(|record| record.status == "active")
+    {
+        let value = match record.backend_kind.as_str() {
+            "managed" => match state.storage.get_managed_secret_value(record.id).await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        secret_id = %record.id,
+                        error = %error,
+                        "failed to load managed secret while redacting provider-visible snapshot"
+                    );
+                    None
+                }
+            },
+            "env" => record
+                .external_reference
+                .as_deref()
+                .and_then(|variable| env::var(variable).ok()),
+            _ => None,
+        };
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
+    match value {
+        serde_json::Value::String(text) => {
+            let mut redacted = mem::take(text);
+            for secret in secret_values {
+                redacted = redacted.replace(secret, "[REDACTED_SECRET]");
+            }
+            *text = redacted;
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_secret_values(value, secret_values);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_secret_values(value, secret_values);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn append_provider_visible_reasoning(
@@ -2066,6 +2143,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 round,
                 request,
             } => {
+                let request = redact_provider_visible_request(state, request).await;
                 append_provider_visible_request(&mut report_json, round, request);
                 if let Err(e) = state
                     .storage
