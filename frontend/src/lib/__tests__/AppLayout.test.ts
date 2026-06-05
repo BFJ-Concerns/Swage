@@ -494,4 +494,43 @@ describe("AppLayout: workbench shell", () => {
     expect(document.querySelector(".window.no-topbar")).not.toBeNull();
     expect(document.querySelector(".bench-grid")).not.toBeNull();
   });
+
+  it("keeps global settings reachable when no bench is selected", () => {
+    const noBenchStore: BenchStore = {
+      get benches() { return []; },
+      get currentBench() { return null; },
+      get recentBenches() { return []; },
+      get isLoading() { return false; },
+      loadBenches: async () => {},
+      selectBench: async () => {},
+      createBench: async () => {},
+      deleteBench: async () => {},
+    };
+    const onNavigate = vi.fn();
+    component = mount(AppLayout, {
+      target: document.body,
+      props: {
+        conversationStore: mockConversationStore(),
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        benchStore: noBenchStore,
+        onRetry: () => {},
+        activeLens: "assistant",
+        availableLenses: [],
+        activeSurface: "conversation",
+        onSelectLens: () => {},
+        onRefreshLenses: () => {},
+        onSelectSurface: () => {},
+        onNavigate,
+      },
+    });
+
+    (
+      Array.from(document.querySelectorAll(".footer-item")).find((button) =>
+        button.textContent?.includes("Settings"),
+      ) as HTMLButtonElement
+    ).click();
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
+  });
 });

@@ -29,6 +29,16 @@ async function flushUi(): Promise<void> {
   }
 }
 
+async function waitForSaveCall(): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    await flushUi();
+    if (vi.mocked(settingsApi.saveSettings).mock.calls.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Timed out waiting for settings autosave.");
+}
+
 function buttonNamed(name: string): HTMLButtonElement {
   const button = Array.from(document.querySelectorAll("button")).find(
     (candidate) => candidate.textContent?.trim() === name,
@@ -197,8 +207,7 @@ describe("SettingsPage", () => {
     await flushUi();
     buttonContaining("OpenRouter").click();
     await flushUi();
-    buttonNamed("Save").click();
-    await flushUi();
+    await waitForSaveCall();
 
     expect(settingsApi.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -301,8 +310,7 @@ describe("SettingsPage", () => {
     await flushUi();
     clickDiscoveredModel("gpt-4.1-mini");
     await flushUi();
-    buttonNamed("Save").click();
-    await flushUi();
+    await waitForSaveCall();
 
     expect(settingsApi.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -310,6 +318,36 @@ describe("SettingsPage", () => {
         default_provider: "openai",
       }),
     );
+  });
+
+  it("collapses provider sections", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: {
+        openai: {
+          protocol: "openai",
+          base_url: null,
+          api_key_secret_ref: null,
+          api_key_env: null,
+          has_credential: false,
+          api_key: "",
+        },
+      },
+      default_provider: "openai",
+    });
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Base URL");
+
+    buttonNamed("Collapse").click();
+    await flushUi();
+
+    expect(document.body.textContent).not.toContain("Base URL");
+    expect(buttonNamed("Expand").getAttribute("aria-expanded")).toBe("false");
   });
 
   it("persists display preferences locally", async () => {

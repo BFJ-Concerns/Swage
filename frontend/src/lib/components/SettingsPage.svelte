@@ -58,6 +58,8 @@
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
+  let hasLoadedSettings = $state(false);
+  let lastPersistedSettingsFingerprint = "";
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
   let recoveryExports = $state<RecoveryExportSummary[]>([]);
@@ -66,6 +68,7 @@
   let displayPreferences = $state<DisplayPreferences>(readDisplayPreferences());
   let status = $state("");
   let error = $state<string | null>(null);
+  let collapsedProviderIds = $state<Set<string>>(new Set());
 
   const PROVIDER_KINDS = [
     { id: "OpenAi", label: "OpenAI", protocol: "openai" },
@@ -79,6 +82,11 @@
   const DISPLAY_MODEL_OPTIONS = ["off", "assistant", "all"] as const;
   const DISPLAY_RENDERING_OPTIONS = ["markdown", "plain"] as const;
   const DISPLAY_PRINT_OPTIONS = ["full", "minimal", "off"] as const;
+  const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "providers",
+    "generation",
+    "automation",
+  ]);
 
   const providerIds = $derived(Object.keys(settings?.providers ?? {}));
   const modelIds = $derived(Object.keys(settings?.models ?? {}));
@@ -103,6 +111,8 @@
       savedProviderIds = new Set(Object.keys(settings.providers));
       selectedProvider = settings.default_provider || providerIds[0] || "";
       selectedPreset = presetIds[0] ?? "";
+      lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      hasLoadedSettings = true;
       if (selectedProvider) await loadModels();
       if (tab === "recovery") await loadRecoveryExports();
     } catch (err) {
@@ -237,6 +247,20 @@
   function providerModels(providerId: string): [string, ModelSettings][] {
     if (!settings) return [];
     return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId);
+  }
+
+  function isProviderCollapsed(id: string): boolean {
+    return collapsedProviderIds.has(id);
+  }
+
+  function toggleProviderCollapsed(id: string): void {
+    const next = new Set(collapsedProviderIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    collapsedProviderIds = next;
   }
 
   type ProviderKindDefinition = {
@@ -487,6 +511,25 @@
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
 
+  function settingsFingerprint(): string | null {
+    if (!settings) return null;
+    return JSON.stringify({
+      providers: settings.providers,
+      default_provider: settings.default_provider,
+      models: settings.models,
+      default_model: settings.default_model,
+      generation_presets: settings.generation_presets,
+      tool_runtime: settings.tool_runtime,
+      tool_permissions: settings.tool_permissions,
+      hitl: settings.hitl,
+      sandbox: settings.sandbox,
+      context: settings.context,
+      pricing: settings.pricing,
+      observability: settings.observability,
+      communication: settings.communication,
+    });
+  }
+
   async function persist(options: { message?: string } = {}): Promise<boolean> {
     if (!settings) return false;
     error = null;
@@ -517,6 +560,7 @@
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
+      lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       status =
         options.message ??
         "Saved. New turns will use the updated runtime.";
@@ -602,6 +646,19 @@
 
   const isShellTab = $derived(SHELL_LAYOUT_TABS.has(tab));
   const isNonFunctionalTab = $derived(NON_FUNCTIONAL_TABS.has(tab));
+  const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
+
+  $effect(() => {
+    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    const fingerprint = settingsFingerprint();
+    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
+
+    const timer = window.setTimeout(() => {
+      void persist({ message: "Saved automatically. New turns will use the updated runtime." });
+    }, 650);
+
+    return () => window.clearTimeout(timer);
+  });
 </script>
 
 <div class="settings-pane" aria-label="Settings">
@@ -868,12 +925,15 @@
         <p class="sub">{heading.sub}</p>
       </div>
       <div class="head-actions">
-        <!-- TODO Autosave hot settings pages -->
-        <!-- Pages whose changes hot-apply should persist automatically instead of relying on this global Save action. -->
-        <!-- --- -->
-        <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
-          {isPersisting ? "Saving..." : "Save"}
-        </button>
+        {#if shouldAutosaveSettings}
+          <span class="autosave-state" class:saving={isPersisting}>
+            {isPersisting ? "Autosaving" : "Autosave"}
+          </span>
+        {:else}
+          <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
+            {isPersisting ? "Saving..." : "Save"}
+          </button>
+        {/if}
       </div>
     </div>
 
@@ -993,9 +1053,7 @@
       {#each providerIds as id, ix (id)}
         {@const provider = settings.providers[id]}
         {@const modelsForProvider = providerModels(id)}
-        <!-- TODO Collapse provider settings sections -->
-        <!-- Provider sections should collapse so long provider lists stay scannable. -->
-        <!-- --- -->
+        {@const isCollapsed = isProviderCollapsed(id)}
         <section class="provider-section" aria-label={`Provider ${id}`}>
           <div class="provider-head">
             <div class="provider-head-text">
@@ -1013,6 +1071,14 @@
               <span class="credential-status" class:set={provider.has_credential}>
                 {provider.has_credential ? "Credential stored" : "No credential"}
               </span>
+              <button
+                type="button"
+                class="opt"
+                aria-expanded={!isCollapsed}
+                onclick={() => toggleProviderCollapsed(id)}
+              >
+                {isCollapsed ? "Expand" : "Collapse"}
+              </button>
               <button type="button" class="opt opt-cancel" onclick={() => removeProvider(id)}>
                 <span aria-hidden="true">×</span>
                 <span>Remove</span>
@@ -1020,151 +1086,155 @@
             </div>
           </div>
 
-          <div class="field">
-            <div class="key">
-              Base URL
-              <small>Override the provider's canonical endpoint when needed.</small>
-            </div>
-            <div class="val">
-              <input
-                type="text"
-                class="text"
-                bind:value={provider.base_url}
-                placeholder="Provider default"
-                autocomplete="off"
-              />
-            </div>
-          </div>
+          {#if !isCollapsed}
+            <div class="provider-body">
+              <div class="field">
+                <div class="key">
+                  Base URL
+                  <small>Override the provider's canonical endpoint when needed.</small>
+                </div>
+                <div class="val">
+                  <input
+                    type="text"
+                    class="text"
+                    bind:value={provider.base_url}
+                    placeholder="Provider default"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
 
-          <div class="field">
-            <div class="key">
-              API key
-              <small>Paste a new value to store or rotate this provider's credential.</small>
-            </div>
-            <div class="val key-val">
-              <input
-                type="password"
-                class="text"
-                bind:value={provider.api_key}
-                placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
-                autocomplete="off"
-              />
-              <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "Stored" : "Empty"}
-              </span>
-            </div>
-          </div>
+              <div class="field">
+                <div class="key">
+                  API key
+                  <small>Paste a new value to store or rotate this provider's credential.</small>
+                </div>
+                <div class="val key-val">
+                  <input
+                    type="password"
+                    class="text"
+                    bind:value={provider.api_key}
+                    placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
+                    autocomplete="off"
+                  />
+                  <span class="credential-status" class:set={provider.has_credential}>
+                    {provider.has_credential ? "Stored" : "Empty"}
+                  </span>
+                </div>
+              </div>
 
-          <div class="field">
-            <div class="key">
-              Models
-              <small>Configured model IDs for this provider. The active default is marked.</small>
-            </div>
-            <div class="val val-stack">
-              {#each modelsForProvider as [modelKey, model] (modelKey)}
-                <div class="model-row provider-model-row">
-                  <div class="model-main">
-                    <span class="model-id">{model.model_id}</span>
-                    <span class="model-sub">{modelKey}</span>
+              <div class="field">
+                <div class="key">
+                  Models
+                  <small>Configured model IDs for this provider. The active default is marked.</small>
+                </div>
+                <div class="val val-stack">
+                  {#each modelsForProvider as [modelKey, model] (modelKey)}
+                    <div class="model-row provider-model-row">
+                      <div class="model-main">
+                        <span class="model-id">{model.model_id}</span>
+                        <span class="model-sub">{modelKey}</span>
+                      </div>
+                      <div class="model-facts">
+                        <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
+                        <span>{model.generation_preset ?? "provider generation defaults"}</span>
+                        {#if settings.default_model === modelKey}
+                          <span class="fact-strong">Default</span>
+                        {/if}
+                      </div>
+                      <div class="opt-row row-actions">
+                        <button
+                          type="button"
+                          class="opt"
+                          class:active={settings.default_model === modelKey}
+                          onclick={() => {
+                            if (!settings) return;
+                            settings.default_model = modelKey;
+                            settings.default_provider = id;
+                          }}
+                        >
+                          Use
+                        </button>
+                        <button type="button" class="opt opt-warn" onclick={() => removeModel(modelKey)}>Remove</button>
+                      </div>
+                    </div>
+                  {:else}
+                    <p class="empty">No models configured for this provider.</p>
+                  {/each}
+
+                  <div class="search-row">
+                    <input
+                      type="text"
+                      class="text search"
+                      value={newModelIdByProvider[id] ?? ""}
+                      oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
+                      placeholder="model-id"
+                      autocomplete="off"
+                    />
+                    <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
+                      <span class="pick-mark" aria-hidden="true">+</span>
+                      <span>Add model</span>
+                    </button>
                   </div>
-                  <div class="model-facts">
-                    <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
-                    <span>{model.generation_preset ?? "provider generation defaults"}</span>
-                    {#if settings.default_model === modelKey}
-                      <span class="fact-strong">Default</span>
-                    {/if}
-                  </div>
-                  <div class="opt-row row-actions">
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="key">
+                  Discover
+                  <small>Fetch known models for this provider, then add the ones Swage should use.</small>
+                </div>
+                <div class="val val-stack">
+                  <div class="search-row">
+                    <input
+                      type="text"
+                      class="text search"
+                      value={selectedProvider === id ? modelQuery : ""}
+                      onfocus={() => selectProvider(id)}
+                      oninput={(event) => {
+                        selectedProvider = id;
+                        modelQuery = event.currentTarget.value;
+                        loadModels();
+                      }}
+                      placeholder="Search models"
+                      autocomplete="off"
+                    />
                     <button
                       type="button"
                       class="opt"
-                      class:active={settings.default_model === modelKey}
+                      disabled={isPersisting}
                       onclick={() => {
-                        if (!settings) return;
-                        settings.default_model = modelKey;
-                        settings.default_provider = id;
+                        selectedProvider = id;
+                        loadModels();
                       }}
                     >
-                      Use
+                      Refresh
                     </button>
-                    <button type="button" class="opt opt-warn" onclick={() => removeModel(modelKey)}>Remove</button>
                   </div>
+                  {#if selectedProvider === id}
+                    <div class="opt-grid">
+                      {#each discoveredModels as model (model.id)}
+                        {@const added = addedModelIds.has(model.id)}
+                        <button
+                          type="button"
+                          class="opt"
+                          class:active={added}
+                          disabled={added}
+                          onclick={() => addDiscoveredModel(model)}
+                          title={added ? "Already added" : `Add ${model.name}`}
+                        >
+                          <span class="opt-label">{model.name}</span>
+                          <span class="opt-tag">{added ? "Added" : "Add"}</span>
+                        </button>
+                      {:else}
+                        <p class="empty">No discovered models to show.</p>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
-              {:else}
-                <p class="empty">No models configured for this provider.</p>
-              {/each}
-
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={newModelIdByProvider[id] ?? ""}
-                  oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
-                  placeholder="model-id"
-                  autocomplete="off"
-                />
-                <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
-                  <span class="pick-mark" aria-hidden="true">+</span>
-                  <span>Add model</span>
-                </button>
               </div>
             </div>
-          </div>
-
-          <div class="field">
-            <div class="key">
-              Discover
-              <small>Fetch known models for this provider, then add the ones Swage should use.</small>
-            </div>
-            <div class="val val-stack">
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={selectedProvider === id ? modelQuery : ""}
-                  onfocus={() => selectProvider(id)}
-                  oninput={(event) => {
-                    selectedProvider = id;
-                    modelQuery = event.currentTarget.value;
-                    loadModels();
-                  }}
-                  placeholder="Search models"
-                  autocomplete="off"
-                />
-                <button
-                  type="button"
-                  class="opt"
-                  disabled={isPersisting}
-                  onclick={() => {
-                    selectedProvider = id;
-                    loadModels();
-                  }}
-                >
-                  Refresh
-                </button>
-              </div>
-              {#if selectedProvider === id}
-                <div class="opt-grid">
-                  {#each discoveredModels as model (model.id)}
-                    {@const added = addedModelIds.has(model.id)}
-                    <button
-                      type="button"
-                      class="opt"
-                      class:active={added}
-                      disabled={added}
-                      onclick={() => addDiscoveredModel(model)}
-                      title={added ? "Already added" : `Add ${model.name}`}
-                    >
-                      <span class="opt-label">{model.name}</span>
-                      <span class="opt-tag">{added ? "Added" : "Add"}</span>
-                    </button>
-                  {:else}
-                    <p class="empty">No discovered models to show.</p>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </div>
+          {/if}
         </section>
       {:else}
         <div class="field">
@@ -1698,6 +1768,27 @@
   .head-actions {
     display: flex;
     gap: 8px;
+  }
+
+  .autosave-state {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--ink);
+    color: var(--ink-soft);
+    background: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .autosave-state.saving {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   /* Notices — flat orange band with cream text, matches the not-found banner

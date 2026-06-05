@@ -513,9 +513,6 @@
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
-      <!-- TODO Expose global settings from picker mode -->
-      <!-- Global settings should be reachable before a bench is open; only bench-scoped settings should depend on a selected bench. -->
-      <!-- --- -->
       <!-- No bench selected: nav shows a "Recent" list per workup view 04 plus
            a quick legend. Selection still happens in the body via BenchPicker;
            the nav's recent list is a fast lane for re-opening recent work. -->
@@ -552,6 +549,16 @@
           Click a bench card to preview, then open it. Or double-click to skip
           the preview.
         </p>
+      </div>
+      <div class="footer">
+        <button
+          class="footer-item"
+          class:active={settingsTab !== null}
+          onclick={() => onNavigate?.("/settings/providers")}
+        >
+          Settings
+        </button>
+        <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {/if}
   </aside>
