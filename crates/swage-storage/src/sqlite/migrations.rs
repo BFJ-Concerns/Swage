@@ -2062,6 +2062,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deleting_turn_orphans_but_keeps_messages() {
+        let conn = open_migrated();
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
+        let message_id = uuid::Uuid::new_v4().to_string();
+
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, created_at)
+             VALUES (?1,?2,?3,'assistant','hello',0,'agent-test',?4)",
+            rusqlite::params![message_id, thread_id, turn_id, now],
+        )
+        .expect("insert message");
+
+        conn.execute("DELETE FROM turns WHERE id=?1", rusqlite::params![turn_id])
+            .expect("delete turn");
+
+        let retained_turn_id: Option<String> = conn
+            .query_row(
+                "SELECT turn_id FROM messages WHERE id=?1",
+                rusqlite::params![message_id],
+                |r| r.get(0),
+            )
+            .expect("message should survive turn deletion");
+        assert!(
+            retained_turn_id.is_none(),
+            "deleting a turn should retain its messages with turn_id set to NULL"
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // context_snapshots table (002_context_snapshots migration)
     // ---------------------------------------------------------------------------
