@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 05 (Combined Binary & CLI).
+//! Cross-task integration tests for the combined binary and CLI.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the gateway client library, runtime metadata, CLI
@@ -99,7 +99,7 @@ async fn start_test_gateway() -> (Router, SocketAddr) {
 ///
 /// Proves: the client library [e32t] can discover and communicate with a
 /// running gateway whose startup [kfs2] wrote runtime metadata [f9b7].
-/// This is the core wiring risk identified in the phase document: "Library
+/// This is the core wiring risk for the client path: "Library
 /// compiles but is not used by CLI subcommands — gateway communication
 /// duplicated outside the library."
 ///

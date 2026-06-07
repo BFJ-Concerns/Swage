@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.2 Phase 03 (Skills System).
+//! Cross-task integration tests for the skills system.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when skill discovery (swage-config), the SkillsElement

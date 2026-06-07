@@ -1,5 +1,5 @@
 <!--
-  Two-stage bench picker per Progress.md:
+  Two-stage bench picker:
     1. Card grid of bench names. Single click on a card selects it and reveals
        a details panel below the grid (about, last opened, conversation count,
        attached folders — though the data is still thin server-side).

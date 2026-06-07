@@ -766,12 +766,12 @@ pub fn validate_resolved_catalog_references(
 /// Validate TOML content against the closed config schema, collecting all
 /// problems rather than stopping at the first.
 ///
-/// Phase 1 — syntax: a parse error is returned immediately (can't walk
+/// Step 1 — syntax: a parse error is returned immediately (can't walk
 /// unparseable TOML).
-/// Phase 2 — schema + semantics: unknown sections, unknown fields, type
+/// Step 2 — schema + semantics: unknown sections, unknown fields, type
 /// mismatches, and constraint violations are all collected.
 pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProblem> {
-    // Phase 1: syntax
+    // Step 1: syntax
     let table = match content.parse::<Table>() {
         Ok(table) => table,
         Err(e) => {
@@ -792,7 +792,7 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
 
     let mut problems = Vec::new();
 
-    // Phase 2: schema and semantics
+    // Step 2: schema and semantics
     for (section_name, section_value) in &table {
         // Top-level scalar keys (above any [section] header) live in the
         // same iteration as section tables. Recognise them first so they

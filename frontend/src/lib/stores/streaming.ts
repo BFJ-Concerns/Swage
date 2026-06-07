@@ -7,8 +7,7 @@ import { fromStore, get, writable } from "svelte/store";
 
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
-// Approval state surfaced for the ApprovalCard / MessageInput swap. Mirrors
-// the workup's "approval replaces input" view (riso-cyanotype.html, view 03).
+// Approval state surfaced for the ApprovalCard / MessageInput swap.
 // Fields match the `approval_required` server event so the UI can render
 // without an extra fetch.
 export interface PendingApproval {
@@ -46,7 +45,7 @@ export interface StreamingStore {
   // The most recently raised approval still awaiting a decision. Cleared
   // when an approval_confirmed/expired/decision_error event arrives.
   // The ApprovalCard reads this and replaces the input box while it is set,
-  // matching the Riso workup view 03.
+  // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
   startTurn(content: string, selectedModelId?: string | null): void;
@@ -364,9 +363,8 @@ export function createStreamingStore(
 
         case "approval_required":
           // Surface the request so MessageInput can swap itself out for the
-          // ApprovalCard (workup view 03). We retain only the latest active
-          // approval; cross-conversation approval queues are out of scope per
-          // Progress.md.
+          // ApprovalCard. We retain only the latest active approval;
+          // cross-conversation approval queues are not modelled here.
           pendingApprovalStore.set({
             approval_id: event.approval_id,
             turn_id: event.turn_id,

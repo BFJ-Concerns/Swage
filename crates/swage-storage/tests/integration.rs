@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 03 (Persistence).
+//! Cross-task integration tests for persistence.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together. Each test documents
@@ -134,7 +134,7 @@ async fn full_hierarchy_survives_reconnection() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("hierarchy.db");
 
-    // Phase 1: create all entities and drop the connection.
+    // Step 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
         let bench = BenchStore::create(
@@ -151,7 +151,7 @@ async fn full_hierarchy_survives_reconnection() {
         create_full_hierarchy(&storage, bench.id, AGENT_A).await
     };
 
-    // Phase 2: reconnect and verify everything is readable.
+    // Step 2: reconnect and verify everything is readable.
     let storage = SqliteStorage::open(&db_path).expect("reopen");
 
     let session = storage.get_session(session_id).await.expect("get session");

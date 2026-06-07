@@ -1,9 +1,8 @@
-//! Cross-task integration tests for programmable assembly and compaction
-//! (era 0.2 phase 04).
+//! Cross-task integration tests for programmable assembly and compaction.
 //!
 //! These tests verify interactions between multiple tasks' outputs:
 //! - Assembly config discovery → Python execution → dispatch → output
-//! - Two-phase execution → structured extraction → compaction results
+//! - Intent recording → structured extraction → compaction results
 //! - Named assembly resolution → include → nested report elements
 //! - Fail-open → error recovery → default assembly fallback
 //! - Circular reference detection → warning in report
@@ -171,7 +170,7 @@ def assemble(ctx):
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Sustained Conversation Quality — intelligent compaction.
-// Cross-task: extraction [9ry2] → two-phase [7ank] → elements [iu50] →
+// Cross-task: extraction [9ry2] → deferred compaction [7ank] → elements [iu50] →
 //             dispatch [mgoi]
 //
 // A Python assembly applies strategy="structured_extract" to older history.

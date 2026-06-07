@@ -140,7 +140,7 @@
   small "switch / new" affordance underneath.
 
   TODO(debt): replace with a back-arrow that returns to a dedicated bench
-  picker route, plus a ▾ menu for bench-scoped settings (per Progress.md).
+  picker route, plus a ▾ menu for bench-scoped settings.
   Blocked by: bench picker route not yet implemented.
 -->
 <div class="bench-selector">

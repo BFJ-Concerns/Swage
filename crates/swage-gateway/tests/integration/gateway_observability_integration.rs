@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.2 Phase 02 (Gateway Integration & Observability).
+//! Cross-task integration tests for gateway integration and observability.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the assembly wiring, subscription protocol, token

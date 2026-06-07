@@ -75,7 +75,7 @@
 
   // activeSurface and onSelectSurface are kept in Props for API compatibility
   // with App.svelte but the new shell ignores them: the lens determines what
-  // sits on the stage. Each lens picks one layout per Progress.md.
+  // sits on the stage. Each lens picks one layout.
   let {
     conversationStore,
     connectionStore,
@@ -128,11 +128,9 @@
   let now = $state(Date.now());
 
   // Settings sub-pages — drives both the URL the page list links to and the
-  // ix counter shown beside each entry. The list mirrors the Riso workup
-  // (`riso-cyanotype.html`, view 06): Plugins, Automations, Channels, Nodes,
-  // Voice, Recovery, Display, Account. Pages whose backends don't exist yet
-  // render shells (see SettingsPage.svelte) — the entries land here so the nav
-  // looks complete and the routes resolve.
+  // ix counter shown beside each entry. Pages whose backends don't exist yet
+  // render shells (see SettingsPage.svelte) so the nav looks complete and the
+  // routes resolve.
   const SETTINGS_PAGES: ReadonlyArray<{
     id: NonNullable<typeof settingsTab>;
     label: string;
@@ -192,15 +190,13 @@
   );
 
   // Stage-dominant layout: conversation moves to the narrow side when a
-  // module is on the stage. Per Progress.md, each lens picks one layout —
-  // this isn't an on-demand swap.
+  // module is on the stage. Each lens owns one layout; this isn't an
+  // on-demand swap.
   const isStageDominant = $derived(stageSurface !== null || hasPlacedStageModules);
 
-  // Stamp shown on the right of the topbar — `BENCH · NAME · STATE` per
-  // workup view 01/02/03/07. The bench portion is real; the state cycles
-  // through the streaming store. Team-live and approval states are real
-  // too, but the workup also uses time-on-state ("TEAM LIVE 04:18") which
-  // we do not have an aggregator for yet (see mote below).
+  // Stamp shown on the right of the topbar. The bench portion is real; the
+  // state cycles through the streaming store. Team-live and approval states
+  // are real too, but timed state durations need a separate aggregator.
   const stampState = $derived<{ label: string; tone: "idle" | "busy" | "alert" }>(
     streamingStore.isStreaming
       ? { label: "Working", tone: "busy" }
@@ -253,8 +249,8 @@
     onBenchChange?.();
   }
 
-  // The Builder lens carries a caret (workup view 05). Clicking the lens body
-  // activates it; clicking the caret toggles the persisted mode menu.
+  // The Builder lens carries a caret. Clicking the lens body activates it;
+  // clicking the caret toggles the persisted mode menu.
   let builderModeOpen = $state(false);
   let activeBuilderMode = $state<BuilderMode>("team");
 
@@ -371,7 +367,7 @@
               aria-haspopup="menu"
               aria-expanded={builderModeOpen}
               onclick={(event) => toggleBuilderMode(event)}
-              title="Builder mode menu (workup view 05)"
+              title="Builder mode menu"
             >▾</button>
           {/if}
         </div>
@@ -387,7 +383,7 @@
 
       {#if builderModeOpen && isBuilderLens(activeLens)}
         <div class="builder-pop" role="menu" aria-label="Builder mode">
-          <div class="builder-pop-banner">Builder mode · workup view 05</div>
+          <div class="builder-pop-banner">Builder mode</div>
           {#each BUILDER_MODE_OPTIONS as item (item.mode)}
             <button
               type="button"
@@ -513,9 +509,9 @@
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
-      <!-- No bench selected: nav shows a "Recent" list per workup view 04 plus
-           a quick legend. Selection still happens in the body via BenchPicker;
-           the nav's recent list is a fast lane for re-opening recent work. -->
+      <!-- No bench selected: nav shows a "Recent" list plus a quick legend.
+           Selection still happens in the body via BenchPicker; the nav's
+           recent list is a fast lane for re-opening recent work. -->
       <div class="bench-head picker-mode">
         <div class="crumb">
           <span class="bench-label">Choose a bench</span>
@@ -602,7 +598,7 @@
         {/if}
         <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
         {#if streamingStore.pendingApproval}
-          <!-- Approval replaces the input box (workup view 03). -->
+          <!-- Approval replaces the input box. -->
           <ApprovalCard approval={streamingStore.pendingApproval} />
         {:else}
           <MessageInput
@@ -1054,8 +1050,8 @@
     text-transform: uppercase;
   }
 
-  /* Caret as a separate button beside the Builder lens — workup view 05.
-     The split lets clicking the lens body activate it without opening the
+  /* Caret as a separate button beside the Builder lens. The split lets
+     clicking the lens body activate it without opening the
      menu, while the caret toggles the menu independently. */
   .lens-wrap {
     display: flex;
@@ -1096,7 +1092,7 @@
     filter: brightness(1.1);
   }
 
-  /* Builder mode dropdown — workup view 05. */
+  /* Builder mode dropdown. */
   .builder-pop {
     position: absolute;
     top: 48px;
@@ -1437,8 +1433,8 @@
     background: var(--paper);
   }
 
-  /* Pane heads — workup view 01/02/05 place a small label + index above each
-     pane. Index expresses live state such as "LIVE", "Builder", or a count. */
+  /* Pane heads place a small label + index above each pane. Index expresses
+     live state such as "LIVE", "Builder", or a count. */
   .pane-head {
     display: flex;
     justify-content: space-between;
@@ -1469,7 +1465,7 @@
     color: var(--ink-soft);
   }
 
-  /* Conversation meta footer — workup view 01 places token / state below the input. */
+  /* Conversation meta footer places token / state below the input. */
   .conv-meta {
     display: flex;
     justify-content: space-between;
@@ -1525,8 +1521,7 @@
     position: relative;
   }
 
-  /* Tonal hint on the left edge — preserves the workup vocabulary
-     (auto = ink rule, streaming = orange rule). */
+  /* Tonal hint on the left edge: auto = ink rule, streaming = orange rule. */
   .stage-module[data-tone="auto"] {
     border-left-width: 4px;
   }

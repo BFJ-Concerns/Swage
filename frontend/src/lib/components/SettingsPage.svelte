@@ -21,9 +21,8 @@
   import { downloadRecoveryExport, exportRecoveryBundle, listRecoveryExports } from "../api/workflows";
   import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RecoveryExportSummary, RequireApprovalEntry, SettingsResponse } from "../types";
 
-  // Pages added per the Riso workup (`riso-cyanotype.html`, view 06) — only
-  // providers, generation, automation, and recovery have working backends. The
-  // rest are shells; see the per-page motes below.
+  // Only providers, generation, automation, and recovery have working
+  // backends. The rest are shells; see the per-page motes below.
   type SettingsTabId =
     | "providers"
     | "generation"
@@ -665,11 +664,11 @@
   {#if isShellTab}
     {@const heading = TAB_TITLES[tab]}
     <!--
-      Shell pages from the Riso workup (`riso-cyanotype.html`, view 06) that do
-      not yet have a working backend. Each page renders the heading and any
-      partial functionality the gateway already exposes (read-only operator
-      data where it exists), with an explicit non-functional banner so the
-      operator knows nothing is going to be persisted.
+      Shell pages that do not yet have a working backend. Each page renders the
+      heading and any partial functionality the gateway already exposes
+      (read-only operator data where it exists), with an explicit
+      non-functional banner so the operator knows nothing is going to be
+      persisted.
     -->
     <div class="head">
       <div class="head-text">
@@ -683,8 +682,8 @@
       <div class="shell-banner" role="note">
         <span class="shell-flag">Non-functional</span>
         <span class="shell-body">
-          This page is a placeholder for the Riso workup view. No values here are
-          saved or applied — the underlying backend hasn't been built yet.
+          This page is a placeholder. No values here are saved or applied —
+          the underlying backend hasn't been built yet.
         </span>
       </div>
     {/if}
@@ -705,14 +704,13 @@
     {#if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the platform plugin model is accepted in the backlog.
+        Swage has a platform plugin model.
 
         Wire the Plugins page to a real plugin/extension catalogue. Today the
         gateway exposes per-bench extensions (`/api/benches/{id}/extensions`)
         but no platform-level plugin registry. Surface installed plugins,
         their tools, and an enable/disable toggle.
-        Why: the workup view 06 lists Plugins as the first page; today users
-        cannot see or manage anything plugin-shaped from settings.
+        Why: users cannot see or manage anything plugin-shaped from settings.
         How to apply: when the gateway gains a plugin registry endpoint,
         replace this shell with a real list bound to that endpoint.
         ---
@@ -724,14 +722,14 @@
     {:else if tab === "channels"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        channel management semantics are accepted in the backlog.
+        Swage has channel management semantics.
 
         Render the channel list returned by /api/operator/overview.channels
         and add per-channel route/credential editing. Today the page is a
         shell because the operator endpoint is read-only and there is no
         management API.
-        Why: Riso workup view 06 lists Channels as a settings page; the
-        operator deck reads them but there is no way to add/configure them.
+        Why: the operator deck reads channels but there is no way to
+        add/configure them.
         How to apply: extend swage-gateway with channel CRUD, then bind here.
         ---
       -->
@@ -742,13 +740,11 @@
     {:else if tab === "nodes"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        execution-host registration and disconnect semantics are accepted in
-        the backlog.
+        Swage has execution-host registration and disconnect semantics.
 
         Show registered execution hosts (operator overview already returns
         nodes). Add register/disconnect flows once the gateway exposes them.
-        Why: workup view 06 includes Nodes; today there is no settings-level
-        view of attached hosts.
+        Why: there is no settings-level view of attached hosts.
         How to apply: bind to /api/operator/overview.nodes for a read-only
         view first; design a registration flow before building the form.
         ---
@@ -760,14 +756,14 @@
     {:else if tab === "voice"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the voice provider/configuration model is accepted in the backlog.
+        Swage has a voice provider/configuration model.
 
         Bind to /api/voice/capabilities for read-only state, then add voice
         provider configuration (transcription engine, synthesis voice,
         per-bench overrides). The capabilities endpoint exists; the
         configuration endpoint does not.
-        Why: workup view 06 lists Voice; the WorkbenchOperations capability
-        strip is the only place voice surfaces today.
+        Why: the WorkbenchOperations capability strip is the only place voice
+        surfaces today.
         How to apply: once a /api/voice/config endpoint exists, replace this
         shell with the real form.
         ---
@@ -899,13 +895,12 @@
     {:else if tab === "account"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the local-vs-remote identity model is accepted in the backlog.
+        Swage has a local-vs-remote identity model.
 
         Account is unscoped. Swage runs locally with no notion of identity;
         a remote identity provider would precede any meaningful account
-        page. Until then this stays a shell so the workup nav resolves.
-        Why: workup view 06 lists Account but the application has no
-        account model yet.
+        page. Until then this stays a shell so the settings route resolves.
+        Why: the application has no account model yet.
         How to apply: revisit when remote identity / multi-host work begins.
         ---
       -->
@@ -1571,7 +1566,7 @@
   }
 
   /* ---------------------------------------------------------------------------
-     Non-functional page shell — used by the workup pages without a backend.
+     Non-functional page shell — used by settings pages without a backend.
      --------------------------------------------------------------------------- */
 
   .shell-banner {

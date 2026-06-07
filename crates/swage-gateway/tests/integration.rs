@@ -19,10 +19,16 @@ mod credential_governance_integration;
 mod execution_host_integration;
 #[path = "integration/external_channel_gateway_integration.rs"]
 mod external_channel_gateway_integration;
+#[path = "integration/gateway_cli_integration.rs"]
+mod gateway_cli_integration;
+#[path = "integration/gateway_observability_integration.rs"]
+mod gateway_observability_integration;
 #[path = "integration/heartbeat_integration.rs"]
 mod heartbeat_integration;
 #[path = "integration/integration.rs"]
 mod integration;
+#[path = "integration/inter_agent_messaging_integration.rs"]
+mod inter_agent_messaging_integration;
 #[path = "integration/lens_catalog_integration.rs"]
 mod lens_catalog_integration;
 #[path = "integration/material_management_integration.rs"]
@@ -33,22 +39,8 @@ mod onboarding_recovery_integration;
 mod operator_audit_usage_integration;
 #[path = "integration/operator_control_integration.rs"]
 mod operator_control_integration;
-#[path = "integration/phase01_era03_integration.rs"]
-mod phase01_era03_integration;
-#[path = "integration/phase02_era02_integration.rs"]
-mod phase02_era02_integration;
-#[path = "integration/phase02_era03_integration.rs"]
-mod phase02_era03_integration;
-#[path = "integration/phase03_era03_integration.rs"]
-mod phase03_era03_integration;
-#[path = "integration/phase04_era03_integration.rs"]
-mod phase04_era03_integration;
-#[path = "integration/phase05_integration.rs"]
-mod phase05_integration;
-#[path = "integration/phase06_integration.rs"]
-mod phase06_integration;
-#[path = "integration/phase07_integration.rs"]
-mod phase07_integration;
+#[path = "integration/output_schema_validation_integration.rs"]
+mod output_schema_validation_integration;
 #[path = "integration/presence_liveness_integration.rs"]
 mod presence_liveness_integration;
 #[path = "integration/ptc_integration.rs"]
@@ -57,6 +49,8 @@ mod ptc_integration;
 mod run_supervision_integration;
 #[path = "integration/sandbox_entrypoint_integration.rs"]
 mod sandbox_entrypoint_integration;
+#[path = "integration/sandbox_observability_integration.rs"]
+mod sandbox_observability_integration;
 #[path = "integration/scheduled_jobs_integration.rs"]
 mod scheduled_jobs_integration;
 #[path = "integration/shared_reference_integration.rs"]
@@ -65,5 +59,11 @@ mod shared_reference_integration;
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
 mod skills_integration;
+#[path = "integration/tool_approval_integration.rs"]
+mod tool_approval_integration;
+#[path = "integration/tui_cli_integration.rs"]
+mod tui_cli_integration;
+#[path = "integration/unified_turn_loop_integration.rs"]
+mod unified_turn_loop_integration;
 #[path = "integration/web_interface_integration.rs"]
 mod web_interface_integration;

@@ -92,7 +92,7 @@ export function createBenchStore(): BenchStore {
         benchesStore.set(benches);
 
         // Deliberately leave currentBench null. The user lands on the bench
-        // picker (Progress.md, workup view 04) and chooses where to work —
+        // picker and chooses where to work —
         // auto-selecting a bench would skip past it.
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.

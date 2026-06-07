@@ -309,9 +309,9 @@ function setPath(path: string): void {
 }
 
 /**
- * Open a bench from the picker. Swage now lands on the bench picker on entry
- * (Progress.md, workup view 04), so tests that need a bench open must go
- * through it. Double-clicking a card triggers `openBench` in BenchPicker.
+ * Open a bench from the picker. Swage lands on the bench picker on entry, so
+ * tests that need a bench open must go through it. Double-clicking a card
+ * triggers `openBench` in BenchPicker.
  */
 async function openBenchFromPicker(name: string): Promise<void> {
   const card = Array.from(

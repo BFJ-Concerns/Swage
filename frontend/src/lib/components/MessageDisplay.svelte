@@ -441,7 +441,7 @@
     color: var(--ink-orange);
   }
 
-  /* ---- Inline retry chip (workup view 07) -------------------------------- */
+  /* ---- Inline retry chip -------------------------------------------------- */
 
   .inline-retry {
     align-self: flex-start;

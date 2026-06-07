@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 03: Web Interface.
+//! Cross-task integration tests for the web interface.
 //!
 //! These tests verify interactions between gateway asset serving and the
 //! existing API surface — behaviour that emerges only when both are wired

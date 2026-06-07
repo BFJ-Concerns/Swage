@@ -28,10 +28,11 @@ use crate::tokeniser::Tokeniser;
 
 /// Produce an assembled context from the provided elements.
 ///
-/// This is the built-in "default" assembly, designed to be era-0.1 compatible:
-/// given the same prompt rules and conversation history, it produces a message
-/// sequence that generates an identical LLM request to the current gateway
-/// (system message from instructions, then history in chronological order).
+/// This is the built-in "default" assembly, designed to preserve the legacy
+/// prompt shape: given the same prompt rules and conversation history, it
+/// produces a message sequence that generates an identical LLM request to the
+/// current gateway (system message from instructions, then history in
+/// chronological order).
 ///
 /// ## Element ordering
 ///
@@ -41,7 +42,7 @@ use crate::tokeniser::Tokeniser;
 /// | Priority | Element |
 /// |----------|---------|
 /// | 100      | `"prompts"` — system instructions |
-/// | 50       | `"memory"` — **skipped in era 0.1** |
+/// | 50       | `"memory"` — **skipped by the default assembly** |
 /// | 0        | `"history"` — conversation messages |
 ///
 /// ## Budget enforcement
@@ -67,8 +68,8 @@ pub fn default_assembly(
     let mut sorted: Vec<&dyn ContextElement> = elements.iter().map(|e| e.as_ref()).collect();
     sorted.sort_by_key(|element| Reverse(element.priority()));
 
-    // Era 0.1: memory is not yet included in the assembled context.
-    // Future assemblies that opt in to memory can simply remove this filter.
+    // The default assembly keeps memory tool-accessible rather than prepending
+    // it to the prompt. Custom assemblies can opt in by removing this filter.
     let active: Vec<&dyn ContextElement> = sorted
         .into_iter()
         .filter(|e| e.name() != "memory")

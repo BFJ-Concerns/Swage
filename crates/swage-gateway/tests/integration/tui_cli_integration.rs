@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 06 (Terminal User Interface).
+//! Cross-task integration tests for the terminal user interface.
 //!
 //! Tests the CLI dispatch and gateway-facing integration points for the TUI.
 //! Terminal rendering tests live in the swage-tui crate; these tests verify
