@@ -189,10 +189,14 @@
       : null,
   );
 
-  // Stage-dominant layout: conversation moves to the narrow side when a
-  // module is on the stage. Each lens owns one layout; this isn't an
-  // on-demand swap.
-  const isStageDominant = $derived(stageSurface !== null || hasPlacedStageModules);
+  const hasStage = $derived(stageSurface !== null || hasPlacedStageModules);
+  // TODO Add lens-level layout dominance.
+  // Lenses need an explicit layout placement so conversation-dominant and
+  // stage-dominant views are data-driven instead of inferred from module
+  // presence.
+  // ---
+  const isStageDominant = $derived(false);
+  const isConversationDominant = $derived(hasStage);
 
   // Stamp shown on the right of the topbar. The bench portion is real; the
   // state cycles through the streaming store. Team-live and approval states
@@ -562,6 +566,7 @@
   <main
     class="body"
     class:full={!currentBench || settingsMode}
+    class:conversation-dominant={isConversationDominant && !settingsMode}
     class:stage-dominant={isStageDominant && !settingsMode}
   >
     {#if settingsBenchSlug}
@@ -1386,10 +1391,23 @@
     grid-template-columns: 1fr;
   }
 
-  /* Stage-dominant lenses (builder, team-running) put the module pane wide
-     and the conversation narrow. */
+  /* Conversation-dominant lenses keep the conversation pane wide and park the
+     module pane as a narrow rail. */
+  .body.conversation-dominant {
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+
+  .body.conversation-dominant > .conversation-pane {
+    grid-column: 1;
+  }
+
+  .body.conversation-dominant > .stage-pane {
+    grid-column: 2;
+  }
+
+  /* Stage-dominant lenses put the module pane wide and the conversation narrow. */
   .body.stage-dominant {
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: 360px minmax(0, 1fr);
   }
 
   .body.stage-dominant > .conversation-pane {
@@ -1640,6 +1658,7 @@
 
     .body,
     .body.full,
+    .body.conversation-dominant,
     .body.stage-dominant {
       grid-template-columns: 1fr;
     }

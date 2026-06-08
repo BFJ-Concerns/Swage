@@ -377,9 +377,19 @@ describe("AppLayout: workbench shell", () => {
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
-    // The stage pane sits next to the conversation pane in stage-dominant mode.
+    // The stage pane sits next to the conversation pane as a secondary rail.
     expect(document.querySelector(".stage-pane")).not.toBeNull();
-    expect(document.querySelector(".body.stage-dominant")).not.toBeNull();
+    expect(document.querySelector(".body.conversation-dominant")).not.toBeNull();
+  });
+
+  it("keeps conversation as the primary pane when a stage is present", async () => {
+    component = mountBuilderLayout();
+    await waitForText("Author the workspace, then let the agent live in it.");
+
+    const body = document.querySelector(".body.conversation-dominant");
+    expect(body).not.toBeNull();
+    expect(body!.firstElementChild?.classList.contains("conversation-pane")).toBe(true);
+    expect(body!.lastElementChild?.classList.contains("stage-pane")).toBe(true);
   });
 
   it("selects and persists the builder mode from the lens menu", async () => {
