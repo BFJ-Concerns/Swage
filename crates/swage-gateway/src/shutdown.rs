@@ -100,6 +100,13 @@ pub async fn recover_orphaned_turns(
         for session in storage.list_by_bench(bench.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
+                    // TODO Preserve delegated parent turns across restart
+                    // Delegated parent turns should suspend/resume durably;
+                    // this startup recovery path currently
+                    // interrupts Delegating turns. Persist enough delegation
+                    // correlation state to resume the parent turn or expose a
+                    // recoverable suspended state after a gateway restart.
+                    // ---
                     if !matches!(
                         turn.state,
                         TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating

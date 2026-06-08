@@ -1,3 +1,10 @@
+// TODO Audit turn-processing storage fallbacks
+// Review fallback paths in this module that substitute default values when
+// stored turn, replay, or context data is degraded. Each path should either
+// propagate failure, log explicit degraded-state behaviour, or keep the fallback
+// with a test explaining why defaulting is safe.
+// ---
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{env, mem};

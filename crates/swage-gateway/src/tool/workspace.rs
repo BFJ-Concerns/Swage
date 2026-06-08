@@ -20,6 +20,12 @@ use swage_tool::context::ToolContext;
 /// Uses `config.workspace.path` if set and non-empty. Canonicalises the
 /// result so that symlinks cannot be used to bypass scoping checks later.
 /// Falls back to the current working directory if canonicalisation fails.
+// TODO Require explicit workspace root resolution
+// Stop falling back to the gateway process CWD or "/" when the configured
+// workspace path cannot be canonicalised. Daemon/global mode must fail clearly
+// or resolve relative paths against a stable config-owned root so tool scope
+// cannot drift between launches.
+// ---
 pub fn resolve_workspace_root(config: &ResolvedConfig) -> PathBuf {
     let raw = PathBuf::from(&config.workspace.path);
     // Canonicalize resolves symlinks and makes the path absolute. If it fails
