@@ -363,6 +363,82 @@ pub struct ObservabilityConfig {
     pub force_on: bool,
 }
 
+/// Experiment switches for hidden runtime variants.
+///
+/// Variant ids are an operator/runtime concern. User-facing and model-facing
+/// surfaces should continue to name the function being performed, while this
+/// section decides whether the runtime may choose among alternative
+/// implementations behind that stable surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentationConfig {
+    /// Master switch for every experimental variant decision.
+    ///
+    /// When false, variant selection helpers must return the default
+    /// implementation and record, at most, that experimentation was disabled.
+    #[serde(default = "default_experimentation_enabled")]
+    pub enabled: bool,
+    /// Per-location controls keyed by stable runtime location id.
+    ///
+    /// Location ids are intentionally application-defined strings so callers
+    /// can address broad areas such as `context.assembly` or precise work such
+    /// as `task.important-import`. Entries merge across config layers by key.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub locations: HashMap<String, ExperimentLocationConfig>,
+}
+
+fn default_experimentation_enabled() -> bool {
+    true
+}
+
+impl Default for ExperimentationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            locations: HashMap::new(),
+        }
+    }
+}
+
+impl ExperimentationConfig {
+    pub fn is_enabled_for(&self, location_id: &str) -> bool {
+        self.enabled
+            && self
+                .locations
+                .get(location_id)
+                .is_none_or(|location| location.enabled)
+    }
+
+    pub fn forced_variant_for(&self, location_id: &str) -> Option<&str> {
+        self.locations
+            .get(location_id)
+            .filter(|location| self.enabled && location.enabled)
+            .and_then(|location| location.forced_variant.as_deref())
+    }
+}
+
+/// Per-location experiment controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentLocationConfig {
+    /// Whether this exact location may participate in experimentation.
+    #[serde(default = "default_experimentation_enabled")]
+    pub enabled: bool,
+    /// Optional operator pin for deterministic dogfooding.
+    ///
+    /// This is useful for forcing a specific variant during a session or task
+    /// without changing the public function name that the user and model see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_variant: Option<String>,
+}
+
+impl Default for ExperimentLocationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            forced_variant: None,
+        }
+    }
+}
+
 /// Output schema validation settings — controls structured-output enforcement
 /// for the agent's final response.
 ///
@@ -601,6 +677,8 @@ pub struct ResolvedConfig {
     pub pricing: PricingConfig,
     /// Observability settings — controls channel delivery behaviour.
     pub observability: ObservabilityConfig,
+    /// Experimentation settings — controls hidden runtime variants.
+    pub experimentation: ExperimentationConfig,
     /// Output schema validation settings — JSON Schema and retry limits.
     /// Defaults to no schema (validation disabled) with 3 retries.
     pub output: OutputConfig,

@@ -21,6 +21,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "pricing",
     "generation",
     "observability",
+    "experimentation",
     "output",
     "hitl",
     "communication",
@@ -58,6 +59,9 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "pricing" => &["models"],
         "generation" => &["presets"],
         "observability" => &["force_on"],
+        // `locations` is a dynamic table of location-id → controls; nested
+        // fields are validated by `validate_experimentation_locations_table`.
+        "experimentation" => &["enabled", "locations"],
         "output" => &["schema", "max_retries"],
         "hitl" => &["timeout", "timeout_policy"],
         // context_transfer is a dynamic sub-table — field-level validation
@@ -145,6 +149,8 @@ fn check_field_type(
         // generation.presets is a dynamic map of preset name → preset config.
         ("generation", "presets") => ("table", matches!(value, Value::Table(_))),
         ("observability", "force_on") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("experimentation", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("experimentation", "locations") => ("table", matches!(value, Value::Table(_))),
         // [tools] permission fields — flat under [tools] in TOML
         ("tools", "allow") => ("array", matches!(value, Value::Array(_))),
         ("tools", "deny") => ("array", matches!(value, Value::Array(_))),
@@ -342,12 +348,92 @@ fn check_field_semantics(
                 ));
             }
         }
+        ("experimentation", "locations") => {
+            if let Value::Table(table) = value {
+                problems.extend(validate_experimentation_locations_table(
+                    table, file_path, field_path,
+                ));
+            }
+        }
         ("tools", "python_execute") => {
             if let Value::Table(table) = value {
                 problems.extend(validate_python_execute_table(table, file_path, field_path));
             }
         }
         _ => {}
+    }
+
+    problems
+}
+
+fn validate_experimentation_locations_table(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+) -> Vec<ConfigProblem> {
+    const LOCATION_FIELDS: &[&str] = &["enabled", "forced_variant"];
+
+    let mut problems = Vec::new();
+
+    for (location_id, value) in table {
+        let location_path = format!("{field_path}.{location_id}");
+        let Value::Table(location_table) = value else {
+            problems.push(make_problem(
+                file_path,
+                Some(location_path),
+                ConfigProblemKind::TypeError {
+                    expected: "table".to_string(),
+                    found: toml_type_name(value).to_string(),
+                },
+            ));
+            continue;
+        };
+
+        for (name, value) in location_table {
+            let nested_path = format!("{location_path}.{name}");
+            if !LOCATION_FIELDS.contains(&name.as_str()) {
+                problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::UnknownField {
+                        section: location_path.clone(),
+                        name: name.clone(),
+                    },
+                ));
+                continue;
+            }
+
+            match (name.as_str(), value) {
+                ("enabled", Value::Boolean(_)) => {}
+                ("enabled", other) => problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::TypeError {
+                        expected: "boolean".to_string(),
+                        found: toml_type_name(other).to_string(),
+                    },
+                )),
+                ("forced_variant", Value::String(variant)) if variant.trim().is_empty() => {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(nested_path),
+                        ConfigProblemKind::SemanticError {
+                            message: "forced_variant must not be empty".to_string(),
+                        },
+                    ));
+                }
+                ("forced_variant", Value::String(_)) => {}
+                ("forced_variant", other) => problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::TypeError {
+                        expected: "string".to_string(),
+                        found: toml_type_name(other).to_string(),
+                    },
+                )),
+                _ => {}
+            }
+        }
     }
 
     problems

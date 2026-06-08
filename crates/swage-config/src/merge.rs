@@ -1,12 +1,12 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    ContextConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
-    ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
-    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig,
+    ContextConfig, ExperimentLocationConfig, ExperimentationConfig, GenerationConfig,
+    GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig, ModelCapabilitiesConfig,
+    ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
+    PricingConfig, ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
+    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -88,6 +88,20 @@ pub struct PartialGenerationConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialObservabilityConfig {
     pub force_on: Option<bool>,
+}
+
+/// Partial mirror of `ExperimentationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialExperimentationConfig {
+    pub enabled: Option<bool>,
+    pub locations: Option<HashMap<String, PartialExperimentLocationConfig>>,
+}
+
+/// Partial mirror of `ExperimentLocationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialExperimentLocationConfig {
+    pub enabled: Option<bool>,
+    pub forced_variant: Option<Option<String>>,
 }
 
 /// Partial mirror of `ToolConfig` + `ToolPermissionConfig`.
@@ -197,6 +211,7 @@ pub struct PartialConfig {
     pub context: Option<PartialContextConfig>,
     pub pricing: Option<PartialPricingConfig>,
     pub observability: Option<PartialObservabilityConfig>,
+    pub experimentation: Option<PartialExperimentationConfig>,
     pub tools: Option<PartialToolConfig>,
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
@@ -259,6 +274,28 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             observability: Some(PartialObservabilityConfig {
                 force_on: Some(r.observability.force_on),
+            }),
+            experimentation: Some(PartialExperimentationConfig {
+                enabled: Some(r.experimentation.enabled),
+                locations: if r.experimentation.locations.is_empty() {
+                    None
+                } else {
+                    Some(
+                        r.experimentation
+                            .locations
+                            .into_iter()
+                            .map(|(key, location)| {
+                                (
+                                    key,
+                                    PartialExperimentLocationConfig {
+                                        enabled: Some(location.enabled),
+                                        forced_variant: Some(location.forced_variant),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                },
             }),
             tools: Some(PartialToolConfig {
                 shell_timeout_secs: Some(r.tools.shell_timeout_secs),
@@ -435,6 +472,34 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         observability: merge_section(base.observability, overlay.observability, |b, o| {
             PartialObservabilityConfig {
                 force_on: o.force_on.or(b.force_on),
+            }
+        }),
+        experimentation: merge_section(base.experimentation, overlay.experimentation, |b, o| {
+            let locations = match (b.locations, o.locations) {
+                (Some(mut base_locations), Some(overlay_locations)) => {
+                    for (key, overlay_location) in overlay_locations {
+                        match base_locations.entry(key) {
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                let base_location = entry.get_mut();
+                                base_location.enabled =
+                                    overlay_location.enabled.or(base_location.enabled);
+                                base_location.forced_variant = overlay_location
+                                    .forced_variant
+                                    .clone()
+                                    .or_else(|| base_location.forced_variant.clone());
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(overlay_location);
+                            }
+                        }
+                    }
+                    Some(base_locations)
+                }
+                (base_locations, overlay_locations) => overlay_locations.or(base_locations),
+            };
+            PartialExperimentationConfig {
+                enabled: o.enabled.or(b.enabled),
+                locations,
             }
         }),
         tools: merge_section(base.tools, overlay.tools, |b, o| {
@@ -664,6 +729,28 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let o = partial.observability.unwrap_or_default();
             ObservabilityConfig {
                 force_on: o.force_on.unwrap_or(do_.force_on),
+            }
+        },
+        experimentation: {
+            let de = ExperimentationConfig::default();
+            let e = partial.experimentation.unwrap_or_default();
+            ExperimentationConfig {
+                enabled: e.enabled.unwrap_or(de.enabled),
+                locations: e
+                    .locations
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, location)| {
+                        let dl = ExperimentLocationConfig::default();
+                        (
+                            key,
+                            ExperimentLocationConfig {
+                                enabled: location.enabled.unwrap_or(dl.enabled),
+                                forced_variant: location.forced_variant.unwrap_or(None),
+                            },
+                        )
+                    })
+                    .collect(),
             }
         },
         output: {
