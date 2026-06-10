@@ -586,17 +586,12 @@
            scope — without one, no WebSocket is attempted, so a "lost" banner
            would be misleading. -->
       <section class="pane conversation-pane" aria-label="Conversation">
+        <!-- The pane head carries the conversation's own running stat — token
+             usage against the model budget. Live/working state is not repeated
+             here: the topbar stamp and the streaming cursor already show it. -->
         <header class="pane-head">
           <span class="pane-label">Conversation</span>
-          <span class="pane-index">
-            {#if streamingStore.isStreaming}
-              Live
-            {:else if streamingStore.turnError}
-              Retrying
-            {:else}
-              Idle
-            {/if}
-          </span>
+          <span class="pane-index">tokens · {tokenUsageLabel}</span>
         </header>
         {#if activeConversation}
           <ConnectionIndicator store={connectionStore} {onRetry} />
@@ -612,14 +607,6 @@
             selectedModelId={activeConversation?.selected_model_id ?? defaultModelId}
           />
         {/if}
-        <footer class="conv-meta" aria-hidden="false">
-          <span class="conv-meta-tokens">
-            tokens · <span>{tokenUsageLabel}</span>
-          </span>
-          <span class="conv-meta-state" data-tone={stampState.tone}>
-            ● {stampState.label}
-          </span>
-        </footer>
       </section>
 
       <!-- Stage pane: shows the module placed by the active lens. -->
@@ -1481,38 +1468,6 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--ink-soft);
-  }
-
-  /* Conversation meta footer places token / state below the input. */
-  .conv-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 22px 12px;
-    border-top: 1px dotted var(--rule-soft);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--ink-soft);
-    flex-shrink: 0;
-  }
-
-  .conv-meta-state {
-    padding: 2px 6px;
-    border: 1px solid var(--rule-soft);
-  }
-
-  .conv-meta-state[data-tone="busy"] {
-    background: var(--accent);
-    color: var(--paper);
-    border-color: var(--accent);
-  }
-
-  .conv-meta-state[data-tone="alert"] {
-    color: var(--ink-orange);
-    border-color: var(--accent);
   }
 
   /* Stage modules placed by the active lens runtime. */

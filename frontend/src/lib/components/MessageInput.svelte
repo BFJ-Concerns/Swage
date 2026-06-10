@@ -28,13 +28,15 @@
 
   // Auto-grow: recalculate textarea height whenever content changes.
   // We reset to "auto" first so the element can shrink when text is deleted.
+  // The CSS min-height holds the comfortable multi-line default; this only
+  // takes over once the content outgrows it.
   $effect(() => {
     // Reading `content` makes this reactive — the effect re-runs on every keystroke.
     content;
     if (textarea) {
       textarea.style.height = "auto";
-      // Clamp to the CSS max-height (160px) — overflow-y handles scrolling beyond that.
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+      // Clamp to the CSS max-height (320px) — overflow-y handles scrolling beyond that.
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 320)}px`;
     }
   });
 
@@ -66,26 +68,33 @@
 -->
 <div class="message-input" class:disabled={!store}>
   <span class="input-label" aria-hidden="true">Write</span>
-  {#if modelOptions.length > 0}
-    <select
-      class="model-select"
-      bind:value={selectedModel}
-      aria-label="Model"
-      disabled={!store || store?.isStreaming}
-    >
-      {#each modelOptions as modelId (modelId)}
-        <option value={modelId}>{modelId}</option>
-      {/each}
-    </select>
-  {/if}
-  <textarea
-    bind:this={textarea}
-    bind:value={content}
-    placeholder="Send a message — Shift+Enter for a new line"
-    rows="1"
-    onkeydown={handleKeydown}
-    aria-label="Message"
-  ></textarea>
+  <!-- Field column: the textarea fills the height, with the model picker
+       parked in a slim toolbar beneath it so the composer stays a clean
+       three-block bar (WRITE · field · SEND) however tall it grows. -->
+  <div class="field">
+    <textarea
+      bind:this={textarea}
+      bind:value={content}
+      placeholder="Send a message — Shift+Enter for a new line"
+      rows="3"
+      onkeydown={handleKeydown}
+      aria-label="Message"
+    ></textarea>
+    {#if modelOptions.length > 0}
+      <div class="field-toolbar">
+        <select
+          class="model-select"
+          bind:value={selectedModel}
+          aria-label="Model"
+          disabled={!store || store?.isStreaming}
+        >
+          {#each modelOptions as modelId (modelId)}
+            <option value={modelId}>{modelId}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
+  </div>
 
   {#if store?.isStreaming}
     <button class="action stop" onclick={() => store!.cancelTurn()}>
@@ -147,28 +156,45 @@
     text-transform: uppercase;
   }
 
+  /* Field column: textarea stacked over the optional model toolbar. */
+  .field {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .field-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-top: 1px dotted var(--rule-soft);
+  }
+
   .model-select {
-    align-self: stretch;
     max-width: min(34vw, 18rem);
-    border: 0;
-    border-right: 2px solid var(--ink);
+    border: 1px solid var(--rule-soft);
     background: var(--paper);
-    color: var(--ink);
-    font: inherit;
-    font-size: 0.78rem;
-    padding: 0 0.55rem;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    padding: 3px 6px;
+    cursor: pointer;
   }
 
   textarea {
+    flex: 1;
     border: none;
     background: transparent;
-    padding: 12px 14px;
+    padding: 14px 16px;
     font-family: var(--font-body);
-    font-size: 13.5px;
+    font-size: 14px;
     line-height: 1.55;
     color: var(--ink);
-    min-height: 44px;
-    max-height: 160px;
+    /* Comfortable ~3-line default; grows to max before scrolling (kept in
+       sync with the auto-grow clamp in the script). */
+    min-height: 96px;
+    max-height: 320px;
     resize: none;
     outline: none;
     overflow-y: auto;
