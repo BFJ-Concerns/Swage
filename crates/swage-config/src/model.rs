@@ -363,6 +363,17 @@ pub struct ObservabilityConfig {
     pub force_on: bool,
 }
 
+// TODO Wire experimentation variant selection into the runtime
+// `is_enabled_for` and `forced_variant_for` have no callers outside this
+// crate: nothing selects variants, honours the kill switch, or records which
+// variant ran. Build one location end-to-end first (context assembly or a
+// task prompt is the natural candidate): resolve the variant behind the
+// stable surface, honour enabled/forced_variant, and write the chosen
+// variant to the audit trail so runs are reconstructable. The bandit
+// allocation and shadow-run backlog entries (initiative Plan/Backlog.md,
+// Experimentation section) depend on this loop existing and should not be
+// designed before it does.
+// ---
 /// Experiment switches for hidden runtime variants.
 ///
 /// Variant ids are an operator/runtime concern. User-facing and model-facing
