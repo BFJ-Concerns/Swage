@@ -93,6 +93,15 @@ pub struct ConversationThreadDetail {
     pub branch: Option<ConversationBranchResponse>,
 }
 
+// TODO Move API view/DTO types into the swage-protocol crate
+// The view types in this file (ToolCallView, MessageView, the conversation/
+// bench/workspace responses) are the HTTP wire contract, mirrored by hand in
+// frontend/src/lib/types.ts with no enforcement. Move them to swage-protocol
+// so the frontend types are generated rather than maintained in parallel. See
+// the wire-contract section in CLAUDE.md and the swage-protocol mote in
+// .motes/TODO.md.
+// ---
+
 /// A tool call that occurred within a turn, as surfaced by the conversation API.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallView {

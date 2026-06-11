@@ -1,6 +1,14 @@
 // Shared TypeScript types for the Swage web interface.
 // These mirror the gateway's API response shapes.
 
+// TODO Replace hand-written API types with generated swage-protocol output
+// Every interface in this file mirrors a gateway serde type by hand, with no
+// enforcement — drift surfaces only at runtime. Once wire types live in the
+// swage-protocol crate, this file should be generated (ts-rs), with the
+// committed JSON Schema as the canonical contract. See the wire-contract
+// section in CLAUDE.md and the swage-protocol mote in .motes/TODO.md.
+// ---
+
 // -------------------------------------------------------------------------
 // Bench types
 // -------------------------------------------------------------------------

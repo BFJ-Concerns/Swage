@@ -63,3 +63,28 @@ disable it globally and per location — down to a single important task that
 shouldn't become anyone's sample. The frontend control isn't built yet; the
 backend capability is the requirement, so leave the seam for it even though
 nothing toggles it from the UI today.
+
+### The wire contract is one definition, projected
+
+Anything that crosses a process boundary — HTTP request/response bodies,
+WebSocket events, node commands — belongs in the `swage-protocol` crate as
+plain serde types, defined once. Every consumer is a derived projection: Rust
+clients depend on the crate directly; the frontend's TypeScript is generated
+from it (ts-rs); the canonical published artifact is the JSON Schema
+(schemars), committed to the repo and freshness-checked in CI. If a projection
+and the schema ever disagree, the schema wins.
+
+The crate is organised by surface, each emitting its own schema document:
+client (conversation, streaming, approvals), hosting/operator, node (duplex
+and server-initiated — the server invokes operations on remote execution
+clients over a connection the node dialled in, with correlation IDs,
+capability advertisement, cancellation, and heartbeats as first-class fields),
+and channel (the contract external integrators speak). Subset clients
+implement only their surfaces; external parties see only the surface
+published to them.
+
+Until the migration lands (motes track it), wire types are still
+hand-duplicated across the gateway, swage-client, and
+`frontend/src/lib/types.ts`. Don't add a fourth copy: new wire types should
+start in the shape above, and work touching the existing ones should move
+them toward it rather than extending the duplication.

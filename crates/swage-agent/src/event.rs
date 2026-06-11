@@ -10,6 +10,14 @@ use uuid::Uuid;
 
 use crate::approval::ApprovalDecisionValue;
 
+// TODO Define SchemaValidationError once in the swage-protocol crate
+// Three structurally-identical copies of this struct exist (here, the gateway's
+// websocket.rs, swage-client's websocket.rs), kept in sync only by the review
+// discipline described below. One shared definition in swage-protocol removes
+// the discipline requirement. See the wire-contract section in CLAUDE.md and
+// the swage-protocol mote in .motes/TODO.md.
+// ---
+
 /// A single JSON Schema validation error reported during output schema checking.
 ///
 /// Wire-compatible with `swage_gateway::websocket::SchemaValidationError` — the
