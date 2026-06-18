@@ -103,8 +103,11 @@
                 <button
                   class="delete-btn"
                   title="Delete conversation"
+                  aria-label={`Delete conversation: ${conversation.message_preview ?? "New conversation"}`}
                   onclick={(e) => requestDelete(conversation.id, e)}
-                >×</button>
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
             {/if}
           </li>
         {/each}
@@ -290,30 +293,43 @@
     color: rgba(255, 248, 238, 0.7);
   }
 
-  /* Delete affordance. */
+  /* Delete affordance — always rendered so touch and keyboard can reach it,
+     resting in a low-contrast state that brightens on hover/focus. UI audit
+     f-4: visibility:hidden until row hover made it absent on touch and from
+     the tab order while not hovered. */
   .delete-btn {
     background: none;
     border: none;
     color: var(--ink-soft);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-label-md);
     line-height: 1;
     padding: 0 4px;
     cursor: pointer;
-    visibility: hidden;
+    opacity: 0.4;
+    transition: opacity 120ms ease, color 120ms ease;
   }
 
-  .conversation-item:hover .delete-btn {
-    visibility: visible;
-  }
-
-  .delete-btn:hover {
+  .delete-btn:hover,
+  .delete-btn:focus-visible {
+    opacity: 1;
     color: var(--ink-orange);
+  }
+
+  .delete-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .conversation-item.active .delete-btn {
     color: rgba(255, 248, 238, 0.7);
-    visibility: visible;
+    opacity: 0.6;
+  }
+
+  .conversation-item.active .delete-btn:hover,
+  .conversation-item.active .delete-btn:focus-visible {
+    color: var(--accent);
+    opacity: 1;
   }
 
   .delete-confirm {

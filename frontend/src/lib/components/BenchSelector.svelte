@@ -185,8 +185,11 @@
               <button
                 class="delete-bench-btn"
                 title="Delete bench"
+                aria-label={`Delete bench ${bench.name}`}
                 onclick={(e) => requestDelete(bench.id, e)}
-              >×</button>
+              >
+                <span aria-hidden="true">×</span>
+              </button>
             {/if}
           </li>
         {/each}
@@ -366,28 +369,31 @@
     text-overflow: ellipsis;
   }
 
-  /* Delete controls. */
+  /* Delete controls — always rendered so touch and keyboard can reach them,
+     low-contrast until hover/focus. UI audit f-4. */
   .delete-bench-btn {
     background: none;
     border: none;
     color: inherit;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-label-md);
     line-height: 1;
     padding: 0 4px;
     cursor: pointer;
-    visibility: hidden;
     flex-shrink: 0;
-    opacity: 0.6;
+    opacity: 0.4;
+    transition: opacity 120ms ease, color 120ms ease;
   }
 
-  .bench-item:hover .delete-bench-btn {
-    visibility: visible;
-  }
-
-  .delete-bench-btn:hover {
+  .delete-bench-btn:hover,
+  .delete-bench-btn:focus-visible {
     opacity: 1;
     color: var(--ink-orange);
+  }
+
+  .delete-bench-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .delete-confirm {
