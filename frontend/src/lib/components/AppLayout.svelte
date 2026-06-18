@@ -432,16 +432,22 @@
   <aside class="nav" class:settings={settingsMode} aria-label="Navigation">
     {#if settingsMode}
       <!--
-        Settings nav: parked bench-head shows where × CLOSE returns to,
-        then a vertical list of settings pages drives the active sub-route.
+        Settings nav: the parked bench-head is the wayfinding target × CLOSE
+        returns to. It's a real link back to the active conversation (or the
+        picker if none was open), so the block reads as navigation rather than
+        a label that looks like a breadcrumb. UI audit f-16: the old "Return
+        to / on close" fragment was a hanging, non-interactive label.
       -->
-      <div class="bench-head settings-head">
-        <div class="crumb">
-          <span class="return-mark">Return to</span>
-        </div>
+      <button
+        type="button"
+        class="bench-head settings-head return-link"
+        onclick={closeSettings}
+        aria-label={`Close settings and return to ${activeConversation?.id ? "conversation" : "bench picker"}`}
+        title="Close settings"
+      >
+        <span class="return-mark">← Close</span>
         <h2 class="name">{settingsBench?.name ?? currentBench?.name ?? "Swage"}</h2>
-        <div class="meta">on close</div>
-      </div>
+      </button>
       <div class="settings-pages">
         {#if settingsBenchSlug}
           {#each BENCH_SETTINGS_PAGES as page (page.id)}
@@ -456,39 +462,68 @@
             </button>
           {/each}
         {:else}
-          {#each SETTINGS_PAGES as page (page.id)}
+          <!--
+            Functional pages lead; non-functional ones collapse into a muted
+            "Coming soon" group below, so they stay visible as a roadmap but
+            stop competing for scan attention with working entries. UI audit
+            f-5: the previous flat list interleaved five SHELL chips with the
+            five working pages, reading as "half-finished product".
+          -->
+          {#each SETTINGS_PAGES.filter((page) => page.functional) as page (page.id)}
             <button
               type="button"
               class="settings-page"
               class:active={settingsTab === page.id}
-              class:shell={!page.functional}
               onclick={() => onNavigate?.(`/settings/${page.id}`)}
-              title={page.functional ? page.label : `${page.label} (not yet wired)`}
+              title={page.label}
             >
               <span>{page.label}</span>
-              <span class="ix">
-                {#if !page.functional}
-                  <span class="shell-mark" aria-label="Non-functional placeholder">SHELL</span>
-                {:else}
-                  {page.ix}
-                {/if}
-              </span>
+              <span class="ix">{page.ix}</span>
             </button>
           {/each}
+          <div class="settings-coming-soon" role="separator" aria-label="Coming soon">
+            <span class="coming-soon-label">Coming soon</span>
+          </div>
+          <div class="settings-coming-soon-grid">
+            {#each SETTINGS_PAGES.filter((page) => !page.functional) as page (page.id)}
+              <button
+                type="button"
+                class="settings-page shell"
+                class:active={settingsTab === page.id}
+                onclick={() => onNavigate?.(`/settings/${page.id}`)}
+                title={`${page.label} (not yet wired)`}
+              >
+                <span>{page.label}</span>
+              </button>
+            {/each}
+          </div>
         {/if}
       </div>
     {:else if currentBench}
-      <!-- Bench header — large display name, becomes back-arrow + secondary
-           menu in future iterations. -->
+      <!--
+        Bench header. The back-arrow returns to the bench picker — a clear
+        wayfinding target that the dropdown-only model lacked. The Switch
+        dropdown stays for fast switching without leaving the current bench
+        (UI audit f-7).
+      -->
       <div class="bench-head">
+        <button
+          type="button"
+          class="back-to-picker"
+          aria-label="Back to bench picker"
+          title="Back to bench picker"
+          onclick={() => {
+            benchStore?.closeBench();
+            onNavigate?.("/");
+          }}
+        >
+          <span aria-hidden="true">←</span>
+        </button>
         <div class="crumb">
           <span class="bench-label">Bench</span>
           <span class="bench-count">{conversationCount} convos</span>
         </div>
         <h2 class="name">{currentBench.name}</h2>
-        <!-- TODO(debt): swap BenchSelector dropdown for a back-arrow that
-             returns to the bench picker. The picker is not yet a dedicated
-             route. Blocked by: bench picker view component. -->
         <BenchSelector {benchStore} {onBenchChange} />
       </div>
 
@@ -639,7 +674,12 @@
                 </div>
               {/await}
             {:else}
-              <div class="surface-loading">Loading builder…</div>
+              <div class="surface-skeleton" role="status" aria-label="Loading builder">
+                <div class="sk sk-line sk-line-lg"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line sk-line-sm"></div>
+              </div>
             {/if}
           {:else if stageSurface === "operator"}
             {#if operatorDashboardModule}
@@ -652,7 +692,11 @@
                 </div>
               {/await}
             {:else}
-              <div class="surface-loading">Loading operator…</div>
+              <div class="surface-skeleton" role="status" aria-label="Loading operator">
+                <div class="sk sk-line sk-line-lg"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line sk-line-sm"></div>
+              </div>
             {/if}
           {/if}
         </section>
@@ -715,15 +759,18 @@
     height: 100%;
     background: var(--paper);
     color: var(--ink);
-    border: 2px solid var(--ink);
+    border: var(--border-strong);
     display: grid;
     grid-template-rows: 48px 1fr;
-    grid-template-columns: 280px 1fr;
+    /* Fluid chrome: the nav shrinks to content rather than claiming a fixed
+       280px allotment. It yields before the conversation pane (the primary
+       surface) does. UI audit f-21. */
+    grid-template-columns: clamp(220px, 18vw, 280px) 1fr;
     grid-template-areas:
       "nav top"
       "nav body";
     font-family: var(--font-body);
-    font-size: 13px;
+    font-size: var(--font-body-sm);
     /* The translucent orange offset shadow needs the window above its trail. */
     isolation: isolate;
     position: relative;
@@ -786,53 +833,85 @@
     background: var(--accent);
   }
 
-  /* Parked bench-head in settings nav: same ink block as the regular nav,
-     but the orange registration band underneath is suppressed (the bench
-     isn't currently active, just the destination of × CLOSE). */
+  /* Parked bench-head in settings nav: now a real link back to the
+     conversation/picker rather than a label that looks like a breadcrumb.
+     Same ink block as the regular nav, but the orange registration band
+     underneath is suppressed (the bench isn't currently active, just the
+     destination of × CLOSE). UI audit f-16. */
   .nav.settings .bench-head {
-    padding: 14px 22px;
+    padding: 12px 16px;
+    width: 100%;
+    text-align: left;
+    background: var(--ink);
+    color: var(--paper);
+    cursor: pointer;
+    border: none;
+    font: inherit;
+  }
+
+  .nav.settings .bench-head:hover {
+    background: var(--ink-soft);
+  }
+
+  .nav.settings .bench-head:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .nav.settings .bench-head::after {
     display: none;
   }
 
-  .nav.settings .bench-head .crumb {
-    margin-bottom: 6px;
-  }
-
   .return-mark {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
-  }
-
-  /* Decorative pip — orange on cream is below AA so it stays as a pure
-     graphic element; the text colour reads against the ink block instead. */
-  .return-mark::before {
-    content: "";
-    width: 8px;
-    height: 8px;
-    background: var(--accent);
+    text-transform: uppercase;
+    color: rgba(255, 248, 238, 0.7);
+    margin-bottom: 6px;
   }
 
   .nav.settings .bench-head .name {
-    font-size: 26px;
+    font-size: var(--font-display-2);
     letter-spacing: 0.03em;
   }
 
-  .nav.settings .bench-head .meta {
-    margin-top: 4px;
-    font-family: var(--font-body);
-    font-weight: 500;
-    font-size: 11px;
-    line-height: 1.5;
-    color: rgba(255, 248, 238, 0.7);
+  /* Back-to-picker affordance in the active bench header — a clear wayfinding
+     target that the dropdown-only model lacked. UI audit f-7. */
+  .back-to-picker {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid rgba(255, 248, 238, 0.4);
+    color: var(--paper);
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    margin-bottom: 8px;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+
+  .back-to-picker:hover,
+  .back-to-picker:focus-visible {
+    border-color: var(--paper);
+    background: rgba(255, 248, 238, 0.12);
+  }
+
+  .back-to-picker:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .settings-pages {
-    padding: 16px 14px;
+    padding: 12px 14px;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -851,7 +930,7 @@
     border: 1px solid transparent;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 12px;
+    font-size: var(--font-label-md);
     line-height: 1;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -883,32 +962,49 @@
   .settings-page .ix {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     opacity: 0.6;
   }
 
-  /* Non-functional settings entries advertise themselves with an explicit
-     SHELL chip rather than fading into the background. The intent is that
-     the user can still see what's coming without thinking they're broken. */
-  .settings-page.shell .ix {
-    opacity: 1;
+  /* Coming-soon group — functional pages lead; non-functional ones collapse
+     into a muted footer so the roadmap stays visible without competing for
+     scan attention. UI audit f-5. */
+  .settings-coming-soon {
+    margin: 14px 0 4px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--rule-soft);
   }
 
-  .shell-mark {
-    display: inline-block;
-    padding: 2px 6px;
-    background: var(--accent);
-    color: var(--paper);
+  .coming-soon-label {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 9px;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
     text-transform: uppercase;
+    color: var(--ink-soft);
+    opacity: 0.7;
   }
 
-  .settings-page.active .shell-mark {
-    background: var(--paper);
+  .settings-coming-soon-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding-top: 4px;
+  }
+
+  .settings-coming-soon-grid .settings-page {
+    /* Low-emphasis entries — they read as a roadmap, not as peers of the
+       working pages above. */
+    padding: 4px 0;
+    color: var(--ink-soft);
+    opacity: 0.7;
+    letter-spacing: 0.1em;
+  }
+
+  .settings-coming-soon-grid .settings-page:hover:not(.active) {
+    background: transparent;
+    opacity: 1;
     color: var(--ink);
   }
 
@@ -1179,7 +1275,9 @@
   .bench-head {
     background: var(--ink);
     color: var(--paper);
-    padding: 18px 22px;
+    /* Density hierarchy: chrome padding tightens to 12–16px; generous air is
+       reserved for content surfaces. UI audit f-21. */
+    padding: 12px 16px;
     position: relative;
   }
 
@@ -1198,19 +1296,19 @@
     background: var(--paper);
     color: var(--ink);
     text-align: center;
-    border-bottom: 2px solid var(--ink);
+    border-bottom: var(--border-strong);
   }
 
   .bench-head .crumb {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
     text-transform: uppercase;
     display: flex;
     justify-content: space-between;
     color: rgba(255, 248, 238, 0.7);
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
 
   .bench-head.picker-mode .crumb {
@@ -1221,7 +1319,9 @@
   .bench-head .name {
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: 36px;
+    /* Right-size display type to content: a single bench name doesn't need
+       36px. 24–28px is still emphatically Bebas. UI audit f-21. */
+    font-size: var(--font-display-2);
     line-height: 1;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -1572,16 +1672,49 @@
     line-height: 1.4;
   }
 
-  .surface-loading,
   .surface-error {
     margin: auto;
     padding: 14px 18px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-label-md);
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--ink-orange);
-    border: 1px dashed var(--accent);
+    color: var(--error);
+    border: 1px dashed var(--error);
+  }
+
+  /* Low-fidelity skeleton: the layout paints before the lazy module fills it,
+     so the surface reads as "the right thing is loading" rather than a bare
+     text fragment. aria-label on the wrapper carries the announcement. */
+  .surface-skeleton {
+    margin: auto;
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+  }
+
+  .sk {
+    height: 12px;
+    background: var(--paper-deep);
+    border-left: 3px solid var(--rule-soft);
+    opacity: 0.7;
+    animation: sk-pulse 1.4s ease-in-out infinite;
+  }
+
+  .sk-line { width: 100%; }
+  .sk-line-lg { width: 60%; height: 18px; }
+  .sk-line-sm { width: 35%; }
+
+  @keyframes sk-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 0.85; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sk { animation: none; }
   }
 
   /* ---------------------------------------------------------------------------

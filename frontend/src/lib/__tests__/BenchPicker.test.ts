@@ -25,6 +25,7 @@ function benchStore(): BenchStore {
     get isLoading() { return false; },
     loadBenches: async () => {},
     selectBench: async () => {},
+    closeBench: () => {},
     createBench: async () => {},
     deleteBench: async () => {},
   };

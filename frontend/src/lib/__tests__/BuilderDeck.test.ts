@@ -74,6 +74,7 @@ function mockBenchStore(): BenchStore {
     },
     loadBenches: async () => {},
     selectBench: async () => {},
+    closeBench: () => {},
     createBench: async () => {},
     deleteBench: async () => {},
   };

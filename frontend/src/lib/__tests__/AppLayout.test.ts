@@ -145,6 +145,7 @@ function mockBenchStore(): BenchStore {
     get isLoading() { return false; },
     loadBenches: async () => {},
     selectBench: async () => {},
+    closeBench: () => {},
     createBench: async () => {},
     deleteBench: async () => {},
   };
@@ -480,6 +481,7 @@ describe("AppLayout: workbench shell", () => {
       get isLoading() { return false; },
       loadBenches: async () => {},
       selectBench: async () => {},
+      closeBench: () => {},
       createBench: async () => {},
       deleteBench: async () => {},
     };
@@ -513,6 +515,7 @@ describe("AppLayout: workbench shell", () => {
       get isLoading() { return false; },
       loadBenches: async () => {},
       selectBench: async () => {},
+      closeBench: () => {},
       createBench: async () => {},
       deleteBench: async () => {},
     };

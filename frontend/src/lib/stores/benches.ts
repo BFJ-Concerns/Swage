@@ -15,6 +15,8 @@ export interface BenchStore {
   readonly isLoading: boolean;
   loadBenches(): Promise<void>;
   selectBench(id: string): Promise<void>;
+  /** Drop the current bench selection and return to the picker. */
+  closeBench(): void;
   createBench(name: string): Promise<void>;
   deleteBench(id: string): Promise<void>;
 }
@@ -114,6 +116,13 @@ export function createBenchStore(): BenchStore {
       );
       currentBenchStore.set(opened);
       rememberBenchOpen(id);
+    },
+
+    closeBench() {
+      // Return to the bench picker. The bench list is preserved so reopening
+      // is instant; only the active selection is dropped. The caller is
+      // responsible for navigating the URL to the picker route.
+      currentBenchStore.set(null);
     },
 
     async createBench(name) {
