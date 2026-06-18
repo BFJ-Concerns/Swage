@@ -343,11 +343,15 @@ describe("SettingsPage", () => {
 
     expect(document.body.textContent).toContain("Base URL");
 
-    buttonNamed("Collapse").click();
+    // The whole provider header bar is the collapse trigger (UI audit f-22).
+    const collapse = document.querySelector<HTMLButtonElement>(".provider-collapse");
+    if (!collapse) throw new Error("Provider collapse trigger not found");
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+    collapse.click();
     await flushUi();
 
     expect(document.body.textContent).not.toContain("Base URL");
-    expect(buttonNamed("Expand").getAttribute("aria-expanded")).toBe("false");
+    expect(collapse.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("persists display preferences locally", async () => {

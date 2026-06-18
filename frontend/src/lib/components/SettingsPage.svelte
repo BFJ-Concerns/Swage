@@ -53,6 +53,10 @@
   // the inline inputs are open (null otherwise).
   let addingProvider = $state(false);
   let compatibleDraft = $state<{ name: string; base_url: string } | null>(null);
+  // Inline validation for the compatible Base URL field. Reserved slot
+  // rendered as role="alert" so client-side validation has somewhere to write
+  // (UI audit f-6). Null/empty means no error to show.
+  let compatibleBaseUrlError = $state<string | null>(null);
   let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let savedProviderIds = $state<Set<string>>(new Set());
@@ -299,7 +303,10 @@
 
   function toggleAddProvider(): void {
     addingProvider = !addingProvider;
-    if (!addingProvider) compatibleDraft = null;
+    if (!addingProvider) {
+      compatibleDraft = null;
+      compatibleBaseUrlError = null;
+    }
     error = null;
   }
 
@@ -309,6 +316,7 @@
     // inputs instead of creating immediately. Clicking again collapses them.
     if (kind.id === "OpenAiCompatible") {
       compatibleDraft = compatibleDraft ? null : { name: "", base_url: "" };
+      compatibleBaseUrlError = null;
       error = null;
       return;
     }
@@ -325,6 +333,7 @@
     discoveredModels = [];
     addingProvider = false;
     compatibleDraft = null;
+    compatibleBaseUrlError = null;
     error = null;
   }
 
@@ -332,7 +341,11 @@
     if (!settings || !compatibleDraft) return;
     const baseUrl = compatibleDraft.base_url.trim();
     if (!baseUrl) {
-      error = "OpenAI-compatible providers need a base URL.";
+      compatibleBaseUrlError = "Enter a base URL so Swage knows where to send requests.";
+      return;
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      compatibleBaseUrlError = "Enter a URL starting with http:// or https://";
       return;
     }
     const baseId = slugifyProviderName(compatibleDraft.name) || "openai-compatible";
@@ -349,6 +362,7 @@
     discoveredModels = [];
     addingProvider = false;
     compatibleDraft = null;
+    compatibleBaseUrlError = null;
     error = null;
   }
 
@@ -1014,27 +1028,52 @@
               </button>
             </div>
             {#if compatibleDraft}
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={compatibleDraft.name}
-                  oninput={(event) => {
-                    if (compatibleDraft) compatibleDraft.name = event.currentTarget.value;
-                  }}
-                  placeholder="Provider name"
-                  autocomplete="off"
-                />
-                <input
-                  type="text"
-                  class="text"
-                  value={compatibleDraft.base_url}
-                  oninput={(event) => {
-                    if (compatibleDraft) compatibleDraft.base_url = event.currentTarget.value;
-                  }}
-                  placeholder="https://api.example.com/v1"
-                  autocomplete="off"
-                />
+              <!--
+                OpenAI-compatible provider draft. Each field has a persistent
+                visible <label> (placeholders vanish once the user types, and
+                screen readers name the field only by placeholder here), a
+                surviving helper line for Base URL, and a reserved role="alert"
+                slot for client-side validation. UI audit f-6.
+              -->
+              <div class="search-row compatible-form">
+                <div class="compatible-field">
+                  <label class="key" for="compatible-name">Provider name</label>
+                  <input
+                    id="compatible-name"
+                    type="text"
+                    class="text search"
+                    value={compatibleDraft.name}
+                    oninput={(event) => {
+                      if (compatibleDraft) compatibleDraft.name = event.currentTarget.value;
+                    }}
+                    placeholder="My OpenAI proxy"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="compatible-field">
+                  <label class="key" for="compatible-base-url">Base URL</label>
+                  <input
+                    id="compatible-base-url"
+                    type="text"
+                    class="text"
+                    value={compatibleDraft.base_url}
+                    oninput={(event) => {
+                      if (compatibleDraft) compatibleDraft.base_url = event.currentTarget.value;
+                      if (compatibleBaseUrlError) compatibleBaseUrlError = null;
+                    }}
+                    placeholder="https://api.example.com/v1"
+                    autocomplete="off"
+                    aria-describedby="compatible-base-url-help compatible-base-url-error"
+                  />
+                  <small id="compatible-base-url-help" class="field-help">
+                    Override the provider's canonical endpoint.
+                  </small>
+                  <p
+                    id="compatible-base-url-error"
+                    class="field-error"
+                    role="alert"
+                  >{compatibleBaseUrlError ?? ""}</p>
+                </div>
                 <button type="button" class="opt opt-pick" onclick={commitCompatibleProvider}>
                   <span class="pick-mark" aria-hidden="true">+</span>
                   <span>Connect</span>
@@ -1050,35 +1089,47 @@
         {@const modelsForProvider = providerModels(id)}
         {@const isCollapsed = isProviderCollapsed(id)}
         <section class="provider-section" aria-label={`Provider ${id}`}>
+          <!--
+            The whole header bar is the collapse trigger — one large click
+            target with a rotating chevron — instead of a low-contrast "Collapse"
+            text button competing with four other text fragments in the same
+            row. Remove is demoted to a low-emphasis icon button (sibling, never
+            nested inside the collapse button). aria-expanded is preserved. The
+            credential chip becomes a status with a check. UI audit f-22.
+          -->
           <div class="provider-head">
-            <div class="provider-head-text">
-              <span class="provider-index">
-                Provider <span class="ix">{String(ix + 1).padStart(2, "0")}</span>
+            <button
+              type="button"
+              class="provider-collapse"
+              aria-expanded={!isCollapsed}
+              aria-label={`Provider ${providerDisplayName(id)} — ${isCollapsed ? "expand" : "collapse"}`}
+              onclick={() => toggleProviderCollapsed(id)}
+            >
+              <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
+              <span class="provider-head-text">
+                <span class="provider-index">
+                  Provider <span class="ix">{String(ix + 1).padStart(2, "0")}</span>
+                </span>
+                <h2>{providerDisplayName(id)}</h2>
+                <p class="provider-meta-line">
+                  <span class="meta-protocol">{provider.protocol}</span>
+                  <span class="meta-key">{id}</span>
+                  <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
+                </p>
               </span>
-              <h2>{providerDisplayName(id)}</h2>
-              <p class="provider-meta-line">
-                <span class="meta-protocol">{provider.protocol}</span>
-                <span class="meta-key">{id}</span>
-                <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
-              </p>
-            </div>
-            <div class="provider-meta">
               <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "Credential stored" : "No credential"}
+                {provider.has_credential ? "✓ Credential" : "No credential"}
               </span>
-              <button
-                type="button"
-                class="opt"
-                aria-expanded={!isCollapsed}
-                onclick={() => toggleProviderCollapsed(id)}
-              >
-                {isCollapsed ? "Expand" : "Collapse"}
-              </button>
-              <button type="button" class="opt opt-cancel" onclick={() => removeProvider(id)}>
-                <span aria-hidden="true">×</span>
-                <span>Remove</span>
-              </button>
-            </div>
+            </button>
+            <button
+              type="button"
+              class="provider-remove"
+              aria-label={`Remove provider ${providerDisplayName(id)}`}
+              title="Remove provider"
+              onclick={() => removeProvider(id)}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
           </div>
 
           {#if !isCollapsed}
@@ -1164,6 +1215,7 @@
                       value={newModelIdByProvider[id] ?? ""}
                       oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
                       placeholder="model-id"
+                      aria-label={`Add model by id for ${providerDisplayName(id)}`}
                       autocomplete="off"
                     />
                     <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
@@ -2190,14 +2242,91 @@
 
   .provider-head {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 18px;
+    align-items: stretch;
+    gap: 4px;
     padding-bottom: 12px;
+  }
+
+  /* The collapse trigger occupies the whole header bar — one large click
+     target. Borders, background, and the rotating chevron carry the
+     affordance; aria-expanded announces state (UI audit f-22). */
+  .provider-collapse {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 12px;
+    background: transparent;
+    border: none;
+    padding: 6px 4px;
+    margin: 0;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 0;
+  }
+
+  .provider-collapse:hover {
+    background: var(--rule-faint);
+  }
+
+  .provider-collapse:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .chevron {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1;
+    color: var(--ink-soft);
+    transition: transform 120ms ease;
   }
 
   .provider-head-text {
     min-width: 0;
+  }
+
+  /* Credential chip promoted to a status — the set variant carries a check and
+     a positive tint so it reads as a state, not a label. */
+  .provider-collapse .credential-status {
+    justify-self: end;
+  }
+
+  .credential-status.set {
+    border-color: var(--ink);
+    color: var(--ink);
+    background: rgba(47, 122, 58, 0.14);
+  }
+
+  /* Remove is demoted to a low-emphasis icon button — sibling of the collapse
+     trigger, never nested (UI audit f-22). */
+  .provider-remove {
+    flex-shrink: 0;
+    align-self: center;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--ink-soft);
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px 8px;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+
+  .provider-remove:hover,
+  .provider-remove:focus-visible {
+    opacity: 1;
+    color: var(--error);
+    border-color: var(--rule-soft);
+  }
+
+  .provider-remove:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .provider-index {
@@ -2205,7 +2334,7 @@
     margin-bottom: 6px;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     letter-spacing: 0.22em;
     text-transform: uppercase;
@@ -2220,7 +2349,7 @@
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: 26px;
+    font-size: var(--font-display-3);
     line-height: 1;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -2232,7 +2361,7 @@
     flex-wrap: wrap;
     gap: 6px 14px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     color: var(--ink-soft);
     word-break: break-word;
   }
@@ -2254,12 +2383,48 @@
     text-transform: uppercase;
   }
 
-  .provider-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  /* Compatible-provider draft form — persistent visible labels, helper text,
+     and an inline validation slot live in their own column structure so the
+     search-row layout (input + Connect button on one line) still works. */
+  .compatible-form {
     flex-wrap: wrap;
-    justify-content: flex-end;
+  }
+
+  .compatible-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 220px;
+    flex: 1;
+  }
+
+  .compatible-field .key {
+    /* Reuse the field-key look so the compatible form matches the per-provider
+       field rows below it. */
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: var(--font-meta);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .field-help {
+    font-family: var(--font-body);
+    font-size: var(--font-label-sm);
+    color: var(--ink-soft);
+  }
+
+  .field-error {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    color: var(--error);
+    min-height: 0;
+  }
+
+  .field-error:empty {
+    display: none;
   }
 
   /* Per-model row inside Model compatibility — id label on the left, chip
