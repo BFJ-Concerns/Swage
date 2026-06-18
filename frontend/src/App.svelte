@@ -373,9 +373,28 @@
 </script>
 
 {#if isInitialising}
-  <!-- Loading splash — shown only for the brief window before the HTTP response. -->
-  <div class="splash">
-    <p>Loading…</p>
+  <!--
+    Loading splash — a low-fidelity skeleton of the window grid rather than a
+    bare "Loading…" fragment. The shell is strongly branded, so a content-free
+    text splash read as a broken render; this paints the layout first and lets
+    content fill it. UI audit f-13.
+  -->
+  <div class="splash" role="status" aria-label="Loading Swage">
+    <div class="splash-frame">
+      <div class="splash-nav">
+        <div class="sk sk-line sk-line-lg"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line sk-line-sm"></div>
+      </div>
+      <div class="splash-body">
+        <div class="sk sk-line sk-line-lg"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line sk-line-sm"></div>
+        <p class="splash-mark">Swage</p>
+      </div>
+    </div>
   </div>
 {:else if loadError}
   <!-- Gateway unreachable at startup — give the user something to act on. -->
@@ -433,13 +452,75 @@
     align-items: center;
     justify-content: center;
     background: var(--paper);
-    color: var(--ink-soft);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    line-height: 1;
-    letter-spacing: 0.18em;
+    color: var(--ink);
+    padding: 24px;
+  }
+
+  /* Skeleton of the window grid: a nav column and a body column, each carrying
+     placeholder blocks where content will sit. */
+  .splash-frame {
+    width: 100%;
+    max-width: 1100px;
+    height: 100%;
+    max-height: 640px;
+    border: var(--border-strong);
+    background: var(--paper);
+    display: grid;
+    grid-template-columns: clamp(220px, 18vw, 280px) 1fr;
+    overflow: hidden;
+  }
+
+  .splash-nav,
+  .splash-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .splash-nav {
+    background: var(--paper-deep);
+    border-right: var(--border-strong);
+  }
+
+  .splash-body {
+    position: relative;
+    justify-content: center;
+  }
+
+  .splash-mark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-family: var(--font-display);
+    font-size: var(--font-display-1);
+    letter-spacing: 0.06em;
     text-transform: uppercase;
+    color: var(--ink-soft);
+    opacity: 0.35;
+    margin: 0;
+  }
+
+  .sk {
+    height: 12px;
+    background: var(--rule-faint);
+    border-left: 3px solid var(--rule-soft);
+    opacity: 0.7;
+    animation: sk-pulse 1.4s ease-in-out infinite;
+  }
+
+  .sk-line { width: 100%; }
+  .sk-line-lg { width: 60%; height: 18px; }
+  .sk-line-sm { width: 35%; }
+
+  @keyframes sk-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 0.85; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sk { animation: none; }
   }
 
   /* ---- Error screen --------------------------------------------------------- */
