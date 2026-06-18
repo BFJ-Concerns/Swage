@@ -16,10 +16,22 @@
   Conventions:
     --ink            primary ink (text/borders)
     --paper          surface colour
-    --accent         fluoro orange (decorative — never used for text on paper)
+    --accent         fluoro orange — one job: primary action fill + active
+                     emphasis. Never used for text on paper (use --ink-orange)
+                     and never used for errors (use --error).
     --ink-orange     orange variant suitable for body text on paper (AA contrast)
+    --error          distinct warm red reserved for the error/warning family.
+                     Orange owns action; errors read as trouble, not "another
+                     orange thing".
     --ink-soft       muted variant of ink for secondary text
     --rule-soft      hairline divider colour
+
+  Colour roles (see UI audit, "Colour discipline"):
+    primary action / active emphasis  --accent
+    error / warning text               --error
+    decorative (streaming cursor,
+      inline-code background)          neutral ink / paper-deep, no hue
+    small text labels on paper         --ink-orange
 */
 
 :root {
@@ -41,6 +53,34 @@
 
   /* Riso shadow offset — used by .riso-block and offset pseudo-elements. */
   --offset: 3px;
+
+  /*
+    Border scale. Nesting depth, not component identity, decides the weight:
+      --border-strong  2px ink — outermost frame + primary cards only
+      --border         1px ink — nested panels, inputs inside cards
+      --rule           1px faint — dividers between regions
+      --rule-soft      hairline — dotted inner rules (kept for back-compat)
+  */
+  --border-strong: 2px solid var(--ink);
+  --border: 1px solid var(--ink);
+  --rule: 1px solid var(--rule-faint);
+
+  /*
+    Type scale. Replaces ad-hoc per-component px sizes with a named ladder so
+    the system feels intentional rather than tuned by eye. Display sizes carry
+    the caps burden (Bebas is caps by nature); body and help stay sentence-case.
+    The smallest label is floored at 11px and metadata chips at 10px — the
+    practical minimum for comfortable reading (UI audit f-15).
+  */
+  --font-display-1: 32px;  /* hero bench name, splash mark */
+  --font-display-2: 24px;  /* pane/page titles */
+  --font-display-3: 19px;  /* card titles, section heads */
+  --font-body-lg: 16px;    /* prominent body */
+  --font-body-md: 14px;    /* default body */
+  --font-body-sm: 13px;    /* dense body, message rows */
+  --font-label-md: 12px;   /* secondary labels, button text */
+  --font-label-sm: 11px;   /* eyebrow floor — never below this for text */
+  --font-meta: 10px;       /* metadata chips, status pips */
 }
 
 /* ---------------------------------------------------------------------------
@@ -55,6 +95,8 @@
   --rule-faint: rgba(14, 59, 102, 0.18);
   /* Decorative orange (#f06a3a) is below AA on cream — use --ink-orange for text. */
   --ink-orange: #c54115;
+  /* Distinct warm red for the error family. ~8:1 on cream paper. */
+  --error: #a8321a;
   --shadow-blend: multiply;
   --shadow-opacity: 0.5;
 }
@@ -71,6 +113,8 @@
   --rule-faint: rgba(255, 248, 238, 0.18);
   /* On dark paper, the fluoro orange has enough contrast to act as ink-orange. */
   --ink-orange: var(--accent);
+  /* Lighter warm red readable on the dark cyanotype paper. */
+  --error: #ff7a5a;
   --shadow-blend: screen;
   --shadow-opacity: 0.7;
 }
@@ -120,11 +164,12 @@
   pointer-events: none;
 }
 
-/* Eyebrow labels — small uppercased mono used throughout. */
+/* Eyebrow labels — small uppercased mono used throughout. Floored at the
+   --font-label-sm token; never smaller for readable text (UI audit f-15). */
 .eyebrow {
   font-family: var(--font-mono);
   font-weight: 500;
-  font-size: 11px;
+  font-size: var(--font-label-sm);
   line-height: 1;
   letter-spacing: 0.18em;
   text-transform: uppercase;
