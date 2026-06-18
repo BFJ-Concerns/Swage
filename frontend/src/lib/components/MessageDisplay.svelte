@@ -165,16 +165,43 @@
       (displayPreferences.message_model_display === "assistant" && role === "assistant")
     );
   }
+
+  // ---- Assistive status announcement ----------------------------------------
+  // The message history itself is NOT a live region: the streaming renderer
+  // rewrites the in-progress assistant message's innerHTML on every token, and
+  // a live region on that container would queue each token for announcement —
+  // an unusable wall of noise for screen-reader users (UI audit f-1).
+  // Instead we derive a single coarse status string from the streaming store's
+  // coarse flags. These flags only change on turn boundaries, so the dedicated
+  // live region below updates a handful of times per turn, not per token.
+  const streamingStatus = $derived(
+    turnError
+      ? `Error: ${turnError.message}`
+      : providerRetry
+        ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
+        : isStreaming
+          ? "Generating response"
+          : streamedContent
+            ? "Response complete"
+            : "",
+  );
 </script>
 
+<!--
+  The history container uses role="region", NOT role="log". role="log" carries
+  an implicit aria-live="polite", which would re-announce every streamed token
+  (UI audit f-1). A neutral region lets sighted users read the stream while a
+  dedicated sr-only live region below announces only coarse status.
+-->
 <div
   class="message-display"
   bind:this={scrollEl}
   onscroll={handleScroll}
-  role="log"
+  role="region"
   aria-label="Conversation messages"
-  aria-live="polite"
 >
+  <!-- Dedicated, throttled assistive status — see streamingStatus above. -->
+  <div class="sr-only" aria-live="polite" aria-atomic="true">{streamingStatus}</div>
   {#if !hasConversation}
     <!-- No active conversation — first-time user or sidebar empty state. -->
     <div class="empty-state">
@@ -192,7 +219,16 @@
         class="message"
         class:user={message.role === "user"}
         class:assistant={message.role === "assistant"}
+        aria-label={message.role === "user" ? "Your message" : "Assistant message"}
       >
+        <!-- Role label is real DOM text, not a CSS ::before — so it reaches the
+             accessibility tree reliably across screen-reader/browser combos
+             (UI audit f-14). User and assistant messages also sit on opposite
+             sides with mirrored borders so the roles read at a glance even with
+             colour off (UI audit f-23). -->
+        <span class="role-label" class:user-label={message.role === "user"}>
+          {message.role === "user" ? "You" : "Assistant"}
+        </span>
         {#if message.role === "user"}
           <!-- User messages render as plain text (no markdown injection). -->
           <div class="message-content user-content">
@@ -219,8 +255,8 @@
             {/if}
           </div>
         {/if}
-        {#if shouldShowModel(message.role)}
-          <div class="message-model">Model not reported</div>
+        {#if shouldShowModel(message.role) && message.model}
+          <div class="message-model">{message.model}</div>
         {/if}
       </div>
 
@@ -238,7 +274,8 @@
 
     <!-- ---- Live streaming content: grows as tokens arrive ---- -->
     {#if isStreaming || streamedContent}
-      <div class="message assistant streaming">
+      <div class="message assistant streaming" aria-label="Assistant message">
+        <span class="role-label">Assistant</span>
         <div class="message-content assistant-content markdown-body">
           {#if shouldRenderMarkdown}
             <!-- Incremental markdown render — re-parses on each token. -->
@@ -249,7 +286,9 @@
           {/if}
 
           {#if isStreaming}
-            <!-- Blinking cursor to signal active generation. -->
+            <!-- Blinking cursor to signal active generation. Decoration only —
+                 muted ink so it stops competing with status/error colour
+                 (UI audit f-17). -->
             <span class="cursor" aria-hidden="true">▌</span>
           {/if}
         </div>
@@ -294,11 +333,12 @@
 <style>
   /*
     Riso conversation surface. Messages are not bubbles in the design — they
-    are short ink-coloured passages prefixed by an uppercased "WHO" eyebrow,
-    bordered with a single coloured rule on the left:
-      USER       → fluoro orange rule + faint orange wash
-      ASSISTANT  → ink rule + faint ink wash
-      TOOL       → dashed orange rule + transparent (mono type)
+    are short ink-coloured passages prefixed by an uppercased "WHO" label,
+    bordered with a single coloured rule:
+      ASSISTANT  → left ink rule + faint ink wash, left-aligned
+      USER       → right ink-orange rule + faint orange wash, right-aligned
+    Roles sit on opposite sides with mirrored borders so they read at a glance
+    even with colour off (UI audit f-23).
   */
 
   .message-display {
@@ -321,7 +361,7 @@
     justify-content: center;
     color: var(--ink-soft);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     line-height: 1;
     letter-spacing: 0.18em;
     text-transform: uppercase;
@@ -339,27 +379,26 @@
     gap: 4px;
   }
 
-  /* The "WHO" eyebrow sits above the bubble. We don't have a separate slot in
-     the markup, so the bubble's pseudo-element shows the role label.
-     User messages get the orange ink colour; assistant messages stay navy. */
+  /* User messages sit on the right; assistant messages on the left. The role
+     label and content both follow the side, so the border side mirrors too. */
+  .message.user {
+    align-items: flex-end;
+  }
 
-  .message::before {
+  /* The "WHO" label is real DOM text (UI audit f-14) — not a CSS ::before,
+     which screen readers expose inconsistently. */
+  .role-label {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     letter-spacing: 0.2em;
     text-transform: uppercase;
     color: var(--ink-soft);
   }
 
-  .message.user::before {
-    content: "You";
+  .role-label.user-label {
     color: var(--ink-orange);
-  }
-
-  .message.assistant::before {
-    content: "Assistant";
   }
 
   /* ---- Message content ---------------------------------------------------- */
@@ -369,7 +408,7 @@
     border-left: 3px solid var(--ink);
     background: rgba(14, 59, 102, 0.06);
     font-family: var(--font-body);
-    font-size: 13.5px;
+    font-size: var(--font-body-sm);
     line-height: 1.55;
     color: var(--ink);
     word-break: break-word;
@@ -382,12 +421,16 @@
 
   :global(body.display-density-comfortable) .message-content {
     padding: 14px 18px;
-    font-size: 14.5px;
+    font-size: var(--font-body-md);
     line-height: 1.7;
   }
 
+  /* Assistant: left rule, left-aligned (default above). */
   .user-content {
-    border-left-color: var(--ink-orange);
+    /* Mirror to the right side so user and assistant read as distinct roles
+       even with colour off (UI audit f-23). */
+    border-left: none;
+    border-right: 3px solid var(--ink-orange);
     background: rgba(240, 106, 58, 0.08);
     /* User-written text preserves manual line breaks. */
     white-space: pre-wrap;
@@ -404,15 +447,17 @@
     border: 1px solid var(--rule-soft);
     color: var(--ink-soft);
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: var(--font-meta);
     letter-spacing: 0.12em;
     text-transform: uppercase;
   }
 
   .assistant-content.interrupted {
-    /* Dashed orange rule replaces the solid ink rule when a turn was cut. */
+    /* Dashed error-coloured rule replaces the solid ink rule when a turn was
+       cut. Uses --error so an interrupted turn reads as trouble, not "another
+       orange thing" (UI audit f-17). */
     border-left-style: dashed;
-    border-left-color: var(--accent);
+    border-left-color: var(--error);
   }
 
   /* ---- Streaming cursor --------------------------------------------------- */
@@ -420,7 +465,9 @@
   .cursor {
     display: inline-block;
     animation: blink 1s step-start infinite;
-    color: var(--ink-orange);
+    /* Decoration drops to muted ink so it stops competing with status and
+       error colour (UI audit f-17). */
+    color: var(--ink-soft);
     font-family: var(--font-mono);
   }
 
@@ -435,10 +482,10 @@
     margin: 8px 0 0;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: var(--ink-orange);
+    color: var(--error);
   }
 
   /* ---- Inline retry chip -------------------------------------------------- */
@@ -450,10 +497,10 @@
     gap: 8px;
     padding: 6px 10px;
     background: var(--paper);
-    border: 1px solid var(--accent);
+    border: 1px solid var(--error);
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     line-height: 1;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -463,9 +510,9 @@
 
   .retry-mark {
     padding: 2px 6px;
-    background: var(--accent);
+    background: var(--error);
     color: var(--paper);
-    font-size: 9px;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
   }
 
@@ -474,7 +521,7 @@
     text-transform: none;
     font-family: var(--font-body);
     font-weight: 400;
-    font-size: 12px;
+    font-size: var(--font-label-md);
     letter-spacing: 0;
   }
 
@@ -486,14 +533,14 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: rgba(240, 106, 58, 0.1);
-    border-left: 3px solid var(--accent);
+    background: rgba(168, 50, 26, 0.1);
+    border-left: 3px solid var(--error);
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--ink-orange);
+    color: var(--error);
     max-width: 80ch;
   }
 
@@ -541,12 +588,14 @@
   }
 
   .markdown-body :global(code) {
+    /* Inline code is decoration, not status — drop off the orange family so it
+       stops competing with primary action and error colour (UI audit f-17). */
     font-family: var(--font-mono);
     font-size: 0.85em;
-    background: rgba(240, 106, 58, 0.12);
-    border: 1px solid rgba(240, 106, 58, 0.45);
+    background: var(--paper-deep);
+    border: 1px solid var(--rule-faint);
     padding: 0.05em 0.35em;
-    color: var(--ink-orange);
+    color: var(--ink);
   }
 
   .markdown-body :global(pre) {
@@ -568,7 +617,7 @@
   }
 
   .markdown-body :global(blockquote) {
-    border-left: 3px dashed var(--accent);
+    border-left: 3px dashed var(--rule-soft);
     margin: 0.5em 0;
     padding-left: 1em;
     color: var(--ink-soft);

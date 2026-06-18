@@ -297,6 +297,11 @@ export interface MessageView {
     | "awaiting_approval"
     | "delegating"
     | null;
+  // Model id that produced an assistant message, when the API carries it.
+  // Absent on user messages and on assistant messages whose model wasn't
+  // reported — the message surface renders no model chip in that case rather
+  // than a permanent "Model not reported" label (UI audit f-9).
+  model?: string | null;
   // Present on every message in the conversation API; empty when no tool calls
   // were recorded for that message. Kept optional here so local client-created
   // message objects do not need to synthesise it eagerly.
