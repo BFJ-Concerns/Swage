@@ -310,19 +310,24 @@ function setPath(path: string): void {
 
 /**
  * Open a bench from the picker. Swage lands on the bench picker on entry, so
- * tests that need a bench open must go through it. Double-clicking a card
- * triggers `openBench` in BenchPicker.
+ * tests that need a bench open must go through it. Clicking a card's Open
+ * button triggers `openBench` in BenchPicker.
  */
 async function openBenchFromPicker(name: string): Promise<void> {
   const card = Array.from(
-    document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+    document.querySelectorAll<HTMLElement>(".bench-card"),
   ).find((el) => el.textContent?.includes(name));
 
   if (!card) {
     throw new Error(`Bench card with name "${name}" not found in picker`);
   }
 
-  flushSync(() => card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  const openBtn = card.querySelector<HTMLButtonElement>(".open-btn");
+  if (!openBtn) {
+    throw new Error(`Open button missing on bench card "${name}"`);
+  }
+
+  flushSync(() => openBtn.click());
   await settleUi();
 }
 
@@ -612,10 +617,14 @@ describe("App", () => {
     await settleUi();
 
     const card = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+      document.querySelectorAll<HTMLElement>(".bench-card"),
     ).find((el) => el.textContent?.includes(defaultBench.name));
     expect(card).toBeDefined();
-    flushSync(() => card!.click());
+    // Preview/selection is triggered by the bench-name button, not the card
+    // container (UI audit f-2 — card is no longer a single interactive widget).
+    const nameBtn = card!.querySelector<HTMLButtonElement>(".bench-name-btn");
+    expect(nameBtn).toBeDefined();
+    flushSync(() => nameBtn!.click());
     await waitForText("Missing folder");
 
     const relinkInput = document.querySelector<HTMLInputElement>(
