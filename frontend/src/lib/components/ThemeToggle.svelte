@@ -18,10 +18,19 @@
 
   let { mode, onSelect }: Props = $props();
 
-  const options: Array<{ value: ThemeMode; label: string; title: string }> = [
-    { value: "light", label: "L", title: "Light (riso)" },
-    { value: "dark", label: "D", title: "Dark (cyanotype)" },
-    { value: "system", label: "S", title: "Follow system" },
+  // Each option pairs a glyph with a word so the visible label names the
+  // function, not the mechanism — and aria-label carries the same name into
+  // the a11y tree so it is announced reliably (title alone is not a dependable
+  // accessible name and never shows on touch). UI audit f-3.
+  const options: Array<{
+    value: ThemeMode;
+    glyph: string;
+    label: string;
+    ariaLabel: string;
+  }> = [
+    { value: "light", glyph: "☀", label: "Light", ariaLabel: "Light theme" },
+    { value: "dark", glyph: "☾", label: "Dark", ariaLabel: "Dark theme" },
+    { value: "system", glyph: "⌂", label: "System", ariaLabel: "Follow system theme" },
   ];
 </script>
 
@@ -32,17 +41,18 @@
       class="opt"
       class:active={mode === option.value}
       onclick={() => onSelect(option.value)}
-      title={option.title}
+      aria-label={option.ariaLabel}
       aria-pressed={mode === option.value}
     >
-      {option.label}
+      <span class="glyph" aria-hidden="true">{option.glyph}</span>
+      <span class="word">{option.label}</span>
     </button>
   {/each}
 </div>
 
 <style>
   /*
-    Three small mono squares matching the topbar's measurement vocabulary.
+    Three small mono segments matching the topbar's measurement vocabulary.
     Active state inverts to ink-on-paper without the orange offset (the
     toggle is a steady control — the offset is reserved for emphasis).
   */
@@ -53,7 +63,10 @@
   }
 
   .opt {
-    width: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 8px;
     height: 24px;
     background: transparent;
     color: inherit;
@@ -61,7 +74,7 @@
     border-right: 1px solid currentColor;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     line-height: 1;
     letter-spacing: 0.04em;
     cursor: pointer;
