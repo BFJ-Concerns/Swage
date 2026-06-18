@@ -466,7 +466,7 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Send a message to start.",
+      "Send a message below to start the conversation.",
     );
   });
 
