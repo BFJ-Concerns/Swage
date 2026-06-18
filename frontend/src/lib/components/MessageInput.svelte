@@ -125,18 +125,10 @@
     isolation: isolate;
   }
 
-  /* Translucent orange offset — the riso "second pass". */
-  .message-input::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border: 2px solid var(--accent);
-    transform: translate(var(--offset), var(--offset));
-    z-index: -1;
-    mix-blend-mode: var(--shadow-blend);
-    opacity: var(--shadow-opacity);
-    pointer-events: none;
-  }
+  /* The composer carries its presence through the 2px ink frame alone — no
+     riso offset shadow. The translucent orange offset is reserved for the
+     single active selection / primary action so it keeps meaning rather than
+     reading as texture on every always-on surface (UI audit f-18). */
 
   .message-input.disabled {
     opacity: 0.5;
