@@ -203,14 +203,20 @@
   <!-- Dedicated, throttled assistive status — see streamingStatus above. -->
   <div class="sr-only" aria-live="polite" aria-atomic="true">{streamingStatus}</div>
   {#if !hasConversation}
-    <!-- No active conversation — first-time user or sidebar empty state. -->
+    <!-- No active conversation — first-time user or sidebar empty state.
+         Three registers, not one: Bebas display for the headline (caps are
+         fine in display type), sentence-case body for the help copy, and
+         uppercase mono reserved for the small category label. UI audit f-10. -->
     <div class="empty-state">
-      <p>Select a conversation or start a new one.</p>
+      <p class="empty-headline">Nothing here yet</p>
+      <p class="empty-help">Pick a conversation from the list, or start a new one with the button above.</p>
+      <p class="empty-label">Empty · Conversation</p>
     </div>
   {:else if messages.length === 0 && !isStreaming}
     <!-- Conversation created but no messages exchanged yet. -->
     <div class="empty-state">
-      <p>Send a message to start.</p>
+      <p class="empty-headline">No messages</p>
+      <p class="empty-help">Send a message below to start the conversation.</p>
     </div>
   {:else}
     <!-- ---- Committed messages from conversation history ---- -->
@@ -353,22 +359,52 @@
   }
 
   /* ---- Empty state -------------------------------------------------------- */
+  /* Three registers (UI audit f-10): display headline carries the caps burden,
+     sentence-case body delivers the help, uppercase mono is reserved for the
+     small category label. The old all-caps-mono help copy hurt word-shape
+     recognition and was indistinguishable from a metadata label. */
 
   .empty-state {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 8px;
+    text-align: center;
+    color: var(--ink);
+    padding: 24px;
+  }
+
+  .empty-headline {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: var(--font-display-2);
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .empty-help {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: var(--font-body-sm);
+    line-height: 1.55;
     color: var(--ink-soft);
+    max-width: 34ch;
+  }
+
+  .empty-label {
+    margin: 6px 0 0;
     font-family: var(--font-mono);
-    font-size: var(--font-label-sm);
+    font-weight: 500;
+    font-size: var(--font-meta);
     line-height: 1;
     letter-spacing: 0.18em;
     text-transform: uppercase;
-  }
-
-  .empty-state p {
-    margin: 0;
+    color: var(--ink-soft);
   }
 
   /* ---- Message rows ------------------------------------------------------- */
