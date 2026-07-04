@@ -119,10 +119,9 @@ vi.mock("../lib/api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
   approvePendingAction: vi.fn(),
   rejectPendingAction: vi.fn(),
-  pauseScheduledJob: vi.fn(),
-  resumeScheduledJob: vi.fn(),
-  disableHeartbeat: vi.fn(),
-  enableHeartbeat: vi.fn(),
+  pauseSchedule: vi.fn(),
+  resumeSchedule: vi.fn(),
+  fetchScheduleRuns: vi.fn(),
 }));
 
 vi.mock("../lib/api/websocket", () => ({
@@ -211,8 +210,7 @@ function makeOperatorOverview(
       },
     ],
     approvals: [],
-    scheduled_jobs: { jobs: [] },
-    heartbeats: { heartbeats: [] },
+    schedules: { schedules: [] },
     channels: {
       channels: [
         {

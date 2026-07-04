@@ -13,8 +13,7 @@ vi.mock("../api/materials", () => ({
 vi.mock("../api/workflows", () => ({
   bytesToBase64: vi.fn(() => "encoded"),
   createAttachment: vi.fn(),
-  createHeartbeat: vi.fn(),
-  createScheduledJob: vi.fn(),
+  createSchedule: vi.fn(),
   exportRecoveryBundle: vi.fn(),
   fetchVoiceCapabilities: vi.fn(),
 }));
@@ -82,30 +81,29 @@ describe("WorkbenchOperations", () => {
       updated_at: "2026-01-01T00:00:00Z",
       archived_at: null,
     });
-    vi.mocked(workflowApi.createScheduledJob).mockResolvedValue({
-      id: "job-1",
-      session_id: "session-1",
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue({
+      id: "schedule-1",
       message: "Review the queue.",
       status: "active",
-      schedule: { kind: "interval", every: "1h" },
-      routing: {},
+      spec: { kind: "interval", every: "every 1 hours" },
+      session: { policy: "fresh", bench_id: "bench-1", agent_id: "gateway" },
+      routing: {
+        deliver_to_origin: false,
+        home_target: null,
+        explicit_targets: [],
+        store_local_output: true,
+      },
+      gate: null,
       next_run_at: null,
       last_run_at: null,
-    });
-    vi.mocked(workflowApi.createHeartbeat).mockResolvedValue({
-      id: "heartbeat-1",
-      session_id: "session-1",
-      message: "Check status.",
-      status: "enabled",
-      interval_seconds: 60,
-      next_beat_at: null,
-      last_beat_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
     });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({
       version: 1,
       benches: [{}],
       sessions: [{}, {}],
-      scheduled_jobs: [],
+      schedules: [],
     });
     vi.mocked(workflowApi.createAttachment).mockResolvedValue({
       attachment: {
@@ -208,7 +206,7 @@ describe("WorkbenchOperations", () => {
     });
   });
 
-  it("creates scheduled work for the active conversation", async () => {
+  it("creates a fresh-session schedule with a gate", async () => {
     component = mount(WorkbenchOperations, {
       target: document.body,
       props: {
@@ -219,17 +217,28 @@ describe("WorkbenchOperations", () => {
     await flushUi();
 
     setFieldValue(textareaByPlaceholder("Run the review checklist."), "Review the queue.");
+    const gateToggle = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (!gateToggle) throw new Error("missing gate toggle");
+    gateToggle.click();
+    await flushUi();
+    setFieldValue(inputByPlaceholder("model id or alias"), "cheap");
+    setFieldValue(
+      textareaByPlaceholder("Only when there is something new to act on."),
+      "Only when the queue is non-empty.",
+    );
     clickButton("Schedule");
     await flushUi();
 
-    expect(workflowApi.createScheduledJob).toHaveBeenCalledWith({
-      session_id: "session-1",
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith({
       message: "Review the queue.",
-      schedule: { kind: "interval", every: "1h" },
+      spec: { kind: "interval", every: "every 1 hours" },
+      session: { policy: "fresh", bench_id: "bench-1", agent_id: "gateway" },
+      routing: null,
+      gate: { model: "cheap", criteria: "Only when the queue is non-empty." },
     });
   });
 
-  it("creates a heartbeat for the active conversation", async () => {
+  it("creates a continuation schedule against the active conversation", async () => {
     component = mount(WorkbenchOperations, {
       target: document.body,
       props: {
@@ -239,17 +248,18 @@ describe("WorkbenchOperations", () => {
     });
     await flushUi();
 
-    setFieldValue(
-      textareaByPlaceholder("Check whether anything needs operator attention."),
-      "Check status.",
-    );
-    clickButton("Start heartbeat");
+    setFieldValue(textareaByPlaceholder("Run the review checklist."), "Check status.");
+    clickButton("This conversation");
+    await flushUi();
+    clickButton("Schedule");
     await flushUi();
 
-    expect(workflowApi.createHeartbeat).toHaveBeenCalledWith({
-      session_id: "session-1",
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith({
       message: "Check status.",
-      interval_seconds: 900,
+      spec: { kind: "interval", every: "every 1 hours" },
+      session: { policy: "continuation", session_id: "session-1" },
+      routing: null,
+      gate: null,
     });
   });
 

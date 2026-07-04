@@ -164,8 +164,7 @@ function createMockGateway() {
           has_running_turn: false,
         })),
         approvals: [],
-        scheduled_jobs: { jobs: [] },
-        heartbeats: { heartbeats: [] },
+        schedules: { schedules: [] },
         channels: { channels: [] },
         nodes: [],
       });
@@ -191,8 +190,7 @@ function createMockGateway() {
         secrets: [],
         channel_links: [],
         execution_hosts: [],
-        scheduled_jobs: [],
-        heartbeats: [],
+        schedules: [],
       });
       return;
     }

@@ -179,8 +179,7 @@
       ["secrets", recoveryExport.secrets],
       ["channels", recoveryExport.channel_links],
       ["nodes", recoveryExport.execution_hosts],
-      ["jobs", recoveryExport.scheduled_jobs],
-      ["heartbeats", recoveryExport.heartbeats],
+      ["schedules", recoveryExport.schedules],
     ];
     return counts.map(([label, value]) => `${label}: ${value}`).join(" · ");
   }
