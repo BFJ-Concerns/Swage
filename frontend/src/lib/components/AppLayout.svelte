@@ -610,7 +610,11 @@
     {#if settingsBenchSlug}
       <BenchSettingsPage bench={settingsBench} tab={settingsBenchTab ?? "overview"} />
     {:else if settingsTab}
-      <SettingsPage tab={settingsTab} />
+      <SettingsPage
+        tab={settingsTab}
+        benchId={currentBench?.id ?? null}
+        sessionId={activeConversation?.id ?? null}
+      />
     {:else if !currentBench}
       <!-- Bench picker view: full card grid with two-stage selection. -->
       <BenchPicker

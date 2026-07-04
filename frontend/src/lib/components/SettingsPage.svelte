@@ -19,6 +19,7 @@
   } from "../display-preferences";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import { downloadRecoveryExport, exportRecoveryBundle, listRecoveryExports } from "../api/workflows";
+  import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RecoveryExportSummary, RequireApprovalEntry, SettingsResponse } from "../types";
 
   // Only providers, generation, automation, and recovery have working
@@ -37,9 +38,11 @@
 
   interface Props {
     tab?: SettingsTabId;
+    benchId?: string | null;
+    sessionId?: string | null;
   }
 
-  let { tab = "providers" }: Props = $props();
+  let { tab = "providers", benchId = null, sessionId = null }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
   // returns a fresh server snapshot which we replace it with. Null until the
@@ -1425,6 +1428,15 @@
         </div>
       {/if}
     {:else if tab === "automation"}
+      <div class="field">
+        <div class="key">
+          Schedules
+          <small>Create and operate durable scheduled agent work. Reachable here on a fresh install, before the builder surfaces have context.</small>
+        </div>
+        <div class="val">
+          <ScheduleAutomationPanel {benchId} {sessionId} />
+        </div>
+      </div>
       <div class="field">
         <div class="key">
           Sandbox

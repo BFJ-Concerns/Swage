@@ -1,5 +1,7 @@
 import type { OperatorOverview } from "../types";
+import type { ScheduleListResponse } from "../protocol/ScheduleListResponse";
 import type { ScheduleRunListResponse } from "../protocol/ScheduleRunListResponse";
+import type { TriggerScheduleResponse } from "../protocol/TriggerScheduleResponse";
 
 let baseUrl = "";
 
@@ -53,6 +55,18 @@ export async function rejectPendingAction(
     decision: "rejected",
     reason,
   });
+}
+
+export async function listSchedules(): Promise<ScheduleListResponse> {
+  const response = await request("/api/schedules", "GET");
+  return response.json() as Promise<ScheduleListResponse>;
+}
+
+export async function triggerSchedule(
+  scheduleId: string,
+): Promise<TriggerScheduleResponse> {
+  const response = await request(`/api/schedules/${scheduleId}/trigger`, "POST");
+  return response.json() as Promise<TriggerScheduleResponse>;
 }
 
 export async function pauseSchedule(scheduleId: string): Promise<void> {
