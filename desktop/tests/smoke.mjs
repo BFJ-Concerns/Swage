@@ -386,8 +386,8 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  await page.getByRole("button", { name: /default/i }).click();
-  await page.getByRole("button", { name: "Open bench", exact: true }).click();
+  await page.getByRole("button", { name: /preview bench default/i }).click();
+  await page.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page
