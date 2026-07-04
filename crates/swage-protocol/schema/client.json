@@ -292,6 +292,38 @@
         "updated_at"
       ]
     },
+    "ScheduleGateUpdate": {
+      "description": "How an update touches a schedule's gate.\n\nA gate is an optional field, and clearing an optional field over the\nwire needs a value distinct from \"leave unchanged\". So the gate slot on\nan update is itself optional: absent leaves the gate as it stands, while\na present value is one of these two actions.",
+      "oneOf": [
+        {
+          "description": "Install this gate, replacing any existing one.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "set"
+            }
+          },
+          "$ref": "#/$defs/GateConfig",
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Remove the gate entirely.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "clear"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        }
+      ]
+    },
     "ScheduleListResponse": {
       "type": "object",
       "properties": {
@@ -597,10 +629,10 @@
       "type": "object",
       "properties": {
         "gate": {
-          "description": "Replaces the gate when present.",
+          "description": "Set or clear the gate. Absent leaves the existing gate untouched.",
           "anyOf": [
             {
-              "$ref": "#/$defs/GateConfig"
+              "$ref": "#/$defs/ScheduleGateUpdate"
             },
             {
               "type": "null"
@@ -614,11 +646,6 @@
             "null"
           ],
           "default": null
-        },
-        "remove_gate": {
-          "description": "Removes the gate entirely. Wins over `gate` if both are supplied.",
-          "type": "boolean",
-          "default": false
         },
         "routing": {
           "anyOf": [

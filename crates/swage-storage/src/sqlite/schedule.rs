@@ -396,17 +396,31 @@ impl ScheduleStore for SqliteStorage {
             let now = Utc::now();
             let created_at = now.to_rfc3339();
             let scheduled_for = serialise_optional_dt(run.scheduled_for);
+            let state = run.state.to_string();
+            let skip_reason = run.skip_reason.map(|reason| reason.to_string());
+            // A run born terminal (an overlap skip) is complete the moment it
+            // is recorded; a pending run has not finished.
+            let completed_at = matches!(
+                run.state,
+                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+            )
+            .then(|| now.to_rfc3339());
 
             conn.execute(
                 "INSERT INTO schedule_runs
-                 (id, schedule_id, trigger_kind, state, scheduled_for, created_at)
-                 VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
+                 (id, schedule_id, trigger_kind, state, skip_reason, scheduled_for,
+                  error_message, created_at, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     id.to_string(),
                     run.schedule_id.to_string(),
                     run.trigger.to_string(),
+                    &state,
+                    &skip_reason,
                     &scheduled_for,
+                    &run.error_message,
                     &created_at,
+                    &completed_at,
                 ],
             )?;
 
@@ -414,17 +428,17 @@ impl ScheduleStore for SqliteStorage {
                 id,
                 schedule_id: run.schedule_id,
                 trigger: run.trigger,
-                state: ScheduleRunState::Pending,
-                skip_reason: None,
+                state: run.state,
+                skip_reason: run.skip_reason,
                 scheduled_for: run.scheduled_for,
                 session_id: None,
                 turn_id: None,
                 gate: None,
                 output_text: None,
-                error_message: None,
+                error_message: run.error_message,
                 created_at: now,
                 started_at: None,
-                completed_at: None,
+                completed_at: completed_at.as_deref().map(parse_dt).transpose()?,
             })
         })
         .await
@@ -453,19 +467,6 @@ impl ScheduleStore for SqliteStorage {
             ))?;
             let rows = stmt.query_map(params![schedule_id.to_string()], row_to_schedule_run)?;
             rows.collect()
-        })
-        .await
-    }
-
-    async fn has_unfinished_schedule_run(&self, schedule_id: Uuid) -> Result<bool, StorageError> {
-        self.with_conn(move |conn| {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM schedule_runs
-                 WHERE schedule_id = ?1 AND state IN ('pending', 'running')",
-                params![schedule_id.to_string()],
-                |row| row.get(0),
-            )?;
-            Ok(count > 0)
         })
         .await
     }
@@ -712,11 +713,11 @@ mod tests {
             .await
             .unwrap();
         let run = storage
-            .create_schedule_run(NewScheduleRun {
-                schedule_id: schedule.id,
-                trigger: ScheduleRunTrigger::Tick,
-                scheduled_for: Some(Utc::now()),
-            })
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
             .await
             .unwrap();
         assert_eq!(run.state, ScheduleRunState::Pending);
@@ -753,37 +754,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unfinished_run_detection_sees_pending_and_running_only() {
+    async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
         let (storage, bench_id, _) = make_storage_with_session().await;
         let schedule = storage
             .create_schedule(fresh_schedule(bench_id))
             .await
             .unwrap();
-        assert!(
-            !storage
-                .has_unfinished_schedule_run(schedule.id)
-                .await
-                .unwrap()
-        );
 
-        let run = storage
-            .create_schedule_run(NewScheduleRun {
-                schedule_id: schedule.id,
-                trigger: ScheduleRunTrigger::Tick,
-                scheduled_for: None,
-            })
+        // The first pending run claims the schedule's one in-flight slot.
+        let first = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
             .await
             .unwrap();
+
+        // A second in-flight run for the same schedule is refused by the
+        // partial unique index — the insert *is* the overlap check.
+        let clash = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await;
         assert!(
-            storage
-                .has_unfinished_schedule_run(schedule.id)
-                .await
-                .unwrap()
+            matches!(clash, Err(StorageError::ConstraintViolation(_))),
+            "a second in-flight run must trip the guard, got {clash:?}"
         );
 
+        // A run born terminal (an overlap skip) sits outside the predicate,
+        // so it coexists with the live run freely.
+        storage
+            .create_schedule_run(NewScheduleRun::skipped_overlap(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+                "a previous run of this schedule was still in flight",
+            ))
+            .await
+            .unwrap();
+
+        // Once the first run finishes, the slot frees and a fresh run inserts.
         storage
             .update_schedule_run(
-                run.id,
+                first.id,
                 ScheduleRunUpdate {
                     state: Some(ScheduleRunState::Completed),
                     output_text: Some("done".into()),
@@ -792,28 +809,58 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            !storage
-                .has_unfinished_schedule_run(schedule.id)
-                .await
-                .unwrap()
-        );
+        storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .expect("a new run inserts once the slot is free");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_fails_incomplete_runs_and_leaves_finished_ones() {
         let (storage, bench_id, _) = make_storage_with_session().await;
-        let schedule = storage
+        // Incomplete runs land on separate schedules: the one-in-flight
+        // guard forbids two non-terminal runs on a single schedule, and
+        // recovery sweeps them across the whole table regardless.
+        let schedule_a = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+        let schedule_b = storage
             .create_schedule(fresh_schedule(bench_id))
             .await
             .unwrap();
 
+        // A finished run first, so it frees schedule A's slot for the
+        // still-running run that follows.
+        let completed = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_a.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                completed.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Completed),
+                    output_text: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let running = storage
-            .create_schedule_run(NewScheduleRun {
-                schedule_id: schedule.id,
-                trigger: ScheduleRunTrigger::Tick,
-                scheduled_for: Some(Utc::now()),
-            })
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_a.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
             .await
             .unwrap();
         storage
@@ -828,30 +875,11 @@ mod tests {
             .await
             .unwrap();
         let pending = storage
-            .create_schedule_run(NewScheduleRun {
-                schedule_id: schedule.id,
-                trigger: ScheduleRunTrigger::Tick,
-                scheduled_for: Some(Utc::now()),
-            })
-            .await
-            .unwrap();
-        let completed = storage
-            .create_schedule_run(NewScheduleRun {
-                schedule_id: schedule.id,
-                trigger: ScheduleRunTrigger::Manual,
-                scheduled_for: None,
-            })
-            .await
-            .unwrap();
-        storage
-            .update_schedule_run(
-                completed.id,
-                ScheduleRunUpdate {
-                    state: Some(ScheduleRunState::Completed),
-                    output_text: Some("done".into()),
-                    ..Default::default()
-                },
-            )
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_b.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
             .await
             .unwrap();
 

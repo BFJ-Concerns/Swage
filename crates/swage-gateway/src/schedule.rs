@@ -130,6 +130,32 @@ impl ParsedSpec {
         }
     }
 
+    /// Compute the armed lifecycle state for this spec as of `now`: the
+    /// status the schedule should carry and its next fire time.
+    ///
+    /// This is the one place that decides whether a spec is live or spent,
+    /// and it is deliberately shared by resume and update so both honour the
+    /// same one-shot contract:
+    ///
+    /// - A future occurrence arms the schedule `Active` to fire then. For a
+    ///   one-shot that means a moment still ahead; for an interval or cron,
+    ///   the next computed occurrence (always ahead).
+    /// - No occurrence, or a one-shot whose moment already lies in the past,
+    ///   completes the schedule *without firing*. This is the pre-unification
+    ///   one-shot semantics: a moment missed while paused is completed
+    ///   deliberately and shown in status, never fired late as a surprise.
+    ///
+    /// Because a one-shot only reaches the past by having fired or by having
+    /// its moment lapse, "future moment" and "never fired" coincide — so a
+    /// fired one-shot never re-arms here, and only a *new* future moment
+    /// (via update) can revive it.
+    fn arm(&self, now: DateTime<Utc>) -> (ScheduleStatus, Option<DateTime<Utc>>) {
+        match self.initial_next_run_at(now) {
+            Some(next) if next > now => (ScheduleStatus::Active, Some(next)),
+            _ => (ScheduleStatus::Completed, None),
+        }
+    }
+
     fn into_spec(self) -> wire::ScheduleSpec {
         match self {
             ParsedSpec::OneShot { at } => wire::ScheduleSpec::OneShot {
@@ -241,13 +267,24 @@ pub async fn update_schedule(
     if let Some(routing) = &request.routing {
         let _ = resolve_delivery_targets(None, routing.clone())?;
     }
-    if let Some(gate) = &request.gate {
+    if let Some(wire::ScheduleGateUpdate::Set(gate)) = &request.gate {
         validate_gate(state, gate)?;
     }
-    let gate = if request.remove_gate {
-        Some(None)
-    } else {
-        request.gate.map(Some)
+    // Fold the wire tri-state into the storage tri-state: absent leaves the
+    // gate unchanged, `Set` installs it, `Clear` removes it.
+    let gate = request.gate.map(|update| match update {
+        wire::ScheduleGateUpdate::Set(gate) => Some(gate),
+        wire::ScheduleGateUpdate::Clear => None,
+    });
+
+    // Re-arm from the new spec. Recomputing status alongside next_run_at is
+    // what lets an update revive a `completed` schedule (a one-shot given a
+    // future moment fires again); see `ParsedSpec::arm`. A paused schedule
+    // stays paused through an edit — resume is what re-arms it — so its
+    // lifecycle is left untouched here.
+    let armed = match existing.status {
+        ScheduleStatus::Paused => None,
+        _ => parsed.as_ref().map(|spec| spec.arm(now)),
     };
 
     let updated = state
@@ -256,14 +293,12 @@ pub async fn update_schedule(
             schedule_id,
             UpdateSchedule {
                 message: request.message,
+                status: armed.map(|(status, _)| status),
                 kind: parsed.as_ref().map(ParsedSpec::kind),
                 expression: parsed.as_ref().map(ParsedSpec::expression),
                 delivery_routing: request.routing.as_ref().map(routing_to_value).transpose()?,
                 gate,
-                next_run_at: parsed.as_ref().map(|spec| match existing.status {
-                    ScheduleStatus::Completed => None,
-                    _ => spec.initial_next_run_at(now),
-                }),
+                next_run_at: armed.map(|(_, next_run_at)| next_run_at),
                 ..Default::default()
             },
         )
@@ -289,18 +324,20 @@ pub async fn pause_schedule(
     map_schedule(updated)
 }
 
+/// Resume a paused schedule, re-arming it from its stored spec.
+///
+/// The one-shot contract lives in [`ParsedSpec::arm`]: a paused one-shot
+/// whose moment is still ahead resumes `Active` and fires at that moment; a
+/// one-shot whose moment passed while paused (or that had already fired)
+/// resumes `Completed` without firing. Recurring schedules resume to their
+/// next occurrence.
 pub async fn resume_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
     let existing = get_schedule(state, schedule_id).await?;
     let parsed = ParsedSpec::parse_stored(existing.kind, &existing.expression)?;
-    let next_run_at = parsed.next_run_after(Utc::now());
-    let status = if next_run_at.is_some() {
-        ScheduleStatus::Active
-    } else {
-        ScheduleStatus::Completed
-    };
+    let (status, next_run_at) = parsed.arm(Utc::now());
     let updated = state
         .storage
         .update_schedule(
@@ -476,70 +513,124 @@ pub fn spawn_schedule_loop_until_cancelled(
 // Run execution
 // ---------------------------------------------------------------------------
 
+/// The terminal shape a run's body reaches: either it executed and
+/// produced output, or it deliberately did not run.
+enum RunOutcome {
+    Completed {
+        output: String,
+    },
+    /// Gated out, or the target session was busy. `message` records a clean,
+    /// human-readable cause on the run row (gate skips leave it to the
+    /// recorded gate decision instead).
+    Skipped {
+        reason: SkipReason,
+        gate: Option<GateDecision>,
+        message: Option<String>,
+    },
+}
+
+/// A run-body failure carried to the single catch point: the message to
+/// record, plus any output the turn produced before a later step (delivery)
+/// failed — that output stays on the failed run row.
+struct RunFailure {
+    message: String,
+    output: Option<String>,
+}
+
+impl From<GatewayError> for RunFailure {
+    fn from(error: GatewayError) -> Self {
+        Self {
+            message: error.to_string(),
+            output: None,
+        }
+    }
+}
+
+impl From<swage_core::StorageError> for RunFailure {
+    fn from(error: swage_core::StorageError) -> Self {
+        Self {
+            message: error.to_string(),
+            output: None,
+        }
+    }
+}
+
 /// Drive one run of a schedule from creation to a terminal state.
 ///
-/// The run row is created first and every subsequent decision — overlap
-/// skip, gate verdict, session, turn, output, failure — is written onto
-/// it, so a crash at any point leaves a reconstructable record (startup
-/// recovery fails whatever was left pending/running).
+/// The pending-run insert is the overlap check (a partial unique index
+/// admits one non-terminal run per schedule); losing that race records a
+/// terminal overlap skip. Past that point a run row exists, and a single
+/// catch guarantees it reaches a terminal state on every exit — completed,
+/// skipped, or failed with any output it managed to produce. The returned
+/// run *is* the outcome: a failure lives on the row, not in an `Err`, so a
+/// manual trigger returns the failed run and the tick loop simply moves on.
 async fn execute_schedule(
     state: &AppState,
     schedule: &Schedule,
     trigger: ScheduleRunTrigger,
     scheduled_for: Option<DateTime<Utc>>,
 ) -> Result<ScheduleRun, GatewayError> {
-    // Overlap check happens before this run's own row exists, so it only
-    // sees predecessors (a manual trigger racing the tick loop, or a run
-    // that outlived its interval).
-    let overlapped = state
+    let run = match state
         .storage
-        .has_unfinished_schedule_run(schedule.id)
-        .await?;
+        .create_schedule_run(NewScheduleRun::pending(schedule.id, trigger, scheduled_for))
+        .await
+    {
+        Ok(run) => run,
+        // The one-in-flight index rejected the insert: a predecessor is
+        // still running (a manual trigger racing the tick, or another manual
+        // trigger). Record the skip terminally with a clean message — never
+        // the raw constraint error — rather than executing over the top.
+        Err(swage_core::StorageError::ConstraintViolation(_)) => {
+            return record_overlap_skip(state, schedule, trigger, scheduled_for).await;
+        }
+        Err(error) => return Err(error.into()),
+    };
 
-    let run = state
-        .storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger,
-            scheduled_for,
-        })
-        .await?;
-
-    if overlapped {
-        return skip_run(state, schedule, run.id, SkipReason::Overlap, None).await;
+    match run_body(state, schedule, &run).await {
+        Ok(RunOutcome::Completed { output }) => complete_run(state, run.id, output).await,
+        Ok(RunOutcome::Skipped {
+            reason,
+            gate,
+            message,
+        }) => skip_run(state, schedule, run.id, reason, gate, message).await,
+        Err(RunFailure { message, output }) => {
+            fail_run(state, schedule, run.id, message, output).await
+        }
     }
+}
 
+/// Everything between a fresh pending run and its terminal outcome: gate
+/// check, session resolution, turn creation, turn execution, delivery. Every
+/// fallible step propagates its error as a [`RunFailure`] to the single
+/// catch in [`execute_schedule`]; the one non-failure exit is a busy
+/// session, which is a deliberate overlap skip.
+async fn run_body(
+    state: &AppState,
+    schedule: &Schedule,
+    run: &ScheduleRun,
+) -> Result<RunOutcome, RunFailure> {
     // The previous outcome feeds both the gate and fresh-session context.
     let previous_outcome = previous_run_outcome(state, schedule.id).await?;
 
     if let Some(gate) = &schedule.gate {
-        let decision =
-            match run_gate_check(state, schedule, gate, previous_outcome.as_deref()).await {
-                Ok(decision) => decision,
-                Err(error) => {
-                    // Fail closed: an unreachable gate fails the run visibly
-                    // rather than silently waking the main model. The next
-                    // occurrence tries again.
-                    let message = format!("gate check failed: {error}");
-                    state
-                        .storage
-                        .update_schedule_run(
-                            run.id,
-                            ScheduleRunUpdate {
-                                state: Some(ScheduleRunState::Failed),
-                                error_message: Some(message.clone()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    return Err(GatewayError::ValidationError(message));
-                }
-            };
+        let decision = run_gate_check(state, schedule, gate, previous_outcome.as_deref())
+            .await
+            .map_err(|error| RunFailure {
+                // Fail closed: an unreachable gate fails the run visibly
+                // rather than silently waking the main model. The next
+                // occurrence tries again.
+                message: format!("gate check failed: {error}"),
+                output: None,
+            })?;
 
         record_gate_decision(state, schedule, run.id, &decision).await?;
 
         if decision.verdict == GateVerdict::Skip {
-            return skip_run(state, schedule, run.id, SkipReason::Gate, Some(decision)).await;
+            return Ok(RunOutcome::Skipped {
+                reason: SkipReason::Gate,
+                gate: Some(decision),
+                message: None,
+            });
         }
         state
             .storage
@@ -591,26 +682,18 @@ async fn execute_schedule(
             .await
         {
             Ok(turn_id) => turn_id,
-            // The session is busy with another turn (a user's, or another
-            // automation's). That is an overlap in fact if not in name:
-            // skip deliberately instead of stumbling into a failure.
+            // The target session is busy with another turn — a user's, or
+            // another automation that won the atomic turn guard on a shared
+            // continuation session. Overlap in fact if not in name: skip
+            // deliberately instead of stumbling into a failure.
             Err(GatewayError::TurnInProgress { .. }) => {
-                return skip_run(state, schedule, run.id, SkipReason::Overlap, None).await;
+                return Ok(RunOutcome::Skipped {
+                    reason: SkipReason::Overlap,
+                    gate: None,
+                    message: Some("the target session was busy with another turn".into()),
+                });
             }
-            Err(error) => {
-                state
-                    .storage
-                    .update_schedule_run(
-                        run.id,
-                        ScheduleRunUpdate {
-                            state: Some(ScheduleRunState::Failed),
-                            error_message: Some(error.to_string()),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                return Err(error);
-            }
+            Err(error) => return Err(error.into()),
         };
     state
         .storage
@@ -624,58 +707,101 @@ async fn execute_schedule(
         )
         .await?;
 
-    match crate::automated_turn::run_placeholder_turn(state, session_id, &input, turn_id).await {
-        Ok(output_text) => {
-            // A delivery failure must still land the run in a terminal
-            // state — the output is preserved on the run either way.
-            match deliver_run_output(state, schedule, session_id, &output_text).await {
-                Ok(()) => {
-                    state
-                        .storage
-                        .update_schedule_run(
-                            run.id,
-                            ScheduleRunUpdate {
-                                state: Some(ScheduleRunState::Completed),
-                                output_text: Some(output_text),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                }
-                Err(error) => {
-                    state
-                        .storage
-                        .update_schedule_run(
-                            run.id,
-                            ScheduleRunUpdate {
-                                state: Some(ScheduleRunState::Failed),
-                                output_text: Some(output_text),
-                                error_message: Some(format!("delivery failed: {error}")),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    return Err(error);
-                }
-            }
-        }
-        Err(error) => {
-            state
-                .storage
-                .update_schedule_run(
-                    run.id,
-                    ScheduleRunUpdate {
-                        state: Some(ScheduleRunState::Failed),
-                        error_message: Some(error.to_string()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            return Err(error);
-        }
-    }
+    let output =
+        crate::automated_turn::run_placeholder_turn(state, session_id, &input, turn_id).await?;
 
+    // Delivery runs after a successful turn: a failure here still fails the
+    // run, but the output the turn produced is preserved on the row.
+    deliver_run_output(state, schedule, session_id, &output)
+        .await
+        .map_err(|error| RunFailure {
+            message: format!("delivery failed: {error}"),
+            output: Some(output.clone()),
+        })?;
+
+    Ok(RunOutcome::Completed { output })
+}
+
+/// Record a run that never executes because a predecessor still holds the
+/// schedule's one in-flight slot. Inserted straight into its terminal
+/// skipped state with a clean message — never a raw constraint error — plus
+/// an explicit audit event, since no state transition fired the audit
+/// trigger for a row that was born terminal.
+async fn record_overlap_skip(
+    state: &AppState,
+    schedule: &Schedule,
+    trigger: ScheduleRunTrigger,
+    scheduled_for: Option<DateTime<Utc>>,
+) -> Result<ScheduleRun, GatewayError> {
+    const MESSAGE: &str = "a previous run of this schedule was still in flight";
+    let run = state
+        .storage
+        .create_schedule_run(NewScheduleRun::skipped_overlap(
+            schedule.id,
+            trigger,
+            scheduled_for,
+            MESSAGE,
+        ))
+        .await?;
+    record_overlap_audit(state, schedule, run.id, MESSAGE).await?;
+    tracing::info!(
+        schedule_id = %schedule.id,
+        run_id = %run.id,
+        reason = %SkipReason::Overlap,
+        "schedule run skipped"
+    );
     fetch_run(state, run.id).await
+}
+
+/// Mark a completed run and return the recorded row.
+async fn complete_run(
+    state: &AppState,
+    run_id: Uuid,
+    output: String,
+) -> Result<ScheduleRun, GatewayError> {
+    state
+        .storage
+        .update_schedule_run(
+            run_id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Completed),
+                output_text: Some(output),
+                ..Default::default()
+            },
+        )
+        .await?;
+    fetch_run(state, run_id).await
+}
+
+/// Land a run terminally failed — preserving any output produced before the
+/// failure — and return the recorded row. The failure lives on the run, not
+/// in an `Err`: a manual trigger returns the failed run, and the tick loop
+/// moves on to the next schedule.
+async fn fail_run(
+    state: &AppState,
+    schedule: &Schedule,
+    run_id: Uuid,
+    message: String,
+    output: Option<String>,
+) -> Result<ScheduleRun, GatewayError> {
+    state
+        .storage
+        .update_schedule_run(
+            run_id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Failed),
+                error_message: Some(message),
+                output_text: output,
+                ..Default::default()
+            },
+        )
+        .await?;
+    tracing::warn!(
+        schedule_id = %schedule.id,
+        run_id = %run_id,
+        "schedule run failed"
+    );
+    fetch_run(state, run_id).await
 }
 
 async fn deliver_run_output(
@@ -698,6 +824,7 @@ async fn skip_run(
     run_id: Uuid,
     reason: SkipReason,
     gate: Option<GateDecision>,
+    message: Option<String>,
 ) -> Result<ScheduleRun, GatewayError> {
     state
         .storage
@@ -707,6 +834,7 @@ async fn skip_run(
                 state: Some(ScheduleRunState::Skipped),
                 skip_reason: Some(reason),
                 gate,
+                error_message: message,
                 ..Default::default()
             },
         )
@@ -718,6 +846,33 @@ async fn skip_run(
         "schedule run skipped"
     );
     fetch_run(state, run_id).await
+}
+
+/// Overlap skips inserted straight into a terminal state never trip the
+/// audit trigger (which fires on state *transitions*), so they get an
+/// explicit audit event — the same pattern the gate decision uses.
+async fn record_overlap_audit(
+    state: &AppState,
+    schedule: &Schedule,
+    run_id: Uuid,
+    cause: &str,
+) -> Result<(), GatewayError> {
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "schedule_run".into(),
+            entity_id: run_id.to_string(),
+            event_kind: "overlap_skip".into(),
+            summary: "schedule run skipped: a previous run was still in flight".into(),
+            metadata: serde_json::json!({
+                "schedule_id": schedule.id,
+                "cause": cause,
+            }),
+        })
+        .await?;
+    Ok(())
 }
 
 async fn fetch_run(state: &AppState, run_id: Uuid) -> Result<ScheduleRun, GatewayError> {

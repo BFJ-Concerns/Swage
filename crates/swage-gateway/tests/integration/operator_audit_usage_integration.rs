@@ -197,11 +197,11 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         .await
         .unwrap();
     let schedule_run = storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger: ScheduleRunTrigger::Manual,
-            scheduled_for: None,
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Manual,
+            None,
+        ))
         .await
         .unwrap();
     storage
@@ -434,11 +434,11 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
         .await
         .unwrap();
     let run = storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: None,
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Tick,
+            None,
+        ))
         .await
         .unwrap();
     storage
@@ -624,11 +624,11 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
         .await
         .unwrap();
     let usage_run = storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger: ScheduleRunTrigger::Manual,
-            scheduled_for: None,
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Manual,
+            None,
+        ))
         .await
         .unwrap();
     storage

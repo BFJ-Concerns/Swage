@@ -824,12 +824,6 @@ pub trait ScheduleStore: Send + Sync {
     async fn list_schedule_runs(&self, schedule_id: Uuid)
     -> Result<Vec<ScheduleRun>, StorageError>;
 
-    /// Whether the schedule has a run that is still pending or running.
-    ///
-    /// The overlap check: a due run that finds an unfinished predecessor
-    /// is skipped and recorded rather than raced.
-    async fn has_unfinished_schedule_run(&self, schedule_id: Uuid) -> Result<bool, StorageError>;
-
     async fn update_schedule_run(
         &self,
         id: Uuid,
@@ -1816,9 +1810,6 @@ mod tests {
             unimplemented!()
         }
         async fn list_schedule_runs(&self, _: Uuid) -> Result<Vec<ScheduleRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn has_unfinished_schedule_run(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn update_schedule_run(

@@ -21,7 +21,6 @@ use super::delivery::DeliveryRoutingRequest;
 ///   `cron` crate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export)]
 pub enum ScheduleSpec {
     OneShot { at: String },
     Interval { every: String },
@@ -37,7 +36,6 @@ pub enum ScheduleSpec {
 ///   whatever agent that session has at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
-#[ts(export)]
 pub enum SessionPolicy {
     Fresh { bench_id: Uuid, agent_id: String },
     Continuation { session_id: Uuid },
@@ -49,7 +47,6 @@ pub enum SessionPolicy {
 /// and the previous run's outcome, then verdicts `run` or `skip`. Its
 /// decision and reasoning are recorded on the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct GateConfig {
     /// Model id or alias from the configured model catalogue.
     pub model: String,
@@ -59,10 +56,24 @@ pub struct GateConfig {
     pub criteria: Option<String>,
 }
 
+/// How an update touches a schedule's gate.
+///
+/// A gate is an optional field, and clearing an optional field over the
+/// wire needs a value distinct from "leave unchanged". So the gate slot on
+/// an update is itself optional: absent leaves the gate as it stands, while
+/// a present value is one of these two actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ScheduleGateUpdate {
+    /// Install this gate, replacing any existing one.
+    Set(GateConfig),
+    /// Remove the gate entirely.
+    Clear,
+}
+
 /// Lifecycle status of a schedule definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum ScheduleStatus {
     Active,
     Paused,
@@ -74,7 +85,6 @@ pub enum ScheduleStatus {
 /// What caused a run to be created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum ScheduleRunTrigger {
     /// The scheduler's clock reached the schedule's next occurrence.
     Tick,
@@ -85,7 +95,6 @@ pub enum ScheduleRunTrigger {
 /// Lifecycle state of a recorded run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum ScheduleRunState {
     Pending,
     Running,
@@ -98,7 +107,6 @@ pub enum ScheduleRunState {
 /// Why a run was skipped rather than executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum SkipReason {
     /// The gate model decided no work was needed.
     Gate,
@@ -110,7 +118,6 @@ pub enum SkipReason {
 /// The gate model's recorded verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum GateVerdict {
     Run,
     Skip,
@@ -118,7 +125,6 @@ pub enum GateVerdict {
 
 /// A gate decision as recorded on a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct GateDecision {
     pub model: String,
     pub verdict: GateVerdict,
@@ -186,7 +192,6 @@ string_round_trip!(GateVerdict {
 
 /// Create a schedule.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct CreateScheduleRequest {
     /// What each run asks the agent to do.
     pub message: String,
@@ -204,7 +209,6 @@ pub struct CreateScheduleRequest {
 /// The session policy is fixed at creation — delete and recreate to change
 /// where runs execute.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct UpdateScheduleRequest {
     #[serde(default)]
     pub message: Option<String>,
@@ -212,17 +216,13 @@ pub struct UpdateScheduleRequest {
     pub spec: Option<ScheduleSpec>,
     #[serde(default)]
     pub routing: Option<DeliveryRoutingRequest>,
-    /// Replaces the gate when present.
+    /// Set or clear the gate. Absent leaves the existing gate untouched.
     #[serde(default)]
-    pub gate: Option<GateConfig>,
-    /// Removes the gate entirely. Wins over `gate` if both are supplied.
-    #[serde(default)]
-    pub remove_gate: bool,
+    pub gate: Option<ScheduleGateUpdate>,
 }
 
 /// A schedule as returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct Schedule {
     pub id: Uuid,
     pub message: String,
@@ -239,7 +239,6 @@ pub struct Schedule {
 
 /// A recorded run: everything needed to reconstruct what happened.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct ScheduleRun {
     pub id: Uuid,
     pub schedule_id: Uuid,
@@ -261,19 +260,16 @@ pub struct ScheduleRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct ScheduleListResponse {
     pub schedules: Vec<Schedule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct ScheduleRunListResponse {
     pub runs: Vec<ScheduleRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct TriggerScheduleResponse {
     pub run: ScheduleRun,
 }

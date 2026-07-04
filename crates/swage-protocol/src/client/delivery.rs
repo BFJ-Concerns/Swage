@@ -11,7 +11,6 @@ use ts_rs::TS;
 /// An external channel integration that can receive delivered output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum ExternalChannelIntegration {
     DevDm,
     DevThread,
@@ -42,7 +41,6 @@ impl std::str::FromStr for ExternalChannelIntegration {
 /// A destination for a run's output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export)]
 pub enum DeliveryTarget {
     Channel {
         integration: ExternalChannelIntegration,
@@ -61,7 +59,6 @@ pub enum DeliveryTarget {
 /// an origin always exists. Callers without an origin (schedules, manual
 /// API calls) must set it false or target resolution errors.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(export)]
 pub struct DeliveryRoutingRequest {
     #[serde(default = "default_true")]
     pub deliver_to_origin: bool,

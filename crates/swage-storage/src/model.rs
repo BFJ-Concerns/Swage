@@ -1900,14 +1900,57 @@ pub struct UpdateSchedule {
 
 /// Input for recording a schedule run.
 ///
-/// Runs are always created `Pending`; everything else — gate decision,
-/// session, turn, output — arrives through [`ScheduleRunUpdate`] as the
-/// run progresses.
+/// An executing run is created `Pending` and everything else — gate
+/// decision, session, turn, output — arrives through [`ScheduleRunUpdate`]
+/// as it progresses. A run known-terminal at creation (an overlap skip that
+/// never runs) is created in its terminal state directly, so it falls
+/// outside the one-in-flight guard rather than tripping it.
 #[derive(Debug, Clone)]
 pub struct NewScheduleRun {
     pub schedule_id: Uuid,
     pub trigger: ScheduleRunTrigger,
+    pub state: ScheduleRunState,
+    pub skip_reason: Option<SkipReason>,
     pub scheduled_for: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+}
+
+impl NewScheduleRun {
+    /// A run about to execute: created `Pending`, to be advanced through
+    /// [`ScheduleRunUpdate`] as it progresses.
+    pub fn pending(
+        schedule_id: Uuid,
+        trigger: ScheduleRunTrigger,
+        scheduled_for: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            schedule_id,
+            trigger,
+            state: ScheduleRunState::Pending,
+            skip_reason: None,
+            scheduled_for,
+            error_message: None,
+        }
+    }
+
+    /// A run that never executes because a predecessor was still active:
+    /// recorded straight into its terminal skipped state, outside the
+    /// one-in-flight guard.
+    pub fn skipped_overlap(
+        schedule_id: Uuid,
+        trigger: ScheduleRunTrigger,
+        scheduled_for: Option<DateTime<Utc>>,
+        error_message: impl Into<String>,
+    ) -> Self {
+        Self {
+            schedule_id,
+            trigger,
+            state: ScheduleRunState::Skipped,
+            skip_reason: Some(SkipReason::Overlap),
+            scheduled_for,
+            error_message: Some(error_message.into()),
+        }
+    }
 }
 
 /// Progress update for a schedule run.

@@ -327,11 +327,11 @@ async fn operator_runs_survive_restart_with_durable_history() {
         .await
         .unwrap();
     let failed_run = storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: Some(Utc::now()),
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
         .await
         .unwrap();
     storage
@@ -346,11 +346,11 @@ async fn operator_runs_survive_restart_with_durable_history() {
         .await
         .unwrap();
     let completed_run = storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: schedule.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: Some(Utc::now()),
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
         .await
         .unwrap();
     storage

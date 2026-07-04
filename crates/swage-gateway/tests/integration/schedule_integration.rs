@@ -19,14 +19,18 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use futures::StreamExt as _;
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+use tokio::sync::oneshot;
+
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
 use swage_protocol::client::schedule::{
-    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleSpec, SessionPolicy,
+    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleSpec, ScheduleStatus, SessionPolicy,
+    SkipReason, UpdateScheduleRequest,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
@@ -729,20 +733,25 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
     .await
     .unwrap();
 
-    let result = schedule::trigger_schedule(&state, created.id).await;
-    assert!(result.is_err(), "gate failure should surface as an error");
-
-    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, ScheduleRunState::Failed);
+    // A gate transport failure is a run failure, not a raised error: the
+    // trigger returns the recorded failed run (item 4's contract), with the
+    // main model left asleep.
+    let run = schedule::trigger_schedule(&state, created.id)
+        .await
+        .expect("a failed run is returned, not raised")
+        .run;
+    assert_eq!(run.state, ScheduleRunState::Failed);
+    assert!(run.completed_at.is_some());
     assert!(
-        runs[0]
-            .error_message
+        run.error_message
             .as_deref()
             .unwrap()
             .contains("gate check failed")
     );
-    assert!(runs[0].turn_id.is_none(), "main model must stay asleep");
+    assert!(run.turn_id.is_none(), "main model must stay asleep");
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -806,11 +815,11 @@ async fn due_run_meeting_an_executing_predecessor_is_skipped_and_recorded() {
     // A predecessor is still executing.
     let predecessor = state
         .storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: created.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: Some(Utc::now()),
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            created.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
         .await
         .unwrap();
     state
@@ -957,36 +966,41 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
 
-    let created = schedule::create_schedule(
-        &state,
-        create_request(
-            "interrupted work",
-            ScheduleSpec::Interval {
-                every: "every 5 seconds".into(),
-            },
-            continuation(session_id),
-        ),
-    )
-    .await
-    .unwrap();
+    // Two schedules, each left with a run mid-flight by an unclean
+    // shutdown. They sit on separate schedules because the one-in-flight
+    // guard permits only one non-terminal run per schedule; recovery sweeps
+    // the whole table regardless.
+    let make_schedule = || {
+        schedule::create_schedule(
+            &state,
+            create_request(
+                "interrupted work",
+                ScheduleSpec::Interval {
+                    every: "every 5 seconds".into(),
+                },
+                continuation(session_id),
+            ),
+        )
+    };
+    let schedule_a = make_schedule().await.unwrap();
+    let schedule_b = make_schedule().await.unwrap();
 
-    // Two runs left mid-flight by an unclean shutdown.
     let pending = state
         .storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: created.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: Some(Utc::now()),
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule_a.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
         .await
         .unwrap();
     let running = state
         .storage
-        .create_schedule_run(NewScheduleRun {
-            schedule_id: created.id,
-            trigger: ScheduleRunTrigger::Tick,
-            scheduled_for: Some(Utc::now()),
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule_b.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
         .await
         .unwrap();
     state
@@ -1022,4 +1036,531 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
         );
         assert!(run.completed_at.is_some());
     }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot lifecycle (item 1)
+// ---------------------------------------------------------------------------
+
+/// A one-shot request at a given moment.
+fn one_shot_request(session_id: Uuid, at: chrono::DateTime<Utc>) -> CreateScheduleRequest {
+    create_request(
+        "one and done",
+        ScheduleSpec::OneShot {
+            at: at.to_rfc3339(),
+        },
+        continuation(session_id),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn paused_future_one_shot_resumes_and_still_fires() {
+    // The regression: pausing then resuming a one-shot whose moment is still
+    // ahead used to complete it, silently cancelling a pending run. It must
+    // resume active and keep its moment.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("resume-future.db"),
+        MockProvider::new(vec![]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let moment = Utc::now() + Duration::hours(1);
+    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
+        .await
+        .unwrap();
+
+    schedule::pause_schedule(&state, created.id).await.unwrap();
+    let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
+
+    assert_eq!(resumed.status, ScheduleStatus::Active);
+    assert_eq!(
+        resumed.next_run_at.map(|t| t.to_rfc3339()),
+        Some(moment.to_rfc3339()),
+        "a future one-shot keeps its original moment on resume"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn paused_lapsed_one_shot_resumes_completed_without_firing() {
+    // A never-fired one-shot whose moment passed while paused completes on
+    // resume — deliberately, without a surprise late run.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("resume-lapsed.db"),
+        MockProvider::new(vec![]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let lapsed = Utc::now() - Duration::hours(1);
+    let created = schedule::create_schedule(&state, one_shot_request(session_id, lapsed))
+        .await
+        .unwrap();
+    schedule::pause_schedule(&state, created.id).await.unwrap();
+
+    let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
+    assert_eq!(resumed.status, ScheduleStatus::Completed);
+    assert!(resumed.next_run_at.is_none());
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert!(
+        runs.is_empty(),
+        "resuming a lapsed one-shot must not fire it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("fired-oneshot.db"),
+        MockProvider::new(vec![MockProvider::text_round("first")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let moment = Utc::now() - Duration::seconds(1);
+    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
+        .await
+        .unwrap();
+
+    // Fire it.
+    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    let after_fire = state
+        .storage
+        .get_schedule(created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_fire.status, ScheduleStatus::Completed);
+    assert_eq!(
+        state
+            .storage
+            .list_schedule_runs(created.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Pause/resume must not revive a fired one-shot.
+    schedule::pause_schedule(&state, created.id).await.unwrap();
+    let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
+    assert_eq!(resumed.status, ScheduleStatus::Completed);
+
+    // An update that leaves the moment unchanged must not revive it either.
+    schedule::update_schedule(
+        &state,
+        created.id,
+        UpdateScheduleRequest {
+            message: Some("still done".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(
+        state
+            .storage
+            .list_schedule_runs(created.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a fired one-shot must never fire again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
+    // The one sanctioned re-arm: fired -> update to a future moment ->
+    // fires exactly once more.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("rearm-oneshot.db"),
+        MockProvider::new(vec![
+            MockProvider::text_round("first"),
+            MockProvider::text_round("second"),
+        ]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, Utc::now() - Duration::seconds(1)),
+    )
+    .await
+    .unwrap();
+
+    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(
+        state
+            .storage
+            .get_schedule(created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ScheduleStatus::Completed
+    );
+
+    // Re-arm to a future moment: revives from completed.
+    let rearm_at = Utc::now() + Duration::seconds(1);
+    let rearmed = schedule::update_schedule(
+        &state,
+        created.id,
+        UpdateScheduleRequest {
+            spec: Some(ScheduleSpec::OneShot {
+                at: rearm_at.to_rfc3339(),
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rearmed.status, ScheduleStatus::Active);
+    assert_eq!(
+        rearmed.next_run_at.map(|t| t.to_rfc3339()),
+        Some(rearm_at.to_rfc3339())
+    );
+
+    // The re-armed moment fires once more, then the schedule is spent again.
+    schedule::tick_once(&state, rearm_at).await.unwrap();
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 2, "re-armed one-shot fires exactly once more");
+    assert!(
+        runs.iter()
+            .all(|run| run.state == ScheduleRunState::Completed)
+    );
+    assert_eq!(
+        state
+            .storage
+            .get_schedule(created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ScheduleStatus::Completed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal run state on every failure seam (item 2) + trigger contract (item 4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_returns_the_recorded_failed_run_over_http() {
+    // The endpoint's contract: a valid request returns the recorded run in
+    // whatever terminal state it reached — a failed run comes back 202 with
+    // its failure in the body, never as a 4xx (item 4). The run here fails
+    // at delivery, after producing output.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("trigger-failed.db"),
+        MockProvider::new(vec![MockProvider::text_round("produced output")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let (_, created) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "undeliverable",
+            "spec": {"kind": "interval", "every": "every 5 seconds"},
+            "session": {"policy": "continuation", "session_id": session_id},
+            "routing": {
+                "deliver_to_origin": false,
+                "home_target": null,
+                "explicit_targets": [{"kind": "webhook", "url": "not-a-valid-url"}],
+                "store_local_output": false
+            },
+        })),
+    )
+    .await;
+    let schedule_id = created["id"].as_str().unwrap();
+
+    let (status, body) = request_json(
+        &router,
+        "POST",
+        &format!("/api/schedules/{schedule_id}/trigger"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a valid request returns the run even when the run failed"
+    );
+    assert_eq!(body["run"]["state"], "failed");
+    assert!(body["run"]["error_message"].is_string());
+    assert!(body["run"]["completed_at"].is_string());
+    // The output the turn produced survives on the failed run.
+    assert_eq!(body["run"]["output_text"], "produced output");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delivery_failure_preserves_output_on_the_failed_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("delivery-fail.db"),
+        MockProvider::new(vec![MockProvider::text_round("hard-won output")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    // Route to a webhook whose URL cannot even be parsed: delivery fails
+    // after the turn has already produced output.
+    let created = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            routing: Some(DeliveryRoutingRequest {
+                deliver_to_origin: false,
+                home_target: None,
+                explicit_targets: vec![DeliveryTarget::Webhook {
+                    url: "not-a-valid-url".into(),
+                }],
+                store_local_output: false,
+            }),
+            ..create_request(
+                "undeliverable",
+                ScheduleSpec::Interval {
+                    every: "every 5 seconds".into(),
+                },
+                continuation(session_id),
+            )
+        },
+    )
+    .await
+    .unwrap();
+
+    let run = schedule::trigger_schedule(&state, created.id)
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(run.state, ScheduleRunState::Failed);
+    assert_eq!(
+        run.output_text.as_deref(),
+        Some("hard-won output"),
+        "output the turn produced stays on the failed run"
+    );
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap()
+            .contains("delivery failed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_on_unknown_schedule_is_a_request_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("unknown.db"), MockProvider::new(vec![]));
+    let router = build_router(state.clone());
+
+    let (status, _) = request_json(
+        &router,
+        "POST",
+        &format!("/api/schedules/{}/trigger", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "unknown schedule is a 4xx, got {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Atomic overlap guard, concurrent racers (item 3)
+// ---------------------------------------------------------------------------
+
+/// A provider whose single stream emits one delta, signals that it has
+/// started, then blocks until released — so a run can be pinned in-flight
+/// while a racing trigger observes the overlap.
+struct StallProvider {
+    started: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+    output: String,
+}
+
+impl StallProvider {
+    fn new(output: &str, started: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+        Self {
+            started: Mutex::new(Some(started)),
+            release: Mutex::new(Some(release)),
+            output: output.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StallProvider {
+    fn model_id(&self) -> &str {
+        "stall-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("overlap tests do not gate")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("overlap tests do not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        if let Some(started) = self.started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        let release = self.release.lock().unwrap().take();
+        let output = self.output.clone();
+        Box::pin(
+            futures::stream::once(async move { StreamChunk::Delta { content: output } }).chain(
+                futures::stream::once(async move {
+                    if let Some(release) = release {
+                        let _ = release.await;
+                    }
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    }
+                }),
+            ),
+        )
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_manual_triggers_run_one_and_skip_the_overlap_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("race.db"),
+        StallProvider::new("held output", started_tx, release_rx),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "racing",
+            ScheduleSpec::Interval {
+                every: "every 5 seconds".into(),
+            },
+            continuation(session_id),
+        ),
+    )
+    .await
+    .unwrap();
+
+    // The winner claims the in-flight slot and stalls mid-turn.
+    let winner_state = state.clone();
+    let winner_id = created.id;
+    let winner =
+        tokio::spawn(async move { schedule::trigger_schedule(&winner_state, winner_id).await });
+    started_rx
+        .await
+        .expect("winner's turn should start before the racer triggers");
+
+    // The racer trips the atomic guard and records a clean overlap skip.
+    let loser = schedule::trigger_schedule(&state, created.id)
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(loser.state, ScheduleRunState::Skipped);
+    assert_eq!(loser.skip_reason, Some(SkipReason::Overlap));
+    assert!(loser.turn_id.is_none());
+    let message = loser.error_message.as_deref().unwrap_or_default();
+    assert!(!message.is_empty(), "overlap skip carries a clean message");
+    assert!(
+        !message.contains("UNIQUE constraint"),
+        "overlap skips must never leak raw constraint text, got: {message}"
+    );
+
+    // Release the winner: it completes normally.
+    release_tx.send(()).unwrap();
+    let winner_run = winner.await.unwrap().unwrap().run;
+    assert_eq!(winner_run.state, ScheduleRunState::Completed);
+    assert_eq!(winner_run.output_text.as_deref(), Some("held output"));
+}
+
+// ---------------------------------------------------------------------------
+// Gate-update tri-state wire contract (item 6)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gate_update_tristate_round_trips_over_the_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_config(
+        &dir.path().join("gate-tristate.db"),
+        MockProvider::new(vec![]),
+        config_with_gate_model(),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let (status, created) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "clearable gate",
+            "spec": {"kind": "interval", "every": "every 5 seconds"},
+            "session": {"policy": "continuation", "session_id": session_id},
+            "gate": {"model": GATE_MODEL, "criteria": "only when there is work"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["gate"]["model"], GATE_MODEL);
+    let schedule_id = created["id"].as_str().unwrap().to_string();
+
+    // Absent gate field leaves it untouched.
+    let (status, unchanged) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{schedule_id}"),
+        Some(json!({"message": "renamed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["message"], "renamed");
+    assert_eq!(unchanged["gate"]["model"], GATE_MODEL);
+
+    // Clear removes it.
+    let (status, cleared) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{schedule_id}"),
+        Some(json!({"gate": {"action": "clear"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cleared["gate"].is_null());
+
+    // Set installs a fresh gate, criteria and all.
+    let (status, set) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{schedule_id}"),
+        Some(json!({"gate": {"action": "set", "model": GATE_MODEL, "criteria": "revised"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(set["gate"]["model"], GATE_MODEL);
+    assert_eq!(set["gate"]["criteria"], "revised");
 }

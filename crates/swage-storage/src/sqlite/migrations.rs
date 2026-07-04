@@ -743,6 +743,16 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_schedule_runs_state
         ON schedule_runs(schedule_id, state);
 
+    -- At most one in-flight run per schedule. This partial unique index is
+    -- the overlap guard itself: the pending-run insert either succeeds
+    -- (this run owns the schedule) or trips the constraint (a predecessor is
+    -- still running), which the scheduler turns into a deliberate skip.
+    -- Terminal rows fall outside the predicate, so any number of finished
+    -- runs — including skipped-for-overlap ones — coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_runs_one_active
+        ON schedule_runs(schedule_id)
+        WHERE state IN ('pending', 'running');
+
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
     CREATE TABLE IF NOT EXISTS threads (

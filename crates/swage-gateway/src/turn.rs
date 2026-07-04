@@ -4006,21 +4006,25 @@ pub(crate) mod tests {
             &self,
             run: NewScheduleRun,
         ) -> Result<ScheduleRun, StorageError> {
+            let terminal = matches!(
+                run.state,
+                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+            );
             let created = ScheduleRun {
                 id: Uuid::new_v4(),
                 schedule_id: run.schedule_id,
                 trigger: run.trigger,
-                state: ScheduleRunState::Pending,
-                skip_reason: None,
+                state: run.state,
+                skip_reason: run.skip_reason,
                 scheduled_for: run.scheduled_for,
                 session_id: None,
                 turn_id: None,
                 gate: None,
                 output_text: None,
-                error_message: None,
+                error_message: run.error_message,
                 created_at: chrono::Utc::now(),
                 started_at: None,
-                completed_at: None,
+                completed_at: terminal.then(chrono::Utc::now),
             };
             self.db
                 .lock()
@@ -4049,19 +4053,6 @@ pub(crate) mod tests {
                 .collect();
             runs.sort_by_key(|run| run.created_at);
             Ok(runs)
-        }
-
-        async fn has_unfinished_schedule_run(
-            &self,
-            schedule_id: Uuid,
-        ) -> Result<bool, StorageError> {
-            Ok(self.db.lock().await.schedule_runs.values().any(|run| {
-                run.schedule_id == schedule_id
-                    && matches!(
-                        run.state,
-                        ScheduleRunState::Pending | ScheduleRunState::Running
-                    )
-            }))
         }
 
         async fn update_schedule_run(
