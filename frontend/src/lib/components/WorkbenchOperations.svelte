@@ -176,18 +176,23 @@
       const message = scheduleMessage.trim();
       if (!message) throw new Error("Scheduled work needs a prompt.");
 
+      // A ticked gate with no model is an incomplete choice, not a silent
+      // "no gate" — surface it before the request goes out.
+      if (gateEnabled && !gateModel.trim()) {
+        throw new Error("Enter a gate model, or turn the gate check off.");
+      }
+
       const created = await createSchedule({
         message,
         spec: buildScheduleSpec(),
         session: buildSessionPolicy(),
         routing: null,
-        gate:
-          gateEnabled && gateModel.trim()
-            ? {
-                model: gateModel.trim(),
-                criteria: gateCriteria.trim() || null,
-              }
-            : null,
+        gate: gateEnabled
+          ? {
+              model: gateModel.trim(),
+              criteria: gateCriteria.trim() || null,
+            }
+          : null,
       });
 
       scheduleMessage = "";

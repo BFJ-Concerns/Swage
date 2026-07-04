@@ -238,6 +238,29 @@ describe("WorkbenchOperations", () => {
     });
   });
 
+  it("blocks a ticked gate with a blank model before submitting", async () => {
+    component = mount(WorkbenchOperations, {
+      target: document.body,
+      props: {
+        benchId: "bench-1",
+        sessionId: "session-1",
+      },
+    });
+    await flushUi();
+
+    setFieldValue(textareaByPlaceholder("Run the review checklist."), "Review the queue.");
+    const gateToggle = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (!gateToggle) throw new Error("missing gate toggle");
+    gateToggle.click();
+    await flushUi();
+    // Gate ticked, model left blank.
+    clickButton("Schedule");
+    await flushUi();
+
+    expect(workflowApi.createSchedule).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Enter a gate model");
+  });
+
   it("creates a continuation schedule against the active conversation", async () => {
     component = mount(WorkbenchOperations, {
       target: document.body,
