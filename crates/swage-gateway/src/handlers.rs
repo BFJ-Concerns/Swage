@@ -2642,15 +2642,19 @@ mod tests {
             .expect("submit async turn");
 
         let poll = {
+            // Generous deadline: under a full-workspace test run the async
+            // turn competes with every other suite for CPU, and a one-second
+            // budget starves reliably.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut completed = None;
-            for _ in 0..50 {
+            while std::time::Instant::now() < deadline {
                 let current = client.poll_turn(turn_id).await.expect("poll turn");
                 let state = current["state"].as_str().expect("poll state string");
                 if matches!(state, "completed" | "failed" | "interrupted") {
                     completed = Some(current);
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             completed.expect("turn should reach a terminal state")
         };
