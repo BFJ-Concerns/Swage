@@ -20,13 +20,12 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    HeartbeatRunState, HeartbeatStatus, NewHeartbeat, NewHeartbeatRun, NewNodeExecution,
-    NewScheduledJob, NewScheduledRun, NewSession, NewTeam, NewThread, NewTopologyRun, NewTurn,
-    NodeExecutionState, ScheduledJobKind, ScheduledJobStatus, ScheduledRunState,
-    ScheduledRunTrigger, SqliteStorage, TopologyRunState, TurnState,
+    NewNodeExecution, NewSchedule, NewScheduleRun, NewSession, NewTeam, NewThread, NewTopologyRun,
+    NewTurn, NodeExecutionState, ScheduleKind, ScheduleRunState, ScheduleRunTrigger,
+    ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage, TopologyRunState, TurnState,
     model::TopologyNodeRecordKind,
     store::{
-        BenchStore, HeartbeatStore, ScheduleStore, SessionStore, Storage, TeamStore, ThreadStore,
+        BenchStore, ScheduleStore, SessionStore, Storage, TeamStore, ThreadStore,
         TopologyTraceStore, TurnStore,
     },
 };
@@ -313,77 +312,55 @@ async fn operator_runs_survive_restart_with_durable_history() {
         .await
         .unwrap();
 
-    let scheduled_job = storage
-        .create_scheduled_job(NewScheduledJob {
-            session_id,
-            agent_id: "gateway".into(),
+    let schedule = storage
+        .create_schedule(NewSchedule {
             message: "nightly".into(),
-            status: ScheduledJobStatus::Active,
-            kind: ScheduledJobKind::Cron,
-            schedule_expression: "0 * * * * *".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Cron,
+            expression: "0 * * * * *".into(),
+            session_policy: SessionPolicy::Continuation { session_id },
             delivery_routing: json!({"store_local_output": true}),
+            gate: None,
             next_run_at: None,
             last_run_at: None,
         })
         .await
         .unwrap();
-    let scheduled_run = storage
-        .create_scheduled_run(NewScheduledRun {
-            job_id: scheduled_job.id,
-            trigger: ScheduledRunTrigger::Scheduled,
-            state: ScheduledRunState::Running,
+    let failed_run = storage
+        .create_schedule_run(NewScheduleRun {
+            schedule_id: schedule.id,
+            trigger: ScheduleRunTrigger::Tick,
             scheduled_for: Some(Utc::now()),
-            turn_id: None,
-            output_text: None,
-            error_message: None,
-            started_at: Some(Utc::now()),
-            completed_at: None,
         })
         .await
         .unwrap();
     storage
-        .update_scheduled_run_state(
-            scheduled_run.id,
-            ScheduledRunState::Failed,
-            None,
-            None,
-            Some("cron failed"),
+        .update_schedule_run(
+            failed_run.id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Failed),
+                error_message: Some("cron failed".into()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-
-    let heartbeat = storage
-        .create_heartbeat(NewHeartbeat {
-            session_id,
-            agent_id: "gateway".into(),
-            message: "heartbeat".into(),
-            interval_seconds: 60,
-            status: HeartbeatStatus::Enabled,
-            last_beat_at: None,
-            next_beat_at: None,
-        })
-        .await
-        .unwrap();
-    let heartbeat_run = storage
-        .create_heartbeat_run(NewHeartbeatRun {
-            heartbeat_id: heartbeat.id,
-            state: HeartbeatRunState::Running,
+    let completed_run = storage
+        .create_schedule_run(NewScheduleRun {
+            schedule_id: schedule.id,
+            trigger: ScheduleRunTrigger::Tick,
             scheduled_for: Some(Utc::now()),
-            turn_id: None,
-            output_text: None,
-            error_message: None,
-            started_at: Some(Utc::now()),
-            completed_at: None,
         })
         .await
         .unwrap();
     storage
-        .update_heartbeat_run_state(
-            heartbeat_run.id,
-            HeartbeatRunState::Completed,
-            None,
-            Some("beat ok"),
-            None,
+        .update_schedule_run(
+            completed_run.id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Completed),
+                output_text: Some("beat ok".into()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -468,13 +445,13 @@ async fn operator_runs_survive_restart_with_durable_history() {
     assert_eq!(runs[&delegated_turn.id].1, "completed");
     assert!(runs[&delegated_turn.id].2["completed_at"].is_string());
 
-    assert_eq!(runs[&scheduled_run.id].0, "scheduled_run");
-    assert_eq!(runs[&scheduled_run.id].1, "failed");
-    assert!(runs[&scheduled_run.id].2["completed_at"].is_string());
+    assert_eq!(runs[&failed_run.id].0, "schedule_run");
+    assert_eq!(runs[&failed_run.id].1, "failed");
+    assert!(runs[&failed_run.id].2["completed_at"].is_string());
 
-    assert_eq!(runs[&heartbeat_run.id].0, "heartbeat_run");
-    assert_eq!(runs[&heartbeat_run.id].1, "completed");
-    assert!(runs[&heartbeat_run.id].2["completed_at"].is_string());
+    assert_eq!(runs[&completed_run.id].0, "schedule_run");
+    assert_eq!(runs[&completed_run.id].1, "completed");
+    assert!(runs[&completed_run.id].2["completed_at"].is_string());
 
     assert_eq!(runs[&node_execution.id].0, "node_execution");
     assert_eq!(runs[&node_execution.id].1, "failed");
