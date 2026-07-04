@@ -1498,6 +1498,72 @@ async fn concurrent_manual_triggers_run_one_and_skip_the_overlap_cleanly() {
     assert_eq!(winner_run.output_text.as_deref(), Some("held output"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
+    // The other live interleaving: the serial tick loop firing a due schedule
+    // while a manual trigger already holds it in flight. From the index's
+    // side this is the same insert-against-a-non-terminal-row collision as
+    // manual-vs-manual — the trigger kind is irrelevant to the guard — so the
+    // tick's occurrence records a terminal overlap skip rather than executing
+    // a second time.
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("race-tick.db"),
+        StallProvider::new("held output", started_tx, release_rx),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "racing the tick",
+            ScheduleSpec::Interval {
+                every: "every 5 seconds".into(),
+            },
+            continuation(session_id),
+        ),
+    )
+    .await
+    .unwrap();
+    let due_at = created
+        .next_run_at
+        .expect("an interval has a first occurrence");
+
+    // A manual trigger claims the in-flight slot and stalls mid-turn.
+    let winner_state = state.clone();
+    let winner_id = created.id;
+    let winner =
+        tokio::spawn(async move { schedule::trigger_schedule(&winner_state, winner_id).await });
+    started_rx
+        .await
+        .expect("the manual turn should start before the tick fires");
+
+    // The tick finds the schedule due, tries to run it, and trips the guard.
+    let executed = schedule::tick_once(&state, due_at).await.unwrap();
+    assert_eq!(executed, 1);
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    let skip = runs
+        .iter()
+        .find(|run| run.trigger == ScheduleRunTrigger::Tick)
+        .expect("the tick recorded a run");
+    assert_eq!(skip.state, ScheduleRunState::Skipped);
+    assert_eq!(skip.skip_reason, Some(SkipReason::Overlap));
+    assert!(skip.turn_id.is_none());
+    let message = skip.error_message.as_deref().unwrap_or_default();
+    assert!(
+        !message.is_empty() && !message.contains("UNIQUE constraint"),
+        "overlap skips must never leak raw constraint text, got: {message}"
+    );
+
+    // Release the winning manual run: it completes normally.
+    release_tx.send(()).unwrap();
+    let winner_run = winner.await.unwrap().unwrap().run;
+    assert_eq!(winner_run.state, ScheduleRunState::Completed);
+}
+
 // ---------------------------------------------------------------------------
 // Gate-update tri-state wire contract (item 6)
 // ---------------------------------------------------------------------------
