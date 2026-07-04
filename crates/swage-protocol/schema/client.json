@@ -1,0 +1,648 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientSurface",
+  "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
+  "type": "object",
+  "properties": {
+    "create_schedule_request": {
+      "$ref": "#/$defs/CreateScheduleRequest"
+    },
+    "schedule": {
+      "$ref": "#/$defs/Schedule"
+    },
+    "schedule_list": {
+      "$ref": "#/$defs/ScheduleListResponse"
+    },
+    "schedule_run": {
+      "$ref": "#/$defs/ScheduleRun"
+    },
+    "schedule_run_list": {
+      "$ref": "#/$defs/ScheduleRunListResponse"
+    },
+    "trigger_schedule_response": {
+      "$ref": "#/$defs/TriggerScheduleResponse"
+    },
+    "update_schedule_request": {
+      "$ref": "#/$defs/UpdateScheduleRequest"
+    }
+  },
+  "required": [
+    "create_schedule_request",
+    "update_schedule_request",
+    "schedule",
+    "schedule_list",
+    "schedule_run",
+    "schedule_run_list",
+    "trigger_schedule_response"
+  ],
+  "$defs": {
+    "CreateScheduleRequest": {
+      "description": "Create a schedule.",
+      "type": "object",
+      "properties": {
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "message": {
+          "description": "What each run asks the agent to do.",
+          "type": "string"
+        },
+        "routing": {
+          "description": "Defaults to local-record-only routing when omitted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryRoutingRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "session": {
+          "$ref": "#/$defs/SessionPolicy"
+        },
+        "spec": {
+          "$ref": "#/$defs/ScheduleSpec"
+        }
+      },
+      "required": [
+        "message",
+        "spec",
+        "session"
+      ]
+    },
+    "DeliveryRoutingRequest": {
+      "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
+      "type": "object",
+      "properties": {
+        "deliver_to_origin": {
+          "type": "boolean",
+          "default": true
+        },
+        "explicit_targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeliveryTarget"
+          }
+        },
+        "home_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "store_local_output": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "DeliveryTarget": {
+      "description": "A destination for a run's output.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "conversation": {
+              "type": "string"
+            },
+            "integration": {
+              "$ref": "#/$defs/ExternalChannelIntegration"
+            },
+            "kind": {
+              "type": "string",
+              "const": "channel"
+            }
+          },
+          "required": [
+            "kind",
+            "integration",
+            "account",
+            "conversation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "local_storage"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "webhook"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
+    },
+    "ExternalChannelIntegration": {
+      "description": "An external channel integration that can receive delivered output.",
+      "type": "string",
+      "enum": [
+        "dev_dm",
+        "dev_thread"
+      ]
+    },
+    "GateConfig": {
+      "description": "A cheap-model check that runs before the main model wakes.\n\nThe gate model inspects the schedule's message, the optional criteria,\nand the previous run's outcome, then verdicts `run` or `skip`. Its\ndecision and reasoning are recorded on the run.",
+      "type": "object",
+      "properties": {
+        "criteria": {
+          "description": "What \"work needed\" means for this schedule. When absent the gate\njudges from the schedule message and previous outcome alone.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model id or alias from the configured model catalogue.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "GateDecision": {
+      "description": "A gate decision as recorded on a run.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/GateVerdict"
+        }
+      },
+      "required": [
+        "model",
+        "verdict",
+        "reasoning"
+      ]
+    },
+    "GateVerdict": {
+      "description": "The gate model's recorded verdict.",
+      "type": "string",
+      "enum": [
+        "run",
+        "skip"
+      ]
+    },
+    "Schedule": {
+      "description": "A schedule as returned by the API.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_run_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_run_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "routing": {
+          "$ref": "#/$defs/DeliveryRoutingRequest"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionPolicy"
+        },
+        "spec": {
+          "$ref": "#/$defs/ScheduleSpec"
+        },
+        "status": {
+          "$ref": "#/$defs/ScheduleStatus"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "message",
+        "status",
+        "spec",
+        "session",
+        "routing",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ScheduleListResponse": {
+      "type": "object",
+      "properties": {
+        "schedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Schedule"
+          }
+        }
+      },
+      "required": [
+        "schedules"
+      ]
+    },
+    "ScheduleRun": {
+      "description": "A recorded run: everything needed to reconstruct what happened.",
+      "type": "object",
+      "properties": {
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "output_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schedule_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "scheduled_for": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "session_id": {
+          "description": "The session the run executed in — created fresh or continued,\ndepending on the schedule's session policy. Absent when the run\nnever reached a session (gated out, or skipped for overlap).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "skip_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkipReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/$defs/ScheduleRunState"
+        },
+        "trigger": {
+          "$ref": "#/$defs/ScheduleRunTrigger"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "id",
+        "schedule_id",
+        "trigger",
+        "state",
+        "created_at"
+      ]
+    },
+    "ScheduleRunListResponse": {
+      "type": "object",
+      "properties": {
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScheduleRun"
+          }
+        }
+      },
+      "required": [
+        "runs"
+      ]
+    },
+    "ScheduleRunState": {
+      "description": "Lifecycle state of a recorded run.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "failed"
+          ]
+        },
+        {
+          "description": "Deliberately not executed — see the run's `skip_reason`.",
+          "type": "string",
+          "const": "skipped"
+        }
+      ]
+    },
+    "ScheduleRunTrigger": {
+      "description": "What caused a run to be created.",
+      "oneOf": [
+        {
+          "description": "The scheduler's clock reached the schedule's next occurrence.",
+          "type": "string",
+          "const": "tick"
+        },
+        {
+          "description": "An operator fired the schedule by hand.",
+          "type": "string",
+          "const": "manual"
+        }
+      ]
+    },
+    "ScheduleSpec": {
+      "description": "When a schedule fires.\n\n- `one_shot` — a single RFC 3339 instant.\n- `interval` — natural-language `\"every N seconds|minutes|hours|days\"`.\n- `cron` — a cron expression (seconds-resolution, as parsed by the\n  `cron` crate).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "one_shot"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "every": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "interval"
+            }
+          },
+          "required": [
+            "kind",
+            "every"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cron": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cron"
+            }
+          },
+          "required": [
+            "kind",
+            "cron"
+          ]
+        }
+      ]
+    },
+    "ScheduleStatus": {
+      "description": "Lifecycle status of a schedule definition.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused"
+          ]
+        },
+        {
+          "description": "A one-shot that has fired, or an interval/cron with no next\noccurrence.",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "SessionPolicy": {
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `bench_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "bench_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "policy": {
+              "type": "string",
+              "const": "fresh"
+            }
+          },
+          "required": [
+            "policy",
+            "bench_id",
+            "agent_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "string",
+              "const": "continuation"
+            },
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "policy",
+            "session_id"
+          ]
+        }
+      ]
+    },
+    "SkipReason": {
+      "description": "Why a run was skipped rather than executed.",
+      "oneOf": [
+        {
+          "description": "The gate model decided no work was needed.",
+          "type": "string",
+          "const": "gate"
+        },
+        {
+          "description": "A previous run of this schedule (or another turn in the target\nsession) was still executing when this run came due.",
+          "type": "string",
+          "const": "overlap"
+        }
+      ]
+    },
+    "TriggerScheduleResponse": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/ScheduleRun"
+        }
+      },
+      "required": [
+        "run"
+      ]
+    },
+    "UpdateScheduleRequest": {
+      "description": "Partially update a schedule.\n\nThe session policy is fixed at creation — delete and recreate to change\nwhere runs execute.",
+      "type": "object",
+      "properties": {
+        "gate": {
+          "description": "Replaces the gate when present.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "remove_gate": {
+          "description": "Removes the gate entirely. Wins over `gate` if both are supplied.",
+          "type": "boolean",
+          "default": false
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryRoutingRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScheduleSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    }
+  }
+}
