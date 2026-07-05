@@ -51,6 +51,7 @@ mime_guess = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 cron = "0.16"
+chromiumoxide = "0.9.1"
 
 [dev-dependencies]
 swage-safety = { path = "../swage-safety" }

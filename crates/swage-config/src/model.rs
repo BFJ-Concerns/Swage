@@ -198,20 +198,85 @@ pub struct ToolPermissionConfig {
 
 impl Default for ToolPermissionConfig {
     fn default() -> Self {
+        let mut bundles = HashMap::new();
+        bundles.insert(
+            "browsing".to_string(),
+            vec![
+                "browser_navigate".to_string(),
+                "browser_snapshot".to_string(),
+            ],
+        );
+        bundles.insert(
+            "browser_actions".to_string(),
+            vec![
+                "browser_click".to_string(),
+                "browser_type".to_string(),
+                "browser_select".to_string(),
+                "browser_scroll".to_string(),
+            ],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
-            bundles: HashMap::new(),
+            bundles,
             require_approval: default_high_risk_tool_approvals(),
         }
     }
 }
 
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    ["shell", "file_edit", "file_write", "python_execute"]
-        .into_iter()
-        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-        .collect()
+    [
+        "shell",
+        "file_edit",
+        "file_write",
+        "python_execute",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_scroll",
+    ]
+    .into_iter()
+    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+    .collect()
+}
+
+/// Settings for the gateway-hosted browser tools.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserScreenshotPolicy {
+    Off,
+    Actions,
+    All,
+}
+
+impl Default for BrowserScreenshotPolicy {
+    fn default() -> Self {
+        Self::Actions
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserToolConfig {
+    pub binary_path: Option<String>,
+    pub page_idle_secs: u64,
+    pub process_idle_secs: u64,
+    pub max_snapshot_bytes: usize,
+    pub screenshots: BrowserScreenshotPolicy,
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for BrowserToolConfig {
+    fn default() -> Self {
+        Self {
+            binary_path: None,
+            page_idle_secs: 300,
+            process_idle_secs: 600,
+            max_snapshot_bytes: 40_000,
+            screenshots: BrowserScreenshotPolicy::Actions,
+            allow_hosts: Vec::new(),
+        }
+    }
 }
 
 /// Tool execution settings.
@@ -228,6 +293,9 @@ pub struct ToolConfig {
     pub plugin_directory: Option<String>,
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
+    /// Gateway-hosted browser settings.
+    #[serde(default)]
+    pub browser: BrowserToolConfig,
     /// Tool permission rules — controls which tools an agent may invoke.
     /// Defaults to broad availability with approval gates for high-risk tools.
     #[serde(default)]
@@ -242,6 +310,7 @@ impl Default for ToolConfig {
             max_output_bytes: 100_000,
             plugin_directory: None,
             search: None,
+            browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig::default(),
         }
     }
@@ -1101,13 +1170,39 @@ timeout_policy = "reject"
         let cfg = ToolPermissionConfig::default();
         assert_eq!(cfg.allow, vec!["*".to_string()]);
         assert!(cfg.deny.is_empty());
-        assert!(cfg.bundles.is_empty());
+        assert_eq!(
+            cfg.bundles.get("browsing").expect("browsing bundle"),
+            &vec![
+                "browser_navigate".to_string(),
+                "browser_snapshot".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("browser_actions")
+                .expect("browser action bundle"),
+            &vec![
+                "browser_click".to_string(),
+                "browser_type".to_string(),
+                "browser_select".to_string(),
+                "browser_scroll".to_string()
+            ]
+        );
         assert_eq!(
             cfg.require_approval
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_edit", "file_write", "python_execute"]
+            vec![
+                "shell",
+                "file_edit",
+                "file_write",
+                "python_execute",
+                "browser_click",
+                "browser_type",
+                "browser_select",
+                "browser_scroll"
+            ]
         );
     }
 
@@ -1201,6 +1296,7 @@ timeout_policy = "reject"
             max_output_bytes: 50_000,
             plugin_directory: Some("plugins".into()),
             search: None,
+            browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig {
                 allow: vec!["echo".into()],
                 deny: vec!["shell_exec".into()],
@@ -1218,7 +1314,8 @@ timeout_policy = "reject"
         let cfg = ToolConfig::default();
         assert_eq!(cfg.permissions.allow, vec!["*".to_string()]);
         assert!(cfg.permissions.deny.is_empty());
-        assert!(cfg.permissions.bundles.is_empty());
+        assert!(cfg.permissions.bundles.contains_key("browsing"));
+        assert!(cfg.permissions.bundles.contains_key("browser_actions"));
     }
 
     // --- OutputConfig tests ---
@@ -1275,7 +1372,16 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_edit", "file_write", "python_execute"]
+            vec![
+                "shell",
+                "file_edit",
+                "file_write",
+                "python_execute",
+                "browser_click",
+                "browser_type",
+                "browser_select",
+                "browser_scroll"
+            ]
         );
     }
 
