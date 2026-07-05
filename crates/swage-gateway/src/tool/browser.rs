@@ -325,7 +325,7 @@ async fn finish_action_call(
     audit: BrowserActionAudit,
 ) -> Result<Value, ToolError> {
     let full_snapshot = write_full_snapshot(ctx, &observation).await?;
-    let screenshot = write_screenshot(ctx, host, &audit).await?;
+    let screenshot = write_screenshot(tool_name, ctx, host, &audit).await?;
     write_audit_event(
         tool_name,
         ctx,
@@ -363,11 +363,15 @@ async fn write_full_snapshot(
 }
 
 async fn write_screenshot(
+    tool_name: &str,
     ctx: &dyn ToolContext,
     host: &BrowserHost,
     audit: &BrowserActionAudit,
 ) -> Result<Option<String>, ToolError> {
-    let Some(bytes) = host.screenshot_after_action(ctx.session_id()).await? else {
+    let Some(bytes) = host
+        .screenshot_after_action(ctx.session_id(), tool_name)
+        .await?
+    else {
         return Ok(None);
     };
     let path = tool_output_artifact_path(ctx, "screenshot.jpg");

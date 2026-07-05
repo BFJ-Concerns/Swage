@@ -221,7 +221,12 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
     let mut env_guard = ProcessEnvGuard::new();
     env_guard.set_swage_home(temp.path());
     env_guard.set_managed_secret_key(42);
-    let mut browser_config = browser_config(&binary, temp.path(), fixture.host());
+    let mut browser_config = browser_config_with_screenshots(
+        &binary,
+        temp.path(),
+        fixture.host(),
+        BrowserScreenshotPolicy::default(),
+    );
     browser_config.max_snapshot_bytes = 700;
     let browser_host = BrowserHost::new(browser_config);
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
@@ -372,6 +377,10 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
 
     let type_result = type_call.result.as_deref().expect("browser_type result");
     let parsed_type_result = serde_json::from_str::<Value>(type_result).expect("type result JSON");
+    assert!(
+        parsed_type_result["screenshot"].is_null(),
+        "browser_type must not capture post-type screenshots under the default actions policy: {type_result}"
+    );
     let snapshot_path = parsed_type_result["full_snapshot"]
         .as_str()
         .map(ToString::to_string)
@@ -387,6 +396,69 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
     assert_no_secret("snapshot artifact", &artifact);
 
     browser_host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ax_typed_field_stays_masked_when_snapshot_falls_back_to_dom() {
+    let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+    let Some(binary) = browser_binary_or_skip() else {
+        return;
+    };
+    let fixture = FixtureServer::spawn().await;
+    let temp = TempDir::new().expect("tempdir");
+    let host = BrowserHost::new(browser_config(&binary, temp.path(), fixture.host()));
+
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        host.navigate("mask-session", &fixture.url("/fallback-mask")),
+    )
+    .await
+    .expect("navigate fallback mask page timed out")
+    .expect("navigate fallback mask page");
+    let token = first
+        .refs
+        .values()
+        .find(|entry| entry.name == "Token")
+        .expect("AX token ref");
+    assert_ne!(
+        token.backend_node_id,
+        BackendNodeId::new(0),
+        "test must type through an AX-backed ref before forcing DOM fallback:\n{}",
+        first.output
+    );
+
+    host.type_text(
+        "mask-session",
+        &token.reference,
+        "dom-fallback-secret",
+        true,
+        false,
+    )
+    .await
+    .expect("type token");
+    let fallback = host
+        .snapshot("mask-session")
+        .await
+        .expect("fallback snapshot");
+    assert!(
+        fallback
+            .refs
+            .values()
+            .all(|entry| entry.backend_node_id == BackendNodeId::new(0)),
+        "expected forced DOM fallback refs after typing, got:\n{}",
+        fallback.output
+    );
+    assert!(
+        !fallback.output.contains("dom-fallback-secret"),
+        "AX-masked field leaked after DOM fallback:\n{}",
+        fallback.output
+    );
+    assert!(
+        fallback.output.contains("value=\"[masked]\""),
+        "DOM fallback did not keep the AX-applied mask:\n{}",
+        fallback.output
+    );
+    host.shutdown().await;
 }
 
 #[test]
@@ -427,12 +499,21 @@ async fn live_smoke_public_site() {
 }
 
 fn browser_config(binary: &str, root: &std::path::Path, host: String) -> BrowserConfig {
+    browser_config_with_screenshots(binary, root, host, BrowserScreenshotPolicy::Off)
+}
+
+fn browser_config_with_screenshots(
+    binary: &str,
+    root: &std::path::Path,
+    host: String,
+    screenshots: BrowserScreenshotPolicy,
+) -> BrowserConfig {
     let tool_config = BrowserToolConfig {
         binary_path: Some(binary.to_string()),
         page_idle_secs: 30,
         process_idle_secs: 30,
         max_snapshot_bytes: 40_000,
-        screenshots: BrowserScreenshotPolicy::Off,
+        screenshots,
         allow_hosts: vec![host],
     };
     BrowserConfig {
@@ -735,6 +816,7 @@ impl FixtureServer {
         let saw_login = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route("/login", get(login_page).post(login_post))
+            .route("/fallback-mask", get(fallback_mask_page))
             .route("/set-cookie", get(set_cookie))
             .route("/signed-in", get(signed_in))
             .route("/whoami", get(whoami))
@@ -800,6 +882,22 @@ async fn login_post(State(saw_login): State<Arc<AtomicBool>>) -> impl IntoRespon
             ("location", "/signed-in"),
         ],
         Html(""),
+    )
+}
+
+async fn fallback_mask_page() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+        <title>Fallback Mask</title>
+        <main id="ax-region">
+            <label>Token <input name="token" autocomplete="off"></label>
+        </main>
+        <script>
+        document.querySelector('input[name="token"]').addEventListener('input', () => {
+            document.querySelector('#ax-region').setAttribute('aria-hidden', 'true');
+            document.querySelector('#ax-region').style.display = 'none';
+        });
+        </script>"#,
     )
 }
 

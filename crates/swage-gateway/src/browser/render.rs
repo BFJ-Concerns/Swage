@@ -116,7 +116,8 @@ impl Renderer {
         if !name.is_empty() {
             line.push_str(&format!(" \"{}\"", escape_text(&name)));
         }
-        let state_text = state_text(node, self.is_masked(node));
+        let masked = self.is_masked(node);
+        let state_text = state_text(node, masked);
         if !state_text.is_empty() {
             line.push(' ');
             line.push_str(&state_text);
@@ -139,6 +140,9 @@ impl Renderer {
             );
         }
         self.lines.push(line);
+        if masked {
+            return;
+        }
         for child in child_nodes(nodes, node) {
             self.render_node(nodes, child, depth + 1);
         }

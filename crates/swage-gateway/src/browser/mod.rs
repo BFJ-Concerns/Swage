@@ -16,7 +16,7 @@ use chromiumoxide::cdp::browser_protocol::accessibility::{
     AxNode, EnableParams, GetFullAxTreeParams, QueryAxTreeParams,
 };
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, GetDocumentParams, ResolveNodeParams,
+    BackendNodeId, DescribeNodeParams, GetDocumentParams, QuerySelectorParams, ResolveNodeParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, CaptureScreenshotParams, NavigateParams,
@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::json;
 use swage_config::{BrowserScreenshotPolicy, BrowserToolConfig};
 use swage_core::ToolError;
-use swage_sandbox::ChildProcessManager;
+use swage_sandbox::{ChildProcessManager, cleanup_failed_startup_process};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -404,8 +404,14 @@ impl BrowserHost {
     pub async fn screenshot_after_action(
         &self,
         session_id: &str,
+        tool_name: &str,
     ) -> Result<Option<Vec<u8>>, ToolError> {
         if self.config.screenshots == BrowserScreenshotPolicy::Off {
+            return Ok(None);
+        }
+        // Text-tree masking cannot redact screenshot pixels. Type actions are
+        // therefore never post-captured: an honest absence beats a leaked JPEG.
+        if tool_name == "browser_type" {
             return Ok(None);
         }
         let mut state = self.inner.lock().await;
@@ -465,7 +471,7 @@ impl BrowserHost {
                     "that element is no longer on the page — call browser_snapshot for the current state",
                 ))?;
             if mask_target_after_action {
-                page.mask_ref_target(&target);
+                page.mask_ref_target(&target).await;
             }
             tokio::time::sleep(LOAD_SETTLE).await;
             let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
@@ -487,7 +493,7 @@ impl BrowserHost {
                 "that element is no longer on the page — call browser_snapshot for the current state",
             ))?;
         if mask_target_after_action {
-            page.mask_ref_target(&target);
+            page.mask_ref_target(&target).await;
         }
         tokio::time::sleep(LOAD_SETTLE).await;
         let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
@@ -532,7 +538,7 @@ impl BrowserHost {
                 "that element is no longer on the page — call browser_snapshot for the current state",
             ))?;
         if mask_target_after_action {
-            page.mask_ref_target(&target);
+            page.mask_ref_target(&target).await;
         }
         tokio::time::sleep(LOAD_SETTLE).await;
         let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
@@ -698,12 +704,27 @@ impl BrowserState {
 }
 
 impl PageSession {
-    fn mask_ref_target(&mut self, target: &RefEntry) {
+    async fn mask_ref_target(&mut self, target: &RefEntry) {
+        // AX and DOM fallback snapshots use different native identifiers. Keep
+        // both populated where possible so a masked field stays masked when the
+        // renderer changes path later in the session.
         if target.backend_node_id != BackendNodeId::new(0) {
             self.masked_backend_nodes.insert(target.backend_node_id);
+            if target.selector.is_none()
+                && let Ok(Some(selector)) =
+                    selector_for_backend_node(&self.page, target.backend_node_id).await
+            {
+                self.masked_selectors.insert(selector);
+            }
         }
         if let Some(selector) = &target.selector {
             self.masked_selectors.insert(selector.clone());
+            if target.backend_node_id == BackendNodeId::new(0)
+                && let Ok(Some(backend_node_id)) =
+                    backend_node_for_selector(&self.page, selector).await
+            {
+                self.masked_backend_nodes.insert(backend_node_id);
+            }
         }
     }
 }
@@ -713,7 +734,6 @@ async fn spawn_browser(
     no_sandbox: bool,
 ) -> Result<BrowserProcess, ToolError> {
     let binary = resolve_browser_binary(config.binary_path.as_deref())?;
-    let port = reserve_local_port()?;
     let profile = config.profile_root.join(DEFAULT_PROFILE);
     tokio::fs::create_dir_all(&profile)
         .await
@@ -724,6 +744,9 @@ async fn spawn_browser(
                 profile.display()
             ),
         })?;
+    tighten_profile_permissions(&profile).await?;
+    let active_port_file = profile.join("DevToolsActivePort");
+    let _ = tokio::fs::remove_file(&active_port_file).await;
 
     let mut command = tokio::process::Command::new(binary);
     command
@@ -734,7 +757,7 @@ async fn spawn_browser(
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--remote-debugging-address=127.0.0.1")
-        .arg(format!("--remote-debugging-port={port}"))
+        .arg("--remote-debugging-port=0")
         .arg("about:blank")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -747,12 +770,33 @@ async fn spawn_browser(
             name: "browser".to_string(),
             message: format!("failed to start Chromium: {error}"),
         })?;
-    let endpoint = format!("http://127.0.0.1:{port}");
-    wait_for_devtools(&endpoint).await?;
-    let (browser, mut handler) = Browser::connect(endpoint).await.map_err(browser_error(
+    let endpoint = match wait_for_devtools_endpoint(&active_port_file).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            cleanup_failed_startup_process(
+                child,
+                Duration::from_secs(2),
+                "failed to clean up Chromium after DevTools startup failure",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let (browser, mut handler) = match Browser::connect(endpoint).await.map_err(browser_error(
         "browser",
         "failed to connect to Chromium DevTools",
-    ))?;
+    )) {
+        Ok(connected) => connected,
+        Err(error) => {
+            cleanup_failed_startup_process(
+                child,
+                Duration::from_secs(2),
+                "failed to clean up Chromium after DevTools connection failure",
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let handler = tokio::spawn(async move {
         while let Some(event) = handler.next().await {
             if let Err(error) = event {
@@ -795,25 +839,24 @@ fn find_on_path(binary: &str) -> Option<PathBuf> {
     })
 }
 
-fn reserve_local_port() -> Result<u16, ToolError> {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .map_err(|error| ToolError::ExecutionFailed {
-            name: "browser".to_string(),
-            message: format!("failed to reserve DevTools port: {error}"),
-        })
-}
-
-async fn wait_for_devtools(endpoint: &str) -> Result<(), ToolError> {
+async fn wait_for_devtools_endpoint(
+    active_port_file: &std::path::Path,
+) -> Result<String, ToolError> {
     let client = reqwest::Client::new();
-    let version_url = format!("{endpoint}/json/version");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(response) = client.get(&version_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
+        if let Ok(contents) = tokio::fs::read_to_string(active_port_file).await {
+            let mut lines = contents.lines();
+            let port = lines.next().unwrap_or_default().trim();
+            if !port.is_empty() {
+                let endpoint = format!("http://127.0.0.1:{port}");
+                let version_url = format!("{endpoint}/json/version");
+                if let Ok(response) = client.get(&version_url).send().await
+                    && response.status().is_success()
+                {
+                    return Ok(endpoint);
+                }
+            }
         }
         if Instant::now() >= deadline {
             return Err(ToolError::ExecutionFailed {
@@ -823,6 +866,27 @@ async fn wait_for_devtools(endpoint: &str) -> Result<(), ToolError> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[cfg(unix)]
+async fn tighten_profile_permissions(profile: &std::path::Path) -> Result<(), ToolError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let permissions = std::fs::Permissions::from_mode(0o700);
+    tokio::fs::set_permissions(profile, permissions)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            name: "browser".to_string(),
+            message: format!(
+                "failed to secure browser profile '{}': {error}",
+                profile.display()
+            ),
+        })
+}
+
+#[cfg(not(unix))]
+async fn tighten_profile_permissions(_profile: &std::path::Path) -> Result<(), ToolError> {
+    Ok(())
 }
 
 async fn resolve_object(
@@ -849,6 +913,81 @@ async fn resolve_object(
             "that element is no longer on the page — call browser_snapshot for the current state"
                 .to_string(),
     })
+}
+
+async fn selector_for_backend_node(
+    page: &Page,
+    backend_node_id: BackendNodeId,
+) -> Result<Option<String>, ToolError> {
+    let object_id = resolve_object(page, backend_node_id, "browser").await?;
+    let result = page.execute(
+        CallFunctionOnParams::builder()
+            .function_declaration(
+                r#"function () {
+                    if (this.id) return '#' + CSS.escape(this.id);
+                    const parts = [];
+                    for (let node = this; node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement; node = node.parentElement) {
+                        const siblings = Array.from(node.parentElement ? node.parentElement.children : []).filter(s => s.tagName === node.tagName);
+                        const index = siblings.indexOf(node) + 1;
+                        parts.unshift(node.tagName.toLowerCase() + (siblings.length > 1 ? `:nth-of-type(${index})` : ''));
+                    }
+                    return parts.join(' > ');
+                }"#,
+            )
+            .object_id(object_id)
+            .build()
+            .expect("valid selector function"),
+    )
+    .await
+    .map_err(browser_error(
+        "browser",
+        "failed to derive selector for masked browser field",
+    ))?
+    .result
+    .result;
+    let value = result.value.ok_or_else(|| ToolError::ExecutionFailed {
+        name: "browser".to_string(),
+        message: "masked browser field selector did not return a value".to_string(),
+    })?;
+    serde_json::from_value::<String>(value)
+        .map(|selector| (!selector.is_empty()).then_some(selector))
+        .map_err(|error| ToolError::ExecutionFailed {
+            name: "browser".to_string(),
+            message: format!("failed to decode masked field selector: {error}"),
+        })
+}
+
+async fn backend_node_for_selector(
+    page: &Page,
+    selector: &str,
+) -> Result<Option<BackendNodeId>, ToolError> {
+    let document = page
+        .execute(GetDocumentParams::builder().depth(0).pierce(true).build())
+        .await
+        .map_err(browser_error(
+            "browser",
+            "failed to read document for masked browser field",
+        ))?
+        .result
+        .root;
+    let node_id = page
+        .execute(QuerySelectorParams::new(document.node_id, selector))
+        .await
+        .map_err(browser_error(
+            "browser",
+            "failed to resolve masked browser field selector",
+        ))?
+        .node_id;
+    if *node_id.inner() == 0 {
+        return Ok(None);
+    }
+    page.execute(DescribeNodeParams::builder().node_id(node_id).build())
+        .await
+        .map(|node| Some(node.node.backend_node_id))
+        .map_err(browser_error(
+            "browser",
+            "failed to describe masked browser field",
+        ))
 }
 
 async fn query_accessibility_tree(page: &Page) -> Result<Vec<AxNode>, ToolError> {
@@ -1008,10 +1147,7 @@ async fn dom_snapshot(
 }
 
 fn parse_browser_url(raw: &str) -> Result<Url, ToolError> {
-    Url::parse(raw).map_err(|error| ToolError::InvalidParameters {
-        name: "browser_navigate".to_string(),
-        message: format!("invalid url: {error}"),
-    })
+    crate::tool::url_fetch::parse_fetch_url(raw, "browser_navigate")
 }
 
 async fn current_url(page: &Page) -> Result<String, ToolError> {
