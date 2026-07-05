@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use swage_client::runtime::RuntimeMetadata;
 use swage_config::LogLevel;
+use swage_storage::ChannelQueueStore;
 use tokio_util::sync::CancellationToken;
 
 /// Run the gateway to completion.
@@ -73,7 +74,19 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 4: Open persistent storage.
     let raw_storage = open_storage(&db_path);
 
-    // Step 5: Recover orphaned turns from a previous unclean shutdown.
+    // Step 5: Requeue channel messages claimed by a crashed gateway before
+    // interrupting the orphaned turns they were attached to. A running process
+    // cannot survive startup, so any in-flight turn here is a crash orphan.
+    match raw_storage.requeue_presented_for_inflight_turns().await {
+        Ok(0) => {}
+        Ok(n) => info!("Requeued {n} channel message(s) from orphaned turn(s)"),
+        Err(e) => {
+            eprintln!("Channel queue startup recovery failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    // Step 5b: Recover orphaned turns from a previous unclean shutdown.
     match crate::shutdown::recover_orphaned_turns(&*raw_storage, &*raw_storage).await {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
@@ -104,7 +117,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5b: Apply timeout policy to any approval requests that expired
+    // Step 5c: Apply timeout policy to any approval requests that expired
     // while the gateway was offline. Approvals still within their window are
     // left as-is and will be re-emitted to clients on WebSocket connect.
     let message_ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
@@ -142,6 +155,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     let provider = create_provider(&config, &startup_secret_manager).await;
     let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
+    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
     // Step 7: Build the tool dispatch pipeline.
     let tool_dispatcher = build_tool_dispatcher(
@@ -162,6 +176,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
     );
     state.voice_provider = voice_provider;
+    state.telegram = telegram;
     state.start_agent_message_expiry();
     crate::execution_host::register_local_execution_host(&state).await;
     if let Err(error) = crate::execution_host::restore_registered_execution_hosts(&state).await {
@@ -175,6 +190,25 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         background_shutdown.clone(),
     );
     let attachment_handle = crate::attachment::spawn_ingestion_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
+    let queue_handle = crate::background_loop::spawn_periodic_loop(
+        std::time::Duration::from_millis(250),
+        background_shutdown.clone(),
+        "channel queue drain failed",
+        {
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    crate::channel_gateway::drain_channel_queue(state).await;
+                    Ok(())
+                }
+            }
+        },
+    );
+    let telegram_handle = crate::telegram::spawn_poll_loop_until_cancelled(
         state.clone(),
         background_shutdown.clone(),
     );
@@ -238,10 +272,16 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         for (name, handle) in [
             ("schedule", schedule_handle),
             ("attachment ingestion", attachment_handle),
+            ("channel queue", queue_handle),
         ] {
             if let Err(error) = handle.await {
                 warn!(%error, "background {name} loop did not shut down cleanly");
             }
+        }
+        if let Some(handle) = telegram_handle
+            && let Err(error) = handle.await
+        {
+            warn!(%error, "background telegram polling loop did not shut down cleanly");
         }
     }
 
@@ -341,6 +381,74 @@ async fn resolve_provider_config(
         &model.model_id,
         base_url,
     ))
+}
+
+async fn create_telegram_client(
+    config: &swage_config::ResolvedConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Option<Arc<crate::telegram::TelegramClient>> {
+    let Some(telegram) = config.channels.telegram.as_ref() else {
+        return None;
+    };
+
+    let token = match resolve_telegram_token(telegram, secret_manager).await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(
+                "Telegram channel credential resolution failed: {error}. \
+                 The server will start, but Telegram polling will stay disabled \
+                 until configuration is fixed."
+            );
+            return None;
+        }
+    };
+
+    let timeout = std::time::Duration::from_secs(telegram.poll_timeout_secs.saturating_add(10));
+    match crate::telegram::TelegramClient::new(crate::telegram::TelegramClientConfig {
+        base_url: telegram.api_base_url.clone(),
+        token,
+        request_timeout: timeout,
+    }) {
+        Ok(client) => Some(Arc::new(client)),
+        Err(error) => {
+            tracing::warn!(
+                "Telegram channel startup failed: {error}. \
+                 The server will start, but Telegram polling will stay disabled \
+                 until configuration is fixed."
+            );
+            None
+        }
+    }
+}
+
+async fn resolve_telegram_token(
+    telegram: &swage_config::TelegramChannelConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Result<String, String> {
+    if let Some(reference) = telegram.bot_token_secret_ref.as_deref() {
+        let resolved = secret_manager.resolve(reference).await.map_err(|error| {
+            format!("failed to resolve telegram credential {reference}: {error}")
+        })?;
+        if resolved.record.material_kind != "channel_token" {
+            return Err(format!(
+                "telegram credential {reference} has material_kind '{}', expected 'channel_token'",
+                resolved.record.material_kind
+            ));
+        }
+        return Ok(resolved.value);
+    }
+
+    if let Some(env_var) = telegram.bot_token_env.as_deref() {
+        warn!(
+            "Telegram channel is using legacy bot_token_env credential resolution. \
+             Store it as a governed channel_token secret and set bot_token_secret_ref \
+             to audit credential access."
+        );
+        return std::env::var(env_var)
+            .map_err(|_| format!("environment variable '{env_var}' is not set"));
+    }
+
+    Err("telegram channel configured without bot_token_secret_ref or bot_token_env".into())
 }
 
 fn default_provider_model(

@@ -4,6 +4,12 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "channel_link_code_response": {
+      "$ref": "#/$defs/ChannelLinkCodeResponse"
+    },
+    "create_channel_link_code_request": {
+      "$ref": "#/$defs/CreateChannelLinkCodeRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -27,6 +33,8 @@
     }
   },
   "required": [
+    "create_channel_link_code_request",
+    "channel_link_code_response",
     "create_schedule_request",
     "update_schedule_request",
     "schedule",
@@ -36,6 +44,61 @@
     "trigger_schedule_response"
   ],
   "$defs": {
+    "ChannelLinkCodeResponse": {
+      "description": "A short-lived, single-use channel link code.",
+      "type": "object",
+      "properties": {
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "link_code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "link_code",
+        "expires_at"
+      ]
+    },
+    "CreateChannelLinkCodeRequest": {
+      "description": "Request a short-lived code that links a channel conversation to a bench.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bench_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
+        "home_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "integration": {
+          "$ref": "#/$defs/ExternalChannelIntegration"
+        }
+      },
+      "required": [
+        "integration"
+      ]
+    },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
       "type": "object",
@@ -174,7 +237,8 @@
       "type": "string",
       "enum": [
         "dev_dm",
-        "dev_thread"
+        "dev_thread",
+        "telegram"
       ]
     },
     "GateConfig": {

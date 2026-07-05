@@ -239,6 +239,8 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
             })
             .unwrap(),
             content: "Delivered".into(),
+            status: "sent".into(),
+            error: None,
         })
         .await
         .unwrap();

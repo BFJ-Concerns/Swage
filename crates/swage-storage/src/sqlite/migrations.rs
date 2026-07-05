@@ -40,7 +40,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         // 017/018 were the scheduled-job and heartbeat tables, absorbed into
         // the unified schedules schema in 001 during the private alpha.
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
-        ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
@@ -118,26 +117,6 @@ const CREATE_EXECUTION_HOST_TABLE: &str = "
 
 const ADD_EXECUTION_HOST_WORKSPACE_ROOTS: &str = "
     ALTER TABLE execution_hosts ADD COLUMN workspace_roots_json TEXT NOT NULL DEFAULT '[]';
-";
-
-const CREATE_CHANNEL_LINK_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS channel_links (
-        integration      TEXT NOT NULL,
-        account          TEXT NOT NULL,
-        conversation     TEXT NOT NULL,
-        bench_id       TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
-        agent_id         TEXT NOT NULL,
-        session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        home_target_json TEXT,
-        linked_at        TEXT NOT NULL,
-        updated_at       TEXT NOT NULL,
-        PRIMARY KEY (integration, account, conversation)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
-        ON channel_links(bench_id);
-    CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
-        ON channel_links(session_id);
 ";
 
 const CREATE_LENS_PREFERENCES_TABLE: &str = "
@@ -235,6 +214,8 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         target_json  TEXT NOT NULL,
         content      TEXT NOT NULL,
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+        error        TEXT,
         delivered_at TEXT NOT NULL
     );
 
@@ -423,7 +404,41 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
             'delivery recorded',
             json_object(
                 'target', NEW.target_json,
-                'content', NEW.content
+                'content', NEW.content,
+                'status', NEW.status,
+                'error', COALESCE(NEW.error, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_channel_inbound_state_audit
+    AFTER UPDATE OF state ON channel_inbound_messages
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (
+                SELECT th.session_id
+                FROM turns t
+                INNER JOIN threads th ON th.id = t.thread_id
+                WHERE t.id = NEW.turn_id
+            ),
+            'channel_inbound_message',
+            NEW.id,
+            'state_transition',
+            'channel inbound message state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'integration', NEW.integration,
+                'account', NEW.account,
+                'conversation', NEW.conversation,
+                'external_id', NEW.external_id,
+                'turn_id', COALESCE(NEW.turn_id, ''),
+                'discard_reason', COALESCE(NEW.discard_reason, '')
             ),
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
@@ -687,6 +702,26 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_bench_id ON sessions(bench_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
+    -- Channel links: durable one-time binding from an external conversation
+    -- origin to the bench/agent/session it should resume.
+    CREATE TABLE IF NOT EXISTS channel_links (
+        integration      TEXT NOT NULL,
+        account          TEXT NOT NULL,
+        conversation     TEXT NOT NULL,
+        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        agent_id         TEXT NOT NULL,
+        session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        home_target_json TEXT,
+        linked_at        TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        PRIMARY KEY (integration, account, conversation)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
+        ON channel_links(bench_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
+        ON channel_links(session_id);
+
     -- Schedules: one durable definition per recurring or one-off piece of
     -- agent work. The session policy is flattened into columns: fresh rows
     -- carry the target bench/agent, continuation rows the session each run
@@ -790,6 +825,69 @@ const COMPLETE_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_in_flight_per_thread
         ON turns(thread_id)
         WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
+
+    -- Inbound external-channel messages are durably queued before any turn
+    -- begins. Queue rows keep Telegram/update provenance even though the turn
+    -- itself receives one composed input string.
+    CREATE TABLE IF NOT EXISTS channel_inbound_messages (
+        id             TEXT NOT NULL PRIMARY KEY,
+        integration    TEXT NOT NULL,
+        account        TEXT NOT NULL,
+        conversation   TEXT NOT NULL,
+        external_id    TEXT NOT NULL,
+        sender         TEXT NOT NULL,
+        content        TEXT NOT NULL,
+        state          TEXT NOT NULL CHECK (state IN ('pending', 'presented', 'discarded')),
+        discard_reason TEXT,
+        turn_id        TEXT,
+        received_at    TEXT NOT NULL,
+        presented_at   TEXT,
+        UNIQUE (integration, account, external_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_inbound_pending_origin
+        ON channel_inbound_messages(state, integration, account, conversation, received_at);
+    CREATE INDEX IF NOT EXISTS idx_channel_inbound_turn_id
+        ON channel_inbound_messages(turn_id);
+
+    CREATE TABLE IF NOT EXISTS channel_cursors (
+        integration TEXT NOT NULL,
+        account     TEXT NOT NULL,
+        cursor      TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (integration, account)
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_records (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        target_json  TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+        error        TEXT,
+        delivered_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delivery_records_session_id
+        ON delivery_records(session_id, delivered_at);
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        entity_kind  TEXT NOT NULL,
+        entity_id    TEXT NOT NULL,
+        event_kind   TEXT NOT NULL,
+        summary      TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at   TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_session_id
+        ON audit_events(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_entity
+        ON audit_events(entity_kind, entity_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+        ON audit_events(created_at);
 
     -- Messages: individual messages within a thread.
     CREATE TABLE IF NOT EXISTS messages (

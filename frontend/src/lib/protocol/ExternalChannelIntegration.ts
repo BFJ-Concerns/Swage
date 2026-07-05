@@ -3,4 +3,4 @@
 /**
  * An external channel integration that can receive delivered output.
  */
-export type ExternalChannelIntegration = "dev_dm" | "dev_thread";
+export type ExternalChannelIntegration = "dev_dm" | "dev_thread" | "telegram";

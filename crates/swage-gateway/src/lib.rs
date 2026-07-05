@@ -75,6 +75,7 @@ pub mod startup;
 pub mod state;
 pub mod subscription;
 pub mod supervision;
+pub mod telegram;
 pub mod thread_selection;
 pub mod tool;
 pub mod tool_executor;
