@@ -6,7 +6,7 @@
 
 mod render;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -113,6 +113,8 @@ struct BrowserProcess {
 struct PageSession {
     page: Page,
     refs: RefTable,
+    masked_backend_nodes: HashSet<BackendNodeId>,
+    masked_selectors: HashSet<String>,
     snapshot_seq: u64,
     last_used: Instant,
 }
@@ -135,6 +137,7 @@ impl BrowserHost {
             if let Err(error) = process.browser.close().await {
                 debug!(%error, "browser CDP close failed during shutdown");
             }
+            tokio::time::sleep(Duration::from_millis(500)).await;
             process.handler.abort();
             if let Err(error) = process
                 .child
@@ -160,6 +163,7 @@ impl BrowserHost {
             if let Err(error) = process.browser.close().await {
                 debug!(%error, "browser CDP close failed during idle sweep");
             }
+            tokio::time::sleep(Duration::from_millis(500)).await;
             process.handler.abort();
             if let Err(error) = process
                 .child
@@ -188,6 +192,8 @@ impl BrowserHost {
             .map_err(browser_error("browser_navigate", "failed to navigate"))?;
         tokio::time::sleep(LOAD_SETTLE).await;
         page.refs.clear();
+        page.masked_backend_nodes.clear();
+        page.masked_selectors.clear();
         self.observe_locked(page, BrowserActionKind::Read).await
     }
 
@@ -208,7 +214,7 @@ impl BrowserHost {
         session_id: &str,
         reference: &str,
     ) -> Result<(BrowserObservation, BrowserActionAudit), ToolError> {
-        self.act_on_ref(session_id, reference, "browser_click", |object_id| {
+        self.act_on_ref(session_id, reference, "browser_click", false, |object_id| {
             CallFunctionOnParams::builder()
                 .function_declaration(
                     "function () { this.scrollIntoView({block: 'center', inline: 'center'}); this.click(); }",
@@ -236,6 +242,7 @@ impl BrowserHost {
                 session_id,
                 reference,
                 "browser_type",
+                true,
                 format!(
                     "(el) => {{ el.scrollIntoView({{block:'center',inline:'center'}}); el.focus(); if ({replace}) el.value = ''; el.value = {quoted_text}; el.dispatchEvent(new InputEvent('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); if ({submit} && el.form) el.form.requestSubmit(); }}"
                 ),
@@ -245,7 +252,7 @@ impl BrowserHost {
             return Ok(result);
         }
         let text_value = json!(text);
-        self.act_on_ref(session_id, reference, "browser_type", move |object_id| {
+        self.act_on_ref(session_id, reference, "browser_type", true, move |object_id| {
             CallFunctionOnParams::builder()
                 .function_declaration(
                     "function (text, replace, submit) {
@@ -289,6 +296,7 @@ impl BrowserHost {
                 session_id,
                 reference,
                 "browser_select",
+                false,
                 format!(
                     "(el) => {{ const wanted = {quoted_value}; const option = Array.from(el.options || []).find(o => o.value === wanted || o.label === wanted || o.textContent.trim() === wanted); if (!option) throw new Error('option not found: ' + wanted); el.value = option.value; el.dispatchEvent(new Event('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); }}"
                 ),
@@ -298,7 +306,7 @@ impl BrowserHost {
             return Ok(result);
         }
         let option_value = json!(value);
-        self.act_on_ref(session_id, reference, "browser_select", move |object_id| {
+        self.act_on_ref(session_id, reference, "browser_select", false, move |object_id| {
             CallFunctionOnParams::builder()
                 .function_declaration(
                     "function (wanted) {
@@ -425,6 +433,7 @@ impl BrowserHost {
         session_id: &str,
         reference: &str,
         tool_name: &str,
+        mask_target_after_action: bool,
         build_call: F,
     ) -> Result<(BrowserObservation, BrowserActionAudit), ToolError>
     where
@@ -455,6 +464,9 @@ impl BrowserHost {
                     tool_name,
                     "that element is no longer on the page — call browser_snapshot for the current state",
                 ))?;
+            if mask_target_after_action {
+                page.mask_ref_target(&target);
+            }
             tokio::time::sleep(LOAD_SETTLE).await;
             let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
             let audit = BrowserActionAudit {
@@ -474,6 +486,9 @@ impl BrowserHost {
                 tool_name,
                 "that element is no longer on the page — call browser_snapshot for the current state",
             ))?;
+        if mask_target_after_action {
+            page.mask_ref_target(&target);
+        }
         tokio::time::sleep(LOAD_SETTLE).await;
         let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
         let audit = BrowserActionAudit {
@@ -491,6 +506,7 @@ impl BrowserHost {
         session_id: &str,
         reference: &str,
         tool_name: &str,
+        mask_target_after_action: bool,
         function: String,
     ) -> Result<Option<(BrowserObservation, BrowserActionAudit)>, ToolError> {
         let mut state = self.inner.lock().await;
@@ -515,6 +531,9 @@ impl BrowserHost {
                 tool_name,
                 "that element is no longer on the page — call browser_snapshot for the current state",
             ))?;
+        if mask_target_after_action {
+            page.mask_ref_target(&target);
+        }
         tokio::time::sleep(LOAD_SETTLE).await;
         let observation = self.observe_locked(page, BrowserActionKind::Action).await?;
         let audit = BrowserActionAudit {
@@ -562,6 +581,7 @@ impl BrowserHost {
             &title,
             page.snapshot_seq,
             self.config.max_snapshot_bytes,
+            &page.masked_backend_nodes,
         );
         if rendered.refs.is_empty()
             || rendered
@@ -575,6 +595,7 @@ impl BrowserHost {
                 &title,
                 page.snapshot_seq,
                 self.config.max_snapshot_bytes,
+                &page.masked_selectors,
             )
             .await?;
             page.refs = rendered.refs.clone();
@@ -662,6 +683,8 @@ impl BrowserState {
                 PageSession {
                     page,
                     refs: HashMap::new(),
+                    masked_backend_nodes: HashSet::new(),
+                    masked_selectors: HashSet::new(),
                     snapshot_seq: 0,
                     last_used: Instant::now(),
                 },
@@ -671,6 +694,17 @@ impl BrowserState {
             .sessions
             .get_mut(session_id)
             .expect("session just inserted"))
+    }
+}
+
+impl PageSession {
+    fn mask_ref_target(&mut self, target: &RefEntry) {
+        if target.backend_node_id != BackendNodeId::new(0) {
+            self.masked_backend_nodes.insert(target.backend_node_id);
+        }
+        if let Some(selector) = &target.selector {
+            self.masked_selectors.insert(selector.clone());
+        }
     }
 }
 
@@ -854,10 +888,17 @@ async fn dom_snapshot(
     title: &str,
     snapshot_seq: u64,
     max_bytes: usize,
+    masked_selectors: &HashSet<String>,
 ) -> Result<RenderedSnapshot, ToolError> {
+    let masked_selectors_json =
+        serde_json::to_string(masked_selectors).map_err(|error| ToolError::ExecutionFailed {
+            name: "browser_snapshot".to_string(),
+            message: format!("failed to encode browser mask selectors: {error}"),
+        })?;
     let nodes: Vec<DomNodeSnapshot> = page
         .evaluate_function(
             r#"() => {
+                const maskedSelectors = new Set(__MASKED_SELECTORS__);
                 const cssPath = (el) => {
                     if (el.id) return '#' + CSS.escape(el.id);
                     const parts = [];
@@ -876,7 +917,7 @@ async fn dom_snapshot(
                     }
                     const wrapping = el.closest('label');
                     if (wrapping) return wrapping.innerText.trim();
-                    return (el.innerText || el.value || el.getAttribute('title') || el.getAttribute('alt') || '').trim();
+                    return (el.innerText || el.getAttribute('aria-placeholder') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.id || '').trim();
                 };
                 const roleFor = (el) => {
                     if (el.getAttribute('role')) return el.getAttribute('role');
@@ -899,14 +940,20 @@ async fn dom_snapshot(
                     .map(el => {
                         const role = roleFor(el);
                         const state = [];
+                        const selector = cssPath(el);
+                        const inputType = (el.getAttribute('type') || '').toLowerCase();
+                        const maskValue = inputType === 'password' || maskedSelectors.has(selector);
                         if (el.disabled) state.push('disabled');
                         if (el.checked) state.push('checked');
                         if (el.required) state.push('required');
-                        if (el.value && role === 'textbox') state.push(`value="${el.value}"`);
-                        return {role, name: labelFor(el), selector: cssPath(el), state};
+                        if (el.value && role === 'textbox') {
+                            state.push(maskValue ? 'value="[masked]"' : `value="${el.value}"`);
+                        }
+                        return {role, name: labelFor(el), selector, state};
                     })
                     .filter(node => node.role);
-            }"#,
+            }"#
+            .replace("__MASKED_SELECTORS__", &masked_selectors_json),
         )
         .await
         .map_err(browser_error("browser_snapshot", "failed to build DOM semantic fallback"))?

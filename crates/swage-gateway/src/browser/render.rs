@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chromiumoxide::cdp::browser_protocol::accessibility::{
     AxNode, AxProperty, AxPropertyName, AxValue,
@@ -29,19 +29,24 @@ pub fn render_snapshot(
     title: &str,
     snapshot_seq: u64,
     max_bytes: usize,
+    masked_backend_nodes: &HashSet<BackendNodeId>,
 ) -> RenderedSnapshot {
-    let mut renderer = Renderer {
-        refs: HashMap::new(),
-        next_ref: 1,
-        lines: vec![
-            format!("url: {url}"),
-            format!("title: {title}"),
-            format!("snapshot: {snapshot_seq}"),
-            String::new(),
-        ],
-    };
-    for node in root_nodes(nodes) {
+    let header = vec![
+        format!("url: {url}"),
+        format!("title: {title}"),
+        format!("snapshot: {snapshot_seq}"),
+        String::new(),
+    ];
+    let mut renderer = Renderer::new(header.clone(), masked_backend_nodes);
+    let roots = root_nodes(nodes);
+    for node in &roots {
         renderer.render_node(nodes, node, 0);
+    }
+    if renderer.only_rendered_root_refs() && nodes.len() > roots.len() {
+        renderer = Renderer::new(header, masked_backend_nodes);
+        for node in nodes.iter().filter(|node| node.parent_id.is_some()) {
+            renderer.render_node(nodes, node, 0);
+        }
     }
     let full_output = renderer.lines.join("\n");
     let output = truncate_snapshot(&full_output, max_bytes);
@@ -56,16 +61,36 @@ pub fn render_snapshot(
 struct Renderer {
     refs: RefTable,
     next_ref: usize,
+    masked_backend_nodes: HashSet<BackendNodeId>,
     lines: Vec<String>,
 }
 
 impl Renderer {
+    fn new(lines: Vec<String>, masked_backend_nodes: &HashSet<BackendNodeId>) -> Self {
+        Self {
+            refs: HashMap::new(),
+            next_ref: 1,
+            masked_backend_nodes: masked_backend_nodes.clone(),
+            lines,
+        }
+    }
+
+    fn only_rendered_root_refs(&self) -> bool {
+        self.refs.is_empty()
+            || self
+                .refs
+                .values()
+                .all(|entry| entry.role.eq_ignore_ascii_case("RootWebArea"))
+    }
+
     fn render_node(&mut self, nodes: &[AxNode], node: &AxNode, depth: usize) {
         if should_drop(node) {
             return;
         }
         let role = ax_value_string(node.role.as_ref()).unwrap_or_else(|| "node".to_string());
-        let name = ax_value_string(node.name.as_ref()).unwrap_or_default();
+        let name = ax_value_string(node.name.as_ref())
+            .map(|name| name.trim().to_string())
+            .unwrap_or_default();
         if role == "generic" && name.is_empty() && !has_interesting_state(node) {
             for child in child_nodes(nodes, node) {
                 self.render_node(nodes, child, depth);
@@ -91,7 +116,7 @@ impl Renderer {
         if !name.is_empty() {
             line.push_str(&format!(" \"{}\"", escape_text(&name)));
         }
-        let state_text = state_text(node);
+        let state_text = state_text(node, self.is_masked(node));
         if !state_text.is_empty() {
             line.push(' ');
             line.push_str(&state_text);
@@ -117,6 +142,11 @@ impl Renderer {
         for child in child_nodes(nodes, node) {
             self.render_node(nodes, child, depth + 1);
         }
+    }
+
+    fn is_masked(&self, node: &AxNode) -> bool {
+        node.backend_dom_node_id
+            .is_some_and(|id| self.masked_backend_nodes.contains(&id))
     }
 }
 
@@ -177,7 +207,7 @@ fn has_interesting_state(node: &AxNode) -> bool {
     .any(|name| property_value(node, name).is_some())
 }
 
-fn state_text(node: &AxNode) -> String {
+fn state_text(node: &AxNode, mask_value: bool) -> String {
     let mut states = Vec::new();
     for name in [
         "checked", "disabled", "selected", "expanded", "required", "invalid",
@@ -190,7 +220,9 @@ fn state_text(node: &AxNode) -> String {
             }
         }
     }
-    if let Some(value) = ax_value_string(node.value.as_ref())
+    if mask_value {
+        states.push("value=\"[masked]\"".to_string());
+    } else if let Some(value) = ax_value_string(node.value.as_ref())
         && !value.is_empty()
     {
         states.push(format!("value=\"{}\"", escape_text(&value)));
@@ -277,7 +309,14 @@ mod tests {
             node("3", Some("1"), "textbox", "Username", Some(10)),
             node("4", Some("1"), "button", "Submit", Some(11)),
         ];
-        let rendered = render_snapshot(&nodes, "http://fixture/", "Fixture", 1, 10_000);
+        let rendered = render_snapshot(
+            &nodes,
+            "http://fixture/",
+            "Fixture",
+            1,
+            10_000,
+            &HashSet::new(),
+        );
         assert!(rendered.output.contains("- textbox \"Username\" ref=e1"));
         assert!(rendered.output.contains("- button \"Submit\" ref=e2"));
         assert_eq!(rendered.refs.len(), 2);

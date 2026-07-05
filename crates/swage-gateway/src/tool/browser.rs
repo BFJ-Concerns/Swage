@@ -356,6 +356,9 @@ async fn write_full_snapshot(
     file.write_all(full.as_bytes())
         .await
         .map_err(|error| artifact_error("snapshot", error))?;
+    file.flush()
+        .await
+        .map_err(|error| artifact_error("snapshot", error))?;
     Ok(Some(path.relative))
 }
 
@@ -372,6 +375,9 @@ async fn write_screenshot(
         .await
         .map_err(|error| artifact_error("screenshot", error))?;
     file.write_all(&bytes)
+        .await
+        .map_err(|error| artifact_error("screenshot", error))?;
+    file.flush()
         .await
         .map_err(|error| artifact_error("screenshot", error))?;
     let _ = audit;
