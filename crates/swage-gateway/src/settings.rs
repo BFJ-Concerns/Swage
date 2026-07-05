@@ -779,12 +779,12 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
             "tool max output bytes must be positive".to_string(),
         ));
     }
-    if let Some(directory) = runtime.plugin_directory.as_deref() {
-        if directory.trim().is_empty() {
-            return Err(ApiError::validation(
-                "tool plugin directory must not be empty".to_string(),
-            ));
-        }
+    if let Some(directory) = runtime.plugin_directory.as_deref()
+        && directory.trim().is_empty()
+    {
+        return Err(ApiError::validation(
+            "tool plugin directory must not be empty".to_string(),
+        ));
     }
     if let Some(search) = &runtime.search
         && (search.provider_type.trim().is_empty() || search.base_url.trim().is_empty())
