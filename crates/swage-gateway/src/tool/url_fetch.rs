@@ -338,7 +338,7 @@ fn file_read_follow_up(path: &str) -> Value {
     })
 }
 
-fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url, ToolError> {
+pub(crate) fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url).map_err(|error| ToolError::InvalidParameters {
         name: tool_name.to_owned(),
         message: format!("Invalid URL: {error}"),
@@ -353,7 +353,7 @@ fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url, ToolError
     }
 }
 
-async fn ensure_url_target_is_safe(
+pub(crate) async fn ensure_url_target_is_safe(
     parsed_url: &reqwest::Url,
     tool_name: &str,
 ) -> Result<(), ToolError> {
