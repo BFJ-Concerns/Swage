@@ -1,15 +1,15 @@
 {
   "name": "swage-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.202607.500",
   "type": "module",
   "scripts": {
     "dev": "electron ./src/main.mjs",
     "test": "npm --prefix ../frontend run build && node ./tests/smoke.mjs"
   },
   "devDependencies": {
-    "electron": "^42.1.0",
-    "playwright": "^1.60.0",
+    "electron": "42.5.0",
+    "playwright": "^1.61.1",
     "ws": "8.21.0"
   },
   "overrides": {
