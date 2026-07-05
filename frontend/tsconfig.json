@@ -7,6 +7,10 @@
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": true,
+    // Vite owns the build; tsc (via svelte-check) is type-check only. Without
+    // this, checkJs treats the imported verify-status-hues.mjs as an emittable
+    // input and warns it would overwrite itself.
+    "noEmit": true,
     "isolatedModules": true,
     "moduleDetection": "force",
     "strict": true,
