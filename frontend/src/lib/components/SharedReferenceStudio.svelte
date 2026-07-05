@@ -297,6 +297,23 @@
                 {/each}
               </div>
             </section>
+            {#if detail.object.payload.provider_visible?.requests?.length || detail.object.payload.provider_visible?.reasoning?.length}
+              <section class="reference-panel">
+                <div class="panel-heading">
+                  <h4>Provider Visible</h4>
+                  <span>{detail.object.payload.provider_visible?.requests?.length ?? 0} request(s)</span>
+                </div>
+                <div class="snapshot-meta">
+                  <span>{detail.object.payload.provider_visible?.reasoning?.length ?? 0} reasoning event(s)</span>
+                </div>
+                {#if detail.object.payload.provider_visible?.requests?.[0]}
+                  <article class="provider-visible-card">
+                    <strong>First request</strong>
+                    <code>{JSON.stringify(detail.object.payload.provider_visible.requests[0], null, 2)}</code>
+                  </article>
+                {/if}
+              </section>
+            {/if}
           </div>
         {/if}
 
@@ -460,6 +477,7 @@
 
   .node-card,
   .element-card,
+  .provider-visible-card,
   .interaction-card,
   .edge-row {
     padding: 12px 14px;
@@ -495,12 +513,14 @@
 
   .element-copy,
   .element-meta,
+  .provider-visible-card,
   .interaction-card {
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
+  .provider-visible-card code,
   .interaction-card code {
     white-space: pre-wrap;
     word-break: break-word;

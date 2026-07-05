@@ -100,9 +100,19 @@ pub async fn recover_orphaned_turns(
         for session in storage.list_by_bench(bench.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
+                    // TODO Preserve delegated parent turns across restart
+                    // Delegated parent turns should suspend/resume durably;
+                    // this startup recovery path currently
+                    // interrupts Delegating turns. Persist enough delegation
+                    // correlation state to resume the parent turn or expose a
+                    // recoverable suspended state after a gateway restart.
+                    // ---
                     if !matches!(
                         turn.state,
-                        TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating
+                        TurnState::Pending
+                            | TurnState::Processing
+                            | TurnState::AwaitingApproval
+                            | TurnState::Delegating
                     ) {
                         continue;
                     }
@@ -130,26 +140,22 @@ pub async fn recover_orphaned_turns(
 /// Counts returned by [`recover_orphaned_background_runs`].
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BackgroundRunRecoveryCounts {
-    pub scheduled_runs_failed: u64,
-    pub heartbeat_runs_failed: u64,
+    pub schedule_runs_failed: u64,
     pub background_jobs_retried: u64,
 }
 
 /// Repair background maintenance rows left mid-run by an unclean shutdown.
 ///
-/// Scheduled and heartbeat runs are marked failed because their durable run row
-/// already belongs to a previous process. Attachment jobs are moved back to
+/// Schedule runs are marked failed because their durable run row already
+/// belongs to a previous process. Attachment jobs are moved back to
 /// `retried`, which is already part of the runnable-job selector and lets
 /// ingestion safely resume on the next tick.
 pub async fn recover_orphaned_background_runs(
     storage: &dyn Storage,
 ) -> Result<BackgroundRunRecoveryCounts, StorageError> {
     Ok(BackgroundRunRecoveryCounts {
-        scheduled_runs_failed: storage
-            .recover_incomplete_scheduled_runs("gateway stopped while scheduled run was running")
-            .await?,
-        heartbeat_runs_failed: storage
-            .recover_incomplete_heartbeat_runs("gateway stopped while heartbeat run was running")
+        schedule_runs_failed: storage
+            .recover_incomplete_schedule_runs("gateway stopped while schedule run was running")
             .await?,
         background_jobs_retried: storage
             .recover_running_background_jobs("gateway stopped while background job was running")
@@ -447,6 +453,48 @@ mod tests {
             "delegating turn should become Interrupted"
         );
         assert_eq!(n_delegating, 0, "no turns should remain Delegating");
+    }
+
+    #[tokio::test]
+    async fn recovery_marks_pending_turns_interrupted() {
+        let storage = Arc::new(MockStorage::new());
+        let bench = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let pending_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("claimed but not processed".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let count = recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert_eq!(count, 1, "pending channel placeholder should be recovered");
+        let recovered = storage.get_turn(pending_turn.id).await.unwrap().unwrap();
+        assert_eq!(recovered.state, TurnState::Interrupted);
     }
 
     #[tokio::test]

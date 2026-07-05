@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_gateway::cli::{Cli, Command, GatewayCommand};
 use swage_gateway::tool::{
-    file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-    file_write::FileWriteTool, memory::MemoryTool, shell::ShellTool,
+    file_edit::FileEditTool, file_list::FileListTool, file_read::FileReadTool,
+    file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool, shell::ShellTool,
 };
 use swage_tool::context::ToolContext;
 use swage_tool::tool::Tool;
@@ -86,6 +86,7 @@ fn build_sandbox_agent_tools() -> Vec<Box<dyn Tool>> {
             max_output_bytes,
         }),
         Box::new(FileReadTool { max_output_bytes }),
+        Box::new(FileEditTool),
         Box::new(FileWriteTool),
         Box::new(FileSearchTool { max_output_bytes }),
         Box::new(FileListTool),
@@ -215,6 +216,7 @@ mod tests {
 
         for name in [
             "shell",
+            "file_edit",
             "file_read",
             "file_write",
             "file_search",

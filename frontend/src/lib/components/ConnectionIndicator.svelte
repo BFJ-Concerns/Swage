@@ -49,9 +49,8 @@
 <style>
   /*
     Riso alert banner — a fluoro-orange-on-paper strip sitting at the top of
-    the conversation pane. Per Surfaces.md ("Connection lost" goes in the
-    conversation surface) and Progress.md ("Failures bind to the right scope
-    — pane banners for failures that affect everything in the pane.").
+    the conversation pane. Connection failures affect the whole pane, so they
+    live here instead of inside an individual message.
   */
   .banner {
     display: flex;

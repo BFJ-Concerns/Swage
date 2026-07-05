@@ -5,6 +5,8 @@
 //! without updating every import site.
 
 pub mod agent_memory;
+pub mod browser;
+pub mod file_edit;
 pub mod file_list;
 pub mod file_read;
 pub mod file_search;
@@ -14,6 +16,7 @@ pub mod nested_tool_runtime;
 pub mod plugin;
 pub mod python_execute;
 pub mod shell;
+pub mod tool_result_read;
 pub mod url_fetch;
 pub mod web_search;
 pub mod workspace;

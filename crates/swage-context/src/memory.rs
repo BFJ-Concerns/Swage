@@ -3,7 +3,7 @@
 //! The memory element wraps the bench's persistent memory string and exposes
 //! it as a system message. It is available to the assembly engine but the
 //! default assembly does NOT include it in assembled output — this preserves
-//! era 0.1 equivalence where memory is tool-accessible rather than prepended.
+//! legacy behaviour where memory is tool-accessible rather than prepended.
 //! Custom assemblies can include memory at any position.
 
 use swage_core::{ChatMessage, Role};
@@ -48,9 +48,9 @@ impl ContextElement for MemoryElement {
 
     /// Produce a single system message if memory is non-empty; empty otherwise.
     ///
-    /// The default assembly ignores this element's output to preserve era 0.1
-    /// equivalence. Custom assemblies call `content()` to include memory at
-    /// their chosen position.
+    /// The default assembly ignores this element's output to preserve the
+    /// legacy prompt shape. Custom assemblies call `content()` to include
+    /// memory at their chosen position.
     fn content(&self) -> Vec<ChatMessage> {
         if self.content.is_empty() {
             return vec![];

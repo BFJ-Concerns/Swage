@@ -222,7 +222,40 @@ pub fn validate_files(paths: &[&Path]) -> Vec<ConfigProblem> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        name: &'static str,
+        value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            // Safety: tests that mutate process environment hold ENV_LOCK.
+            unsafe { std::env::set_var(name, value) };
+            Self {
+                name,
+                value: previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // Safety: tests that mutate process environment hold ENV_LOCK.
+            unsafe {
+                if let Some(value) = &self.value {
+                    std::env::set_var(self.name, value);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
 
     fn build_fixture(
         root: &Path,
@@ -285,6 +318,56 @@ mod tests {
         let cfg = load_resolved_config_from(tmp.path(), "bare-bench", "default")
             .expect("should succeed even with missing intermediate configs");
         assert_eq!(cfg.server.port, 5000);
+    }
+
+    #[test]
+    fn load_resolved_config_reads_root_from_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[server]\nport = 5042\n"),
+            "env-bench",
+            Some("[models]\ndefault_model_id = \"env-model\"\n"),
+            "env-agent",
+            Some("[server]\nhost = \"127.0.0.42\"\n"),
+        );
+        let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
+
+        let cfg = load_resolved_config("env-bench", "env-agent")
+            .expect("env-derived root should resolve config");
+
+        assert_eq!(cfg.server.host, "127.0.0.42");
+        assert_eq!(cfg.server.port, 5042);
+        assert_eq!(cfg.default_model_id(), "env-model");
+    }
+
+    #[test]
+    fn load_resolved_config_for_team_reads_root_from_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = TempDir::new().unwrap();
+        build_fixture(
+            tmp.path(),
+            Some("[server]\nport = 3000\n"),
+            "env-bench",
+            Some("[models]\ndefault_model_id = \"bench-model\"\n"),
+            "env-agent",
+            Some("[server]\nhost = \"127.0.0.43\"\n"),
+        );
+        fs::create_dir_all(tmp.path().join("benches/env-bench/teams/env-team")).unwrap();
+        fs::write(
+            tmp.path()
+                .join("benches/env-bench/teams/env-team/config.toml"),
+            "[models]\ndefault_model_id = \"team-model\"\n",
+        )
+        .unwrap();
+        let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
+
+        let cfg = load_resolved_config_for_team("env-bench", "env-team", "env-agent")
+            .expect("env-derived root should resolve team config");
+
+        assert_eq!(cfg.server.host, "127.0.0.43");
+        assert_eq!(cfg.default_model_id(), "team-model");
     }
 
     #[test]

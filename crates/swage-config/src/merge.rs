@@ -1,11 +1,13 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    ContextConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
-    ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
-    PricingConfig, ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig,
-    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
-    ServerConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, ContextConfig,
+    ExperimentLocationConfig, ExperimentationConfig, GenerationConfig, GenerationPresetConfig,
+    HitlConfig, LogLevel, LoggingConfig, ModelCapabilitiesConfig, ModelCatalogConfig,
+    ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
+    ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,10 +85,39 @@ pub struct PartialGenerationConfig {
     pub presets: Option<HashMap<String, GenerationPresetConfig>>,
 }
 
+/// Partial mirror of `ChannelsConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialChannelsConfig {
+    pub telegram: Option<PartialTelegramChannelConfig>,
+}
+
+/// Partial mirror of `TelegramChannelConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialTelegramChannelConfig {
+    pub bot_token_secret_ref: Option<Option<String>>,
+    pub bot_token_env: Option<Option<String>>,
+    pub api_base_url: Option<String>,
+    pub poll_timeout_secs: Option<u64>,
+}
+
 /// Partial mirror of `ObservabilityConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialObservabilityConfig {
     pub force_on: Option<bool>,
+}
+
+/// Partial mirror of `ExperimentationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialExperimentationConfig {
+    pub enabled: Option<bool>,
+    pub locations: Option<HashMap<String, PartialExperimentLocationConfig>>,
+}
+
+/// Partial mirror of `ExperimentLocationConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialExperimentLocationConfig {
+    pub enabled: Option<bool>,
+    pub forced_variant: Option<Option<String>>,
 }
 
 /// Partial mirror of `ToolConfig` + `ToolPermissionConfig`.
@@ -109,10 +140,21 @@ pub struct PartialToolConfig {
     pub max_output_bytes: Option<usize>,
     pub plugin_directory: Option<Option<String>>,
     pub search: Option<Option<SearchProviderConfig>>,
+    pub browser: Option<PartialBrowserToolConfig>,
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
     pub bundles: Option<HashMap<String, Vec<String>>>,
     pub require_approval: Option<Vec<RequireApprovalEntry>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialBrowserToolConfig {
+    pub binary_path: Option<Option<String>>,
+    pub page_idle_secs: Option<u64>,
+    pub process_idle_secs: Option<u64>,
+    pub max_snapshot_bytes: Option<usize>,
+    pub screenshots: Option<BrowserScreenshotPolicy>,
+    pub allow_hosts: Option<Vec<String>>,
 }
 
 /// Partial mirror of `PythonExecuteToolConfig`.
@@ -196,11 +238,13 @@ pub struct PartialConfig {
     pub context: Option<PartialContextConfig>,
     pub pricing: Option<PartialPricingConfig>,
     pub observability: Option<PartialObservabilityConfig>,
+    pub experimentation: Option<PartialExperimentationConfig>,
     pub tools: Option<PartialToolConfig>,
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
     pub generation: Option<PartialGenerationConfig>,
+    pub channels: Option<PartialChannelsConfig>,
     /// Top-level bypass for the permission and approval system.
     /// Mirrors `ResolvedConfig::dangerously_skip_permissions`.
     #[serde(default)]
@@ -259,6 +303,28 @@ impl From<ResolvedConfig> for PartialConfig {
             observability: Some(PartialObservabilityConfig {
                 force_on: Some(r.observability.force_on),
             }),
+            experimentation: Some(PartialExperimentationConfig {
+                enabled: Some(r.experimentation.enabled),
+                locations: if r.experimentation.locations.is_empty() {
+                    None
+                } else {
+                    Some(
+                        r.experimentation
+                            .locations
+                            .into_iter()
+                            .map(|(key, location)| {
+                                (
+                                    key,
+                                    PartialExperimentLocationConfig {
+                                        enabled: Some(location.enabled),
+                                        forced_variant: Some(location.forced_variant),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                },
+            }),
             tools: Some(PartialToolConfig {
                 shell_timeout_secs: Some(r.tools.shell_timeout_secs),
                 python_execute: Some(PartialPythonExecuteToolConfig {
@@ -275,6 +341,14 @@ impl From<ResolvedConfig> for PartialConfig {
                 max_output_bytes: Some(r.tools.max_output_bytes),
                 plugin_directory: Some(r.tools.plugin_directory),
                 search: Some(r.tools.search),
+                browser: Some(PartialBrowserToolConfig {
+                    binary_path: Some(r.tools.browser.binary_path),
+                    page_idle_secs: Some(r.tools.browser.page_idle_secs),
+                    process_idle_secs: Some(r.tools.browser.process_idle_secs),
+                    max_snapshot_bytes: Some(r.tools.browser.max_snapshot_bytes),
+                    screenshots: Some(r.tools.browser.screenshots),
+                    allow_hosts: Some(r.tools.browser.allow_hosts),
+                }),
                 allow: Some(r.tools.permissions.allow),
                 deny: Some(r.tools.permissions.deny),
                 bundles: Some(r.tools.permissions.bundles),
@@ -324,6 +398,17 @@ impl From<ResolvedConfig> for PartialConfig {
                 } else {
                     Some(r.generation.presets)
                 },
+            }),
+            channels: Some(PartialChannelsConfig {
+                telegram: r
+                    .channels
+                    .telegram
+                    .map(|telegram| PartialTelegramChannelConfig {
+                        bot_token_secret_ref: Some(telegram.bot_token_secret_ref),
+                        bot_token_env: Some(telegram.bot_token_env),
+                        api_base_url: Some(telegram.api_base_url),
+                        poll_timeout_secs: Some(telegram.poll_timeout_secs),
+                    }),
             }),
             dangerously_skip_permissions: Some(r.dangerously_skip_permissions),
         }
@@ -436,6 +521,34 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 force_on: o.force_on.or(b.force_on),
             }
         }),
+        experimentation: merge_section(base.experimentation, overlay.experimentation, |b, o| {
+            let locations = match (b.locations, o.locations) {
+                (Some(mut base_locations), Some(overlay_locations)) => {
+                    for (key, overlay_location) in overlay_locations {
+                        match base_locations.entry(key) {
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                let base_location = entry.get_mut();
+                                base_location.enabled =
+                                    overlay_location.enabled.or(base_location.enabled);
+                                base_location.forced_variant = overlay_location
+                                    .forced_variant
+                                    .clone()
+                                    .or_else(|| base_location.forced_variant.clone());
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(overlay_location);
+                            }
+                        }
+                    }
+                    Some(base_locations)
+                }
+                (base_locations, overlay_locations) => overlay_locations.or(base_locations),
+            };
+            PartialExperimentationConfig {
+                enabled: o.enabled.or(b.enabled),
+                locations,
+            }
+        }),
         tools: merge_section(base.tools, overlay.tools, |b, o| {
             // Scalar fields: overlay wins when present, otherwise base.
             // Permission fields (allow, deny): overlay REPLACES base entirely.
@@ -465,6 +578,14 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
                 plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
+                browser: merge_section(b.browser, o.browser, |b, o| PartialBrowserToolConfig {
+                    binary_path: o.binary_path.or(b.binary_path),
+                    page_idle_secs: o.page_idle_secs.or(b.page_idle_secs),
+                    process_idle_secs: o.process_idle_secs.or(b.process_idle_secs),
+                    max_snapshot_bytes: o.max_snapshot_bytes.or(b.max_snapshot_bytes),
+                    screenshots: o.screenshots.or(b.screenshots),
+                    allow_hosts: o.allow_hosts.or(b.allow_hosts),
+                }),
                 allow: o.allow.or(b.allow),
                 deny: o.deny.or(b.deny),
                 bundles,
@@ -514,6 +635,18 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             }
             PartialGenerationConfig {
                 presets: Some(presets),
+            }
+        }),
+        channels: merge_section(base.channels, overlay.channels, |b, o| {
+            PartialChannelsConfig {
+                telegram: merge_section(b.telegram, o.telegram, |bt, ot| {
+                    PartialTelegramChannelConfig {
+                        bot_token_secret_ref: ot.bot_token_secret_ref.or(bt.bot_token_secret_ref),
+                        bot_token_env: ot.bot_token_env.or(bt.bot_token_env),
+                        api_base_url: ot.api_base_url.or(bt.api_base_url),
+                        poll_timeout_secs: ot.poll_timeout_secs.or(bt.poll_timeout_secs),
+                    }
+                }),
             }
         }),
         dangerously_skip_permissions: overlay
@@ -573,6 +706,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;
     }
@@ -606,7 +740,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let t = partial.tools.unwrap_or_default();
             let dp = ToolPermissionConfig::default();
             let dpy = PythonExecuteToolConfig::default();
+            let db = BrowserToolConfig::default();
             let py = t.python_execute.unwrap_or_default();
+            let browser = t.browser.unwrap_or_default();
             ToolConfig {
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 python_execute: PythonExecuteToolConfig {
@@ -626,6 +762,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 plugin_directory: t.plugin_directory.unwrap_or(dt.plugin_directory),
                 // Double-option: outer None → default (None), Some(x) → use x.
                 search: t.search.unwrap_or(dt.search),
+                browser: BrowserToolConfig {
+                    binary_path: browser.binary_path.unwrap_or(db.binary_path),
+                    page_idle_secs: browser.page_idle_secs.unwrap_or(db.page_idle_secs),
+                    process_idle_secs: browser.process_idle_secs.unwrap_or(db.process_idle_secs),
+                    max_snapshot_bytes: browser.max_snapshot_bytes.unwrap_or(db.max_snapshot_bytes),
+                    screenshots: browser.screenshots.unwrap_or(db.screenshots),
+                    allow_hosts: browser.allow_hosts.unwrap_or(db.allow_hosts),
+                },
                 permissions: ToolPermissionConfig {
                     allow: t.allow.unwrap_or(dp.allow),
                     deny: t.deny.unwrap_or(dp.deny),
@@ -657,11 +801,49 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 .unwrap_or_default();
             GenerationConfig { presets }
         },
+        channels: {
+            let default = TelegramChannelConfig::default();
+            let channels = partial.channels.unwrap_or_default();
+            ChannelsConfig {
+                telegram: channels.telegram.map(|telegram| TelegramChannelConfig {
+                    bot_token_secret_ref: telegram
+                        .bot_token_secret_ref
+                        .unwrap_or(default.bot_token_secret_ref),
+                    bot_token_env: telegram.bot_token_env.unwrap_or(default.bot_token_env),
+                    api_base_url: telegram.api_base_url.unwrap_or(default.api_base_url),
+                    poll_timeout_secs: telegram
+                        .poll_timeout_secs
+                        .unwrap_or(default.poll_timeout_secs),
+                }),
+            }
+        },
         observability: {
             let do_ = ObservabilityConfig::default();
             let o = partial.observability.unwrap_or_default();
             ObservabilityConfig {
                 force_on: o.force_on.unwrap_or(do_.force_on),
+            }
+        },
+        experimentation: {
+            let de = ExperimentationConfig::default();
+            let e = partial.experimentation.unwrap_or_default();
+            ExperimentationConfig {
+                enabled: e.enabled.unwrap_or(de.enabled),
+                locations: e
+                    .locations
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, location)| {
+                        let dl = ExperimentLocationConfig::default();
+                        (
+                            key,
+                            ExperimentLocationConfig {
+                                enabled: location.enabled.unwrap_or(dl.enabled),
+                                forced_variant: location.forced_variant.unwrap_or(None),
+                            },
+                        )
+                    })
+                    .collect(),
             }
         },
         output: {
@@ -913,6 +1095,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()
@@ -943,6 +1126,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             },
         )]);
 
@@ -978,6 +1162,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
             }),
@@ -994,6 +1179,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()
@@ -1021,6 +1207,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
             }),
@@ -1036,6 +1223,7 @@ mod tests {
                         aliases: Vec::new(),
                         context_window: None,
                         generation_preset: None,
+                        capabilities: ModelCapabilitiesConfig::default(),
                     },
                 )])),
                 ..Default::default()
@@ -1188,7 +1376,14 @@ mod tests {
         let resolved = resolve(PartialConfig::default());
         assert_eq!(resolved.tools.permissions.allow, vec!["*".to_string()]);
         assert!(resolved.tools.permissions.deny.is_empty());
-        assert!(resolved.tools.permissions.bundles.is_empty());
+        assert!(resolved.tools.permissions.bundles.contains_key("browsing"));
+        assert!(
+            resolved
+                .tools
+                .permissions
+                .bundles
+                .contains_key("browser_actions")
+        );
     }
 
     #[test]

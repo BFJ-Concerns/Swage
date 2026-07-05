@@ -2,12 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   approvePendingAction,
-  disableHeartbeat,
-  enableHeartbeat,
   fetchOperatorOverview,
-  pauseScheduledJob,
+  fetchScheduleRuns,
+  pauseSchedule,
   rejectPendingAction,
-  resumeScheduledJob,
+  resumeSchedule,
   setOperatorBaseUrl,
 } from "../api/operator";
 
@@ -43,8 +42,7 @@ describe("fetchOperatorOverview", () => {
         },
         sessions: [],
         approvals: [],
-        scheduled_jobs: { jobs: [] },
-        heartbeats: { heartbeats: [] },
+        schedules: { schedules: [] },
         channels: { channels: [] },
         nodes: [],
       }),
@@ -141,46 +139,41 @@ describe("operator actions", () => {
     });
   });
 
-  it("pauses and resumes a scheduled job", async () => {
+  it("pauses and resumes a schedule", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(mockResponse({}, 200))
       .mockResolvedValueOnce(mockResponse({}, 200));
 
-    await pauseScheduledJob("job-1");
-    await resumeScheduledJob("job-1");
+    await pauseSchedule("schedule-1");
+    await resumeSchedule("schedule-1");
 
-    expect(fetch).toHaveBeenNthCalledWith(1, "/api/scheduled-jobs/job-1/pause", {
+    expect(fetch).toHaveBeenNthCalledWith(1, "/api/schedules/schedule-1/pause", {
       method: "POST",
     });
-    expect(fetch).toHaveBeenNthCalledWith(2, "/api/scheduled-jobs/job-1/resume", {
+    expect(fetch).toHaveBeenNthCalledWith(2, "/api/schedules/schedule-1/resume", {
       method: "POST",
     });
   });
 
-  it("disables and enables a heartbeat", async () => {
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(mockResponse({}, 200))
-      .mockResolvedValueOnce(mockResponse({}, 200));
+  it("fetches a schedule's recorded runs", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ runs: [] }, 200));
 
-    await disableHeartbeat("hb-1");
-    await enableHeartbeat("hb-1");
+    const response = await fetchScheduleRuns("schedule-1");
 
-    expect(fetch).toHaveBeenNthCalledWith(1, "/api/heartbeats/hb-1/disable", {
-      method: "POST",
+    expect(fetch).toHaveBeenCalledWith("/api/schedules/schedule-1/runs", {
+      method: "GET",
     });
-    expect(fetch).toHaveBeenNthCalledWith(2, "/api/heartbeats/hb-1/enable", {
-      method: "POST",
-    });
+    expect(response.runs).toEqual([]);
   });
 
   it("prepends the configured base URL", async () => {
     setOperatorBaseUrl("http://localhost:4000");
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 200));
 
-    await pauseScheduledJob("job-1");
+    await pauseSchedule("schedule-1");
 
     expect(fetch).toHaveBeenCalledWith(
-      "http://localhost:4000/api/scheduled-jobs/job-1/pause",
+      "http://localhost:4000/api/schedules/schedule-1/pause",
       { method: "POST" },
     );
   });

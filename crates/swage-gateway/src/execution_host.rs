@@ -603,9 +603,14 @@ pub async fn register_attached_node_with_gateway(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
     use std::sync::Arc;
+    use swage_core::ToolError;
     use swage_storage::SqliteStorage;
-    use swage_tool::context::MockToolContext;
+    use swage_tool::context::{MockToolContext, UserInfo};
+    use swage_tool::tool::Tool;
+    use uuid::Uuid;
 
     fn test_secret_manager() -> crate::secret::SecretManager {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -625,6 +630,39 @@ mod tests {
             workspace_roots: vec![PathBuf::from("/tmp/workspace")],
             capabilities: vec!["host_identity".to_string()],
             registered_at: Utc::now(),
+        }
+    }
+
+    struct ObservingTool;
+
+    #[async_trait]
+    impl Tool for ObservingTool {
+        fn name(&self) -> &str {
+            "observe_context"
+        }
+
+        fn description(&self) -> &str {
+            "Return the tool context observed by the execution host."
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, _params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+            Ok(json!({
+                "agent_id": ctx.agent_id(),
+                "session_id": ctx.session_id(),
+                "working_directory": ctx.working_directory(),
+                "allowed_paths": ctx.allowed_paths(),
+                "user_name": ctx.user_info().map(|user| user.name.clone()),
+                "call_id": ctx.call_id(),
+                "turn_id": ctx.turn_id(),
+            }))
         }
     }
 
@@ -798,5 +836,89 @@ mod tests {
                 .to_string()
                 .contains("escapes execution host workspace")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_on_remote_host_preserves_tool_context_across_transport() {
+        let workspace = tempfile::TempDir::new().expect("workspace root");
+        let workspace_root = workspace.path().to_path_buf();
+        let handle = spawn_attached_node(
+            ToolDispatcher::allow_all(vec![Arc::new(ObservingTool) as Arc<dyn Tool>]),
+            workspace_root.clone(),
+            "shared-token".to_string(),
+        )
+        .await;
+
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let token_variable = format!(
+            "SWAGE_TEST_EXECUTION_HOST_TOKEN_{}",
+            Uuid::new_v4().simple()
+        );
+        unsafe { std::env::set_var(&token_variable, "shared-token") };
+        let secret = secret_manager
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Execution host token".into(),
+                material_kind: "plugin_secret".into(),
+                owner_kind: "service".into(),
+                backend_kind: "env".into(),
+                scope_kind: "plugin".into(),
+                scope_id: Some("execution-host".into()),
+                metadata: None,
+                value: None,
+                external_reference: Some(token_variable.clone()),
+            })
+            .await
+            .unwrap();
+
+        let turn_id = Uuid::new_v4();
+        let host = RegisteredExecutionHost {
+            host_id: "attached-a".to_string(),
+            label: None,
+            kind: ExecutionHostKind::AttachedNode,
+            base_url: Some(handle.base_url.clone()),
+            shared_token_secret_ref: Some(secret.reference),
+            workspace_root: workspace_root.clone(),
+            workspace_roots: vec![workspace_root.clone()],
+            capabilities: vec!["observe_context".to_string()],
+            registered_at: Utc::now(),
+        };
+        let ctx = MockToolContext {
+            agent_id: "agent-a".to_string(),
+            session_id: "session-1".to_string(),
+            working_directory: workspace_root.clone(),
+            allowed_paths: vec![workspace_root.clone()],
+            user_info: Some(UserInfo {
+                id: "user-1".into(),
+                name: "Taylor".into(),
+                metadata: HashMap::new(),
+            }),
+            call_id: Some("call-1".to_string()),
+            turn_id: Some(turn_id),
+        };
+
+        let output =
+            execute_on_remote_host(&secret_manager, &host, "observe_context", &json!({}), &ctx)
+                .await
+                .expect("remote host should execute advertised tool");
+
+        assert_eq!(output["agent_id"], "agent-a");
+        assert_eq!(output["session_id"], "session-1");
+        assert_eq!(
+            output["working_directory"],
+            workspace_root.to_string_lossy().to_string()
+        );
+        assert_eq!(
+            output["allowed_paths"][0],
+            workspace_root.to_string_lossy().to_string()
+        );
+        assert_eq!(output["user_name"], "Taylor");
+        assert_eq!(output["call_id"], "call-1");
+        assert_eq!(output["turn_id"], turn_id.to_string());
+
+        handle.join_handle.abort();
+        unsafe { std::env::remove_var(token_variable) };
     }
 }

@@ -22,51 +22,20 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use swage_core::{GatewayError, Role};
-use swage_storage::{NewDeliveryRecord, model::NewSession};
+use swage_storage::{
+    NewDeliveryRecord, PendingChannelOrigin,
+    model::{ChannelInboundMessage, NewSession},
+};
 
 use crate::state::AppState;
 use crate::subscription::SubscriptionState;
 use crate::thread_selection::resolve_thread_for_session;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalChannelIntegration {
-    DevDm,
-    DevThread,
-}
-
-impl ExternalChannelIntegration {
-    pub fn as_metadata_value(&self) -> &'static str {
-        match self {
-            Self::DevDm => "dev_dm",
-            Self::DevThread => "dev_thread",
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, GatewayError> {
-        match value {
-            "dev_dm" => Ok(Self::DevDm),
-            "dev_thread" => Ok(Self::DevThread),
-            other => Err(GatewayError::ValidationError(format!(
-                "unknown channel integration: {other}"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeliveryTarget {
-    Channel {
-        integration: ExternalChannelIntegration,
-        account: String,
-        conversation: String,
-    },
-    LocalStorage,
-    Webhook {
-        url: String,
-    },
-}
+// The delivery wire types live in the protocol crate (the schedule contract
+// embeds them); re-exported here so gateway call sites keep their paths.
+pub use swage_protocol::client::delivery::{
+    DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -98,29 +67,6 @@ pub struct ChannelInboundResponse {
     pub session_id: Uuid,
     pub delivered_to: Vec<DeliveryTarget>,
     pub response: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeliveryRoutingRequest {
-    #[serde(default = "default_true")]
-    pub deliver_to_origin: bool,
-    #[serde(default)]
-    pub home_target: Option<DeliveryTarget>,
-    #[serde(default)]
-    pub explicit_targets: Vec<DeliveryTarget>,
-    #[serde(default)]
-    pub store_local_output: bool,
-}
-
-impl Default for DeliveryRoutingRequest {
-    fn default() -> Self {
-        Self {
-            deliver_to_origin: true,
-            home_target: None,
-            explicit_targets: Vec::new(),
-            store_local_output: false,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +177,7 @@ pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListRespons
     let channels = [
         ExternalChannelIntegration::DevDm,
         ExternalChannelIntegration::DevThread,
+        ExternalChannelIntegration::Telegram,
     ]
     .into_iter()
     .map(|integration| {
@@ -255,11 +202,14 @@ pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListRespons
             .iter()
             .map(|delivery| delivery.delivered_at)
             .max();
-        let status = if route_count > 0 || delivery_count > 0 {
-            "active"
-        } else {
-            "idle"
-        };
+        let status =
+            if integration == ExternalChannelIntegration::Telegram && state.telegram.is_some() {
+                "polling"
+            } else if route_count > 0 || delivery_count > 0 {
+                "active"
+            } else {
+                "idle"
+            };
 
         ChannelStatusResponse {
             integration: integration.as_metadata_value().to_string(),
@@ -280,35 +230,11 @@ async fn handle_inbound(
     text: String,
     routing: DeliveryRoutingRequest,
 ) -> Result<ChannelInboundResponse, GatewayError> {
-    let session_id = ensure_session_for_origin(state, &origin).await?;
-    let configured_home_target = state
-        .storage
-        .get_channel_link(
-            origin.integration.as_metadata_value(),
-            &origin.account,
-            &origin.conversation,
-        )
-        .await?
-        .and_then(|link| link.home_target)
-        .map(serde_json::from_value::<DeliveryTarget>)
-        .transpose()
-        .map_err(|error| {
-            GatewayError::ValidationError(format!(
-                "invalid stored channel home_target for {}:{}:{}: {error}",
-                origin.integration.as_metadata_value(),
-                origin.account,
-                origin.conversation
-            ))
-        })?;
+    let session_id =
+        ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultBench)
+            .await?;
     let response = run_channel_turn(state, session_id, text).await?;
-    let targets = resolve_delivery_targets(
-        Some(&origin),
-        DeliveryRoutingRequest {
-            home_target: routing.home_target.or(configured_home_target),
-            ..routing
-        },
-    )?;
-    deliver_to_targets(state, session_id, &targets, &response).await?;
+    let targets = deliver_channel_response(state, session_id, &origin, routing, &response).await?;
 
     Ok(ChannelInboundResponse {
         session_id,
@@ -317,9 +243,16 @@ async fn handle_inbound(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SessionResolutionPolicy {
+    AllowDefaultBench,
+    LinkedOnly,
+}
+
 async fn ensure_session_for_origin(
     state: &AppState,
     origin: &ChannelOrigin,
+    policy: SessionResolutionPolicy,
 ) -> Result<Uuid, GatewayError> {
     if let Some(existing) = state.channel_routes.lock().await.get(origin).copied()
         && state.storage.get_session(existing).await?.is_some()
@@ -406,6 +339,15 @@ async fn ensure_session_for_origin(
         return Ok(session.id);
     }
 
+    if matches!(policy, SessionResolutionPolicy::LinkedOnly) {
+        return Err(GatewayError::ValidationError(format!(
+            "channel origin {}:{}:{} is not linked",
+            origin.integration.as_metadata_value(),
+            origin.account,
+            origin.conversation
+        )));
+    }
+
     let bench = state.bench_store.get_or_create_default().await?;
     let session = state
         .storage
@@ -437,6 +379,161 @@ async fn ensure_session_for_origin(
         .insert(origin.clone(), session.id);
 
     Ok(session.id)
+}
+
+async fn configured_home_target(
+    state: &AppState,
+    origin: &ChannelOrigin,
+) -> Result<Option<DeliveryTarget>, GatewayError> {
+    state
+        .storage
+        .get_channel_link(
+            origin.integration.as_metadata_value(),
+            &origin.account,
+            &origin.conversation,
+        )
+        .await?
+        .and_then(|link| link.home_target)
+        .map(serde_json::from_value::<DeliveryTarget>)
+        .transpose()
+        .map_err(|error| {
+            GatewayError::ValidationError(format!(
+                "invalid stored channel home_target for {}:{}:{}: {error}",
+                origin.integration.as_metadata_value(),
+                origin.account,
+                origin.conversation
+            ))
+        })
+}
+
+async fn deliver_channel_response(
+    state: &AppState,
+    session_id: Uuid,
+    origin: &ChannelOrigin,
+    routing: DeliveryRoutingRequest,
+    response: &str,
+) -> Result<Vec<DeliveryTarget>, GatewayError> {
+    let configured_home_target = configured_home_target(state, origin).await?;
+    let targets = resolve_delivery_targets(
+        Some(origin),
+        DeliveryRoutingRequest {
+            home_target: routing.home_target.or(configured_home_target),
+            ..routing
+        },
+    )?;
+    deliver_to_targets(state, session_id, &targets, response).await?;
+    Ok(targets)
+}
+
+pub async fn drain_channel_queue(state: AppState) {
+    if let Err(error) = drain_channel_queue_checked(&state).await {
+        tracing::warn!("failed to drain channel queue origin: {error}");
+    }
+}
+
+pub async fn drain_channel_queue_checked(state: &AppState) -> Result<(), GatewayError> {
+    let origins = match state.storage.list_pending_channel_origins().await {
+        Ok(origins) => origins,
+        Err(error) => {
+            return Err(GatewayError::Storage(error));
+        }
+    };
+
+    let mut first_error = None;
+    for pending in origins {
+        if let Err(error) = drain_channel_origin(state, pending).await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+async fn drain_channel_origin(
+    state: &AppState,
+    pending: PendingChannelOrigin,
+) -> Result<(), GatewayError> {
+    let integration = pending
+        .integration
+        .parse::<ExternalChannelIntegration>()
+        .map_err(GatewayError::ValidationError)?;
+    let origin = ChannelOrigin {
+        integration,
+        account: pending.account.clone(),
+        conversation: pending.conversation.clone(),
+    };
+    let rows = state.storage.list_pending_by_origin(pending).await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let row_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+
+    let session_id = match ensure_session_for_origin(
+        state,
+        &origin,
+        SessionResolutionPolicy::LinkedOnly,
+    )
+    .await
+    {
+        Ok(session_id) => session_id,
+        Err(GatewayError::ValidationError(_))
+            if origin.integration == ExternalChannelIntegration::Telegram =>
+        {
+            state
+                .storage
+                .discard_channel_messages(row_ids, "unlinked")
+                .await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
+    if state.active_turns.lock().await.contains_key(&session_id) {
+        return Ok(());
+    }
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("linked session {session_id} no longer exists"))
+        })?;
+    let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
+    let input = compose_channel_messages(&rows);
+
+    let turn = match state
+        .storage
+        .begin_channel_turn(thread.id, &session.agent_id, &input, row_ids)
+        .await
+    {
+        Ok(turn) => turn,
+        Err(swage_core::StorageError::ConstraintViolation(_)) => return Ok(()),
+        Err(error) => return Err(GatewayError::Storage(error)),
+    };
+
+    let response =
+        crate::automated_turn::run_placeholder_turn(state, session_id, &input, turn.id).await?;
+    deliver_channel_response(
+        state,
+        session_id,
+        &origin,
+        DeliveryRoutingRequest::default(),
+        &response,
+    )
+    .await?;
+    Ok(())
+}
+
+fn compose_channel_messages(rows: &[ChannelInboundMessage]) -> String {
+    rows.iter()
+        .map(|row| row.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 async fn run_channel_turn(
@@ -523,21 +620,67 @@ pub async fn deliver_to_targets(
     targets: &[DeliveryTarget],
     content: &str,
 ) -> Result<(), GatewayError> {
+    let mut first_error: Option<GatewayError> = None;
     for target in targets {
-        deliver_to_target(session_id, target, content).await?;
-        record_delivery(state, session_id, target.clone(), content.to_string()).await;
+        match deliver_to_target(state, session_id, target, content).await {
+            Ok(()) => {
+                record_delivery(
+                    state,
+                    session_id,
+                    target.clone(),
+                    content.to_string(),
+                    "sent",
+                    None,
+                )
+                .await;
+            }
+            Err(error) => {
+                let error_text = error.to_string();
+                record_delivery(
+                    state,
+                    session_id,
+                    target.clone(),
+                    content.to_string(),
+                    "failed",
+                    Some(error_text),
+                )
+                .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
     }
 
-    Ok(())
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
 }
 
 async fn deliver_to_target(
+    state: &AppState,
     session_id: Uuid,
     target: &DeliveryTarget,
     content: &str,
 ) -> Result<(), GatewayError> {
     match target {
-        DeliveryTarget::Channel { .. } | DeliveryTarget::LocalStorage => Ok(()),
+        DeliveryTarget::Channel {
+            integration: ExternalChannelIntegration::DevDm | ExternalChannelIntegration::DevThread,
+            ..
+        }
+        | DeliveryTarget::LocalStorage => Ok(()),
+        DeliveryTarget::Channel {
+            integration: ExternalChannelIntegration::Telegram,
+            conversation,
+            ..
+        } => {
+            let telegram = state.telegram.as_ref().ok_or_else(|| {
+                GatewayError::ValidationError("telegram channel is not configured".into())
+            })?;
+            telegram.send_message(conversation, content).await
+        }
         DeliveryTarget::Webhook { url } => {
             let parsed = reqwest::Url::parse(url).map_err(|error| {
                 GatewayError::ValidationError(format!("invalid webhook target URL: {error}"))
@@ -571,28 +714,33 @@ async fn record_delivery(
     session_id: Uuid,
     target: DeliveryTarget,
     content: String,
+    status: &str,
+    error: Option<String>,
 ) {
-    let _ = state
+    if let Err(error) = state
         .storage
         .create_delivery_record(NewDeliveryRecord {
             session_id,
             target: serde_json::to_value(&target).unwrap_or(serde_json::Value::Null),
             content,
+            status: status.to_string(),
+            error,
         })
-        .await;
+        .await
+    {
+        tracing::warn!("failed to record delivery attempt: {error}");
+    }
 }
 
 fn parse_delivery_target(target: serde_json::Value) -> Option<DeliveryTarget> {
     serde_json::from_value(target).ok()
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::turn::tests::make_state_with_session;
+    use swage_core::{FinishReason, StreamChunk};
 
     #[test]
     fn home_target_defaults_to_origin() {
@@ -673,5 +821,92 @@ mod tests {
         .expect_err("missing origin should fail");
 
         assert!(error.to_string().contains("without an origin"));
+    }
+
+    #[test]
+    fn compose_channel_messages_separates_queued_updates() {
+        let received_at = Utc::now();
+        let rows = vec![
+            ChannelInboundMessage {
+                id: Uuid::new_v4(),
+                integration: "telegram".into(),
+                account: "bot-1".into(),
+                conversation: "chat-1".into(),
+                external_id: "1".into(),
+                sender: "chat-1".into(),
+                content: "first".into(),
+                state: swage_storage::model::ChannelInboundMessageState::Pending,
+                discard_reason: None,
+                turn_id: None,
+                received_at,
+                presented_at: None,
+            },
+            ChannelInboundMessage {
+                id: Uuid::new_v4(),
+                integration: "telegram".into(),
+                account: "bot-1".into(),
+                conversation: "chat-1".into(),
+                external_id: "2".into(),
+                sender: "chat-1".into(),
+                content: "second".into(),
+                state: swage_storage::model::ChannelInboundMessageState::Pending,
+                discard_reason: None,
+                turn_id: None,
+                received_at,
+                presented_at: None,
+            },
+        ];
+
+        assert_eq!(compose_channel_messages(&rows[..1]), "first");
+        assert_eq!(compose_channel_messages(&rows), "first\n\nsecond");
+    }
+
+    #[tokio::test]
+    async fn channel_turn_receives_provider_visible_snapshot() {
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Channel answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+
+        let response = run_channel_turn(&state, session_id, "Channel hello".into())
+            .await
+            .expect("channel turn should complete");
+
+        assert_eq!(response, "Channel answer");
+        let thread = state
+            .storage
+            .list_by_session(session_id)
+            .await
+            .expect("list session threads")
+            .into_iter()
+            .next()
+            .expect("session should have a thread");
+        let turn = state
+            .storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .expect("list turns")
+            .into_iter()
+            .next()
+            .expect("channel turn should be persisted");
+        let snapshot = state
+            .storage
+            .get_snapshot(turn.id)
+            .await
+            .expect("get snapshot")
+            .expect("channel turn should receive context snapshot");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("snapshot should be JSON");
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "channel turn snapshot should include provider-visible messages"
+        );
     }
 }

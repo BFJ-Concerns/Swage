@@ -10,7 +10,7 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    is_binary_content, location_approval_error, resolve_context_path, truncate_output,
+    continuable_output_value, is_binary_content, location_approval_error, resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file in the workspace."
+        "Read the contents of a file in the workspace, optionally from a byte offset."
     }
 
     fn parameters(&self) -> Value {
@@ -38,6 +38,11 @@ impl Tool for FileReadTool {
                 "path": {
                     "type": "string",
                     "description": "Path to the file, relative to the workspace root."
+                },
+                "offset_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset to start reading from. Use next_offset_bytes from a truncated result to continue."
                 }
             },
             "required": ["path"]
@@ -56,6 +61,7 @@ impl Tool for FileReadTool {
                 message: "Missing required argument: path".to_owned(),
             })?
             .to_string();
+        let offset_bytes = optional_offset_bytes(&params, self.name())?;
 
         let resolved = resolve_context_path(ctx, &path_str)
             .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read"))?;
@@ -88,10 +94,60 @@ impl Tool for FileReadTool {
 
         // Convert to UTF-8, replacing any invalid sequences rather than failing.
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        let (content, _truncated, _total_bytes) = truncate_output(&text, self.max_output_bytes);
-
-        Ok(json!({"output": content}))
+        read_text_from_offset(
+            &text,
+            &path_str,
+            offset_bytes,
+            self.max_output_bytes,
+            self.name(),
+        )
     }
+}
+
+fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolError> {
+    match params.get("offset_bytes") {
+        Some(Value::Number(number)) => {
+            let offset = number
+                .as_u64()
+                .ok_or_else(|| ToolError::InvalidParameters {
+                    name: tool_name.to_owned(),
+                    message: "offset_bytes must be a non-negative integer".to_owned(),
+                })?;
+            usize::try_from(offset).map_err(|_| ToolError::InvalidParameters {
+                name: tool_name.to_owned(),
+                message: "offset_bytes is too large for this platform".to_owned(),
+            })
+        }
+        Some(Value::Null) | None => Ok(0),
+        Some(_) => Err(ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "offset_bytes must be a non-negative integer".to_owned(),
+        }),
+    }
+}
+
+fn read_text_from_offset(
+    text: &str,
+    path: &str,
+    offset_bytes: usize,
+    max_output_bytes: usize,
+    tool_name: &str,
+) -> Result<Value, ToolError> {
+    if offset_bytes > text.len() || !text.is_char_boundary(offset_bytes) {
+        return Err(ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "offset_bytes must be a valid UTF-8 byte boundary within the file".to_owned(),
+        });
+    }
+
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("path".to_string(), json!(path));
+    continuable_output_value(text, max_output_bytes, offset_bytes, "file_read", arguments).map_err(
+        |message| ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +189,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(val["output"], "Hello, world!");
+        assert!(
+            val.get("total_bytes").is_none(),
+            "small first-page reads should keep their old shape: {val:?}"
+        );
+        assert!(
+            val.get("follow_up").is_none(),
+            "small first-page reads should not invent follow-up metadata: {val:?}"
+        );
     }
 
     #[tokio::test]
@@ -186,6 +250,45 @@ mod tests {
             .await
             .unwrap();
         assert!(val["output"].as_str().unwrap().len() <= 20);
+        assert_eq!(val["truncated"], json!(true));
+        assert_eq!(val["total_bytes"], json!(100));
+    }
+
+    #[tokio::test]
+    async fn truncated_file_read_returns_follow_up_offset() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("big.txt"), b"abcdefghij").unwrap();
+
+        let val = tool_with_limit(&dir, 4)
+            .execute(json!({ "path": "big.txt" }), &ctx(&dir))
+            .await
+            .unwrap();
+
+        assert_eq!(val["output"], json!("abcd"));
+        assert_eq!(val["truncated"], json!(true));
+        assert_eq!(val["total_bytes"], json!(10));
+        assert_eq!(val["offset_bytes"], json!(0));
+        assert_eq!(val["next_offset_bytes"], json!(4));
+        assert_eq!(val["follow_up"]["tool"], json!("file_read"));
+        assert_eq!(val["follow_up"]["arguments"]["path"], json!("big.txt"));
+        assert_eq!(val["follow_up"]["arguments"]["offset_bytes"], json!(4));
+    }
+
+    #[tokio::test]
+    async fn offset_reads_continue_from_prior_truncation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("big.txt"), b"abcdefghij").unwrap();
+
+        let val = tool_with_limit(&dir, 4)
+            .execute(json!({ "path": "big.txt", "offset_bytes": 4 }), &ctx(&dir))
+            .await
+            .unwrap();
+
+        assert_eq!(val["output"], json!("efgh"));
+        assert_eq!(val["truncated"], json!(true));
+        assert_eq!(val["total_bytes"], json!(10));
+        assert_eq!(val["offset_bytes"], json!(4));
+        assert_eq!(val["next_offset_bytes"], json!(8));
     }
 
     #[tokio::test]

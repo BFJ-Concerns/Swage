@@ -6,7 +6,7 @@
 //! precedence, falling back to the default mode.
 
 use swage_config::{ContextTransferConfig, ContextTransferField, ContextTransferMode};
-use swage_core::{ChatMessage, CompletionRequest, ContentPart, Role};
+use swage_core::{ChatMessage, CompletionRequest, Role, render_message_for_model_context};
 use swage_provider::LlmProvider;
 
 /// The resolved context to embed in a Delegate message payload.
@@ -48,9 +48,9 @@ pub fn resolve_policy<'a>(
 /// - **Explicit**: filters the sender's context messages, keeping only those
 ///   whose role/type matches an entry in `allowed_fields`. Recognised fields:
 ///   "system" (system messages), "user" (user messages), "assistant" (assistant messages).
-/// - **Summary**: produces a compacted summary of the sender's context.
-///   Currently falls back to None until swage-context compaction is wired
-///   for cross-agent use. This is fail-open by design.
+/// - **Summary**: unsupported in the synchronous API. Use
+///   [`evaluate_transfer_async`] so the configured provider can create the
+///   summary instead of silently dropping inherited context.
 pub fn evaluate_transfer(
     mode: &ContextTransferMode,
     allowed_fields: &[ContextTransferField],
@@ -80,13 +80,7 @@ pub fn evaluate_transfer(
         }
 
         ContextTransferMode::Summary => {
-            // Summary mode requires an LLM provider — synchronous evaluate
-            // cannot call the provider. Use evaluate_transfer_async instead.
-            tracing::warn!(
-                "context transfer summary mode requires async evaluation with an LLM provider; \
-                 falling back to none in synchronous path"
-            );
-            TransferredContext::default()
+            panic!("summary context transfer requires evaluate_transfer_async with an LLM provider")
         }
     }
 }
@@ -94,8 +88,9 @@ pub fn evaluate_transfer(
 /// Async variant of [`evaluate_transfer`] that supports summary mode.
 ///
 /// When mode is `Summary`, uses the LLM provider to compact the sender's
-/// context into a summary within the configured token budget. Falls back
-/// to `None` gracefully if the provider call fails.
+/// context into a summary within the configured token budget. If summary
+/// generation fails, the delegate receives an explicit diagnostic message
+/// instead of silently losing inherited context.
 pub async fn evaluate_transfer_async(
     mode: &ContextTransferMode,
     allowed_fields: &[ContextTransferField],
@@ -110,26 +105,21 @@ pub async fn evaluate_transfer_async(
         }
 
         ContextTransferMode::Summary => {
-            let Some(provider) = provider else {
-                tracing::warn!(
-                    "context transfer summary mode requested but no provider available; \
-                     falling back to none"
-                );
-                return TransferredContext::default();
-            };
-
             if sender_context.is_empty() {
                 return TransferredContext::default();
             }
 
-            // Collect text content from the sender's context for summarisation.
+            let Some(provider) = provider else {
+                tracing::warn!(
+                    "context transfer summary mode requested but no provider available; \
+                     transferring diagnostic instead of empty context"
+                );
+                return unavailable_summary_context("no summarisation provider was available");
+            };
+
             let context_text: String = sender_context
                 .iter()
-                .flat_map(|m| m.content().iter())
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    ContentPart::ImageUrl { .. } => None,
-                })
+                .map(render_message_for_model_context)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -168,16 +158,25 @@ pub async fn evaluate_transfer_async(
                     }
                 }
                 Err(e) => {
-                    // Fail-open: log the error and return empty context rather
-                    // than blocking the delegation entirely.
                     tracing::warn!(
                         error = %e,
-                        "context transfer summary compaction failed; falling back to none"
+                        "context transfer summary compaction failed; transferring diagnostic instead of empty context"
                     );
-                    TransferredContext::default()
+                    unavailable_summary_context("summary generation failed")
                 }
             }
         }
+    }
+}
+
+fn unavailable_summary_context(reason: &'static str) -> TransferredContext {
+    TransferredContext {
+        messages: vec![ChatMessage::new(
+            Role::System,
+            format!(
+                "Delegated context summary unavailable: {reason}. Inherited context was not transferred."
+            ),
+        )],
     }
 }
 
@@ -258,15 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn mode_summary_sync_falls_back_to_none() {
-        let result = evaluate_transfer(
+    #[should_panic(expected = "summary context transfer requires evaluate_transfer_async")]
+    fn mode_summary_sync_panics_instead_of_dropping_context() {
+        let _ = evaluate_transfer(
             &ContextTransferMode::Summary,
             &[],
             Some(1000),
             &sample_context(),
         );
-        // Synchronous summary falls back to empty (needs async for provider).
-        assert!(result.messages.is_empty());
     }
 
     // --- Async summary mode tests ---
@@ -274,15 +272,18 @@ mod tests {
     use async_trait::async_trait;
     use futures::Stream;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use swage_config::{ContextTransferField, ContextTransferTargetConfig};
     use swage_core::{
         CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-        StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolResult,
+        build_tool_round_messages,
     };
     use swage_provider::LlmProvider;
 
     struct MockSummaryProvider {
         summary: String,
+        captured: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
     }
 
     #[async_trait]
@@ -292,8 +293,11 @@ mod tests {
         }
         async fn complete(
             &self,
-            _req: CompletionRequest,
+            req: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
+            if let Some(captured) = &self.captured {
+                captured.lock().unwrap().push(req);
+            }
             Ok(CompletionResponse {
                 content: self.summary.clone(),
                 input_tokens: 10,
@@ -343,6 +347,7 @@ mod tests {
     async fn mode_summary_async_produces_compacted_context() {
         let provider = MockSummaryProvider {
             summary: "The user asked about reports and the assistant provided a summary.".into(),
+            captured: None,
         };
         let result = evaluate_transfer_async(
             &ContextTransferMode::Summary,
@@ -370,7 +375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mode_summary_async_no_provider_falls_back_to_none() {
+    async fn mode_summary_async_no_provider_transfers_diagnostic() {
         let result = evaluate_transfer_async(
             &ContextTransferMode::Summary,
             &[],
@@ -379,14 +384,17 @@ mod tests {
             None,
         )
         .await;
-        assert!(
-            result.messages.is_empty(),
-            "no provider should fall back to empty"
-        );
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role(), Role::System);
+        let text = match &result.messages[0].content()[0] {
+            ContentPart::Text { text } => text,
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("no summarisation provider was available"));
     }
 
     #[tokio::test]
-    async fn mode_summary_async_provider_error_falls_back_to_none() {
+    async fn mode_summary_async_provider_error_transfers_diagnostic() {
         let provider = ErrorProvider;
         let result = evaluate_transfer_async(
             &ContextTransferMode::Summary,
@@ -396,16 +404,20 @@ mod tests {
             Some(&provider),
         )
         .await;
-        assert!(
-            result.messages.is_empty(),
-            "provider error should fall back to empty"
-        );
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role(), Role::System);
+        let text = match &result.messages[0].content()[0] {
+            ContentPart::Text { text } => text,
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("summary generation failed"));
     }
 
     #[tokio::test]
     async fn mode_summary_async_empty_context_returns_empty() {
         let provider = MockSummaryProvider {
             summary: "shouldn't be called".into(),
+            captured: None,
         };
         let result = evaluate_transfer_async(
             &ContextTransferMode::Summary,
@@ -416,6 +428,45 @@ mod tests {
         )
         .await;
         assert!(result.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mode_summary_async_prompt_includes_structured_tool_replay() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = MockSummaryProvider {
+            summary: "Tool search failed and should be retried differently.".into(),
+            captured: Some(Arc::clone(&captured)),
+        };
+        let sender_context = build_tool_round_messages(
+            &[ToolCall {
+                call_id: "call_search".into(),
+                name: "web_search".into(),
+                arguments: serde_json::json!({"query": "weather"}),
+            }],
+            &[ToolResult {
+                call_id: "call_search".into(),
+                content: "network error".into(),
+                is_error: true,
+            }],
+            "",
+        );
+
+        let result = evaluate_transfer_async(
+            &ContextTransferMode::Summary,
+            &[],
+            Some(512),
+            &sender_context,
+            Some(&provider),
+        )
+        .await;
+
+        assert_eq!(result.messages.len(), 1);
+        let requests = captured.lock().unwrap();
+        let prompt = requests[0].messages[0].text_content();
+        assert!(prompt.contains("tool_use id=call_search name=web_search"));
+        assert!(prompt.contains(r#""query":"weather""#));
+        assert!(prompt.contains("tool_result tool_use_id=call_search is_error=true"));
+        assert!(prompt.contains(r#""network error""#));
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "pricing",
     "generation",
     "observability",
+    "experimentation",
     "output",
     "hitl",
     "communication",
@@ -47,6 +48,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "max_output_bytes",
             "plugin_directory",
             "search",
+            "browser",
             "allow",
             "deny",
             "bundles",
@@ -58,6 +60,9 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "pricing" => &["models"],
         "generation" => &["presets"],
         "observability" => &["force_on"],
+        // `locations` is a dynamic table of location-id → controls; nested
+        // fields are validated by `validate_experimentation_locations_table`.
+        "experimentation" => &["enabled", "locations"],
         "output" => &["schema", "max_retries"],
         "hitl" => &["timeout", "timeout_policy"],
         // context_transfer is a dynamic sub-table — field-level validation
@@ -137,6 +142,7 @@ fn check_field_type(
         ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "plugin_directory") => ("string", matches!(value, Value::String(_))),
         ("tools", "search") => ("table", matches!(value, Value::Table(_))),
+        ("tools", "browser") => ("table", matches!(value, Value::Table(_))),
         ("context", "assembly") => ("string", matches!(value, Value::String(_))),
         ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
@@ -145,6 +151,8 @@ fn check_field_type(
         // generation.presets is a dynamic map of preset name → preset config.
         ("generation", "presets") => ("table", matches!(value, Value::Table(_))),
         ("observability", "force_on") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("experimentation", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("experimentation", "locations") => ("table", matches!(value, Value::Table(_))),
         // [tools] permission fields — flat under [tools] in TOML
         ("tools", "allow") => ("array", matches!(value, Value::Array(_))),
         ("tools", "deny") => ("array", matches!(value, Value::Array(_))),
@@ -342,12 +350,92 @@ fn check_field_semantics(
                 ));
             }
         }
+        ("experimentation", "locations") => {
+            if let Value::Table(table) = value {
+                problems.extend(validate_experimentation_locations_table(
+                    table, file_path, field_path,
+                ));
+            }
+        }
         ("tools", "python_execute") => {
             if let Value::Table(table) = value {
                 problems.extend(validate_python_execute_table(table, file_path, field_path));
             }
         }
         _ => {}
+    }
+
+    problems
+}
+
+fn validate_experimentation_locations_table(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+) -> Vec<ConfigProblem> {
+    const LOCATION_FIELDS: &[&str] = &["enabled", "forced_variant"];
+
+    let mut problems = Vec::new();
+
+    for (location_id, value) in table {
+        let location_path = format!("{field_path}.{location_id}");
+        let Value::Table(location_table) = value else {
+            problems.push(make_problem(
+                file_path,
+                Some(location_path),
+                ConfigProblemKind::TypeError {
+                    expected: "table".to_string(),
+                    found: toml_type_name(value).to_string(),
+                },
+            ));
+            continue;
+        };
+
+        for (name, value) in location_table {
+            let nested_path = format!("{location_path}.{name}");
+            if !LOCATION_FIELDS.contains(&name.as_str()) {
+                problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::UnknownField {
+                        section: location_path.clone(),
+                        name: name.clone(),
+                    },
+                ));
+                continue;
+            }
+
+            match (name.as_str(), value) {
+                ("enabled", Value::Boolean(_)) => {}
+                ("enabled", other) => problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::TypeError {
+                        expected: "boolean".to_string(),
+                        found: toml_type_name(other).to_string(),
+                    },
+                )),
+                ("forced_variant", Value::String(variant)) if variant.trim().is_empty() => {
+                    problems.push(make_problem(
+                        file_path,
+                        Some(nested_path),
+                        ConfigProblemKind::SemanticError {
+                            message: "forced_variant must not be empty".to_string(),
+                        },
+                    ));
+                }
+                ("forced_variant", Value::String(_)) => {}
+                ("forced_variant", other) => problems.push(make_problem(
+                    file_path,
+                    Some(nested_path),
+                    ConfigProblemKind::TypeError {
+                        expected: "string".to_string(),
+                        found: toml_type_name(other).to_string(),
+                    },
+                )),
+                _ => {}
+            }
+        }
     }
 
     problems
@@ -632,6 +720,7 @@ fn validate_catalog_references(table: &Table, file_path: &Path) -> Vec<ConfigPro
     if let Some(providers) = table.get("providers").and_then(Value::as_table)
         && let Some(default_provider) = providers.get("default").and_then(Value::as_str)
         && let Some(provider_entries) = providers.get("entries").and_then(Value::as_table)
+        && !default_provider.is_empty()
         && !provider_entries.contains_key(default_provider)
     {
         problems.push(make_problem(
@@ -651,6 +740,9 @@ fn validate_catalog_references(table: &Table, file_path: &Path) -> Vec<ConfigPro
     let Some(default_model) = models.get("default").and_then(Value::as_str) else {
         return problems;
     };
+    if default_model.is_empty() {
+        return problems;
+    }
     let Some(model_entries) = models.get("entries").and_then(Value::as_table) else {
         return problems;
     };
@@ -762,12 +854,12 @@ pub fn validate_resolved_catalog_references(
 /// Validate TOML content against the closed config schema, collecting all
 /// problems rather than stopping at the first.
 ///
-/// Phase 1 — syntax: a parse error is returned immediately (can't walk
+/// Step 1 — syntax: a parse error is returned immediately (can't walk
 /// unparseable TOML).
-/// Phase 2 — schema + semantics: unknown sections, unknown fields, type
+/// Step 2 — schema + semantics: unknown sections, unknown fields, type
 /// mismatches, and constraint violations are all collected.
 pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProblem> {
-    // Phase 1: syntax
+    // Step 1: syntax
     let table = match content.parse::<Table>() {
         Ok(table) => table,
         Err(e) => {
@@ -788,7 +880,7 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
 
     let mut problems = Vec::new();
 
-    // Phase 2: schema and semantics
+    // Step 2: schema and semantics
     for (section_name, section_value) in &table {
         // Top-level scalar keys (above any [section] header) live in the
         // same iteration as section tables. Recognise them first so they
@@ -1094,6 +1186,32 @@ model_id = "claude-sonnet-4-20250514"
                     && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
             }),
             "missing default model entry should produce SemanticError, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn empty_catalogue_defaults_are_treated_as_unset() {
+        let toml = r#"
+[providers]
+default = ""
+
+[providers.entries.openrouter]
+protocol = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+
+[models]
+default = ""
+
+[models.entries]
+"#;
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.iter().all(|problem| {
+                problem.field_path.as_deref() != Some("providers.default")
+                    && problem.field_path.as_deref() != Some("models.default")
+            }),
+            "empty catalogue defaults should be treated as unset, got: {problems:?}"
         );
     }
 

@@ -41,7 +41,7 @@ pub use bubblewrap::BubblewrapSandbox;
 pub use bubblewrap::find_bwrap;
 pub use config::{SandboxConfig, SandboxConfigError};
 pub use fallback::FallbackSandbox;
-pub use process::ChildProcessManager;
+pub use process::{ChildProcessManager, cleanup_failed_startup_process};
 pub use provider::IpcCompletionProvider;
 pub use sandbox::{Sandbox, ToolCallResult};
 pub use socket::SocketManager;

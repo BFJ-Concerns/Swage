@@ -80,6 +80,20 @@ pub struct ModelEndpointConfig {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "ModelCapabilitiesConfig::is_empty")]
+    pub capabilities: ModelCapabilitiesConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ModelCapabilitiesConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_replay: bool,
+}
+
+impl ModelCapabilitiesConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.reasoning_replay
+    }
 }
 
 /// Configured LLM models keyed by app-level model id.
@@ -184,20 +198,85 @@ pub struct ToolPermissionConfig {
 
 impl Default for ToolPermissionConfig {
     fn default() -> Self {
+        let mut bundles = HashMap::new();
+        bundles.insert(
+            "browsing".to_string(),
+            vec![
+                "browser_navigate".to_string(),
+                "browser_snapshot".to_string(),
+            ],
+        );
+        bundles.insert(
+            "browser_actions".to_string(),
+            vec![
+                "browser_click".to_string(),
+                "browser_type".to_string(),
+                "browser_select".to_string(),
+                "browser_scroll".to_string(),
+            ],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
-            bundles: HashMap::new(),
+            bundles,
             require_approval: default_high_risk_tool_approvals(),
         }
     }
 }
 
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    ["shell", "file_write", "python_execute"]
-        .into_iter()
-        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-        .collect()
+    [
+        "shell",
+        "file_edit",
+        "file_write",
+        "python_execute",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_scroll",
+    ]
+    .into_iter()
+    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+    .collect()
+}
+
+/// Settings for the gateway-hosted browser tools.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserScreenshotPolicy {
+    Off,
+    Actions,
+    All,
+}
+
+impl Default for BrowserScreenshotPolicy {
+    fn default() -> Self {
+        Self::Actions
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserToolConfig {
+    pub binary_path: Option<String>,
+    pub page_idle_secs: u64,
+    pub process_idle_secs: u64,
+    pub max_snapshot_bytes: usize,
+    pub screenshots: BrowserScreenshotPolicy,
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for BrowserToolConfig {
+    fn default() -> Self {
+        Self {
+            binary_path: None,
+            page_idle_secs: 300,
+            process_idle_secs: 600,
+            max_snapshot_bytes: 40_000,
+            screenshots: BrowserScreenshotPolicy::Actions,
+            allow_hosts: Vec::new(),
+        }
+    }
 }
 
 /// Tool execution settings.
@@ -214,6 +293,9 @@ pub struct ToolConfig {
     pub plugin_directory: Option<String>,
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
+    /// Gateway-hosted browser settings.
+    #[serde(default)]
+    pub browser: BrowserToolConfig,
     /// Tool permission rules — controls which tools an agent may invoke.
     /// Defaults to broad availability with approval gates for high-risk tools.
     #[serde(default)]
@@ -228,6 +310,7 @@ impl Default for ToolConfig {
             max_output_bytes: 100_000,
             plugin_directory: None,
             search: None,
+            browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig::default(),
         }
     }
@@ -347,6 +430,93 @@ pub struct ObservabilityConfig {
     /// When true, all observability events are delivered to every connected
     /// client regardless of their subscription state.
     pub force_on: bool,
+}
+
+// TODO Wire experimentation variant selection into the runtime
+// `is_enabled_for` and `forced_variant_for` have no callers outside this
+// crate: nothing selects variants, honours the kill switch, or records which
+// variant ran. Build one location end-to-end first (context assembly or a
+// task prompt is the natural candidate): resolve the variant behind the
+// stable surface, honour enabled/forced_variant, and write the chosen
+// variant to the audit trail so runs are reconstructable. The bandit
+// allocation and shadow-run backlog entries (initiative Plan/Backlog.md,
+// Experimentation section) depend on this loop existing and should not be
+// designed before it does.
+// ---
+/// Experiment switches for hidden runtime variants.
+///
+/// Variant ids are an operator/runtime concern. User-facing and model-facing
+/// surfaces should continue to name the function being performed, while this
+/// section decides whether the runtime may choose among alternative
+/// implementations behind that stable surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentationConfig {
+    /// Master switch for every experimental variant decision.
+    ///
+    /// When false, variant selection helpers must return the default
+    /// implementation and record, at most, that experimentation was disabled.
+    #[serde(default = "default_experimentation_enabled")]
+    pub enabled: bool,
+    /// Per-location controls keyed by stable runtime location id.
+    ///
+    /// Location ids are intentionally application-defined strings so callers
+    /// can address broad areas such as `context.assembly` or precise work such
+    /// as `task.important-import`. Entries merge across config layers by key.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub locations: HashMap<String, ExperimentLocationConfig>,
+}
+
+fn default_experimentation_enabled() -> bool {
+    true
+}
+
+impl Default for ExperimentationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            locations: HashMap::new(),
+        }
+    }
+}
+
+impl ExperimentationConfig {
+    pub fn is_enabled_for(&self, location_id: &str) -> bool {
+        self.enabled
+            && self
+                .locations
+                .get(location_id)
+                .is_none_or(|location| location.enabled)
+    }
+
+    pub fn forced_variant_for(&self, location_id: &str) -> Option<&str> {
+        self.locations
+            .get(location_id)
+            .filter(|location| self.enabled && location.enabled)
+            .and_then(|location| location.forced_variant.as_deref())
+    }
+}
+
+/// Per-location experiment controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentLocationConfig {
+    /// Whether this exact location may participate in experimentation.
+    #[serde(default = "default_experimentation_enabled")]
+    pub enabled: bool,
+    /// Optional operator pin for deterministic dogfooding.
+    ///
+    /// This is useful for forcing a specific variant during a session or task
+    /// without changing the public function name that the user and model see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_variant: Option<String>,
+}
+
+impl Default for ExperimentLocationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            forced_variant: None,
+        }
+    }
 }
 
 /// Output schema validation settings — controls structured-output enforcement
@@ -561,6 +731,45 @@ pub struct GenerationConfig {
     pub presets: HashMap<String, GenerationPresetConfig>,
 }
 
+/// Configured external communication channels.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ChannelsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramChannelConfig>,
+}
+
+/// Telegram bot API polling settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelegramChannelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_secret_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_env: Option<String>,
+    #[serde(default = "default_telegram_api_base_url")]
+    pub api_base_url: String,
+    #[serde(default = "default_telegram_poll_timeout_secs")]
+    pub poll_timeout_secs: u64,
+}
+
+impl Default for TelegramChannelConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_secret_ref: None,
+            bot_token_env: None,
+            api_base_url: default_telegram_api_base_url(),
+            poll_timeout_secs: default_telegram_poll_timeout_secs(),
+        }
+    }
+}
+
+fn default_telegram_api_base_url() -> String {
+    "https://api.telegram.org".to_string()
+}
+
+fn default_telegram_poll_timeout_secs() -> u64 {
+    25
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -587,6 +796,8 @@ pub struct ResolvedConfig {
     pub pricing: PricingConfig,
     /// Observability settings — controls channel delivery behaviour.
     pub observability: ObservabilityConfig,
+    /// Experimentation settings — controls hidden runtime variants.
+    pub experimentation: ExperimentationConfig,
     /// Output schema validation settings — JSON Schema and retry limits.
     /// Defaults to no schema (validation disabled) with 3 retries.
     pub output: OutputConfig,
@@ -595,6 +806,8 @@ pub struct ResolvedConfig {
     pub communication: CommunicationConfig,
     /// Named generation parameter presets available to model entries.
     pub generation: GenerationConfig,
+    /// External communication channel configuration.
+    pub channels: ChannelsConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
     /// When true, the entire permission and approval system is bypassed:
@@ -640,6 +853,7 @@ impl ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;
     }
@@ -997,13 +1211,39 @@ timeout_policy = "reject"
         let cfg = ToolPermissionConfig::default();
         assert_eq!(cfg.allow, vec!["*".to_string()]);
         assert!(cfg.deny.is_empty());
-        assert!(cfg.bundles.is_empty());
+        assert_eq!(
+            cfg.bundles.get("browsing").expect("browsing bundle"),
+            &vec![
+                "browser_navigate".to_string(),
+                "browser_snapshot".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("browser_actions")
+                .expect("browser action bundle"),
+            &vec![
+                "browser_click".to_string(),
+                "browser_type".to_string(),
+                "browser_select".to_string(),
+                "browser_scroll".to_string()
+            ]
+        );
         assert_eq!(
             cfg.require_approval
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_write", "python_execute"]
+            vec![
+                "shell",
+                "file_edit",
+                "file_write",
+                "python_execute",
+                "browser_click",
+                "browser_type",
+                "browser_select",
+                "browser_scroll"
+            ]
         );
     }
 
@@ -1097,6 +1337,7 @@ timeout_policy = "reject"
             max_output_bytes: 50_000,
             plugin_directory: Some("plugins".into()),
             search: None,
+            browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig {
                 allow: vec!["echo".into()],
                 deny: vec!["shell_exec".into()],
@@ -1114,7 +1355,8 @@ timeout_policy = "reject"
         let cfg = ToolConfig::default();
         assert_eq!(cfg.permissions.allow, vec!["*".to_string()]);
         assert!(cfg.permissions.deny.is_empty());
-        assert!(cfg.permissions.bundles.is_empty());
+        assert!(cfg.permissions.bundles.contains_key("browsing"));
+        assert!(cfg.permissions.bundles.contains_key("browser_actions"));
     }
 
     // --- OutputConfig tests ---
@@ -1171,7 +1413,16 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec!["shell", "file_write", "python_execute"]
+            vec![
+                "shell",
+                "file_edit",
+                "file_write",
+                "python_execute",
+                "browser_click",
+                "browser_type",
+                "browser_select",
+                "browser_scroll"
+            ]
         );
     }
 

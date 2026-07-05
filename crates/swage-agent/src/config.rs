@@ -34,6 +34,10 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     pub stop_sequences: Option<Vec<String>>,
     pub generation_metadata: Option<Value>,
+    /// Whether this model requires reasoning side-channel replay around tool
+    /// follow-ups. Defaults off: captured reasoning is diagnostic only.
+    #[serde(default)]
+    pub replay_reasoning: bool,
     /// Configured model key or provider model identifier for this turn.
     ///
     /// When unset, providers use their own default model. Gateway-created
@@ -68,6 +72,7 @@ impl AgentConfig {
             temperature: None,
             stop_sequences: None,
             generation_metadata: None,
+            replay_reasoning: false,
             model_id: None,
             skip_permissions: false,
         }

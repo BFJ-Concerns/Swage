@@ -1,9 +1,9 @@
 //! Prompts element — priority-ordered prompt rules assembled into system instructions.
 //!
-//! The prompts element replaces the flat `config.instructions` string from era 0.1.
+//! The prompts element replaces the legacy flat `config.instructions` string.
 //! It accepts pre-sorted `PromptRule` values (sorted by the config loader) and
 //! concatenates their content into a single `Role::System` message. The assembled
-//! message is byte-equivalent to what the gateway produced in era 0.1 for the
+//! message is byte-equivalent to what the gateway previously produced for the
 //! same instruction set.
 
 use swage_config::model::HierarchyLevel;
@@ -17,7 +17,7 @@ use crate::tokeniser::Tokeniser;
 ///
 /// Rules are concatenated in the order given (priority order from the config loader)
 /// and emitted as a single `Role::System` message. If no rules are provided, the
-/// element produces no messages, matching era 0.1 behaviour where an empty
+/// element produces no messages, matching the legacy behaviour where an empty
 /// instructions string produced no system message.
 ///
 /// Priority 100 ensures prompts always appear before history and memory in the
@@ -53,7 +53,7 @@ impl ContextElement for PromptsElement {
     ///
     /// Rules are joined with `\n\n` to preserve paragraph separation. Returns
     /// an empty vec if no rules are present — the assembly engine then produces
-    /// no system message, matching era 0.1 behaviour for benches without
+    /// no system message, matching the legacy behaviour for benches without
     /// prompt configuration.
     fn content(&self) -> Vec<ChatMessage> {
         if self.rules.is_empty() {

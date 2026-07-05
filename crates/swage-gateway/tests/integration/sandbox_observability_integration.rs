@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 07 (Sandboxing, Observability & Production Readiness).
+//! Cross-task integration tests for sandboxing, observability, and lifecycle management.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the gateway's sandbox routing, structured logging,

@@ -48,6 +48,7 @@ let _msgSeq = 0;
 function makeAssistantMessage(
   content: string,
   tool_calls?: ToolCallView[],
+  model?: string | null,
 ): MessageView {
   _msgSeq += 1;
   return {
@@ -56,6 +57,7 @@ function makeAssistantMessage(
     timestamp: `2026-03-20T10:00:${String(_msgSeq).padStart(2, "0")}Z`,
     turn_state: "completed",
     ...(tool_calls ? { tool_calls } : {}),
+    ...(model !== undefined ? { model } : {}),
   };
 }
 
@@ -221,7 +223,34 @@ describe("historical tool calls from committed messages", () => {
     expect(document.body.textContent).toContain("**not bold**");
   });
 
-  it("shows the message model disclosure when enabled", () => {
+  it("shows the message model id when one is reported", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("Plain response.", undefined, "gpt-4o"),
+    ]);
+    const streaming = makeStreamingStore();
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store,
+        streamingStore: streaming,
+        displayPreferences: {
+          theme: "system",
+          density: "compact",
+          message_model_display: "assistant",
+          conversation_rendering: "markdown",
+          print_marks: "full",
+        },
+      },
+    });
+
+    // The chip renders the real model id, not a permanent "Model not reported"
+    // placeholder (UI audit f-9: omit the chip when no model is available).
+    expect(document.body.textContent).toContain("gpt-4o");
+    expect(document.body.textContent).not.toContain("Model not reported");
+  });
+
+  it("omits the model chip when the API did not report one", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Plain response."),
     ]);
@@ -242,7 +271,8 @@ describe("historical tool calls from committed messages", () => {
       },
     });
 
-    expect(document.body.textContent).toContain("Model not reported");
+    expect(document.body.textContent).not.toContain("Model not reported");
+    expect(document.querySelector(".message-model")).toBeNull();
   });
 
   it("renders tool calls from multiple messages independently", () => {

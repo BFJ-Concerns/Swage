@@ -365,7 +365,9 @@ async fn load_object(
             })?;
             let report: AssemblyReport = serde_json::from_str(&report_json)
                 .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
-            Ok(context_snapshot_object(turn_id, report))
+            let raw_report: Value = serde_json::from_str(&report_json)
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
+            Ok(context_snapshot_object(turn_id, report, &raw_report))
         }
         SharedReferenceKind::OrchestrationFlow => {
             let (bench_id, flow_name) = parse_bench_scoped_object_id(id, "orchestration flow")?;
@@ -495,7 +497,11 @@ fn team_topology_object(team: Team) -> SharedReferenceObject {
     }
 }
 
-fn context_snapshot_object(turn_id: Uuid, report: AssemblyReport) -> SharedReferenceObject {
+fn context_snapshot_object(
+    turn_id: Uuid,
+    report: AssemblyReport,
+    raw_report: &Value,
+) -> SharedReferenceObject {
     let assembly_name = report.assembly_name.clone();
     let total_tokens = report.total_tokens;
     let budget = report.budget;
@@ -521,6 +527,11 @@ fn context_snapshot_object(turn_id: Uuid, report: AssemblyReport) -> SharedRefer
         })
         .collect();
 
+    let provider_visible = raw_report
+        .get("provider_visible")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
     SharedReferenceObject {
         kind: SharedReferenceKind::ContextSnapshot.to_string(),
         id: turn_id.to_string(),
@@ -533,6 +544,7 @@ fn context_snapshot_object(turn_id: Uuid, report: AssemblyReport) -> SharedRefer
             "budget": budget,
             "warnings": warnings,
             "elements": elements,
+            "provider_visible": provider_visible,
         }),
     }
 }
@@ -624,4 +636,49 @@ async fn record_structural_shared_reference_event(
 
 fn default_snapshot_limit() -> usize {
     8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_snapshot_object_keeps_provider_visible_debugger_payload() {
+        let turn_id = Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap();
+        let report = AssemblyReport {
+            assembly_name: "default".to_string(),
+            total_tokens: 42,
+            ..AssemblyReport::default()
+        };
+        let raw_report = serde_json::json!({
+            "provider_visible": {
+                "requests": [{
+                    "round": 1,
+                    "request": {
+                        "provider": "openai",
+                        "body": {
+                            "messages": [
+                                { "role": "user", "content": "hello" }
+                            ]
+                        }
+                    }
+                }],
+                "reasoning": [{
+                    "round": 1,
+                    "content": "private summary"
+                }]
+            }
+        });
+
+        let object = context_snapshot_object(turn_id, report, &raw_report);
+
+        assert_eq!(
+            object.payload["provider_visible"]["requests"][0]["request"]["provider"],
+            "openai"
+        );
+        assert_eq!(
+            object.payload["provider_visible"]["reasoning"][0]["content"],
+            "private summary"
+        );
+    }
 }

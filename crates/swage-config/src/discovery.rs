@@ -256,16 +256,44 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    struct EnvVarGuard {
+        name: &'static str,
+        value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            // Safety: tests that mutate process environment hold ENV_LOCK.
+            unsafe { std::env::set_var(name, value) };
+            Self {
+                name,
+                value: previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // Safety: tests that mutate process environment hold ENV_LOCK.
+            unsafe {
+                if let Some(value) = &self.value {
+                    std::env::set_var(self.name, value);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
+
     // --- resolve_root ---
 
     #[test]
     fn resolve_root_uses_swage_home_env_var() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = TempDir::new().unwrap();
-        // Safety: test-only env mutation; set_var is unsafe in edition 2024
-        unsafe { std::env::set_var("SWAGE_HOME", tmp.path()) };
+        let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
         let result = resolve_root();
-        unsafe { std::env::remove_var("SWAGE_HOME") };
         assert_eq!(result.unwrap(), tmp.path());
     }
 
@@ -274,9 +302,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("new-swage-root");
-        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+        let _env_guard = EnvVarGuard::set("SWAGE_HOME", &root);
         let result = resolve_root();
-        unsafe { std::env::remove_var("SWAGE_HOME") };
         assert_eq!(result.unwrap(), root);
         assert!(root.is_dir(), "missing root should be created");
     }
@@ -287,9 +314,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("swage-file");
         fs::write(&root, "not a directory").unwrap();
-        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+        let _env_guard = EnvVarGuard::set("SWAGE_HOME", &root);
         let result = resolve_root();
-        unsafe { std::env::remove_var("SWAGE_HOME") };
         assert!(result.is_err(), "file root should produce an error");
         let err = result.unwrap_err();
         assert!(matches!(err.kind, ConfigProblemKind::DiscoveryError { .. }));

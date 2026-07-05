@@ -121,6 +121,24 @@ pub trait LlmProvider: Send + Sync {
     /// The model identifier this provider is configured to use.
     fn model_id(&self) -> &str;
 
+    /// Return the provider-visible request body for a completion request.
+    ///
+    /// Concrete providers override this with their exact wire conversion. The
+    /// default keeps tests and unsupported providers debuggable without
+    /// pretending to know a provider-specific protocol.
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "generic",
+            "model_id": self.model_id(),
+            "stream": stream,
+            "body": request,
+        })
+    }
+
     /// Send a completion request and collect the full response.
     async fn complete(
         &self,
@@ -348,6 +366,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.
@@ -372,6 +391,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
         // Safety: unsafe needed in edition 2024 for env mutation; only in tests.

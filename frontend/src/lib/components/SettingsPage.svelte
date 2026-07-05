@@ -19,11 +19,11 @@
   } from "../display-preferences";
   import { discoverModels, fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import { downloadRecoveryExport, exportRecoveryBundle, listRecoveryExports } from "../api/workflows";
+  import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import type { DiscoveredModel, GenerationPresetConfig, ModelSettings, ProviderProtocol, RecoveryExportSummary, RequireApprovalEntry, SettingsResponse } from "../types";
 
-  // Pages added per the Riso workup (`riso-cyanotype.html`, view 06) — only
-  // providers, generation, automation, and recovery have working backends. The
-  // rest are shells; see the per-page motes below.
+  // Only providers, generation, automation, and recovery have working
+  // backends. The rest are shells; see the per-page motes below.
   type SettingsTabId =
     | "providers"
     | "generation"
@@ -38,9 +38,11 @@
 
   interface Props {
     tab?: SettingsTabId;
+    benchId?: string | null;
+    sessionId?: string | null;
   }
 
-  let { tab = "providers" }: Props = $props();
+  let { tab = "providers", benchId = null, sessionId = null }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
   // returns a fresh server snapshot which we replace it with. Null until the
@@ -54,10 +56,16 @@
   // the inline inputs are open (null otherwise).
   let addingProvider = $state(false);
   let compatibleDraft = $state<{ name: string; base_url: string } | null>(null);
+  // Inline validation for the compatible Base URL field. Reserved slot
+  // rendered as role="alert" so client-side validation has somewhere to write
+  // (UI audit f-6). Null/empty means no error to show.
+  let compatibleBaseUrlError = $state<string | null>(null);
   let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
+  let hasLoadedSettings = $state(false);
+  let lastPersistedSettingsFingerprint = "";
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
   let recoveryExports = $state<RecoveryExportSummary[]>([]);
@@ -66,6 +74,7 @@
   let displayPreferences = $state<DisplayPreferences>(readDisplayPreferences());
   let status = $state("");
   let error = $state<string | null>(null);
+  let collapsedProviderIds = $state<Set<string>>(new Set());
 
   const PROVIDER_KINDS = [
     { id: "OpenAi", label: "OpenAI", protocol: "openai" },
@@ -79,6 +88,11 @@
   const DISPLAY_MODEL_OPTIONS = ["off", "assistant", "all"] as const;
   const DISPLAY_RENDERING_OPTIONS = ["markdown", "plain"] as const;
   const DISPLAY_PRINT_OPTIONS = ["full", "minimal", "off"] as const;
+  const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "providers",
+    "generation",
+    "automation",
+  ]);
 
   const providerIds = $derived(Object.keys(settings?.providers ?? {}));
   const modelIds = $derived(Object.keys(settings?.models ?? {}));
@@ -103,6 +117,8 @@
       savedProviderIds = new Set(Object.keys(settings.providers));
       selectedProvider = settings.default_provider || providerIds[0] || "";
       selectedPreset = presetIds[0] ?? "";
+      lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      hasLoadedSettings = true;
       if (selectedProvider) await loadModels();
       if (tab === "recovery") await loadRecoveryExports();
     } catch (err) {
@@ -166,8 +182,7 @@
       ["secrets", recoveryExport.secrets],
       ["channels", recoveryExport.channel_links],
       ["nodes", recoveryExport.execution_hosts],
-      ["jobs", recoveryExport.scheduled_jobs],
-      ["heartbeats", recoveryExport.heartbeats],
+      ["schedules", recoveryExport.schedules],
     ];
     return counts.map(([label, value]) => `${label}: ${value}`).join(" · ");
   }
@@ -239,6 +254,20 @@
     return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId);
   }
 
+  function isProviderCollapsed(id: string): boolean {
+    return collapsedProviderIds.has(id);
+  }
+
+  function toggleProviderCollapsed(id: string): void {
+    const next = new Set(collapsedProviderIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    collapsedProviderIds = next;
+  }
+
   type ProviderKindDefinition = {
     id: ProviderKind;
     label: string;
@@ -276,7 +305,10 @@
 
   function toggleAddProvider(): void {
     addingProvider = !addingProvider;
-    if (!addingProvider) compatibleDraft = null;
+    if (!addingProvider) {
+      compatibleDraft = null;
+      compatibleBaseUrlError = null;
+    }
     error = null;
   }
 
@@ -286,13 +318,14 @@
     // inputs instead of creating immediately. Clicking again collapses them.
     if (kind.id === "OpenAiCompatible") {
       compatibleDraft = compatibleDraft ? null : { name: "", base_url: "" };
+      compatibleBaseUrlError = null;
       error = null;
       return;
     }
     const id = nextProviderId(slugifyProviderName(kind.label));
     settings.providers[id] = {
       protocol: kind.protocol,
-      base_url: null,
+      base_url: kind.id === "OpenRouter" ? "https://openrouter.ai/api/v1" : null,
       api_key_secret_ref: null,
       api_key_env: null,
       has_credential: false,
@@ -302,6 +335,7 @@
     discoveredModels = [];
     addingProvider = false;
     compatibleDraft = null;
+    compatibleBaseUrlError = null;
     error = null;
   }
 
@@ -309,7 +343,11 @@
     if (!settings || !compatibleDraft) return;
     const baseUrl = compatibleDraft.base_url.trim();
     if (!baseUrl) {
-      error = "OpenAI-compatible providers need a base URL.";
+      compatibleBaseUrlError = "Enter a base URL so Swage knows where to send requests.";
+      return;
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      compatibleBaseUrlError = "Enter a URL starting with http:// or https://";
       return;
     }
     const baseId = slugifyProviderName(compatibleDraft.name) || "openai-compatible";
@@ -326,6 +364,7 @@
     discoveredModels = [];
     addingProvider = false;
     compatibleDraft = null;
+    compatibleBaseUrlError = null;
     error = null;
   }
 
@@ -487,6 +526,25 @@
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
 
+  function settingsFingerprint(): string | null {
+    if (!settings) return null;
+    return JSON.stringify({
+      providers: settings.providers,
+      default_provider: settings.default_provider,
+      models: settings.models,
+      default_model: settings.default_model,
+      generation_presets: settings.generation_presets,
+      tool_runtime: settings.tool_runtime,
+      tool_permissions: settings.tool_permissions,
+      hitl: settings.hitl,
+      sandbox: settings.sandbox,
+      context: settings.context,
+      pricing: settings.pricing,
+      observability: settings.observability,
+      communication: settings.communication,
+    });
+  }
+
   async function persist(options: { message?: string } = {}): Promise<boolean> {
     if (!settings) return false;
     error = null;
@@ -517,6 +575,7 @@
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
+      lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       status =
         options.message ??
         "Saved. New turns will use the updated runtime.";
@@ -602,17 +661,30 @@
 
   const isShellTab = $derived(SHELL_LAYOUT_TABS.has(tab));
   const isNonFunctionalTab = $derived(NON_FUNCTIONAL_TABS.has(tab));
+  const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
+
+  $effect(() => {
+    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    const fingerprint = settingsFingerprint();
+    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
+
+    const timer = window.setTimeout(() => {
+      void persist({ message: "Saved automatically. New turns will use the updated runtime." });
+    }, 650);
+
+    return () => window.clearTimeout(timer);
+  });
 </script>
 
 <div class="settings-pane" aria-label="Settings">
   {#if isShellTab}
     {@const heading = TAB_TITLES[tab]}
     <!--
-      Shell pages from the Riso workup (`riso-cyanotype.html`, view 06) that do
-      not yet have a working backend. Each page renders the heading and any
-      partial functionality the gateway already exposes (read-only operator
-      data where it exists), with an explicit non-functional banner so the
-      operator knows nothing is going to be persisted.
+      Shell pages that do not yet have a working backend. Each page renders the
+      heading and any partial functionality the gateway already exposes
+      (read-only operator data where it exists), with an explicit
+      non-functional banner so the operator knows nothing is going to be
+      persisted.
     -->
     <div class="head">
       <div class="head-text">
@@ -626,8 +698,8 @@
       <div class="shell-banner" role="note">
         <span class="shell-flag">Non-functional</span>
         <span class="shell-body">
-          This page is a placeholder for the Riso workup view. No values here are
-          saved or applied — the underlying backend hasn't been built yet.
+          This page is a placeholder. No values here are saved or applied —
+          the underlying backend hasn't been built yet.
         </span>
       </div>
     {/if}
@@ -648,14 +720,13 @@
     {#if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the platform plugin model is accepted in the backlog.
+        Swage has a platform plugin model.
 
         Wire the Plugins page to a real plugin/extension catalogue. Today the
         gateway exposes per-bench extensions (`/api/benches/{id}/extensions`)
         but no platform-level plugin registry. Surface installed plugins,
         their tools, and an enable/disable toggle.
-        Why: the workup view 06 lists Plugins as the first page; today users
-        cannot see or manage anything plugin-shaped from settings.
+        Why: users cannot see or manage anything plugin-shaped from settings.
         How to apply: when the gateway gains a plugin registry endpoint,
         replace this shell with a real list bound to that endpoint.
         ---
@@ -667,14 +738,14 @@
     {:else if tab === "channels"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        channel management semantics are accepted in the backlog.
+        Swage has channel management semantics.
 
         Render the channel list returned by /api/operator/overview.channels
         and add per-channel route/credential editing. Today the page is a
         shell because the operator endpoint is read-only and there is no
         management API.
-        Why: Riso workup view 06 lists Channels as a settings page; the
-        operator deck reads them but there is no way to add/configure them.
+        Why: the operator deck reads channels but there is no way to
+        add/configure them.
         How to apply: extend swage-gateway with channel CRUD, then bind here.
         ---
       -->
@@ -685,13 +756,11 @@
     {:else if tab === "nodes"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        execution-host registration and disconnect semantics are accepted in
-        the backlog.
+        Swage has execution-host registration and disconnect semantics.
 
         Show registered execution hosts (operator overview already returns
         nodes). Add register/disconnect flows once the gateway exposes them.
-        Why: workup view 06 includes Nodes; today there is no settings-level
-        view of attached hosts.
+        Why: there is no settings-level view of attached hosts.
         How to apply: bind to /api/operator/overview.nodes for a read-only
         view first; design a registration flow before building the form.
         ---
@@ -703,14 +772,14 @@
     {:else if tab === "voice"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the voice provider/configuration model is accepted in the backlog.
+        Swage has a voice provider/configuration model.
 
         Bind to /api/voice/capabilities for read-only state, then add voice
         provider configuration (transcription engine, synthesis voice,
         per-bench overrides). The capabilities endpoint exists; the
         configuration endpoint does not.
-        Why: workup view 06 lists Voice; the WorkbenchOperations capability
-        strip is the only place voice surfaces today.
+        Why: the WorkbenchOperations capability strip is the only place voice
+        surfaces today.
         How to apply: once a /api/voice/config endpoint exists, replace this
         shell with the real form.
         ---
@@ -842,13 +911,12 @@
     {:else if tab === "account"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        the local-vs-remote identity model is accepted in the backlog.
+        Swage has a local-vs-remote identity model.
 
         Account is unscoped. Swage runs locally with no notion of identity;
         a remote identity provider would precede any meaningful account
-        page. Until then this stays a shell so the workup nav resolves.
-        Why: workup view 06 lists Account but the application has no
-        account model yet.
+        page. Until then this stays a shell so the settings route resolves.
+        Why: the application has no account model yet.
         How to apply: revisit when remote identity / multi-host work begins.
         ---
       -->
@@ -868,9 +936,15 @@
         <p class="sub">{heading.sub}</p>
       </div>
       <div class="head-actions">
-        <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
-          {isPersisting ? "Saving..." : "Save"}
-        </button>
+        {#if shouldAutosaveSettings}
+          <span class="autosave-state" class:saving={isPersisting}>
+            {isPersisting ? "Autosaving" : "Autosave"}
+          </span>
+        {:else}
+          <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
+            {isPersisting ? "Saving..." : "Save"}
+          </button>
+        {/if}
       </div>
     </div>
 
@@ -956,27 +1030,52 @@
               </button>
             </div>
             {#if compatibleDraft}
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={compatibleDraft.name}
-                  oninput={(event) => {
-                    if (compatibleDraft) compatibleDraft.name = event.currentTarget.value;
-                  }}
-                  placeholder="Provider name"
-                  autocomplete="off"
-                />
-                <input
-                  type="text"
-                  class="text"
-                  value={compatibleDraft.base_url}
-                  oninput={(event) => {
-                    if (compatibleDraft) compatibleDraft.base_url = event.currentTarget.value;
-                  }}
-                  placeholder="https://api.example.com/v1"
-                  autocomplete="off"
-                />
+              <!--
+                OpenAI-compatible provider draft. Each field has a persistent
+                visible <label> (placeholders vanish once the user types, and
+                screen readers name the field only by placeholder here), a
+                surviving helper line for Base URL, and a reserved role="alert"
+                slot for client-side validation. UI audit f-6.
+              -->
+              <div class="search-row compatible-form">
+                <div class="compatible-field">
+                  <label class="key" for="compatible-name">Provider name</label>
+                  <input
+                    id="compatible-name"
+                    type="text"
+                    class="text search"
+                    value={compatibleDraft.name}
+                    oninput={(event) => {
+                      if (compatibleDraft) compatibleDraft.name = event.currentTarget.value;
+                    }}
+                    placeholder="My OpenAI proxy"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="compatible-field">
+                  <label class="key" for="compatible-base-url">Base URL</label>
+                  <input
+                    id="compatible-base-url"
+                    type="text"
+                    class="text"
+                    value={compatibleDraft.base_url}
+                    oninput={(event) => {
+                      if (compatibleDraft) compatibleDraft.base_url = event.currentTarget.value;
+                      if (compatibleBaseUrlError) compatibleBaseUrlError = null;
+                    }}
+                    placeholder="https://api.example.com/v1"
+                    autocomplete="off"
+                    aria-describedby="compatible-base-url-help compatible-base-url-error"
+                  />
+                  <small id="compatible-base-url-help" class="field-help">
+                    Override the provider's canonical endpoint.
+                  </small>
+                  <p
+                    id="compatible-base-url-error"
+                    class="field-error"
+                    role="alert"
+                  >{compatibleBaseUrlError ?? ""}</p>
+                </div>
                 <button type="button" class="opt opt-pick" onclick={commitCompatibleProvider}>
                   <span class="pick-mark" aria-hidden="true">+</span>
                   <span>Connect</span>
@@ -990,175 +1089,201 @@
       {#each providerIds as id, ix (id)}
         {@const provider = settings.providers[id]}
         {@const modelsForProvider = providerModels(id)}
+        {@const isCollapsed = isProviderCollapsed(id)}
         <section class="provider-section" aria-label={`Provider ${id}`}>
+          <!--
+            The whole header bar is the collapse trigger — one large click
+            target with a rotating chevron — instead of a low-contrast "Collapse"
+            text button competing with four other text fragments in the same
+            row. Remove is demoted to a low-emphasis icon button (sibling, never
+            nested inside the collapse button). aria-expanded is preserved. The
+            credential chip becomes a status with a check. UI audit f-22.
+          -->
           <div class="provider-head">
-            <div class="provider-head-text">
-              <span class="provider-index">
-                Provider <span class="ix">{String(ix + 1).padStart(2, "0")}</span>
+            <button
+              type="button"
+              class="provider-collapse"
+              aria-expanded={!isCollapsed}
+              aria-label={`Provider ${providerDisplayName(id)} — ${isCollapsed ? "expand" : "collapse"}`}
+              onclick={() => toggleProviderCollapsed(id)}
+            >
+              <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
+              <span class="provider-head-text">
+                <span class="provider-index">
+                  Provider <span class="ix">{String(ix + 1).padStart(2, "0")}</span>
+                </span>
+                <h2>{providerDisplayName(id)}</h2>
+                <p class="provider-meta-line">
+                  <span class="meta-protocol">{provider.protocol}</span>
+                  <span class="meta-key">{id}</span>
+                  <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
+                </p>
               </span>
-              <h2>{providerDisplayName(id)}</h2>
-              <p class="provider-meta-line">
-                <span class="meta-protocol">{provider.protocol}</span>
-                <span class="meta-key">{id}</span>
-                <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
-              </p>
-            </div>
-            <div class="provider-meta">
               <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "Credential stored" : "No credential"}
+                {provider.has_credential ? "✓ Credential" : "No credential"}
               </span>
-              <button type="button" class="opt opt-cancel" onclick={() => removeProvider(id)}>
-                <span aria-hidden="true">×</span>
-                <span>Remove</span>
-              </button>
-            </div>
+            </button>
+            <button
+              type="button"
+              class="provider-remove"
+              aria-label={`Remove provider ${providerDisplayName(id)}`}
+              title="Remove provider"
+              onclick={() => removeProvider(id)}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
           </div>
 
-          <div class="field">
-            <div class="key">
-              Base URL
-              <small>Override the provider's canonical endpoint when needed.</small>
-            </div>
-            <div class="val">
-              <input
-                type="text"
-                class="text"
-                bind:value={provider.base_url}
-                placeholder="Provider default"
-                autocomplete="off"
-              />
-            </div>
-          </div>
+          {#if !isCollapsed}
+            <div class="provider-body">
+              <div class="field">
+                <div class="key">
+                  Base URL
+                  <small>Override the provider's canonical endpoint when needed.</small>
+                </div>
+                <div class="val">
+                  <input
+                    type="text"
+                    class="text"
+                    bind:value={provider.base_url}
+                    placeholder="Provider default"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
 
-          <div class="field">
-            <div class="key">
-              API key
-              <small>Paste a new value to store or rotate this provider's credential.</small>
-            </div>
-            <div class="val key-val">
-              <input
-                type="password"
-                class="text"
-                bind:value={provider.api_key}
-                placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
-                autocomplete="off"
-              />
-              <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "Stored" : "Empty"}
-              </span>
-            </div>
-          </div>
+              <div class="field">
+                <div class="key">
+                  API key
+                  <small>Paste a new value to store or rotate this provider's credential.</small>
+                </div>
+                <div class="val key-val">
+                  <input
+                    type="password"
+                    class="text"
+                    bind:value={provider.api_key}
+                    placeholder={provider.has_credential ? "Stored credential" : "Paste to store"}
+                    autocomplete="off"
+                  />
+                  <span class="credential-status" class:set={provider.has_credential}>
+                    {provider.has_credential ? "Stored" : "Empty"}
+                  </span>
+                </div>
+              </div>
 
-          <div class="field">
-            <div class="key">
-              Models
-              <small>Configured model IDs for this provider. The active default is marked.</small>
-            </div>
-            <div class="val val-stack">
-              {#each modelsForProvider as [modelKey, model] (modelKey)}
-                <div class="model-row provider-model-row">
-                  <div class="model-main">
-                    <span class="model-id">{model.model_id}</span>
-                    <span class="model-sub">{modelKey}</span>
+              <div class="field">
+                <div class="key">
+                  Models
+                  <small>Configured model IDs for this provider. The active default is marked.</small>
+                </div>
+                <div class="val val-stack">
+                  {#each modelsForProvider as [modelKey, model] (modelKey)}
+                    <div class="model-row provider-model-row">
+                      <div class="model-main">
+                        <span class="model-id">{model.model_id}</span>
+                        <span class="model-sub">{modelKey}</span>
+                      </div>
+                      <div class="model-facts">
+                        <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
+                        <span>{model.generation_preset ?? "provider generation defaults"}</span>
+                        {#if settings.default_model === modelKey}
+                          <span class="fact-strong">Default</span>
+                        {/if}
+                      </div>
+                      <div class="opt-row row-actions">
+                        <button
+                          type="button"
+                          class="opt"
+                          class:active={settings.default_model === modelKey}
+                          onclick={() => {
+                            if (!settings) return;
+                            settings.default_model = modelKey;
+                            settings.default_provider = id;
+                          }}
+                        >
+                          Use
+                        </button>
+                        <button type="button" class="opt opt-warn" onclick={() => removeModel(modelKey)}>Remove</button>
+                      </div>
+                    </div>
+                  {:else}
+                    <p class="empty">No models configured for this provider.</p>
+                  {/each}
+
+                  <div class="search-row">
+                    <input
+                      type="text"
+                      class="text search"
+                      value={newModelIdByProvider[id] ?? ""}
+                      oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
+                      placeholder="model-id"
+                      aria-label={`Add model by id for ${providerDisplayName(id)}`}
+                      autocomplete="off"
+                    />
+                    <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
+                      <span class="pick-mark" aria-hidden="true">+</span>
+                      <span>Add model</span>
+                    </button>
                   </div>
-                  <div class="model-facts">
-                    <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
-                    <span>{model.generation_preset ?? "provider generation defaults"}</span>
-                    {#if settings.default_model === modelKey}
-                      <span class="fact-strong">Default</span>
-                    {/if}
-                  </div>
-                  <div class="opt-row row-actions">
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="key">
+                  Discover
+                  <small>Fetch known models for this provider, then add the ones Swage should use.</small>
+                </div>
+                <div class="val val-stack">
+                  <div class="search-row">
+                    <input
+                      type="text"
+                      class="text search"
+                      value={selectedProvider === id ? modelQuery : ""}
+                      onfocus={() => selectProvider(id)}
+                      oninput={(event) => {
+                        selectedProvider = id;
+                        modelQuery = event.currentTarget.value;
+                        loadModels();
+                      }}
+                      placeholder="Search models"
+                      autocomplete="off"
+                    />
                     <button
                       type="button"
                       class="opt"
-                      class:active={settings.default_model === modelKey}
+                      disabled={isPersisting}
                       onclick={() => {
-                        if (!settings) return;
-                        settings.default_model = modelKey;
-                        settings.default_provider = id;
+                        selectedProvider = id;
+                        loadModels();
                       }}
                     >
-                      Use
+                      Refresh
                     </button>
-                    <button type="button" class="opt opt-warn" onclick={() => removeModel(modelKey)}>Remove</button>
                   </div>
+                  {#if selectedProvider === id}
+                    <div class="opt-grid">
+                      {#each discoveredModels as model (model.id)}
+                        {@const added = addedModelIds.has(model.id)}
+                        <button
+                          type="button"
+                          class="opt"
+                          class:active={added}
+                          disabled={added}
+                          onclick={() => addDiscoveredModel(model)}
+                          title={added ? "Already added" : `Add ${model.name}`}
+                        >
+                          <span class="opt-label">{model.name}</span>
+                          <span class="opt-tag">{added ? "Added" : "Add"}</span>
+                        </button>
+                      {:else}
+                        <p class="empty">No discovered models to show.</p>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
-              {:else}
-                <p class="empty">No models configured for this provider.</p>
-              {/each}
-
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={newModelIdByProvider[id] ?? ""}
-                  oninput={(event) => (newModelIdByProvider[id] = event.currentTarget.value)}
-                  placeholder="model-id"
-                  autocomplete="off"
-                />
-                <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
-                  <span class="pick-mark" aria-hidden="true">+</span>
-                  <span>Add model</span>
-                </button>
               </div>
             </div>
-          </div>
-
-          <div class="field">
-            <div class="key">
-              Discover
-              <small>Fetch known models for this provider, then add the ones Swage should use.</small>
-            </div>
-            <div class="val val-stack">
-              <div class="search-row">
-                <input
-                  type="text"
-                  class="text search"
-                  value={selectedProvider === id ? modelQuery : ""}
-                  onfocus={() => selectProvider(id)}
-                  oninput={(event) => {
-                    selectedProvider = id;
-                    modelQuery = event.currentTarget.value;
-                    loadModels();
-                  }}
-                  placeholder="Search models"
-                  autocomplete="off"
-                />
-                <button
-                  type="button"
-                  class="opt"
-                  disabled={isPersisting}
-                  onclick={() => {
-                    selectedProvider = id;
-                    loadModels();
-                  }}
-                >
-                  Refresh
-                </button>
-              </div>
-              {#if selectedProvider === id}
-                <div class="opt-grid">
-                  {#each discoveredModels as model (model.id)}
-                    {@const added = addedModelIds.has(model.id)}
-                    <button
-                      type="button"
-                      class="opt"
-                      class:active={added}
-                      disabled={added}
-                      onclick={() => addDiscoveredModel(model)}
-                      title={added ? "Already added" : `Add ${model.name}`}
-                    >
-                      <span class="opt-label">{model.name}</span>
-                      <span class="opt-tag">{added ? "Added" : "Add"}</span>
-                    </button>
-                  {:else}
-                    <p class="empty">No discovered models to show.</p>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </div>
+          {/if}
         </section>
       {:else}
         <div class="field">
@@ -1303,6 +1428,15 @@
         </div>
       {/if}
     {:else if tab === "automation"}
+      <div class="field">
+        <div class="key">
+          Schedules
+          <small>Create and operate durable scheduled agent work. Reachable here on a fresh install, before the builder surfaces have context.</small>
+        </div>
+        <div class="val">
+          <ScheduleAutomationPanel {benchId} {sessionId} />
+        </div>
+      </div>
       <div class="field">
         <div class="key">
           Sandbox
@@ -1495,7 +1629,7 @@
   }
 
   /* ---------------------------------------------------------------------------
-     Non-functional page shell — used by the workup pages without a backend.
+     Non-functional page shell — used by settings pages without a backend.
      --------------------------------------------------------------------------- */
 
   .shell-banner {
@@ -1692,6 +1826,27 @@
   .head-actions {
     display: flex;
     gap: 8px;
+  }
+
+  .autosave-state {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--ink);
+    color: var(--ink-soft);
+    background: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .autosave-state.saving {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   /* Notices — flat orange band with cream text, matches the not-found banner
@@ -2098,14 +2253,91 @@
 
   .provider-head {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 18px;
+    align-items: stretch;
+    gap: 4px;
     padding-bottom: 12px;
+  }
+
+  /* The collapse trigger occupies the whole header bar — one large click
+     target. Borders, background, and the rotating chevron carry the
+     affordance; aria-expanded announces state (UI audit f-22). */
+  .provider-collapse {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 12px;
+    background: transparent;
+    border: none;
+    padding: 6px 4px;
+    margin: 0;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 0;
+  }
+
+  .provider-collapse:hover {
+    background: var(--rule-faint);
+  }
+
+  .provider-collapse:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .chevron {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1;
+    color: var(--ink-soft);
+    transition: transform 120ms ease;
   }
 
   .provider-head-text {
     min-width: 0;
+  }
+
+  /* Credential chip promoted to a status — the set variant carries a check and
+     a positive tint so it reads as a state, not a label. */
+  .provider-collapse .credential-status {
+    justify-self: end;
+  }
+
+  .credential-status.set {
+    border-color: var(--ink);
+    color: var(--ink);
+    background: rgba(47, 122, 58, 0.14);
+  }
+
+  /* Remove is demoted to a low-emphasis icon button — sibling of the collapse
+     trigger, never nested (UI audit f-22). */
+  .provider-remove {
+    flex-shrink: 0;
+    align-self: center;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--ink-soft);
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px 8px;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+
+  .provider-remove:hover,
+  .provider-remove:focus-visible {
+    opacity: 1;
+    color: var(--error);
+    border-color: var(--rule-soft);
+  }
+
+  .provider-remove:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .provider-index {
@@ -2113,7 +2345,7 @@
     margin-bottom: 6px;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     letter-spacing: 0.22em;
     text-transform: uppercase;
@@ -2128,7 +2360,7 @@
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: 26px;
+    font-size: var(--font-display-3);
     line-height: 1;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -2140,7 +2372,7 @@
     flex-wrap: wrap;
     gap: 6px 14px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     color: var(--ink-soft);
     word-break: break-word;
   }
@@ -2162,12 +2394,48 @@
     text-transform: uppercase;
   }
 
-  .provider-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  /* Compatible-provider draft form — persistent visible labels, helper text,
+     and an inline validation slot live in their own column structure so the
+     search-row layout (input + Connect button on one line) still works. */
+  .compatible-form {
     flex-wrap: wrap;
-    justify-content: flex-end;
+  }
+
+  .compatible-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 220px;
+    flex: 1;
+  }
+
+  .compatible-field .key {
+    /* Reuse the field-key look so the compatible form matches the per-provider
+       field rows below it. */
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: var(--font-meta);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .field-help {
+    font-family: var(--font-body);
+    font-size: var(--font-label-sm);
+    color: var(--ink-soft);
+  }
+
+  .field-error {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    color: var(--error);
+    min-height: 0;
+  }
+
+  .field-error:empty {
+    display: none;
   }
 
   /* Per-model row inside Model compatibility — id label on the left, chip

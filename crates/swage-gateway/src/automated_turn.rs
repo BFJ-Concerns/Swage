@@ -3,12 +3,29 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use swage_core::GatewayError;
+use swage_core::{GatewayError, StorageError};
 use swage_storage::NewTurn;
 
 use crate::state::AppState;
 use crate::subscription::SubscriptionState;
 use crate::thread_selection::resolve_thread_for_session;
+
+/// Map a placeholder-turn insertion failure to a gateway error.
+///
+/// The turns table carries a partial unique index admitting one non-terminal
+/// turn per thread. The in-memory pre-check below catches the common case,
+/// but two automated runs racing on a shared continuation session can both
+/// pass it and collide on the insert. That collision is an overlap, not an
+/// internal fault, so it becomes `TurnInProgress` — never a raw
+/// `UNIQUE constraint failed: turns.thread_id` surfaced to a caller or a
+/// run record. This mirrors the interactive turn path's
+/// `map_turn_creation_error`.
+fn map_placeholder_turn_creation_error(error: StorageError, session_id: Uuid) -> GatewayError {
+    match error {
+        StorageError::ConstraintViolation(_) => GatewayError::TurnInProgress { session_id },
+        other => GatewayError::Storage(other),
+    }
+}
 
 pub async fn create_placeholder_turn(
     state: &AppState,
@@ -40,7 +57,8 @@ pub async fn create_placeholder_turn(
             user_input: Some(message.to_string()),
             parent_turn_id: None,
         })
-        .await?;
+        .await
+        .map_err(|error| map_placeholder_turn_creation_error(error, session_id))?;
     Ok(turn.id)
 }
 
@@ -75,4 +93,72 @@ pub async fn run_placeholder_turn(
     turn.assistant_response.ok_or_else(|| {
         GatewayError::ValidationError("automated turn completed without assistant response".into())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use swage_core::{FinishReason, StreamChunk};
+
+    use super::*;
+    use crate::turn::tests::make_state_with_session;
+
+    #[test]
+    fn placeholder_turn_constraint_maps_to_turn_in_progress() {
+        // A raw turns-table uniqueness violation must never surface as such —
+        // it is the atomic overlap guard firing, so it reads as an in-flight
+        // turn, not an internal storage fault.
+        let session_id = Uuid::new_v4();
+        let mapped = map_placeholder_turn_creation_error(
+            StorageError::ConstraintViolation("UNIQUE constraint failed: turns.thread_id".into()),
+            session_id,
+        );
+        assert!(matches!(
+            mapped,
+            GatewayError::TurnInProgress { session_id: id } if id == session_id
+        ));
+
+        // Other storage errors pass through untouched.
+        let mapped = map_placeholder_turn_creation_error(
+            StorageError::QueryFailed("disk gone".into()),
+            session_id,
+        );
+        assert!(matches!(mapped, GatewayError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn automated_placeholder_turn_receives_provider_visible_snapshot() {
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Automated answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Automated hello")
+            .await
+            .expect("create automated placeholder");
+        let response = run_placeholder_turn(&state, session_id, "Automated hello", turn_id)
+            .await
+            .expect("automated turn should complete");
+
+        assert_eq!(response, "Automated answer");
+        let snapshot = state
+            .storage
+            .get_snapshot(turn_id)
+            .await
+            .expect("get snapshot")
+            .expect("automated placeholder should receive context snapshot");
+        let parsed: Value = serde_json::from_str(&snapshot).expect("snapshot should be JSON");
+        let provider_request = &parsed["provider_visible"]["requests"][0];
+        assert_eq!(provider_request["round"], serde_json::json!(1));
+        assert!(
+            provider_request["request"]["body"]["messages"].is_array(),
+            "automated turn snapshot should include provider-visible messages"
+        );
+    }
 }

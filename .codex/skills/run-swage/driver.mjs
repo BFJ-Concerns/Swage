@@ -155,9 +155,9 @@ async function flow(flags) {
     await waitForApp(page, flags.wait);
     await page.waitForTimeout(600);
 
-    // Two-stage bench select: click the card to preview, then "Open bench".
-    await page.getByRole("button", { name: /default/i }).first().click();
-    await page.getByRole("button", { name: "Open bench", exact: true }).click();
+    // Two-stage bench select: click the card to preview, then "Open".
+    await page.getByRole("button", { name: /preview bench default/i }).click();
+    await page.getByRole("button", { name: "Open", exact: true }).click();
 
     // Wait for the workspace shell to replace the picker.
     await page.waitForFunction(

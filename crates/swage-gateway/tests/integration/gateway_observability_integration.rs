@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.2 Phase 02 (Gateway Integration & Observability).
+//! Cross-task integration tests for gateway integration and observability.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the assembly wiring, subscription protocol, token
@@ -488,9 +488,15 @@ async fn past_turn_report_matches_live_websocket_report() {
         "past turn context endpoint should return 200"
     );
 
-    // The stored report should match the live one.
+    // The stored report starts as the live context event and may be enriched
+    // later with provider-visible debugger data as the turn progresses.
+    let mut stored_report = stored_body["report"].clone();
+    if let Some(object) = stored_report.as_object_mut() {
+        object.remove("provider_visible");
+    }
+
     assert_eq!(
-        stored_body["report"], *live_report,
+        stored_report, *live_report,
         "stored report should match the live WebSocket report"
     );
 }

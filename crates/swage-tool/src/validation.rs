@@ -1,8 +1,9 @@
 //! JSON schema validation for tool parameters.
 //!
-//! Hand-rolled validation covering the subset of JSON Schema needed by tools:
-//! type checking, required-field presence, and recursive property validation.
-//! Full JSON Schema semantics (oneOf, allOf, $ref, etc.) are out of scope.
+//! A small hand-rolled pass gives stable, friendly errors for the common cases,
+//! then the `jsonschema` validator enforces the full tool contract. Provider
+//! adapters may project schemas down to a stricter portable subset, so local
+//! execution must remain the authoritative validator for richer JSON Schema.
 
 use serde_json::Value;
 use swage_core::ToolError;
@@ -13,6 +14,7 @@ use swage_core::ToolError;
 /// - Required fields are present.
 /// - Each field whose schema declares a `type` matches that type.
 /// - Nested object schemas are validated recursively via `properties`.
+/// - Full JSON Schema constraints are enforced after the friendly subset pass.
 ///
 /// Returns `ToolError::InvalidParameters` on the first failure found, with a
 /// message that names the failing field and explains the violation.
@@ -21,7 +23,25 @@ pub fn validate_tool_schema(
     schema: &Value,
     params: &Value,
 ) -> Result<(), ToolError> {
-    validate_object(tool_name, schema, params, "")
+    validate_object(tool_name, schema, params, "")?;
+    validate_full_json_schema(tool_name, schema, params)
+}
+
+fn validate_full_json_schema(
+    tool_name: &str,
+    schema: &Value,
+    params: &Value,
+) -> Result<(), ToolError> {
+    let validator = jsonschema::validator_for(schema).map_err(|error| {
+        invalid(
+            tool_name,
+            format!("tool parameter schema is invalid: {error}"),
+        )
+    })?;
+
+    validator
+        .validate(params)
+        .map_err(|error| invalid(tool_name, format!("schema validation failed: {error}")))
 }
 
 /// Recursive worker — `path` is the dot-separated field path for error messages.
@@ -373,6 +393,48 @@ mod tests {
             json!({"anything": 42}),
         );
         ok(json!({}), json!({"anything": "goes"}));
+    }
+
+    #[test]
+    fn full_json_schema_enforces_rich_string_constraints() {
+        let msg = err(
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 3,
+                        "pattern": "^[a-z]+$"
+                    }
+                }
+            }),
+            json!({"query": "A"}),
+        );
+
+        assert!(msg.contains("schema validation failed"), "{msg}");
+    }
+
+    #[test]
+    fn full_json_schema_enforces_conditional_constraints() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["fast", "deep"]},
+                "depth": {"type": "integer", "minimum": 1}
+            },
+            "if": {
+                "properties": {"mode": {"const": "deep"}},
+                "required": ["mode"]
+            },
+            "then": {
+                "required": ["depth"]
+            }
+        });
+
+        ok(schema.clone(), json!({"mode": "deep", "depth": 2}));
+        let msg = err(schema, json!({"mode": "deep"}));
+        assert!(msg.contains("schema validation failed"), "{msg}");
+        assert!(msg.contains("depth"), "{msg}");
     }
 
     // -------------------------------------------------------------------------

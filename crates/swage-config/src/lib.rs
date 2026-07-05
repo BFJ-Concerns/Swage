@@ -18,12 +18,13 @@ pub mod validation;
 
 // Resolved config types
 pub use model::{
-    CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferField,
-    ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
-    HierarchyLevel, HitlConfig, LogLevel, LoggingConfig, ModelCatalogConfig, ModelEndpointConfig,
-    ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig, Protocol,
-    ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
-    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, CommunicationConfig, ContextConfig,
+    ContextTransferConfig, ContextTransferField, ContextTransferMode, ContextTransferTargetConfig,
+    GenerationConfig, GenerationPresetConfig, HierarchyLevel, HitlConfig, LogLevel, LoggingConfig,
+    ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
+    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
+    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
+    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, TelegramChannelConfig,
     ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 

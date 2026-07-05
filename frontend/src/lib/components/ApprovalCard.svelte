@@ -145,7 +145,7 @@
   */
   .approval-card {
     margin: 12px 22px 18px;
-    border: 2px solid var(--ink);
+    border: var(--border-strong);
     background: var(--paper);
     display: flex;
     flex-direction: column;
@@ -154,17 +154,10 @@
     isolation: isolate;
   }
 
-  .approval-card::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border: 2px solid var(--accent);
-    transform: translate(var(--offset), var(--offset));
-    z-index: -1;
-    mix-blend-mode: var(--shadow-blend);
-    opacity: var(--shadow-opacity);
-    pointer-events: none;
-  }
+  /* No riso offset shadow: the card already carries an ink header band and a
+     2px ink frame, which is enough emphasis. Spending the orange-offset
+     currency here too means it stops singling out the single active selection
+     / primary action it was designed for (UI audit f-18). */
 
   .head {
     display: flex;
@@ -202,12 +195,12 @@
   .approval-error {
     margin: 0;
     padding: 8px 14px;
-    background: rgba(240, 106, 58, 0.1);
-    border-left: 3px solid var(--accent);
-    color: var(--ink-orange);
+    background: rgba(168, 50, 26, 0.1);
+    border-left: 3px solid var(--error);
+    color: var(--error);
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--font-label-sm);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }

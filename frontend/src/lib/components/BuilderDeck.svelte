@@ -418,7 +418,7 @@
   }
 
   function discoverToolNames(): string[] {
-    const names = new Set(["shell", "file_read", "file_write", "python_execute"]);
+    const names = new Set(["shell", "file_edit", "file_read", "file_write", "python_execute"]);
     for (const extension of extensions) {
       for (const tool of extension.requested_tools) {
         if (tool.trim()) names.add(tool.trim());

@@ -239,7 +239,7 @@ pub struct AssemblyError {
     /// Human-readable description of what went wrong.
     pub message: String,
 
-    /// Which assembly handled the fallback — always `"default"` in Phase 01.
+    /// Which assembly handled the fallback; currently always `"default"`.
     pub fallback_used: String,
 }
 

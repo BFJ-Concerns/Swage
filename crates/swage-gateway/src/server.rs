@@ -218,6 +218,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_channel_links).post(handlers::create_channel_link),
         )
         .route(
+            "/api/onboarding/channels/link-codes",
+            post(handlers::create_channel_link_code),
+        )
+        .route(
             "/api/onboarding/nodes/pairing-codes",
             post(handlers::create_node_pairing_code),
         )
@@ -338,51 +342,27 @@ pub fn build_router(state: AppState) -> Router {
             "/api/background-jobs/{id}/retry",
             post(handlers::retry_background_job),
         )
-        // Durable scheduled jobs and recorded runs.
+        // Durable schedules and their recorded runs.
         .route(
-            "/api/scheduled-jobs",
-            get(handlers::list_scheduled_jobs).post(handlers::create_scheduled_job),
+            "/api/schedules",
+            get(handlers::list_schedules).post(handlers::create_schedule),
         )
         .route(
-            "/api/scheduled-jobs/{id}",
-            put(handlers::update_scheduled_job).delete(handlers::delete_scheduled_job),
+            "/api/schedules/{id}",
+            put(handlers::update_schedule).delete(handlers::delete_schedule),
+        )
+        .route("/api/schedules/{id}/pause", post(handlers::pause_schedule))
+        .route(
+            "/api/schedules/{id}/resume",
+            post(handlers::resume_schedule),
         )
         .route(
-            "/api/scheduled-jobs/{id}/pause",
-            post(handlers::pause_scheduled_job),
+            "/api/schedules/{id}/trigger",
+            post(handlers::trigger_schedule),
         )
         .route(
-            "/api/scheduled-jobs/{id}/resume",
-            post(handlers::resume_scheduled_job),
-        )
-        .route(
-            "/api/scheduled-jobs/{id}/trigger",
-            post(handlers::trigger_scheduled_job),
-        )
-        .route(
-            "/api/scheduled-jobs/{id}/runs",
-            get(handlers::list_scheduled_runs),
-        )
-        // Durable heartbeats and recorded runs.
-        .route(
-            "/api/heartbeats",
-            get(handlers::list_heartbeats).post(handlers::create_heartbeat),
-        )
-        .route(
-            "/api/heartbeats/{id}",
-            put(handlers::update_heartbeat).delete(handlers::delete_heartbeat),
-        )
-        .route(
-            "/api/heartbeats/{id}/enable",
-            post(handlers::enable_heartbeat),
-        )
-        .route(
-            "/api/heartbeats/{id}/disable",
-            post(handlers::disable_heartbeat),
-        )
-        .route(
-            "/api/heartbeats/{id}/runs",
-            get(handlers::list_heartbeat_runs),
+            "/api/schedules/{id}/runs",
+            get(handlers::list_schedule_runs),
         )
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))

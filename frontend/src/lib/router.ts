@@ -5,9 +5,8 @@
 
 // Settings sub-pages reachable from the overlay nav. The first three are wired
 // to real backends (providers, generation presets, automation). The remainder
-// were added per the Riso workup (`riso-cyanotype.html`, view 06) and are
-// rendered as non-functional shells until backends exist — see the SettingsPage
-// motes for the gap on each page.
+// are rendered as non-functional shells until backends exist — see the
+// SettingsPage motes for the gap on each page.
 export type SettingsTab =
   | "providers"
   | "generation"

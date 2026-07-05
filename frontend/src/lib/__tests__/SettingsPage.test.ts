@@ -29,6 +29,16 @@ async function flushUi(): Promise<void> {
   }
 }
 
+async function waitForSaveCall(): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    await flushUi();
+    if (vi.mocked(settingsApi.saveSettings).mock.calls.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Timed out waiting for settings autosave.");
+}
+
 function buttonNamed(name: string): HTMLButtonElement {
   const button = Array.from(document.querySelectorAll("button")).find(
     (candidate) => candidate.textContent?.trim() === name,
@@ -85,7 +95,7 @@ function emptySettings(): SettingsResponse {
       allow: ["*"],
       deny: [],
       bundles: {},
-      require_approval: ["shell", "file_write", "python_execute"],
+      require_approval: ["shell", "file_edit", "file_write", "python_execute"],
     },
     hitl: {
       timeout: 300,
@@ -186,6 +196,31 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("gpt-4.1-mini");
   });
 
+  it("adds OpenRouter with its canonical base URL", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    buttonContaining("Add provider").click();
+    await flushUi();
+    buttonContaining("OpenRouter").click();
+    await flushUi();
+    await waitForSaveCall();
+
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providers: expect.objectContaining({
+          openrouter: expect.objectContaining({
+            protocol: "openrouter",
+            base_url: "https://openrouter.ai/api/v1",
+          }),
+        }),
+      }),
+    );
+  });
+
   it("lists, triggers, and downloads recovery exports", async () => {
     const createObjectUrl = vi.fn(() => "blob:swage-recovery");
     const revokeObjectUrl = vi.fn();
@@ -212,8 +247,7 @@ describe("SettingsPage", () => {
             secrets: 1,
             channel_links: 1,
             execution_hosts: 1,
-            scheduled_jobs: 0,
-            heartbeats: 1,
+            schedules: 1,
           },
         ],
       })
@@ -229,8 +263,7 @@ describe("SettingsPage", () => {
             secrets: 0,
             channel_links: 0,
             execution_hosts: 0,
-            scheduled_jobs: 0,
-            heartbeats: 0,
+            schedules: 0,
           },
         ],
       });
@@ -275,8 +308,7 @@ describe("SettingsPage", () => {
     await flushUi();
     clickDiscoveredModel("gpt-4.1-mini");
     await flushUi();
-    buttonNamed("Save").click();
-    await flushUi();
+    await waitForSaveCall();
 
     expect(settingsApi.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -284,6 +316,40 @@ describe("SettingsPage", () => {
         default_provider: "openai",
       }),
     );
+  });
+
+  it("collapses provider sections", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: {
+        openai: {
+          protocol: "openai",
+          base_url: null,
+          api_key_secret_ref: null,
+          api_key_env: null,
+          has_credential: false,
+          api_key: "",
+        },
+      },
+      default_provider: "openai",
+    });
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Base URL");
+
+    // The whole provider header bar is the collapse trigger (UI audit f-22).
+    const collapse = document.querySelector<HTMLButtonElement>(".provider-collapse");
+    if (!collapse) throw new Error("Provider collapse trigger not found");
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+    collapse.click();
+    await flushUi();
+
+    expect(document.body.textContent).not.toContain("Base URL");
+    expect(collapse.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("persists display preferences locally", async () => {

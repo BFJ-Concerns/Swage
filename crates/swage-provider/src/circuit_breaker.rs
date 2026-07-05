@@ -336,6 +336,7 @@ impl LlmProvider for CircuitBreakerProvider {
                                     next_is_recorded = true;
                                 }
                                 StreamChunk::Delta { .. }
+                                | StreamChunk::Reasoning { .. }
                                 | StreamChunk::Usage(_)
                                 | StreamChunk::ProviderRetryStarted { .. }
                                 | StreamChunk::ProviderRetrySettled { .. }

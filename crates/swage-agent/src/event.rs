@@ -10,6 +10,14 @@ use uuid::Uuid;
 
 use crate::approval::ApprovalDecisionValue;
 
+// TODO Define SchemaValidationError once in the swage-protocol crate
+// Three structurally-identical copies of this struct exist (here, the gateway's
+// websocket.rs, swage-client's websocket.rs), kept in sync only by the review
+// discipline described below. One shared definition in swage-protocol removes
+// the discipline requirement. See the wire-contract section in CLAUDE.md and
+// the swage-protocol mote in .motes/TODO.md.
+// ---
+
 /// A single JSON Schema validation error reported during output schema checking.
 ///
 /// Wire-compatible with `swage_gateway::websocket::SchemaValidationError` — the
@@ -51,6 +59,29 @@ pub enum AgentEvent {
         max_retries: u32,
         provider: String,
         success: bool,
+    },
+
+    /// A provider-visible request body has been prepared for a model call.
+    ///
+    /// This is diagnostic data for context snapshots. It is emitted before the
+    /// provider stream is opened and after agent-side context compaction or
+    /// tool-round replay has shaped the request.
+    ProviderRequestPrepared {
+        turn_id: Uuid,
+        round: usize,
+        request: serde_json::Value,
+    },
+
+    /// Provider reasoning side-channel content was received.
+    ///
+    /// Consumers may persist this for diagnostics, but must not display or
+    /// replay it as visible assistant text unless an explicit provider/model
+    /// capability says that is required.
+    ProviderReasoningCaptured {
+        turn_id: Uuid,
+        round: usize,
+        content: String,
+        details: Option<serde_json::Value>,
     },
 
     /// A tool call has started; consumers can show a "running…" indicator.

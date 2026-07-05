@@ -30,6 +30,17 @@ use crate::error::ClientError;
 // Server → Client event types
 // ---------------------------------------------------------------------------
 
+// TODO Replace these duplicated wire types with swage-protocol imports
+// This file re-implements the gateway's ServerEvent/ClientEvent/
+// SchemaValidationError by hand to avoid a gateway dependency, and has
+// already drifted: approval and turn ids deserialise as Uuid in some variants
+// and String in others within this same file (the gateway sends String), and
+// ApprovalDecision's scope is a lossy Option<String> where the gateway uses a
+// typed enum. A shared swage-protocol crate removes both the duplication and
+// the drift. See the wire-contract section in CLAUDE.md and the
+// swage-protocol mote in .motes/TODO.md.
+// ---
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SchemaValidationError {
     pub path: String,

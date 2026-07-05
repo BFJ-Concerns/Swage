@@ -25,7 +25,10 @@
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use swage_core::{ChatMessage, CompletionRequest, Role};
+use swage_core::{
+    ChatMessage, CompletionRequest, Role, render_message_for_model_context,
+    role_label_for_model_context,
+};
 use swage_provider::LlmProvider;
 
 use crate::tokeniser::Tokeniser;
@@ -196,21 +199,8 @@ fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
     );
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = match message.role() {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        let text = message
-            .content()
-            .iter()
-            .filter_map(|part| match part {
-                swage_core::ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let role_label = role_label_for_model_context(message.role());
+        let text = render_message_for_model_context(message);
         let _ = writeln!(prompt, "[{i}] ({role_label}): {text}");
     }
 
@@ -294,7 +284,8 @@ mod tests {
     use std::pin::Pin;
     use swage_core::{
         ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason,
-        ProviderError, Role, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+        ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+        ToolResult, build_tool_round_messages,
     };
     use swage_provider::LlmProvider;
 
@@ -382,6 +373,30 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn eviction_prompt_includes_structured_tool_replay() {
+        let messages = build_tool_round_messages(
+            &[ToolCall {
+                call_id: "call_search".into(),
+                name: "web_search".into(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }],
+            &[ToolResult {
+                call_id: "call_search".into(),
+                content: "search failed".into(),
+                is_error: true,
+            }],
+            "",
+        );
+
+        let prompt = build_eviction_prompt(&messages);
+
+        assert!(prompt.contains("tool_use id=call_search name=web_search"));
+        assert!(prompt.contains(r#""query":"rust""#));
+        assert!(prompt.contains("tool_result tool_use_id=call_search is_error=true"));
+        assert!(prompt.contains(r#""search failed""#));
     }
 
     // ── Failed tool call is evicted ───────────────────────────────────────────
