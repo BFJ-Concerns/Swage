@@ -2558,22 +2558,20 @@ pub(crate) mod tests {
         model::{
             ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState,
             Attachment, AttachmentScopeKind, AttachmentStatus, BackgroundJob, Bench, BenchSlug,
-            ChannelLink, EdgeEvaluation, ExecutionHostRegistration, Heartbeat, HeartbeatRun,
-            HeartbeatRunState, Material, MaterialStatus, Message, NewAgentMessage,
-            NewApprovalRequest, NewAttachment, NewBackgroundJob, NewBench, NewChannelLink,
-            NewEdgeEvaluation, NewExecutionHostRegistration, NewHeartbeat, NewHeartbeatRun,
-            NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewScheduledJob,
-            NewScheduledRun, NewSession, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-            NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, ScheduledJob,
-            ScheduledRun, ScheduledRunState, Session, Team, Thread, ThreadState, ToolCallRecord,
-            TopologyRun, TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob,
-            WorkspaceAttachment,
+            ChannelLink, EdgeEvaluation, ExecutionHostRegistration, Material, MaterialStatus,
+            Message, NewAgentMessage, NewApprovalRequest, NewAttachment, NewBackgroundJob,
+            NewBench, NewChannelLink, NewEdgeEvaluation, NewExecutionHostRegistration, NewMaterial,
+            NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSession,
+            NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn, NewWorkspaceAttachment,
+            NodeExecution, NodeExecutionState, NodeRetry, Schedule, ScheduleRun, ScheduleRunState,
+            ScheduleRunUpdate, ScheduleStatus, Session, Team, Thread, ThreadState, ToolCallRecord,
+            TopologyRun, TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
         },
         store::{
             ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore, ChannelLinkStore,
-            ContextSnapshotStore, ExecutionHostStore, HeartbeatStore, MaterialStore, MessageStore,
-            ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore,
-            ToolCallStore, TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
+            ContextSnapshotStore, ExecutionHostStore, MaterialStore, MessageStore, ScheduleStore,
+            SessionStore, SkillActivationStore, TeamStore, ThreadStore, ToolCallStore,
+            TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
         },
     };
 
@@ -2877,10 +2875,8 @@ pub(crate) mod tests {
         pub(crate) configuration_versions: Vec<swage_storage::ConfigurationVersion>,
         pub(crate) shared_reference_events: Vec<swage_storage::SharedReferenceEvent>,
         pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
-        pub(crate) scheduled_jobs: HashMap<Uuid, ScheduledJob>,
-        pub(crate) scheduled_runs: HashMap<Uuid, ScheduledRun>,
-        pub(crate) heartbeats: HashMap<Uuid, Heartbeat>,
-        pub(crate) heartbeat_runs: HashMap<Uuid, HeartbeatRun>,
+        pub(crate) schedules: HashMap<Uuid, Schedule>,
+        pub(crate) schedule_runs: HashMap<Uuid, ScheduleRun>,
         pub(crate) attachments: HashMap<Uuid, Attachment>,
         pub(crate) background_jobs: HashMap<Uuid, BackgroundJob>,
         pub(crate) materials: HashMap<Uuid, Material>,
@@ -3906,408 +3902,220 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl ScheduleStore for MockStorage {
-        async fn create_scheduled_job(
-            &self,
-            job: NewScheduledJob,
-        ) -> Result<ScheduledJob, StorageError> {
+        async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
             let now = chrono::Utc::now();
-            let created = ScheduledJob {
+            let created = Schedule {
                 id: Uuid::new_v4(),
-                session_id: job.session_id,
-                agent_id: job.agent_id,
-                message: job.message,
-                status: job.status,
-                kind: job.kind,
-                schedule_expression: job.schedule_expression,
-                delivery_routing: job.delivery_routing,
-                next_run_at: job.next_run_at,
-                last_run_at: job.last_run_at,
+                message: schedule.message,
+                status: schedule.status,
+                kind: schedule.kind,
+                expression: schedule.expression,
+                session_policy: schedule.session_policy,
+                delivery_routing: schedule.delivery_routing,
+                gate: schedule.gate,
+                next_run_at: schedule.next_run_at,
+                last_run_at: schedule.last_run_at,
                 created_at: now,
                 updated_at: now,
             };
             self.db
                 .lock()
                 .await
-                .scheduled_jobs
+                .schedules
                 .insert(created.id, created.clone());
             Ok(created)
         }
 
-        async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, StorageError> {
-            Ok(self.db.lock().await.scheduled_jobs.get(&id).cloned())
+        async fn get_schedule(&self, id: Uuid) -> Result<Option<Schedule>, StorageError> {
+            Ok(self.db.lock().await.schedules.get(&id).cloned())
         }
 
-        async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError> {
-            let mut jobs: Vec<ScheduledJob> = self
-                .db
-                .lock()
-                .await
-                .scheduled_jobs
-                .values()
-                .cloned()
-                .collect();
-            jobs.sort_by_key(|job| job.created_at);
-            Ok(jobs)
+        async fn list_schedules(&self) -> Result<Vec<Schedule>, StorageError> {
+            let mut schedules: Vec<Schedule> =
+                self.db.lock().await.schedules.values().cloned().collect();
+            schedules.sort_by_key(|schedule| schedule.created_at);
+            Ok(schedules)
         }
 
-        async fn list_due_scheduled_jobs(
+        async fn list_due_schedules(
             &self,
             now: chrono::DateTime<chrono::Utc>,
-        ) -> Result<Vec<ScheduledJob>, StorageError> {
-            let mut jobs: Vec<ScheduledJob> = self
+        ) -> Result<Vec<Schedule>, StorageError> {
+            let mut schedules: Vec<Schedule> = self
                 .db
                 .lock()
                 .await
-                .scheduled_jobs
+                .schedules
                 .values()
-                .filter(|job| {
-                    job.status == swage_storage::ScheduledJobStatus::Active
-                        && job.next_run_at.is_some_and(|next| next <= now)
+                .filter(|schedule| {
+                    schedule.status == ScheduleStatus::Active
+                        && schedule.next_run_at.is_some_and(|next| next <= now)
                 })
                 .cloned()
                 .collect();
-            jobs.sort_by_key(|job| job.next_run_at);
-            Ok(jobs)
+            schedules.sort_by_key(|schedule| schedule.next_run_at);
+            Ok(schedules)
         }
 
-        async fn update_scheduled_job(
+        async fn update_schedule(
             &self,
             id: Uuid,
-            update: UpdateScheduledJob,
-        ) -> Result<ScheduledJob, StorageError> {
+            update: UpdateSchedule,
+        ) -> Result<Schedule, StorageError> {
             let mut db = self.db.lock().await;
-            let job = db
-                .scheduled_jobs
+            let schedule = db
+                .schedules
                 .get_mut(&id)
                 .ok_or_else(|| StorageError::NotFound {
-                    entity: "ScheduledJob".into(),
+                    entity: "Schedule".into(),
                     id: id.to_string(),
                 })?;
             if let Some(message) = update.message {
-                job.message = message;
+                schedule.message = message;
             }
             if let Some(status) = update.status {
-                job.status = status;
+                schedule.status = status;
             }
             if let Some(kind) = update.kind {
-                job.kind = kind;
+                schedule.kind = kind;
             }
-            if let Some(schedule_expression) = update.schedule_expression {
-                job.schedule_expression = schedule_expression;
+            if let Some(expression) = update.expression {
+                schedule.expression = expression;
             }
             if let Some(delivery_routing) = update.delivery_routing {
-                job.delivery_routing = delivery_routing;
+                schedule.delivery_routing = delivery_routing;
+            }
+            if let Some(gate) = update.gate {
+                schedule.gate = gate;
             }
             if let Some(next_run_at) = update.next_run_at {
-                job.next_run_at = next_run_at;
+                schedule.next_run_at = next_run_at;
             }
             if let Some(last_run_at) = update.last_run_at {
-                job.last_run_at = last_run_at;
+                schedule.last_run_at = last_run_at;
             }
-            job.updated_at = chrono::Utc::now();
-            Ok(job.clone())
+            schedule.updated_at = chrono::Utc::now();
+            Ok(schedule.clone())
         }
 
-        async fn delete_scheduled_job(&self, id: Uuid) -> Result<bool, StorageError> {
-            Ok(self.db.lock().await.scheduled_jobs.remove(&id).is_some())
+        async fn delete_schedule(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self.db.lock().await.schedules.remove(&id).is_some())
         }
 
-        async fn create_scheduled_run(
+        async fn create_schedule_run(
             &self,
-            run: NewScheduledRun,
-        ) -> Result<ScheduledRun, StorageError> {
-            let created = ScheduledRun {
+            run: NewScheduleRun,
+        ) -> Result<ScheduleRun, StorageError> {
+            let terminal = matches!(
+                run.state,
+                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+            );
+            let created = ScheduleRun {
                 id: Uuid::new_v4(),
-                job_id: run.job_id,
+                schedule_id: run.schedule_id,
                 trigger: run.trigger,
                 state: run.state,
+                skip_reason: run.skip_reason,
                 scheduled_for: run.scheduled_for,
-                turn_id: run.turn_id,
-                output_text: run.output_text,
+                session_id: None,
+                turn_id: None,
+                gate: None,
+                output_text: None,
                 error_message: run.error_message,
                 created_at: chrono::Utc::now(),
-                started_at: run.started_at,
-                completed_at: run.completed_at,
+                started_at: None,
+                completed_at: terminal.then(chrono::Utc::now),
             };
             self.db
                 .lock()
                 .await
-                .scheduled_runs
+                .schedule_runs
                 .insert(created.id, created.clone());
             Ok(created)
         }
 
-        async fn get_scheduled_run(&self, id: Uuid) -> Result<Option<ScheduledRun>, StorageError> {
-            Ok(self.db.lock().await.scheduled_runs.get(&id).cloned())
+        async fn get_schedule_run(&self, id: Uuid) -> Result<Option<ScheduleRun>, StorageError> {
+            Ok(self.db.lock().await.schedule_runs.get(&id).cloned())
         }
 
-        async fn list_scheduled_runs_by_job(
+        async fn list_schedule_runs(
             &self,
-            job_id: Uuid,
-        ) -> Result<Vec<ScheduledRun>, StorageError> {
-            let mut runs: Vec<ScheduledRun> = self
+            schedule_id: Uuid,
+        ) -> Result<Vec<ScheduleRun>, StorageError> {
+            let mut runs: Vec<ScheduleRun> = self
                 .db
                 .lock()
                 .await
-                .scheduled_runs
+                .schedule_runs
                 .values()
-                .filter(|run| run.job_id == job_id)
+                .filter(|run| run.schedule_id == schedule_id)
                 .cloned()
                 .collect();
             runs.sort_by_key(|run| run.created_at);
             Ok(runs)
         }
 
-        async fn update_scheduled_run_state(
+        async fn update_schedule_run(
             &self,
             id: Uuid,
-            state: ScheduledRunState,
-            turn_id: Option<Uuid>,
-            output_text: Option<&str>,
-            error_message: Option<&str>,
+            update: ScheduleRunUpdate,
         ) -> Result<(), StorageError> {
             let mut db = self.db.lock().await;
             let run = db
-                .scheduled_runs
+                .schedule_runs
                 .get_mut(&id)
                 .ok_or_else(|| StorageError::NotFound {
-                    entity: "ScheduledRun".into(),
+                    entity: "ScheduleRun".into(),
                     id: id.to_string(),
                 })?;
-            run.state = state.clone();
-            if let Some(turn_id) = turn_id {
-                run.turn_id = Some(turn_id);
-            }
-            if let Some(output_text) = output_text {
-                run.output_text = Some(output_text.to_string());
-            }
-            if let Some(error_message) = error_message {
-                run.error_message = Some(error_message.to_string());
-            }
-            if matches!(state, ScheduledRunState::Running) && run.started_at.is_none() {
-                run.started_at = Some(chrono::Utc::now());
-            }
-            if matches!(
-                state,
-                ScheduledRunState::Completed | ScheduledRunState::Failed
-            ) {
-                run.completed_at = Some(chrono::Utc::now());
-            }
-            Ok(())
-        }
-
-        async fn recover_incomplete_scheduled_runs(
-            &self,
-            error_message: &str,
-        ) -> Result<u64, StorageError> {
-            let mut db = self.db.lock().await;
-            let now = chrono::Utc::now();
-            let mut recovered = 0;
-            for run in db.scheduled_runs.values_mut() {
+            if let Some(state) = update.state {
+                run.state = state;
+                if matches!(state, ScheduleRunState::Running) && run.started_at.is_none() {
+                    run.started_at = Some(chrono::Utc::now());
+                }
                 if matches!(
-                    run.state,
-                    ScheduledRunState::Pending | ScheduledRunState::Running
+                    state,
+                    ScheduleRunState::Completed
+                        | ScheduleRunState::Failed
+                        | ScheduleRunState::Skipped
                 ) {
-                    run.state = ScheduledRunState::Failed;
-                    run.error_message = Some(error_message.to_string());
-                    run.completed_at = Some(now);
-                    recovered += 1;
+                    run.completed_at = Some(chrono::Utc::now());
                 }
             }
-            Ok(recovered)
-        }
-    }
-
-    #[async_trait]
-    impl HeartbeatStore for MockStorage {
-        async fn create_heartbeat(
-            &self,
-            heartbeat: NewHeartbeat,
-        ) -> Result<Heartbeat, StorageError> {
-            let now = chrono::Utc::now();
-            let created = Heartbeat {
-                id: Uuid::new_v4(),
-                session_id: heartbeat.session_id,
-                agent_id: heartbeat.agent_id,
-                message: heartbeat.message,
-                interval_seconds: heartbeat.interval_seconds,
-                status: heartbeat.status,
-                last_beat_at: heartbeat.last_beat_at,
-                next_beat_at: heartbeat.next_beat_at,
-                created_at: now,
-                updated_at: now,
-            };
-            self.db
-                .lock()
-                .await
-                .heartbeats
-                .insert(created.id, created.clone());
-            Ok(created)
-        }
-
-        async fn get_heartbeat(&self, id: Uuid) -> Result<Option<Heartbeat>, StorageError> {
-            Ok(self.db.lock().await.heartbeats.get(&id).cloned())
-        }
-
-        async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError> {
-            let mut heartbeats: Vec<Heartbeat> =
-                self.db.lock().await.heartbeats.values().cloned().collect();
-            heartbeats.sort_by_key(|heartbeat| heartbeat.created_at);
-            Ok(heartbeats)
-        }
-
-        async fn list_due_heartbeats(
-            &self,
-            now: chrono::DateTime<chrono::Utc>,
-        ) -> Result<Vec<Heartbeat>, StorageError> {
-            let mut heartbeats: Vec<Heartbeat> = self
-                .db
-                .lock()
-                .await
-                .heartbeats
-                .values()
-                .filter(|heartbeat| {
-                    heartbeat.status == swage_storage::HeartbeatStatus::Enabled
-                        && heartbeat.next_beat_at.is_some_and(|next| next <= now)
-                })
-                .cloned()
-                .collect();
-            heartbeats.sort_by_key(|heartbeat| heartbeat.next_beat_at);
-            Ok(heartbeats)
-        }
-
-        async fn update_heartbeat(
-            &self,
-            id: Uuid,
-            update: UpdateHeartbeat,
-        ) -> Result<Heartbeat, StorageError> {
-            let mut db = self.db.lock().await;
-            let heartbeat = db
-                .heartbeats
-                .get_mut(&id)
-                .ok_or_else(|| StorageError::NotFound {
-                    entity: "Heartbeat".into(),
-                    id: id.to_string(),
-                })?;
-            if let Some(message) = update.message {
-                heartbeat.message = message;
+            if let Some(skip_reason) = update.skip_reason {
+                run.skip_reason = Some(skip_reason);
             }
-            if let Some(interval_seconds) = update.interval_seconds {
-                heartbeat.interval_seconds = interval_seconds;
+            if let Some(session_id) = update.session_id {
+                run.session_id = Some(session_id);
             }
-            if let Some(status) = update.status {
-                heartbeat.status = status;
-            }
-            if let Some(last_beat_at) = update.last_beat_at {
-                heartbeat.last_beat_at = last_beat_at;
-            }
-            if let Some(next_beat_at) = update.next_beat_at {
-                heartbeat.next_beat_at = next_beat_at;
-            }
-            heartbeat.updated_at = chrono::Utc::now();
-            Ok(heartbeat.clone())
-        }
-
-        async fn delete_heartbeat(&self, id: Uuid) -> Result<bool, StorageError> {
-            Ok(self.db.lock().await.heartbeats.remove(&id).is_some())
-        }
-
-        async fn create_heartbeat_run(
-            &self,
-            run: NewHeartbeatRun,
-        ) -> Result<HeartbeatRun, StorageError> {
-            let created = HeartbeatRun {
-                id: Uuid::new_v4(),
-                heartbeat_id: run.heartbeat_id,
-                state: run.state,
-                scheduled_for: run.scheduled_for,
-                turn_id: run.turn_id,
-                output_text: run.output_text,
-                error_message: run.error_message,
-                created_at: chrono::Utc::now(),
-                started_at: run.started_at,
-                completed_at: run.completed_at,
-            };
-            self.db
-                .lock()
-                .await
-                .heartbeat_runs
-                .insert(created.id, created.clone());
-            Ok(created)
-        }
-
-        async fn get_heartbeat_run(&self, id: Uuid) -> Result<Option<HeartbeatRun>, StorageError> {
-            Ok(self.db.lock().await.heartbeat_runs.get(&id).cloned())
-        }
-
-        async fn list_heartbeat_runs_by_heartbeat(
-            &self,
-            heartbeat_id: Uuid,
-        ) -> Result<Vec<HeartbeatRun>, StorageError> {
-            let mut runs: Vec<HeartbeatRun> = self
-                .db
-                .lock()
-                .await
-                .heartbeat_runs
-                .values()
-                .filter(|run| run.heartbeat_id == heartbeat_id)
-                .cloned()
-                .collect();
-            runs.sort_by_key(|run| run.created_at);
-            Ok(runs)
-        }
-
-        async fn update_heartbeat_run_state(
-            &self,
-            id: Uuid,
-            state: HeartbeatRunState,
-            turn_id: Option<Uuid>,
-            output_text: Option<&str>,
-            error_message: Option<&str>,
-        ) -> Result<(), StorageError> {
-            let mut db = self.db.lock().await;
-            let run = db
-                .heartbeat_runs
-                .get_mut(&id)
-                .ok_or_else(|| StorageError::NotFound {
-                    entity: "HeartbeatRun".into(),
-                    id: id.to_string(),
-                })?;
-            run.state = state.clone();
-            if let Some(turn_id) = turn_id {
+            if let Some(turn_id) = update.turn_id {
                 run.turn_id = Some(turn_id);
             }
-            if let Some(output_text) = output_text {
-                run.output_text = Some(output_text.to_string());
+            if let Some(gate) = update.gate {
+                run.gate = Some(gate);
             }
-            if let Some(error_message) = error_message {
-                run.error_message = Some(error_message.to_string());
+            if let Some(output_text) = update.output_text {
+                run.output_text = Some(output_text);
             }
-            if matches!(state, HeartbeatRunState::Running) && run.started_at.is_none() {
-                run.started_at = Some(chrono::Utc::now());
-            }
-            if matches!(
-                state,
-                HeartbeatRunState::Completed | HeartbeatRunState::Failed
-            ) {
-                run.completed_at = Some(chrono::Utc::now());
+            if let Some(error_message) = update.error_message {
+                run.error_message = Some(error_message);
             }
             Ok(())
         }
 
-        async fn recover_incomplete_heartbeat_runs(
+        async fn recover_incomplete_schedule_runs(
             &self,
             error_message: &str,
         ) -> Result<u64, StorageError> {
             let mut db = self.db.lock().await;
             let now = chrono::Utc::now();
             let mut recovered = 0;
-            for run in db.heartbeat_runs.values_mut() {
+            for run in db.schedule_runs.values_mut() {
                 if matches!(
                     run.state,
-                    HeartbeatRunState::Pending | HeartbeatRunState::Running
+                    ScheduleRunState::Pending | ScheduleRunState::Running
                 ) {
-                    run.state = HeartbeatRunState::Failed;
+                    run.state = ScheduleRunState::Failed;
                     run.error_message = Some(error_message.to_string());
                     run.completed_at = Some(now);
                     recovered += 1;

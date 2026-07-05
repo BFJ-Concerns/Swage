@@ -1,13 +1,11 @@
 import type {
   AttachmentQueuedResponse,
   CreateAttachmentRequest,
-  CreateHeartbeatRequest,
-  CreateScheduledJobRequest,
-  HeartbeatSummary,
   RecoveryExportListResponse,
-  ScheduledJobSummary,
   VoiceCapabilitiesResponse,
 } from "../types";
+import type { CreateScheduleRequest } from "../protocol/CreateScheduleRequest";
+import type { Schedule } from "../protocol/Schedule";
 
 let baseUrl = "";
 
@@ -51,18 +49,11 @@ export async function createAttachment(
   return response.json() as Promise<AttachmentQueuedResponse>;
 }
 
-export async function createScheduledJob(
-  payload: CreateScheduledJobRequest,
-): Promise<ScheduledJobSummary> {
-  const response = await request("/api/scheduled-jobs", "POST", payload);
-  return response.json() as Promise<ScheduledJobSummary>;
-}
-
-export async function createHeartbeat(
-  payload: CreateHeartbeatRequest,
-): Promise<HeartbeatSummary> {
-  const response = await request("/api/heartbeats", "POST", payload);
-  return response.json() as Promise<HeartbeatSummary>;
+export async function createSchedule(
+  payload: CreateScheduleRequest,
+): Promise<Schedule> {
+  const response = await request("/api/schedules", "POST", payload);
+  return response.json() as Promise<Schedule>;
 }
 
 export async function fetchVoiceCapabilities(): Promise<VoiceCapabilitiesResponse> {

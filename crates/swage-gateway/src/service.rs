@@ -370,6 +370,21 @@ impl ConversationService {
         bench_id: Uuid,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
+        self.create_session_in_bench_for_agent(bench_id, "gateway", selected_model_id)
+            .await
+    }
+
+    /// Create a new session in the specified bench, owned by a specific agent.
+    ///
+    /// The general session-creation path: interactive conversations use the
+    /// default `"gateway"` agent via the wrappers above, while fresh-policy
+    /// schedule runs create sessions for their schedule's target agent.
+    pub async fn create_session_in_bench_for_agent(
+        &self,
+        bench_id: Uuid,
+        agent_id: &str,
+        selected_model_id: Option<String>,
+    ) -> Result<ConversationResponse, GatewayError> {
         // Verify the bench exists — return 404 rather than a FK constraint error.
         self.bench_store
             .get(bench_id)
@@ -381,7 +396,7 @@ impl ConversationService {
             .storage
             .create_session(NewSession {
                 bench_id,
-                agent_id: "gateway".to_string(),
+                agent_id: agent_id.to_string(),
                 metadata: None,
                 active_workspace_attachment_id,
             })
@@ -397,7 +412,7 @@ impl ConversationService {
         self.storage
             .create(NewThread {
                 session_id: session.id,
-                agent_id: "gateway".to_string(),
+                agent_id: agent_id.to_string(),
             })
             .await?;
 

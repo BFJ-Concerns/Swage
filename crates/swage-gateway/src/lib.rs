@@ -57,7 +57,6 @@ pub mod context;
 pub mod error;
 pub mod execution_host;
 pub mod handlers;
-pub mod heartbeat;
 pub mod lens;
 pub mod lifecycle;
 pub mod material;

@@ -9,9 +9,8 @@ use crate::{
     channel_gateway::{ChannelStatusListResponse, list_channel_statuses},
     execution_host::list_execution_hosts,
     handlers::{ApprovalListResponse, ApprovalSummary},
-    heartbeat::list_heartbeats,
     presence::snapshot_presence,
-    schedule::list_scheduled_jobs,
+    schedule::list_schedules,
     state::AppState,
 };
 
@@ -57,8 +56,7 @@ pub struct OperatorOverviewResponse {
     pub gateway: OperatorGatewaySummary,
     pub sessions: Vec<OperatorSessionSummary>,
     pub approvals: Vec<ApprovalSummary>,
-    pub scheduled_jobs: crate::schedule::ScheduledJobListResponse,
-    pub heartbeats: crate::heartbeat::HeartbeatListResponse,
+    pub schedules: swage_protocol::client::schedule::ScheduleListResponse,
     pub channels: ChannelStatusListResponse,
     pub nodes: Vec<OperatorNodeSummary>,
 }
@@ -67,8 +65,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     let presence = snapshot_presence(state).await;
     let channels = list_channel_statuses(state).await;
     let approvals = list_pending_approvals(state).await?;
-    let scheduled_jobs = list_scheduled_jobs(state).await?;
-    let heartbeats = list_heartbeats(state).await?;
+    let schedules = list_schedules(state).await?;
     let execution_hosts = list_execution_hosts(state).await;
     let sessions = list_operator_sessions(state).await?;
 
@@ -112,8 +109,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
         gateway,
         sessions,
         approvals: approvals.approvals,
-        scheduled_jobs,
-        heartbeats,
+        schedules,
         channels,
         nodes,
     })

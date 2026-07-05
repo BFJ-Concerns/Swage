@@ -247,8 +247,7 @@ describe("SettingsPage", () => {
             secrets: 1,
             channel_links: 1,
             execution_hosts: 1,
-            scheduled_jobs: 0,
-            heartbeats: 1,
+            schedules: 1,
           },
         ],
       })
@@ -264,8 +263,7 @@ describe("SettingsPage", () => {
             secrets: 0,
             channel_links: 0,
             execution_hosts: 0,
-            scheduled_jobs: 0,
-            heartbeats: 0,
+            schedules: 0,
           },
         ],
       });

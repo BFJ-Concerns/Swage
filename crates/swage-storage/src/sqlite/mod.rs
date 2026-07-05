@@ -9,7 +9,6 @@ pub mod config_version;
 pub mod context_snapshot;
 pub mod delivery;
 pub mod execution_host;
-pub mod heartbeat;
 pub mod lens;
 pub mod material;
 pub mod message;

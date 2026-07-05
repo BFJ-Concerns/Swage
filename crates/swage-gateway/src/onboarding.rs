@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_storage::{
-    ChannelLink, HeartbeatStatus, NewChannelLink, NewHeartbeat, NewScheduledJob, NewSession,
-    NewThread, NewWorkspaceAttachment, ScheduledJobKind, ScheduledJobStatus,
+    ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
+    NewWorkspaceAttachment, ScheduleKind, ScheduleStatus, SessionPolicy,
     model::{Bench, BenchSlug},
 };
 
@@ -82,8 +82,7 @@ pub struct GatewayRecoveryBundle {
     pub secrets: Vec<RecoverySecretRecord>,
     pub channel_links: Vec<RecoveryChannelLinkRecord>,
     pub execution_hosts: Vec<RecoveryExecutionHostRecord>,
-    pub scheduled_jobs: Vec<RecoveryScheduledJobRecord>,
-    pub heartbeats: Vec<RecoveryHeartbeatRecord>,
+    pub schedules: Vec<RecoveryScheduleRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,8 +102,7 @@ pub struct RecoveryExportSummary {
     pub secrets: usize,
     pub channel_links: usize,
     pub execution_hosts: usize,
-    pub scheduled_jobs: usize,
-    pub heartbeats: usize,
+    pub schedules: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,27 +182,18 @@ pub struct RecoveryExecutionHostRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryScheduledJobRecord {
-    pub session_id: Uuid,
-    pub agent_id: String,
+pub struct RecoveryScheduleRecord {
     pub message: String,
     pub status: String,
     pub kind: String,
-    pub schedule_expression: String,
+    pub expression: String,
+    /// Bench/session ids inside the policy refer to the exporting gateway;
+    /// import remaps them onto the freshly created rows.
+    pub session_policy: SessionPolicy,
     pub delivery_routing: serde_json::Value,
+    pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryHeartbeatRecord {
-    pub session_id: Uuid,
-    pub agent_id: String,
-    pub message: String,
-    pub interval_seconds: i64,
-    pub status: String,
-    pub last_beat_at: Option<DateTime<Utc>>,
-    pub next_beat_at: Option<DateTime<Utc>>,
 }
 
 fn default_attached_node_kind() -> String {
@@ -248,7 +237,11 @@ pub async fn create_channel_link(
     state: &AppState,
     request: CreateChannelLinkRequest,
 ) -> Result<ChannelLinkResponse, GatewayError> {
-    let integration = ExternalChannelIntegration::parse(request.integration.trim())?;
+    let integration: ExternalChannelIntegration = request
+        .integration
+        .trim()
+        .parse()
+        .map_err(GatewayError::ValidationError)?;
     if request.account.trim().is_empty() || request.conversation.trim().is_empty() {
         return Err(GatewayError::ValidationError(
             "channel account and conversation must not be empty".into(),
@@ -398,8 +391,7 @@ pub async fn export_gateway_recovery_bundle(
     let channel_links = state.storage.list_channel_links().await?;
     let secrets = state.storage.list_secrets().await?;
     let execution_hosts = state.storage.list_execution_hosts().await?;
-    let scheduled_jobs = state.storage.list_scheduled_jobs().await?;
-    let heartbeats = state.storage.list_heartbeats().await?;
+    let schedules = state.storage.list_schedules().await?;
 
     let bundle = GatewayRecoveryBundle {
         version: 1,
@@ -482,30 +474,18 @@ pub async fn export_gateway_recovery_bundle(
                 capabilities: host.capabilities,
             })
             .collect(),
-        scheduled_jobs: scheduled_jobs
+        schedules: schedules
             .into_iter()
-            .map(|job| RecoveryScheduledJobRecord {
-                session_id: job.session_id,
-                agent_id: job.agent_id,
-                message: job.message,
-                status: job.status.to_string(),
-                kind: job.kind.to_string(),
-                schedule_expression: job.schedule_expression,
-                delivery_routing: job.delivery_routing,
-                next_run_at: job.next_run_at,
-                last_run_at: job.last_run_at,
-            })
-            .collect(),
-        heartbeats: heartbeats
-            .into_iter()
-            .map(|heartbeat| RecoveryHeartbeatRecord {
-                session_id: heartbeat.session_id,
-                agent_id: heartbeat.agent_id,
-                message: heartbeat.message,
-                interval_seconds: heartbeat.interval_seconds,
-                status: heartbeat.status.to_string(),
-                last_beat_at: heartbeat.last_beat_at,
-                next_beat_at: heartbeat.next_beat_at,
+            .map(|schedule| RecoveryScheduleRecord {
+                message: schedule.message,
+                status: schedule.status.to_string(),
+                kind: schedule.kind.to_string(),
+                expression: schedule.expression,
+                session_policy: schedule.session_policy,
+                delivery_routing: schedule.delivery_routing,
+                gate: schedule.gate,
+                next_run_at: schedule.next_run_at,
+                last_run_at: schedule.last_run_at,
             })
             .collect(),
     };
@@ -560,8 +540,7 @@ async fn record_recovery_export(
         secrets: bundle.secrets.len(),
         channel_links: bundle.channel_links.len(),
         execution_hosts: bundle.execution_hosts.len(),
-        scheduled_jobs: bundle.scheduled_jobs.len(),
-        heartbeats: bundle.heartbeats.len(),
+        schedules: bundle.schedules.len(),
     };
 
     let mut exports = state.recovery_exports.lock().await;
@@ -690,44 +669,38 @@ pub async fn import_gateway_recovery_bundle(
         .await?;
     }
 
-    for job in bundle.scheduled_jobs {
-        state
-            .storage
-            .create_scheduled_job(NewScheduledJob {
-                session_id: *session_map.get(&job.session_id).ok_or_else(|| {
+    for schedule in bundle.schedules {
+        // The policy's bench/session ids belong to the exporting gateway;
+        // remap them onto the rows this import just created.
+        let session_policy = match schedule.session_policy {
+            SessionPolicy::Fresh { bench_id, agent_id } => SessionPolicy::Fresh {
+                bench_id: *bench_map.get(&bench_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "scheduled job referenced unknown session {}",
-                        job.session_id
+                        "schedule referenced unknown bench {bench_id}"
                     ))
                 })?,
-                agent_id: job.agent_id,
-                message: job.message,
-                status: parse_scheduled_status(&job.status)?,
-                kind: parse_scheduled_kind(&job.kind)?,
-                schedule_expression: job.schedule_expression,
-                delivery_routing: job.delivery_routing,
-                next_run_at: job.next_run_at,
-                last_run_at: job.last_run_at,
-            })
-            .await?;
-    }
-
-    for heartbeat in bundle.heartbeats {
-        state
-            .storage
-            .create_heartbeat(NewHeartbeat {
-                session_id: *session_map.get(&heartbeat.session_id).ok_or_else(|| {
+                agent_id,
+            },
+            SessionPolicy::Continuation { session_id } => SessionPolicy::Continuation {
+                session_id: *session_map.get(&session_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "heartbeat referenced unknown session {}",
-                        heartbeat.session_id
+                        "schedule referenced unknown session {session_id}"
                     ))
                 })?,
-                agent_id: heartbeat.agent_id,
-                message: heartbeat.message,
-                interval_seconds: heartbeat.interval_seconds,
-                status: parse_heartbeat_status(&heartbeat.status)?,
-                last_beat_at: heartbeat.last_beat_at,
-                next_beat_at: heartbeat.next_beat_at,
+            },
+        };
+        state
+            .storage
+            .create_schedule(NewSchedule {
+                message: schedule.message,
+                status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
+                kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
+                expression: schedule.expression,
+                session_policy,
+                delivery_routing: schedule.delivery_routing,
+                gate: schedule.gate,
+                next_run_at: schedule.next_run_at,
+                last_run_at: schedule.last_run_at,
             })
             .await?;
     }
@@ -752,8 +725,7 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
         || has_sessions
         || !state.storage.list_channel_links().await?.is_empty()
         || !state.storage.list_execution_hosts().await?.is_empty()
-        || !state.storage.list_scheduled_jobs().await?.is_empty()
-        || !state.storage.list_heartbeats().await?.is_empty()
+        || !state.storage.list_schedules().await?.is_empty()
     {
         return Err(GatewayError::ValidationError(
             "gateway recovery import requires a fresh instance".into(),
@@ -783,34 +755,9 @@ async fn import_bench(state: &AppState, bench: RecoveryBenchRecord) -> Result<Be
     }
 }
 
-fn parse_scheduled_status(value: &str) -> Result<ScheduledJobStatus, GatewayError> {
-    match value {
-        "active" => Ok(ScheduledJobStatus::Active),
-        "paused" => Ok(ScheduledJobStatus::Paused),
-        "completed" => Ok(ScheduledJobStatus::Completed),
-        other => Err(GatewayError::ValidationError(format!(
-            "unknown scheduled job status: {other}"
-        ))),
-    }
-}
-
-fn parse_scheduled_kind(value: &str) -> Result<ScheduledJobKind, GatewayError> {
-    match value {
-        "one_shot" => Ok(ScheduledJobKind::OneShot),
-        "interval" => Ok(ScheduledJobKind::Interval),
-        "cron" => Ok(ScheduledJobKind::Cron),
-        other => Err(GatewayError::ValidationError(format!(
-            "unknown scheduled job kind: {other}"
-        ))),
-    }
-}
-
-fn parse_heartbeat_status(value: &str) -> Result<HeartbeatStatus, GatewayError> {
-    match value {
-        "enabled" => Ok(HeartbeatStatus::Enabled),
-        "disabled" => Ok(HeartbeatStatus::Disabled),
-        other => Err(GatewayError::ValidationError(format!(
-            "unknown heartbeat status: {other}"
-        ))),
-    }
+fn parse_recovery_value<T>(value: &str) -> Result<T, GatewayError>
+where
+    T: std::str::FromStr<Err = String>,
+{
+    value.parse().map_err(GatewayError::ValidationError)
 }

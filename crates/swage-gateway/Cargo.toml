@@ -17,6 +17,7 @@ swage-tool = { path = "../swage-tool" }
 swage-config = { path = "../swage-config" }
 swage-provider = { path = "../swage-provider" }
 swage-storage = { path = "../swage-storage" }
+swage-protocol = { path = "../swage-protocol" }
 swage-python = { path = "../swage-python" }
 swage-sandbox = { path = "../swage-sandbox" }
 swage-agent = { path = "../swage-agent" }

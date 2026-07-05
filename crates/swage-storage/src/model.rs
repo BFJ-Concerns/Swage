@@ -1137,262 +1137,92 @@ pub struct ActiveSkillRecord {
     pub activated_at: DateTime<Utc>,
 }
 
-/// Lifecycle state of a scheduled job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Wire-visible schedule types come from the protocol crate — one
+// definition, stored as TEXT columns via their string forms.
+pub use swage_protocol::client::schedule::{
+    GateConfig, GateDecision, GateVerdict, ScheduleRunState, ScheduleRunTrigger, ScheduleStatus,
+    SessionPolicy, SkipReason,
+};
+
+/// Canonical schedule kinds supported by the scheduler.
+///
+/// Stored beside the raw expression; the pair reconstructs the wire-level
+/// `ScheduleSpec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ScheduledJobStatus {
-    Active,
-    Paused,
-    Completed,
-}
-
-impl std::fmt::Display for ScheduledJobStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ScheduledJobStatus::Active => "active",
-            ScheduledJobStatus::Paused => "paused",
-            ScheduledJobStatus::Completed => "completed",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for ScheduledJobStatus {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(ScheduledJobStatus::Active),
-            "paused" => Ok(ScheduledJobStatus::Paused),
-            "completed" => Ok(ScheduledJobStatus::Completed),
-            other => Err(format!("unknown scheduled job status: {other}")),
-        }
-    }
-}
-
-/// Canonical schedule kinds supported by the built-in scheduler.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduledJobKind {
+pub enum ScheduleKind {
     OneShot,
     Interval,
     Cron,
 }
 
-impl std::fmt::Display for ScheduledJobKind {
+impl std::fmt::Display for ScheduleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            ScheduledJobKind::OneShot => "one_shot",
-            ScheduledJobKind::Interval => "interval",
-            ScheduledJobKind::Cron => "cron",
+            ScheduleKind::OneShot => "one_shot",
+            ScheduleKind::Interval => "interval",
+            ScheduleKind::Cron => "cron",
         };
         write!(f, "{s}")
     }
 }
 
-impl FromStr for ScheduledJobKind {
+impl FromStr for ScheduleKind {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "one_shot" => Ok(ScheduledJobKind::OneShot),
-            "interval" => Ok(ScheduledJobKind::Interval),
-            "cron" => Ok(ScheduledJobKind::Cron),
-            other => Err(format!("unknown scheduled job kind: {other}")),
+            "one_shot" => Ok(ScheduleKind::OneShot),
+            "interval" => Ok(ScheduleKind::Interval),
+            "cron" => Ok(ScheduleKind::Cron),
+            other => Err(format!("unknown schedule kind: {other}")),
         }
     }
 }
 
-/// Execution trigger for a scheduled run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduledRunTrigger {
-    Scheduled,
-    Manual,
-}
-
-impl std::fmt::Display for ScheduledRunTrigger {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ScheduledRunTrigger::Scheduled => "scheduled",
-            ScheduledRunTrigger::Manual => "manual",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for ScheduledRunTrigger {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "scheduled" => Ok(ScheduledRunTrigger::Scheduled),
-            "manual" => Ok(ScheduledRunTrigger::Manual),
-            other => Err(format!("unknown scheduled run trigger: {other}")),
-        }
-    }
-}
-
-/// Lifecycle state of a scheduled run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduledRunState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-
-impl std::fmt::Display for ScheduledRunState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ScheduledRunState::Pending => "pending",
-            ScheduledRunState::Running => "running",
-            ScheduledRunState::Completed => "completed",
-            ScheduledRunState::Failed => "failed",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for ScheduledRunState {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(ScheduledRunState::Pending),
-            "running" => Ok(ScheduledRunState::Running),
-            "completed" => Ok(ScheduledRunState::Completed),
-            "failed" => Ok(ScheduledRunState::Failed),
-            other => Err(format!("unknown scheduled run state: {other}")),
-        }
-    }
-}
-
-/// A durable scheduled job definition.
+/// A durable schedule definition.
+///
+/// The session policy is first-class: fresh-policy schedules carry their
+/// target bench and agent, continuation-policy schedules the session they
+/// keep returning to. No agent id is copied off a session at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledJob {
+pub struct Schedule {
     pub id: Uuid,
-    pub session_id: Uuid,
-    pub agent_id: String,
     pub message: String,
-    pub status: ScheduledJobStatus,
-    pub kind: ScheduledJobKind,
+    pub status: ScheduleStatus,
+    pub kind: ScheduleKind,
     /// Original schedule expression as authored.
-    pub schedule_expression: String,
+    pub expression: String,
+    pub session_policy: SessionPolicy,
     /// Delivery routing configuration serialised as JSON.
     pub delivery_routing: serde_json::Value,
+    pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// A recorded execution of a scheduled job.
+/// A recorded execution of a schedule.
+///
+/// Every due occurrence produces one of these — executed, gated out, or
+/// skipped for overlap — so the run history is the complete account of
+/// what the scheduler did and why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledRun {
+pub struct ScheduleRun {
     pub id: Uuid,
-    pub job_id: Uuid,
-    pub trigger: ScheduledRunTrigger,
-    pub state: ScheduledRunState,
+    pub schedule_id: Uuid,
+    pub trigger: ScheduleRunTrigger,
+    pub state: ScheduleRunState,
+    /// Set when `state` is `Skipped`: what made the skip deliberate.
+    pub skip_reason: Option<SkipReason>,
     pub scheduled_for: Option<DateTime<Utc>>,
+    /// The session the run executed in. Absent when the run never reached
+    /// one (gated out or skipped).
+    pub session_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
-    pub output_text: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Lifecycle state of a heartbeat configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeartbeatStatus {
-    Enabled,
-    Disabled,
-}
-
-impl std::fmt::Display for HeartbeatStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            HeartbeatStatus::Enabled => "enabled",
-            HeartbeatStatus::Disabled => "disabled",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for HeartbeatStatus {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "enabled" => Ok(HeartbeatStatus::Enabled),
-            "disabled" => Ok(HeartbeatStatus::Disabled),
-            other => Err(format!("unknown heartbeat status: {other}")),
-        }
-    }
-}
-
-/// A durable heartbeat bound to an existing session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Heartbeat {
-    pub id: Uuid,
-    pub session_id: Uuid,
-    pub agent_id: String,
-    pub message: String,
-    pub interval_seconds: i64,
-    pub status: HeartbeatStatus,
-    pub last_beat_at: Option<DateTime<Utc>>,
-    pub next_beat_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Lifecycle state of a heartbeat execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeartbeatRunState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-
-impl std::fmt::Display for HeartbeatRunState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            HeartbeatRunState::Pending => "pending",
-            HeartbeatRunState::Running => "running",
-            HeartbeatRunState::Completed => "completed",
-            HeartbeatRunState::Failed => "failed",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for HeartbeatRunState {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(HeartbeatRunState::Pending),
-            "running" => Ok(HeartbeatRunState::Running),
-            "completed" => Ok(HeartbeatRunState::Completed),
-            "failed" => Ok(HeartbeatRunState::Failed),
-            other => Err(format!("unknown heartbeat run state: {other}")),
-        }
-    }
-}
-
-/// A recorded execution of a heartbeat.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatRun {
-    pub id: Uuid,
-    pub heartbeat_id: Uuid,
-    pub state: HeartbeatRunState,
-    pub scheduled_for: Option<DateTime<Utc>>,
-    pub turn_id: Option<Uuid>,
+    /// The gate's verdict and reasoning, when the schedule declares a gate.
+    pub gate: Option<GateDecision>,
     pub output_text: Option<String>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -2037,79 +1867,106 @@ pub struct NewTurn {
     pub parent_turn_id: Option<Uuid>,
 }
 
-/// Input for creating a durable scheduled job.
+/// Input for creating a durable schedule.
 #[derive(Debug, Clone)]
-pub struct NewScheduledJob {
-    pub session_id: Uuid,
-    pub agent_id: String,
+pub struct NewSchedule {
     pub message: String,
-    pub status: ScheduledJobStatus,
-    pub kind: ScheduledJobKind,
-    pub schedule_expression: String,
+    pub status: ScheduleStatus,
+    pub kind: ScheduleKind,
+    pub expression: String,
+    pub session_policy: SessionPolicy,
     pub delivery_routing: serde_json::Value,
+    pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_at: Option<DateTime<Utc>>,
 }
 
-/// Partial update for an existing scheduled job.
+/// Partial update for an existing schedule.
+///
+/// The session policy is fixed at creation; there is deliberately no way
+/// to move a schedule between sessions or agents after the fact.
 #[derive(Debug, Clone, Default)]
-pub struct UpdateScheduledJob {
+pub struct UpdateSchedule {
     pub message: Option<String>,
-    pub status: Option<ScheduledJobStatus>,
-    pub kind: Option<ScheduledJobKind>,
-    pub schedule_expression: Option<String>,
+    pub status: Option<ScheduleStatus>,
+    pub kind: Option<ScheduleKind>,
+    pub expression: Option<String>,
     pub delivery_routing: Option<serde_json::Value>,
+    /// `Some(None)` removes the gate; `Some(Some(_))` replaces it.
+    pub gate: Option<Option<GateConfig>>,
     pub next_run_at: Option<Option<DateTime<Utc>>>,
     pub last_run_at: Option<Option<DateTime<Utc>>>,
 }
 
-/// Input for recording a scheduled run.
+/// Input for recording a schedule run.
+///
+/// An executing run is created `Pending` and everything else — gate
+/// decision, session, turn, output — arrives through [`ScheduleRunUpdate`]
+/// as it progresses. A run known-terminal at creation (an overlap skip that
+/// never runs) is created in its terminal state directly, so it falls
+/// outside the one-in-flight guard rather than tripping it.
 #[derive(Debug, Clone)]
-pub struct NewScheduledRun {
-    pub job_id: Uuid,
-    pub trigger: ScheduledRunTrigger,
-    pub state: ScheduledRunState,
+pub struct NewScheduleRun {
+    pub schedule_id: Uuid,
+    pub trigger: ScheduleRunTrigger,
+    pub state: ScheduleRunState,
+    pub skip_reason: Option<SkipReason>,
     pub scheduled_for: Option<DateTime<Utc>>,
-    pub turn_id: Option<Uuid>,
-    pub output_text: Option<String>,
     pub error_message: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Input for creating a durable heartbeat.
-#[derive(Debug, Clone)]
-pub struct NewHeartbeat {
-    pub session_id: Uuid,
-    pub agent_id: String,
-    pub message: String,
-    pub interval_seconds: i64,
-    pub status: HeartbeatStatus,
-    pub last_beat_at: Option<DateTime<Utc>>,
-    pub next_beat_at: Option<DateTime<Utc>>,
+impl NewScheduleRun {
+    /// A run about to execute: created `Pending`, to be advanced through
+    /// [`ScheduleRunUpdate`] as it progresses.
+    pub fn pending(
+        schedule_id: Uuid,
+        trigger: ScheduleRunTrigger,
+        scheduled_for: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            schedule_id,
+            trigger,
+            state: ScheduleRunState::Pending,
+            skip_reason: None,
+            scheduled_for,
+            error_message: None,
+        }
+    }
+
+    /// A run that never executes because a predecessor was still active:
+    /// recorded straight into its terminal skipped state, outside the
+    /// one-in-flight guard.
+    pub fn skipped_overlap(
+        schedule_id: Uuid,
+        trigger: ScheduleRunTrigger,
+        scheduled_for: Option<DateTime<Utc>>,
+        error_message: impl Into<String>,
+    ) -> Self {
+        Self {
+            schedule_id,
+            trigger,
+            state: ScheduleRunState::Skipped,
+            skip_reason: Some(SkipReason::Overlap),
+            scheduled_for,
+            error_message: Some(error_message.into()),
+        }
+    }
 }
 
-/// Partial update for an existing heartbeat.
+/// Progress update for a schedule run.
+///
+/// Fields are only ever filled in, never cleared — a run's record
+/// accumulates. `started_at`/`completed_at` are stamped by the storage
+/// layer from the state transition.
 #[derive(Debug, Clone, Default)]
-pub struct UpdateHeartbeat {
-    pub message: Option<String>,
-    pub interval_seconds: Option<i64>,
-    pub status: Option<HeartbeatStatus>,
-    pub last_beat_at: Option<Option<DateTime<Utc>>>,
-    pub next_beat_at: Option<Option<DateTime<Utc>>>,
-}
-
-/// Input for recording a heartbeat run.
-#[derive(Debug, Clone)]
-pub struct NewHeartbeatRun {
-    pub heartbeat_id: Uuid,
-    pub state: HeartbeatRunState,
-    pub scheduled_for: Option<DateTime<Utc>>,
+pub struct ScheduleRunUpdate {
+    pub state: Option<ScheduleRunState>,
+    pub skip_reason: Option<SkipReason>,
+    pub session_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+    pub gate: Option<GateDecision>,
     pub output_text: Option<String>,
     pub error_message: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Input for creating a new message within a thread.

@@ -85,16 +85,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
     match crate::shutdown::recover_orphaned_background_runs(&*raw_storage).await {
         Ok(counts) => {
-            if counts.scheduled_runs_failed > 0 {
+            if counts.schedule_runs_failed > 0 {
                 info!(
-                    "Recovered {} orphaned scheduled run(s) from a previous shutdown",
-                    counts.scheduled_runs_failed
-                );
-            }
-            if counts.heartbeat_runs_failed > 0 {
-                info!(
-                    "Recovered {} orphaned heartbeat run(s) from a previous shutdown",
-                    counts.heartbeat_runs_failed
+                    "Recovered {} orphaned schedule run(s) from a previous shutdown",
+                    counts.schedule_runs_failed
                 );
             }
             if counts.background_jobs_retried > 0 {
@@ -176,11 +170,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     }
     let router = crate::server::build_router(state.clone());
     let background_shutdown = CancellationToken::new();
-    let scheduler_handle = crate::schedule::spawn_scheduler_loop_until_cancelled(
-        state.clone(),
-        background_shutdown.clone(),
-    );
-    let heartbeat_handle = crate::heartbeat::spawn_heartbeat_loop_until_cancelled(
+    let schedule_handle = crate::schedule::spawn_schedule_loop_until_cancelled(
         state.clone(),
         background_shutdown.clone(),
     );
@@ -246,8 +236,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.stop_agent_message_expiry();
         background_shutdown.cancel();
         for (name, handle) in [
-            ("scheduler", scheduler_handle),
-            ("heartbeat", heartbeat_handle),
+            ("schedule", schedule_handle),
             ("attachment ingestion", attachment_handle),
         ] {
             if let Err(error) = handle.await {

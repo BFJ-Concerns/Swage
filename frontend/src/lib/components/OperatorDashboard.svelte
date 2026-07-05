@@ -2,20 +2,58 @@
   import { onMount } from "svelte";
   import {
     approvePendingAction,
-    disableHeartbeat,
-    enableHeartbeat,
     fetchOperatorOverview,
-    pauseScheduledJob,
+    fetchScheduleRuns,
+    pauseSchedule,
     rejectPendingAction,
-    resumeScheduledJob,
+    resumeSchedule,
   } from "../api/operator";
   import type { OperatorOverview } from "../types";
   import StatusBadge from "./StatusBadge.svelte";
+  import type { Schedule } from "../protocol/Schedule";
+  import type { ScheduleRun } from "../protocol/ScheduleRun";
 
   let overview = $state<OperatorOverview | null>(null);
   let isLoading = $state(true);
   let errorMessage = $state<string | null>(null);
   let activeActionKey = $state<string | null>(null);
+  let openScheduleId = $state<string | null>(null);
+  let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
+
+  function describeSpec(schedule: Schedule): string {
+    if (schedule.spec.kind === "interval") return schedule.spec.every;
+    if (schedule.spec.kind === "cron") return `cron ${schedule.spec.cron}`;
+    return `once at ${new Date(schedule.spec.at).toLocaleString()}`;
+  }
+
+  function describeSession(schedule: Schedule): string {
+    if (schedule.session.policy === "fresh") {
+      return `fresh session · ${schedule.session.agent_id}`;
+    }
+    return `continues session ${schedule.session.session_id.slice(0, 8)}`;
+  }
+
+  function describeRunOutcome(run: ScheduleRun): string {
+    if (run.state === "skipped") {
+      return run.skip_reason === "gate"
+        ? (run.gate?.reasoning ?? "gate decided no work was needed")
+        : "a previous run was still executing";
+    }
+    if (run.state === "failed") return run.error_message ?? "failed";
+    return run.output_text ?? "";
+  }
+
+  async function toggleScheduleRuns(scheduleId: string): Promise<void> {
+    if (openScheduleId === scheduleId) {
+      openScheduleId = null;
+      return;
+    }
+    await runAction(`runs-${scheduleId}`, async () => {
+      const response = await fetchScheduleRuns(scheduleId);
+      scheduleRuns = { ...scheduleRuns, [scheduleId]: response.runs.toReversed() };
+      openScheduleId = scheduleId;
+    });
+  }
 
   async function loadOverview(): Promise<void> {
     isLoading = true;
@@ -107,9 +145,9 @@
       <article class="metric-card">
         <span class="metric-label">Automation</span>
         <strong class="metric-value">
-          {overview.scheduled_jobs.jobs.length + overview.heartbeats.heartbeats.length}
+          {overview.schedules.schedules.length}
         </strong>
-        <span class="metric-meta">scheduled jobs and heartbeats</span>
+        <span class="metric-meta">schedules</span>
       </article>
       <article class="metric-card">
         <span class="metric-label">Channels</span>
@@ -204,98 +242,101 @@
       <article class="panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Scheduled jobs</p>
-            <h2>Pause or resume recurring work</h2>
+            <p class="panel-kicker">Schedules</p>
+            <h2>Pause, resume, and inspect scheduled work</h2>
           </div>
-          <span class="panel-count">{overview.scheduled_jobs.jobs.length}</span>
+          <span class="panel-count">{overview.schedules.schedules.length}</span>
         </div>
         <div class="stack">
-          {#each overview.scheduled_jobs.jobs as job (job.id)}
-            <section class="control-card">
-              <div class="primary-line">
-                <span>{job.message}</span>
-                <StatusBadge
-                  register={job.status === "active" ? "calm" : "not-yet"}
-                  label={job.status}
-                />
-              </div>
-              <p class="detail-copy mono">
-                {JSON.stringify(job.schedule)}
-              </p>
-              <div class="action-row">
-                {#if job.status === "active"}
+          {#if overview.schedules.schedules.length === 0}
+            <p class="empty-copy">Nothing is scheduled.</p>
+          {:else}
+            {#each overview.schedules.schedules as schedule (schedule.id)}
+              <section class="control-card">
+                <div class="primary-line">
+                  <span>{schedule.message}</span>
+                  <StatusBadge
+                    register={schedule.status === "active" ? "calm" : "not-yet"}
+                    label={schedule.status}
+                  />
+                </div>
+                <p class="detail-copy">
+                  {describeSpec(schedule)} · {describeSession(schedule)}
+                  {#if schedule.gate}
+                    · gated by {schedule.gate.model}
+                  {/if}
+                </p>
+                {#if schedule.next_run_at}
+                  <p class="detail-copy">
+                    next run {new Date(schedule.next_run_at).toLocaleString()}
+                  </p>
+                {/if}
+                <div class="action-row">
+                  {#if schedule.status === "active"}
+                    <button
+                      class="action-btn neutral"
+                      onclick={() =>
+                        runAction(`pause-${schedule.id}`, () => pauseSchedule(schedule.id))}
+                      disabled={actionBusy(`pause-${schedule.id}`)}
+                    >
+                      {actionBusy(`pause-${schedule.id}`) ? "Pausing…" : "Pause"}
+                    </button>
+                  {:else}
+                    <button
+                      class="action-btn positive"
+                      onclick={() =>
+                        runAction(`resume-${schedule.id}`, () => resumeSchedule(schedule.id))}
+                      disabled={actionBusy(`resume-${schedule.id}`)}
+                    >
+                      {actionBusy(`resume-${schedule.id}`) ? "Resuming…" : "Resume"}
+                    </button>
+                  {/if}
                   <button
                     class="action-btn neutral"
-                    onclick={() =>
-                      runAction(`pause-${job.id}`, () => pauseScheduledJob(job.id))}
-                    disabled={actionBusy(`pause-${job.id}`)}
+                    onclick={() => toggleScheduleRuns(schedule.id)}
+                    disabled={actionBusy(`runs-${schedule.id}`)}
                   >
-                    {actionBusy(`pause-${job.id}`) ? "Pausing…" : "Pause"}
+                    {openScheduleId === schedule.id ? "Hide runs" : "Runs"}
                   </button>
-                {:else}
-                  <button
-                    class="action-btn positive"
-                    onclick={() =>
-                      runAction(`resume-${job.id}`, () => resumeScheduledJob(job.id))}
-                    disabled={actionBusy(`resume-${job.id}`)}
-                  >
-                    {actionBusy(`resume-${job.id}`) ? "Resuming…" : "Resume"}
-                  </button>
+                </div>
+                {#if openScheduleId === schedule.id}
+                  <div class="run-history">
+                    {#each scheduleRuns[schedule.id] ?? [] as run (run.id)}
+                      <div class="run-entry">
+                        <div class="primary-line">
+                          <StatusBadge
+                            register={run.state === "completed"
+                              ? "calm"
+                              : run.state === "failed"
+                                ? "wants-a-human"
+                                : "not-yet"}
+                            label={run.state}
+                          />
+                          <span class="mono">{run.trigger}</span>
+                          {#if run.skip_reason}
+                            <span class="mono">skipped: {run.skip_reason}</span>
+                          {/if}
+                          <span class="timestamp">
+                            {new Date(run.created_at).toLocaleString()}
+                          </span>
+                        </div>
+                        {#if run.gate}
+                          <p class="detail-copy">
+                            gate ({run.gate.model}): {run.gate.verdict} — {run.gate.reasoning}
+                          </p>
+                        {/if}
+                        {#if describeRunOutcome(run)}
+                          <p class="detail-copy">{describeRunOutcome(run)}</p>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="empty-copy">No runs recorded yet.</p>
+                    {/each}
+                  </div>
                 {/if}
-              </div>
-            </section>
-          {/each}
-        </div>
-      </article>
-
-      <article class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">Heartbeats</p>
-            <h2>Restart selected runtime activity</h2>
-          </div>
-          <span class="panel-count">{overview.heartbeats.heartbeats.length}</span>
-        </div>
-        <div class="stack">
-          {#each overview.heartbeats.heartbeats as heartbeat (heartbeat.id)}
-            <section class="control-card">
-              <div class="primary-line">
-                <span>{heartbeat.message}</span>
-                <StatusBadge
-                  register={heartbeat.status === "enabled" ? "calm" : "not-yet"}
-                  label={heartbeat.status}
-                />
-              </div>
-              <p class="detail-copy">
-                every {heartbeat.interval_seconds}s
-              </p>
-              <div class="action-row">
-                {#if heartbeat.status === "enabled"}
-                  <button
-                    class="action-btn neutral"
-                    onclick={() =>
-                      runAction(`disable-${heartbeat.id}`, () =>
-                        disableHeartbeat(heartbeat.id),
-                      )}
-                    disabled={actionBusy(`disable-${heartbeat.id}`)}
-                  >
-                    {actionBusy(`disable-${heartbeat.id}`) ? "Stopping…" : "Stop"}
-                  </button>
-                {:else}
-                  <button
-                    class="action-btn positive"
-                    onclick={() =>
-                      runAction(`enable-${heartbeat.id}`, () =>
-                        enableHeartbeat(heartbeat.id),
-                      )}
-                    disabled={actionBusy(`enable-${heartbeat.id}`)}
-                  >
-                    {actionBusy(`enable-${heartbeat.id}`) ? "Restarting…" : "Restart"}
-                  </button>
-                {/if}
-              </div>
-            </section>
-          {/each}
+              </section>
+            {/each}
+          {/if}
         </div>
       </article>
 
@@ -612,6 +653,19 @@
 
   .control-card:last-child {
     border-bottom: none;
+  }
+
+  .run-history {
+    margin-top: 8px;
+    padding-left: 12px;
+    border-left: 2px solid var(--rule-soft);
+    display: grid;
+    gap: 8px;
+  }
+
+  .run-entry {
+    display: grid;
+    gap: 2px;
   }
 
   .empty-copy {
