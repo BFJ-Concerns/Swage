@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 01: LLM Provider Stack.
+//! Cross-task integration tests for the LLM provider stack.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together. Each test documents

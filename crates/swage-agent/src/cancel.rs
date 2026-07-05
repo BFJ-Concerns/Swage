@@ -114,7 +114,8 @@ pub async fn handle_cancel(
     }
 
     // Last resort: no thread annotation — interrupt all in-progress turns.
-    // See BACKLOG.md [vpbv] for the scoping limitation.
+    // This is deliberately broad until delegated-turn cancellation can target
+    // the exact recipient thread.
     let active_turns = storage
         .find_in_progress_by_agent(&delegate.recipient_agent_id)
         .await?;

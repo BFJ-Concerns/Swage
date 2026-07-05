@@ -4,7 +4,7 @@
 //! agent's own `[output]` config for that delegation. The delegator defines the
 //! contract, not the delegate.
 //!
-//! The Phase 02 validation infrastructure handles the actual validation and
+//! The output-validation infrastructure handles the actual validation and
 //! retry loop — this module only resolves which schema to use.
 
 use serde_json::Value;

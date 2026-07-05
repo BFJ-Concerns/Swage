@@ -51,8 +51,24 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
                 ),
             });
         }
-        // No metadata file — gateway is not running, proceed normally.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // No metadata file. Before spawning, recover a daemon that is already
+        // serving at the configured address but lost its runtime metadata.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(meta) = super::recovery::recover_configured_gateway_metadata(
+                effective_host.as_deref(),
+                effective_port,
+            )
+            .await
+            {
+                eprintln!("Gateway is already running (PID {})", meta.pid);
+                return Err(ClientError::GatewayNotRunning {
+                    reason: format!(
+                        "gateway is already running at {} (PID {})",
+                        meta.address, meta.pid
+                    ),
+                });
+            }
+        }
         Err(e) => return Err(ClientError::MetadataIo { source: e }),
     }
 
@@ -216,19 +232,15 @@ pub(crate) fn build_spawn_args(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::Mutex;
+    use crate::test_support::{SwageHomeGuard, XdgRuntimeDirGuard};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::*;
 
     #[test]
     fn log_path_uses_swage_root() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("SWAGE_HOME", dir.path()) };
+        let swage_home = SwageHomeGuard::new();
         let path = gateway_log_path();
-        unsafe { std::env::remove_var("SWAGE_HOME") };
-        assert_eq!(path, dir.path().join("gateway.log"));
+        assert_eq!(path, swage_home.path().join("gateway.log"));
     }
 
     // When no flags are given, only --server-mode should appear.
@@ -289,6 +301,7 @@ mod tests {
     #[tokio::test]
     async fn poll_until_ready_times_out_with_no_gateway() {
         use std::time::Duration;
+        let _runtime_dir = XdgRuntimeDirGuard::new();
         // Use a 50ms timeout — fast enough for a unit test.
         let result = poll_until_ready(Duration::from_millis(50)).await;
         assert!(result.is_err(), "expected timeout error, got: {result:?}");

@@ -6,18 +6,18 @@ use swage_core::StorageError;
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, BenchSlug,
-    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
-    ExecutionHostRegistration, Heartbeat, HeartbeatRun, HeartbeatRunState, InboundAudit,
-    LensPreference, LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelLink,
-    NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation, NewExecutionHostRegistration,
-    NewHeartbeat, NewHeartbeatRun, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewScheduledJob, NewScheduledRun, NewSecretRecord, NewSession,
+    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
+    DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, InboundAudit, LensPreference,
+    LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest,
+    NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelInboundMessage,
+    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation,
+    NewExecutionHostRegistration, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
     NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, ScheduledJob,
-    ScheduledRun, ScheduledRunState, SecretRecord, Session, SharedReferenceEvent,
+    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent,
     SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState, UpdateHeartbeat, UpdateScheduledJob, WorkspaceAttachment,
+    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -505,6 +505,13 @@ pub trait ToolCallStore: Send + Sync {
     /// Fetch a single tool call by id. Returns `None` if not found.
     async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError>;
 
+    /// Fetch a single tool call by provider call id, scoped to the owning turn.
+    async fn get_tool_call_by_turn_and_call_id(
+        &self,
+        turn_id: Uuid,
+        call_id: &str,
+    ) -> Result<Option<ToolCallRecord>, StorageError>;
+
     /// Write the completed result back onto an in-progress tool call.
     ///
     /// Matched by `call_id` scoped to `turn_id` to avoid cross-turn collisions.
@@ -789,93 +796,89 @@ pub trait AgentMessageStore: Send + Sync {
     ) -> Result<u64, StorageError>;
 }
 
-/// Durable scheduler job and run storage.
+/// Durable schedule and run storage.
 #[async_trait]
 pub trait ScheduleStore: Send + Sync {
-    async fn create_scheduled_job(
-        &self,
-        job: NewScheduledJob,
-    ) -> Result<ScheduledJob, StorageError>;
+    async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError>;
 
-    async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, StorageError>;
+    async fn get_schedule(&self, id: Uuid) -> Result<Option<Schedule>, StorageError>;
 
-    async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError>;
+    async fn list_schedules(&self) -> Result<Vec<Schedule>, StorageError>;
 
-    async fn list_due_scheduled_jobs(
+    async fn list_due_schedules(
         &self,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<ScheduledJob>, StorageError>;
+    ) -> Result<Vec<Schedule>, StorageError>;
 
-    async fn update_scheduled_job(
+    async fn update_schedule(
         &self,
         id: Uuid,
-        update: UpdateScheduledJob,
-    ) -> Result<ScheduledJob, StorageError>;
+        update: UpdateSchedule,
+    ) -> Result<Schedule, StorageError>;
 
-    async fn delete_scheduled_job(&self, id: Uuid) -> Result<bool, StorageError>;
+    async fn delete_schedule(&self, id: Uuid) -> Result<bool, StorageError>;
 
-    async fn create_scheduled_run(
-        &self,
-        run: NewScheduledRun,
-    ) -> Result<ScheduledRun, StorageError>;
+    async fn create_schedule_run(&self, run: NewScheduleRun) -> Result<ScheduleRun, StorageError>;
 
-    async fn get_scheduled_run(&self, id: Uuid) -> Result<Option<ScheduledRun>, StorageError>;
+    async fn get_schedule_run(&self, id: Uuid) -> Result<Option<ScheduleRun>, StorageError>;
 
-    async fn list_scheduled_runs_by_job(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Vec<ScheduledRun>, StorageError>;
+    async fn list_schedule_runs(&self, schedule_id: Uuid)
+    -> Result<Vec<ScheduleRun>, StorageError>;
 
-    async fn update_scheduled_run_state(
+    async fn update_schedule_run(
         &self,
         id: Uuid,
-        state: ScheduledRunState,
-        turn_id: Option<Uuid>,
-        output_text: Option<&str>,
-        error_message: Option<&str>,
+        update: ScheduleRunUpdate,
     ) -> Result<(), StorageError>;
-    async fn recover_incomplete_scheduled_runs(
+
+    /// Fail every pending/running run — startup repair after an unclean
+    /// shutdown orphaned them.
+    async fn recover_incomplete_schedule_runs(
         &self,
         error_message: &str,
     ) -> Result<u64, StorageError>;
 }
 
+/// Durable queue for inbound external-channel messages.
 #[async_trait]
-pub trait HeartbeatStore: Send + Sync {
-    async fn create_heartbeat(&self, heartbeat: NewHeartbeat) -> Result<Heartbeat, StorageError>;
-    async fn get_heartbeat(&self, id: Uuid) -> Result<Option<Heartbeat>, StorageError>;
-    async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError>;
-    async fn list_due_heartbeats(
+pub trait ChannelQueueStore: Send + Sync {
+    async fn ingest_channel_inbound(
         &self,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<Heartbeat>, StorageError>;
-    async fn update_heartbeat(
+        messages: Vec<NewChannelInboundMessage>,
+        cursor_integration: &str,
+        cursor_account: &str,
+        cursor: &str,
+    ) -> Result<usize, StorageError>;
+
+    async fn get_channel_cursor(
         &self,
-        id: Uuid,
-        update: UpdateHeartbeat,
-    ) -> Result<Heartbeat, StorageError>;
-    async fn delete_heartbeat(&self, id: Uuid) -> Result<bool, StorageError>;
-    async fn create_heartbeat_run(
+        integration: &str,
+        account: &str,
+    ) -> Result<Option<String>, StorageError>;
+
+    async fn list_pending_channel_origins(&self)
+    -> Result<Vec<PendingChannelOrigin>, StorageError>;
+
+    async fn list_pending_by_origin(
         &self,
-        run: NewHeartbeatRun,
-    ) -> Result<HeartbeatRun, StorageError>;
-    async fn get_heartbeat_run(&self, id: Uuid) -> Result<Option<HeartbeatRun>, StorageError>;
-    async fn list_heartbeat_runs_by_heartbeat(
+        origin: PendingChannelOrigin,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
+    async fn begin_channel_turn(
         &self,
-        heartbeat_id: Uuid,
-    ) -> Result<Vec<HeartbeatRun>, StorageError>;
-    async fn update_heartbeat_run_state(
+        thread_id: Uuid,
+        agent_id: &str,
+        composed_input: &str,
+        message_ids: Vec<Uuid>,
+    ) -> Result<Turn, StorageError>;
+
+    async fn discard_channel_messages(
         &self,
-        id: Uuid,
-        state: HeartbeatRunState,
-        turn_id: Option<Uuid>,
-        output_text: Option<&str>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError>;
-    async fn recover_incomplete_heartbeat_runs(
-        &self,
-        error_message: &str,
+        message_ids: Vec<Uuid>,
+        reason: &str,
     ) -> Result<u64, StorageError>;
+
+    async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -911,7 +914,7 @@ pub trait Storage:
     + ApprovalStore
     + AgentMessageStore
     + ScheduleStore
-    + HeartbeatStore
+    + ChannelQueueStore
     + TopologyTraceStore
     + Send
     + Sync
@@ -944,7 +947,7 @@ impl<T> Storage for T where
         + ApprovalStore
         + AgentMessageStore
         + ScheduleStore
-        + HeartbeatStore
+        + ChannelQueueStore
         + TopologyTraceStore
         + Send
         + Sync
@@ -1146,6 +1149,62 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<DeliveryRecord>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelQueueStore for StubStorage {
+        async fn ingest_channel_inbound(
+            &self,
+            _: Vec<NewChannelInboundMessage>,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<usize, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_channel_cursor(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_channel_origins(
+            &self,
+        ) -> Result<Vec<PendingChannelOrigin>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_by_origin(
+            &self,
+            _: PendingChannelOrigin,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn begin_channel_turn(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+            _: Vec<Uuid>,
+        ) -> Result<Turn, StorageError> {
+            unimplemented!()
+        }
+
+        async fn discard_channel_messages(
+            &self,
+            _: Vec<Uuid>,
+            _: &str,
+        ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+
+        async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }
@@ -1716,6 +1775,13 @@ mod tests {
         async fn get_tool_call(&self, _: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
             unimplemented!()
         }
+        async fn get_tool_call_by_turn_and_call_id(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<Option<ToolCallRecord>, StorageError> {
+            unimplemented!()
+        }
         async fn update_tool_call_result(
             &self,
             _call_id: &str,
@@ -1810,119 +1876,52 @@ mod tests {
 
     #[async_trait]
     impl ScheduleStore for StubStorage {
-        async fn create_scheduled_job(
-            &self,
-            _: NewScheduledJob,
-        ) -> Result<ScheduledJob, StorageError> {
+        async fn create_schedule(&self, _: NewSchedule) -> Result<Schedule, StorageError> {
             unimplemented!()
         }
-        async fn get_scheduled_job(&self, _: Uuid) -> Result<Option<ScheduledJob>, StorageError> {
+        async fn get_schedule(&self, _: Uuid) -> Result<Option<Schedule>, StorageError> {
             unimplemented!()
         }
-        async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError> {
+        async fn list_schedules(&self) -> Result<Vec<Schedule>, StorageError> {
             unimplemented!()
         }
-        async fn list_due_scheduled_jobs(
+        async fn list_due_schedules(
             &self,
             _: chrono::DateTime<chrono::Utc>,
-        ) -> Result<Vec<ScheduledJob>, StorageError> {
+        ) -> Result<Vec<Schedule>, StorageError> {
             unimplemented!()
         }
-        async fn update_scheduled_job(
+        async fn update_schedule(
             &self,
             _: Uuid,
-            _: UpdateScheduledJob,
-        ) -> Result<ScheduledJob, StorageError> {
+            _: UpdateSchedule,
+        ) -> Result<Schedule, StorageError> {
             unimplemented!()
         }
-        async fn delete_scheduled_job(&self, _: Uuid) -> Result<bool, StorageError> {
+        async fn delete_schedule(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn create_scheduled_run(
+        async fn create_schedule_run(
             &self,
-            _: NewScheduledRun,
-        ) -> Result<ScheduledRun, StorageError> {
+            _: NewScheduleRun,
+        ) -> Result<ScheduleRun, StorageError> {
             unimplemented!()
         }
-        async fn get_scheduled_run(&self, _: Uuid) -> Result<Option<ScheduledRun>, StorageError> {
+        async fn get_schedule_run(&self, _: Uuid) -> Result<Option<ScheduleRun>, StorageError> {
             unimplemented!()
         }
-        async fn list_scheduled_runs_by_job(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<ScheduledRun>, StorageError> {
+        async fn list_schedule_runs(&self, _: Uuid) -> Result<Vec<ScheduleRun>, StorageError> {
             unimplemented!()
         }
-        async fn update_scheduled_run_state(
+        async fn update_schedule_run(
             &self,
             _: Uuid,
-            _: ScheduledRunState,
-            _: Option<Uuid>,
-            _: Option<&str>,
-            _: Option<&str>,
+            _: ScheduleRunUpdate,
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
 
-        async fn recover_incomplete_scheduled_runs(&self, _: &str) -> Result<u64, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl HeartbeatStore for StubStorage {
-        async fn create_heartbeat(&self, _: NewHeartbeat) -> Result<Heartbeat, StorageError> {
-            unimplemented!()
-        }
-        async fn get_heartbeat(&self, _: Uuid) -> Result<Option<Heartbeat>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_heartbeats(&self) -> Result<Vec<Heartbeat>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_due_heartbeats(
-            &self,
-            _: chrono::DateTime<chrono::Utc>,
-        ) -> Result<Vec<Heartbeat>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_heartbeat(
-            &self,
-            _: Uuid,
-            _: UpdateHeartbeat,
-        ) -> Result<Heartbeat, StorageError> {
-            unimplemented!()
-        }
-        async fn delete_heartbeat(&self, _: Uuid) -> Result<bool, StorageError> {
-            unimplemented!()
-        }
-        async fn create_heartbeat_run(
-            &self,
-            _: NewHeartbeatRun,
-        ) -> Result<HeartbeatRun, StorageError> {
-            unimplemented!()
-        }
-        async fn get_heartbeat_run(&self, _: Uuid) -> Result<Option<HeartbeatRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_heartbeat_runs_by_heartbeat(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<HeartbeatRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_heartbeat_run_state(
-            &self,
-            _: Uuid,
-            _: HeartbeatRunState,
-            _: Option<Uuid>,
-            _: Option<&str>,
-            _: Option<&str>,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-
-        async fn recover_incomplete_heartbeat_runs(&self, _: &str) -> Result<u64, StorageError> {
+        async fn recover_incomplete_schedule_runs(&self, _: &str) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }

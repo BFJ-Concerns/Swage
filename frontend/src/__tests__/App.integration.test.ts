@@ -119,10 +119,9 @@ vi.mock("../lib/api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
   approvePendingAction: vi.fn(),
   rejectPendingAction: vi.fn(),
-  pauseScheduledJob: vi.fn(),
-  resumeScheduledJob: vi.fn(),
-  disableHeartbeat: vi.fn(),
-  enableHeartbeat: vi.fn(),
+  pauseSchedule: vi.fn(),
+  resumeSchedule: vi.fn(),
+  fetchScheduleRuns: vi.fn(),
 }));
 
 vi.mock("../lib/api/websocket", () => ({
@@ -211,8 +210,7 @@ function makeOperatorOverview(
       },
     ],
     approvals: [],
-    scheduled_jobs: { jobs: [] },
-    heartbeats: { heartbeats: [] },
+    schedules: { schedules: [] },
     channels: {
       channels: [
         {
@@ -309,20 +307,25 @@ function setPath(path: string): void {
 }
 
 /**
- * Open a bench from the picker. Swage now lands on the bench picker on entry
- * (Progress.md, workup view 04), so tests that need a bench open must go
- * through it. Double-clicking a card triggers `openBench` in BenchPicker.
+ * Open a bench from the picker. Swage lands on the bench picker on entry, so
+ * tests that need a bench open must go through it. Clicking a card's Open
+ * button triggers `openBench` in BenchPicker.
  */
 async function openBenchFromPicker(name: string): Promise<void> {
   const card = Array.from(
-    document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+    document.querySelectorAll<HTMLElement>(".bench-card"),
   ).find((el) => el.textContent?.includes(name));
 
   if (!card) {
     throw new Error(`Bench card with name "${name}" not found in picker`);
   }
 
-  flushSync(() => card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  const openBtn = card.querySelector<HTMLButtonElement>(".open-btn");
+  if (!openBtn) {
+    throw new Error(`Open button missing on bench card "${name}"`);
+  }
+
+  flushSync(() => openBtn.click());
   await settleUi();
 }
 
@@ -461,7 +464,7 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Send a message to start.",
+      "Send a message below to start the conversation.",
     );
   });
 
@@ -612,10 +615,14 @@ describe("App", () => {
     await settleUi();
 
     const card = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(".bench-card"),
+      document.querySelectorAll<HTMLElement>(".bench-card"),
     ).find((el) => el.textContent?.includes(defaultBench.name));
     expect(card).toBeDefined();
-    flushSync(() => card!.click());
+    // Preview/selection is triggered by the bench-name button, not the card
+    // container (UI audit f-2 — card is no longer a single interactive widget).
+    const nameBtn = card!.querySelector<HTMLButtonElement>(".bench-name-btn");
+    expect(nameBtn).toBeDefined();
+    flushSync(() => nameBtn!.click());
     await waitForText("Missing folder");
 
     const relinkInput = document.querySelector<HTMLInputElement>(

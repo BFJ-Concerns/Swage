@@ -14,6 +14,7 @@ members = [
     "crates/swage-config",
     "crates/swage-context",
     "crates/swage-gateway",
+    "crates/swage-protocol",
     "crates/swage-python",
     "crates/swage-topology",
     "crates/swage-client",
@@ -21,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.202604.3000"
+version = "0.202607.500"
 edition = "2024"
 rust-version = "1.95"
 
@@ -179,6 +180,10 @@ libc = "0.2"
 
 # JSON Schema validation
 jsonschema = "0.46"
+
+# Wire-contract projections (swage-protocol): TypeScript bindings and JSON Schema
+ts-rs = { version = "12", features = ["uuid-impl", "chrono-impl"] }
+schemars = { version = "1.2", features = ["uuid1", "chrono04"] }
 
 # Testing
 tempfile = "3"

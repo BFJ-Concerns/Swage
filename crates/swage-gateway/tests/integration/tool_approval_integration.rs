@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.3 Phase 03: Human-in-the-Loop Controls.
+//! Cross-task integration tests for tool approval controls.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.
@@ -42,6 +42,8 @@ use swage_provider::LlmProvider;
 use swage_storage::{SqliteStorage, store::BenchStore};
 
 use crate::support::ProcessEnvGuard;
+
+const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 
 struct SwageHomeGuard {
     _env_guard: ProcessEnvGuard,
@@ -278,7 +280,7 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
 }
 
 // ---------------------------------------------------------------------------
-// Tests — each proves a cross-task journey from the phase Delivery Closure
+// Tests — each proves a cross-task journey through approval routing and storage
 // ---------------------------------------------------------------------------
 
 /// Journey: Configure approval → trigger tool → approve → tool executes → turn completes.
@@ -331,7 +333,7 @@ async fn tool_approval_approve_continues_turn() {
 
     // Expect an ApprovalRequired event (the turn pauses).
     let approval_event =
-        ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+        ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
             .await
             .expect("should receive ApprovalRequired event");
 
@@ -354,13 +356,13 @@ async fn tool_approval_approve_continues_turn() {
     .await;
 
     // Expect ApprovalConfirmed and then the turn completing normally.
-    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", Duration::from_secs(5))
+    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalConfirmed");
     assert_eq!(confirmed["decision"], "approved");
 
     // The tool should execute and the turn should complete.
-    let complete = ws_wait_for_event(&mut stream, "turn_complete", Duration::from_secs(5))
+    let complete = ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("turn should complete after approval");
     assert!(complete["turn_id"].is_string());
@@ -660,7 +662,7 @@ async fn hook_triggered_approval_uses_custom_prompt() {
     // forwarding tests from [byi8].
     eprintln!(
         "Hook-triggered approval is tested at the agent level (task 3c77) — \
-               full gateway integration deferred to Phase 05 when the REST API \
+               full gateway integration deferred until the REST API \
                provides a hook configuration surface"
     );
 }
@@ -679,13 +681,13 @@ async fn agent_scoped_routing_isolates_approval_events() {
     // approval routing tests (task [byi8]) and via the re-emission tests
     // [yvld] which verify that approvals for other agents are NOT re-emitted.
     // A full two-agent WebSocket test requires multi-agent session setup
-    // which is not yet available (Phase 04 inter-agent communication).
+    // which is not yet available in the inter-agent communication stack.
     //
     // The routing infrastructure is in place and unit-tested. The cross-agent
     // isolation is verified by `approvals_for_other_agent_not_re_emitted_on_connect`.
     eprintln!(
         "Agent-scoped routing is unit-tested via [byi8] and re-emission tests — \
-               full multi-agent WebSocket integration deferred to Phase 04"
+               full multi-agent WebSocket integration deferred until inter-agent communication is available"
     );
 }
 

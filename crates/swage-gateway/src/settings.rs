@@ -43,6 +43,8 @@ pub struct ModelSettings {
     pub aliases: Vec<String>,
     pub context_window: Option<u32>,
     pub generation_preset: Option<String>,
+    #[serde(default)]
+    pub capabilities: swage_config::ModelCapabilitiesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +158,7 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    capabilities: model.capabilities.clone(),
                 },
             )
         })
@@ -226,6 +229,7 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    capabilities: model.capabilities.clone(),
                 },
             )
         })
@@ -291,6 +295,7 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
+                    capabilities: model.capabilities,
                 },
             )
         })
@@ -774,18 +779,12 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
             "tool max output bytes must be positive".to_string(),
         ));
     }
-    if let Some(directory) = runtime.plugin_directory.as_deref() {
-        if directory.trim().is_empty() {
-            return Err(ApiError::validation(
-                "tool plugin directory must not be empty".to_string(),
-            ));
-        }
-        let path = PathBuf::from(directory);
-        if !path.is_dir() {
-            return Err(ApiError::validation(format!(
-                "tool plugin directory does not exist: {directory}"
-            )));
-        }
+    if let Some(directory) = runtime.plugin_directory.as_deref()
+        && directory.trim().is_empty()
+    {
+        return Err(ApiError::validation(
+            "tool plugin directory must not be empty".to_string(),
+        ));
     }
     if let Some(search) = &runtime.search
         && (search.provider_type.trim().is_empty() || search.base_url.trim().is_empty())
@@ -1051,6 +1050,8 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::SwageHomeGuard;
+
     use serde_json::json;
 
     use super::*;
@@ -1138,8 +1139,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_model_runtime_without_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
@@ -1175,6 +1175,9 @@ mod tests {
                     aliases: vec![],
                     context_window: Some(4096),
                     generation_preset: Some("quick".to_string()),
+                    capabilities: swage_config::ModelCapabilitiesConfig {
+                        reasoning_replay: true,
+                    },
                 },
             )]
             .into_iter()
@@ -1212,11 +1215,15 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should save and hot-apply");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(!response.restart_required);
         assert_eq!(response.default_model, "local:fast");
         assert_eq!(state.active_config().default_model_id(), "fast-wire");
+        assert!(
+            state.active_config().models.entries["local:fast"]
+                .capabilities
+                .reasoning_replay
+        );
         assert_eq!(state.active_config().context.timeout, 7);
         assert_eq!(state.active_config().tools.permissions.deny, vec!["shell"]);
         assert!(!state.restart_required());
@@ -1224,10 +1231,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_rebuilds_tool_runtime_without_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let swage_home = SwageHomeGuard::new();
 
-        let plugin_dir = temp.path().join("plugins").join("echo-plugin");
+        let plugin_dir = swage_home.path().join("plugins").join("echo-plugin");
         std::fs::create_dir_all(&plugin_dir).expect("plugin directory");
         std::fs::write(
             plugin_dir.join("capability.json"),
@@ -1281,7 +1287,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let plugin_root = temp.path().join("plugins").display().to_string();
+        let plugin_root = swage_home.path().join("plugins").display().to_string();
         let request = SaveSettingsRequest {
             default_provider: "local".to_string(),
             providers: [(
@@ -1305,6 +1311,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1333,7 +1340,6 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should save and hot-rebuild tools");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(!response.restart_required);
         assert_eq!(response.tool_runtime.shell_timeout_secs, 2);
@@ -1356,8 +1362,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_observability_pricing_and_communication() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("SWAGE_HOME", temp.path()) };
+        let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
@@ -1417,6 +1422,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1435,7 +1441,6 @@ mod tests {
         let response = save_settings(&state, request)
             .await
             .expect("settings should hot-apply observability and communication");
-        unsafe { std::env::remove_var("SWAGE_HOME") };
 
         assert!(response.observability.force_on);
         assert_eq!(
@@ -1523,6 +1528,16 @@ mod tests {
         let error =
             validate_settings_request(&request).expect_err("missing python runtime is invalid");
         assert!(error.0.to_string().contains("runtime path does not exist"));
+
+        request.tool_runtime = Some(ToolRuntimeSettings {
+            shell_timeout_secs: 30,
+            python_execute: swage_config::PythonExecuteToolConfig::default(),
+            max_output_bytes: 100_000,
+            plugin_directory: Some("/definitely/missing/plugins".to_string()),
+            search: None,
+        });
+        validate_settings_request(&request)
+            .expect("missing plugin directory should not block unrelated settings saves");
     }
 
     #[test]

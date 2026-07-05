@@ -11,8 +11,10 @@ use uuid::Uuid;
 
 use serde_json::Value;
 use swage_core::{
-    ChatMessage, CompletionRequest, Role, StreamChunk, ToolCall, ToolResult,
-    build_tool_round_messages,
+    ChatMessage, CompletionRequest, Role, StreamChunk, ToolCall, ToolReplayReasoning, ToolResult,
+    build_tool_round_messages_with_reasoning, compact_tool_arguments_for_model,
+    compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
+    tool_result_reference,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_provider::LlmProvider;
@@ -30,6 +32,83 @@ use crate::extraction::extract_json;
 use crate::message::{OutboundMessage, TurnRequest};
 
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use swage_core::{PermissionDeniedReason, ToolError};
+
+    use super::{compact_tool_error_detail, format_tool_error_for_model};
+
+    #[test]
+    fn format_tool_error_for_model_keeps_invalid_parameters_compact() {
+        let error = ToolError::InvalidParameters {
+            name: "file_edit".to_string(),
+            message:
+                "missing required field `edits`\n\nschema dump: {\"properties\":{\"edits\":[]}}"
+                    .to_string(),
+        };
+
+        let formatted = format_tool_error_for_model(&error);
+
+        assert_eq!(
+            formatted,
+            "Tool error: invalid parameters for `file_edit`: missing required field `edits`. Correct the arguments and retry."
+        );
+        assert!(!formatted.contains("schema dump"));
+    }
+
+    #[test]
+    fn format_tool_error_for_model_labels_permission_denial() {
+        let error = ToolError::PermissionDenied {
+            name: "shell".to_string(),
+            reason: PermissionDeniedReason::ExplicitlyDenied,
+        };
+
+        let formatted = format_tool_error_for_model(&error);
+
+        assert_eq!(
+            formatted,
+            "Tool error: `shell` is not permitted for this turn (explicitly denied). Choose an allowed tool or ask for access."
+        );
+    }
+
+    #[test]
+    fn format_tool_error_for_model_labels_timeout() {
+        let error = ToolError::Timeout {
+            name: "web_search".to_string(),
+            duration: Duration::from_secs(30),
+        };
+
+        let formatted = format_tool_error_for_model(&error);
+
+        assert_eq!(
+            formatted,
+            "Tool error: `web_search` timed out after 30s. Retry with a smaller or simpler request."
+        );
+    }
+
+    #[test]
+    fn compact_tool_error_detail_collapses_whitespace_and_truncates() {
+        let detail = compact_tool_error_detail(&format!("{}\n{}", "x ".repeat(400), "ignored"));
+
+        assert!(detail.ends_with("..."));
+        assert!(detail.len() <= 320);
+        assert!(!detail.contains('\n'));
+        assert!(!detail.contains("ignored"));
+    }
+
+    #[test]
+    fn compact_tool_error_detail_keeps_traceback_exception_tail() {
+        let detail = compact_tool_error_detail(
+            "Traceback (most recent call last):\n  File \"x.py\", line 1\nZeroDivisionError: division by zero",
+        );
+
+        assert!(detail.contains("Traceback (most recent call last):"));
+        assert!(detail.contains("ZeroDivisionError: division by zero"));
+    }
+}
 // Agent struct
 // ---------------------------------------------------------------------------
 
@@ -257,10 +336,12 @@ impl Agent {
                     &mut total_input_tokens,
                     &mut total_output_tokens,
                     true,
+                    round,
                 )
                 .await?;
             let round_text = round_outcome.text;
             let round_tool_calls = round_outcome.tool_calls;
+            let round_reasoning = round_outcome.reasoning;
             accumulated.push_str(&round_text);
 
             // No tool calls → LLM produced a final text response for this round.
@@ -377,6 +458,7 @@ impl Agent {
                 // Emit ToolEnd — final status and result.
                 let result_value: Value = serde_json::from_str(&result_content)
                     .unwrap_or_else(|_| Value::String(result_content.clone()));
+                let result_metadata = extract_tool_result_metadata(&result_value);
                 let _ = event_tx.send(AgentEvent::ToolEnd {
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
@@ -389,7 +471,15 @@ impl Agent {
                 self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
                     .await;
 
-                // Persist tool call record — always, regardless of result.
+                // Leak detection on tool result before feeding back to the model.
+                let safe_result = self.scan_output(&result_content);
+                let model_arguments = compact_tool_arguments_for_model(&call.arguments);
+                let model_result = compact_tool_result_for_model_with_reference(
+                    &safe_result,
+                    is_error,
+                    tool_result_reference(&turn.id.to_string(), &call.call_id),
+                );
+
                 let _ = self
                     .storage
                     .create_tool_call(NewToolCall {
@@ -398,20 +488,20 @@ impl Agent {
                         call_id: call.call_id.clone(),
                         tool: call.name.clone(),
                         arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                        model_arguments,
                         result: Some(result_content.clone()),
+                        model_result: Some(model_result),
                         status: Some(status),
                         duration_ms: Some(duration_ms as i64),
-                        truncated: false,
-                        total_bytes: None,
+                        truncated: result_metadata.truncated,
+                        total_bytes: result_metadata.total_bytes,
+                        provider_round: round as i32,
                         position: tool_position,
                         parent_call_id: None,
                     })
                     .await;
                 tool_position += 1;
                 total_tool_calls += 1;
-
-                // Leak detection on tool result before feeding back to the model.
-                let safe_result = self.scan_output(&result_content);
 
                 tool_results.push(ToolResult {
                     call_id: call.call_id.clone(),
@@ -421,8 +511,17 @@ impl Agent {
             }
 
             // Build tool round messages and extend context for the next LLM call.
-            let tool_messages =
-                build_tool_round_messages(&round_tool_calls, &tool_results, &round_text);
+            let reasoning_replay = if self.config.replay_reasoning {
+                round_reasoning.as_slice()
+            } else {
+                &[]
+            };
+            let tool_messages = build_tool_round_messages_with_reasoning(
+                &round_tool_calls,
+                &tool_results,
+                &round_text,
+                reasoning_replay,
+            );
             let mut updated_messages = llm_request.messages.clone();
             updated_messages.extend(tool_messages);
             llm_request = CompletionRequest {
@@ -551,6 +650,7 @@ impl Agent {
                         &mut total_input_tokens,
                         &mut total_output_tokens,
                         false,
+                        round + attempt as usize,
                     )
                     .await?;
                 accumulated = retry_outcome.text;
@@ -634,12 +734,21 @@ impl Agent {
         total_input_tokens: &mut u32,
         total_output_tokens: &mut u32,
         collect_tool_calls: bool,
+        round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
         use futures::StreamExt;
+
+        let request_snapshot = self.provider.provider_request_snapshot(&request, true);
+        let _ = event_tx.send(AgentEvent::ProviderRequestPrepared {
+            turn_id: execution.turn_id,
+            round,
+            request: request_snapshot,
+        });
 
         let mut stream = self.provider.stream(request);
         let mut text = String::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning = Vec::new();
 
         loop {
             tokio::select! {
@@ -654,6 +763,15 @@ impl Agent {
                         Some(StreamChunk::Delta { content }) => {
                             text.push_str(&content);
                             let _ = event_tx.send(AgentEvent::Token { content });
+                        }
+                        Some(StreamChunk::Reasoning { content, details }) => {
+                            let _ = event_tx.send(AgentEvent::ProviderReasoningCaptured {
+                                turn_id: execution.turn_id,
+                                round,
+                                content: content.clone(),
+                                details: details.clone(),
+                            });
+                            reasoning.push(ToolReplayReasoning { content, details });
                         }
                         Some(StreamChunk::Usage(usage)) => {
                             *total_input_tokens += usage.input_tokens;
@@ -693,13 +811,18 @@ impl Agent {
             }
         }
 
-        Ok(StreamRoundOutcome { text, tool_calls })
+        Ok(StreamRoundOutcome {
+            text,
+            tool_calls,
+            reasoning,
+        })
     }
 }
 
 struct StreamRoundOutcome {
     text: String,
     tool_calls: Vec<ToolCall>,
+    reasoning: Vec<ToolReplayReasoning>,
 }
 
 // ---------------------------------------------------------------------------
@@ -835,8 +958,82 @@ fn tool_dispatch_result(
             let result_str = serde_json::to_string(&output.result).unwrap_or_default();
             Ok((result_str, false, "success".to_string()))
         }
-        Err(error) => Ok((error.to_string(), true, "error".to_string())),
+        Err(error) => Ok((
+            format_tool_error_for_model(&error),
+            true,
+            "error".to_string(),
+        )),
     }
+}
+
+fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
+    use swage_core::ToolError;
+
+    match error {
+        ToolError::NotFound { name } => format!(
+            "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
+        ),
+        ToolError::InvalidParameters { name, message } => format!(
+            "Tool error: invalid parameters for `{name}`: {}. Correct the arguments and retry.",
+            compact_tool_error_detail(message)
+        ),
+        ToolError::ExecutionFailed { name, message } => format!(
+            "Tool error: `{name}` failed: {}. Use the error detail to adjust the request or retry if appropriate.",
+            compact_tool_error_detail(message)
+        ),
+        ToolError::Timeout { name, duration } => format!(
+            "Tool error: `{name}` timed out after {duration:?}. Retry with a smaller or simpler request."
+        ),
+        ToolError::PermissionDenied { name, reason } => format!(
+            "Tool error: `{name}` is not permitted for this turn ({reason}). Choose an allowed tool or ask for access."
+        ),
+        ToolError::RequiresApproval { name, .. } => {
+            format!("Tool error: `{name}` requires approval before it can run.")
+        }
+        ToolError::RequiresLocationApproval {
+            name, path, access, ..
+        } => format!(
+            "Tool error: `{name}` requires {access} approval for `{path}` before it can run."
+        ),
+        ToolError::RequiresDelegation {
+            name,
+            target_agent_id,
+            ..
+        } => format!(
+            "Tool error: `{name}` requires delegation to `{target_agent_id}`, but delegation was not completed."
+        ),
+    }
+}
+
+fn compact_tool_error_detail(message: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 320;
+
+    let lines = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let first_line = lines.first().copied().unwrap_or("no further detail");
+    let detail = if first_line.starts_with("Traceback")
+        && let Some(last_line) = lines.last()
+        && *last_line != first_line
+    {
+        format!("{first_line} {last_line}")
+    } else {
+        first_line.to_string()
+    };
+    let compact = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if compact.chars().count() <= MAX_DETAIL_CHARS {
+        return compact;
+    }
+
+    let mut shortened = compact
+        .chars()
+        .take(MAX_DETAIL_CHARS.saturating_sub(3))
+        .collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
 
 impl Agent {
@@ -1127,7 +1324,11 @@ impl Agent {
                                 .await;
                         }
                         Err(e) => {
-                            return Ok((e.to_string(), true, "error".to_string()));
+                            return Ok((
+                                format_tool_error_for_model(&e),
+                                true,
+                                "error".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1196,7 +1397,9 @@ impl Agent {
                                 )
                                 .await
                             }
-                            Err(e) => Ok((e.to_string(), true, "error".to_string())),
+                            Err(e) => {
+                                Ok((format_tool_error_for_model(&e), true, "error".to_string()))
+                            }
                         }
                     }
                     ApprovalGateOutcome::Rejected { feedback } => {
@@ -1330,7 +1533,7 @@ impl Agent {
                     }
                 }
             }
-            Err(e) => Ok((e.to_string(), true, "error".to_string())),
+            Err(e) => Ok((format_tool_error_for_model(&e), true, "error".to_string())),
         }
     }
 }

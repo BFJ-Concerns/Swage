@@ -27,6 +27,7 @@
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import WorkbenchOperations from "./WorkbenchOperations.svelte";
   import { listTeams } from "../api/builder";
   import type { DisplayPreferences } from "../display-preferences";
   import type { BenchSettingsTab, Route } from "../router";
@@ -75,7 +76,7 @@
 
   // activeSurface and onSelectSurface are kept in Props for API compatibility
   // with App.svelte but the new shell ignores them: the lens determines what
-  // sits on the stage. Each lens picks one layout per Progress.md.
+  // sits on the stage. Each lens picks one layout.
   let {
     conversationStore,
     connectionStore,
@@ -128,11 +129,9 @@
   let now = $state(Date.now());
 
   // Settings sub-pages — drives both the URL the page list links to and the
-  // ix counter shown beside each entry. The list mirrors the Riso workup
-  // (`riso-cyanotype.html`, view 06): Plugins, Automations, Channels, Nodes,
-  // Voice, Recovery, Display, Account. Pages whose backends don't exist yet
-  // render shells (see SettingsPage.svelte) — the entries land here so the nav
-  // looks complete and the routes resolve.
+  // ix counter shown beside each entry. Pages whose backends don't exist yet
+  // render shells (see SettingsPage.svelte) so the nav looks complete and the
+  // routes resolve.
   const SETTINGS_PAGES: ReadonlyArray<{
     id: NonNullable<typeof settingsTab>;
     label: string;
@@ -191,16 +190,20 @@
       : null,
   );
 
-  // Stage-dominant layout: conversation moves to the narrow side when a
-  // module is on the stage. Per Progress.md, each lens picks one layout —
-  // this isn't an on-demand swap.
-  const isStageDominant = $derived(stageSurface !== null || hasPlacedStageModules);
+  const hasStage = $derived(stageSurface !== null || hasPlacedStageModules);
+  // TODO Add lens-level layout dominance.
+  // Lenses need an explicit layout placement so conversation-dominant and
+  // stage-dominant views are data-driven instead of inferred from module
+  // presence.
+  // ---
+  // Until then: a lens that places a builder/operator module on the stage
+  // gets the wide pane — those surfaces are unusable as a 320px rail.
+  const isStageDominant = $derived(stageSurface !== null);
+  const isConversationDominant = $derived(hasStage && !isStageDominant);
 
-  // Stamp shown on the right of the topbar — `BENCH · NAME · STATE` per
-  // workup view 01/02/03/07. The bench portion is real; the state cycles
-  // through the streaming store. Team-live and approval states are real
-  // too, but the workup also uses time-on-state ("TEAM LIVE 04:18") which
-  // we do not have an aggregator for yet (see mote below).
+  // Stamp shown on the right of the topbar. The bench portion is real; the
+  // state cycles through the streaming store. Team-live and approval states
+  // are real too, but timed state durations need a separate aggregator.
   const stampState = $derived<{ label: string; tone: "idle" | "busy" | "alert" }>(
     streamingStore.isStreaming
       ? { label: "Working", tone: "busy" }
@@ -253,8 +256,8 @@
     onBenchChange?.();
   }
 
-  // The Builder lens carries a caret (workup view 05). Clicking the lens body
-  // activates it; clicking the caret toggles the persisted mode menu.
+  // The Builder lens carries a caret. Clicking the lens body activates it;
+  // clicking the caret toggles the persisted mode menu.
   let builderModeOpen = $state(false);
   let activeBuilderMode = $state<BuilderMode>("team");
 
@@ -371,7 +374,7 @@
               aria-haspopup="menu"
               aria-expanded={builderModeOpen}
               onclick={(event) => toggleBuilderMode(event)}
-              title="Builder mode menu (workup view 05)"
+              title="Builder mode menu"
             >▾</button>
           {/if}
         </div>
@@ -387,7 +390,7 @@
 
       {#if builderModeOpen && isBuilderLens(activeLens)}
         <div class="builder-pop" role="menu" aria-label="Builder mode">
-          <div class="builder-pop-banner">Builder mode · workup view 05</div>
+          <div class="builder-pop-banner">Builder mode</div>
           {#each BUILDER_MODE_OPTIONS as item (item.mode)}
             <button
               type="button"
@@ -432,16 +435,22 @@
   <aside class="nav" class:settings={settingsMode} aria-label="Navigation">
     {#if settingsMode}
       <!--
-        Settings nav: parked bench-head shows where × CLOSE returns to,
-        then a vertical list of settings pages drives the active sub-route.
+        Settings nav: the parked bench-head is the wayfinding target × CLOSE
+        returns to. It's a real link back to the active conversation (or the
+        picker if none was open), so the block reads as navigation rather than
+        a label that looks like a breadcrumb. UI audit f-16: the old "Return
+        to / on close" fragment was a hanging, non-interactive label.
       -->
-      <div class="bench-head settings-head">
-        <div class="crumb">
-          <span class="return-mark">Return to</span>
-        </div>
+      <button
+        type="button"
+        class="bench-head settings-head return-link"
+        onclick={closeSettings}
+        aria-label={`Close settings and return to ${activeConversation?.id ? "conversation" : "bench picker"}`}
+        title="Close settings"
+      >
+        <span class="return-mark">← Close</span>
         <h2 class="name">{settingsBench?.name ?? currentBench?.name ?? "Swage"}</h2>
-        <div class="meta">on close</div>
-      </div>
+      </button>
       <div class="settings-pages">
         {#if settingsBenchSlug}
           {#each BENCH_SETTINGS_PAGES as page (page.id)}
@@ -456,39 +465,68 @@
             </button>
           {/each}
         {:else}
-          {#each SETTINGS_PAGES as page (page.id)}
+          <!--
+            Functional pages lead; non-functional ones collapse into a muted
+            "Coming soon" group below, so they stay visible as a roadmap but
+            stop competing for scan attention with working entries. UI audit
+            f-5: the previous flat list interleaved five SHELL chips with the
+            five working pages, reading as "half-finished product".
+          -->
+          {#each SETTINGS_PAGES.filter((page) => page.functional) as page (page.id)}
             <button
               type="button"
               class="settings-page"
               class:active={settingsTab === page.id}
-              class:shell={!page.functional}
               onclick={() => onNavigate?.(`/settings/${page.id}`)}
-              title={page.functional ? page.label : `${page.label} (not yet wired)`}
+              title={page.label}
             >
               <span>{page.label}</span>
-              <span class="ix">
-                {#if !page.functional}
-                  <span class="shell-mark" aria-label="Non-functional placeholder">SHELL</span>
-                {:else}
-                  {page.ix}
-                {/if}
-              </span>
+              <span class="ix">{page.ix}</span>
             </button>
           {/each}
+          <div class="settings-coming-soon" role="separator" aria-label="Coming soon">
+            <span class="coming-soon-label">Coming soon</span>
+          </div>
+          <div class="settings-coming-soon-grid">
+            {#each SETTINGS_PAGES.filter((page) => !page.functional) as page (page.id)}
+              <button
+                type="button"
+                class="settings-page shell"
+                class:active={settingsTab === page.id}
+                onclick={() => onNavigate?.(`/settings/${page.id}`)}
+                title={`${page.label} (not yet wired)`}
+              >
+                <span>{page.label}</span>
+              </button>
+            {/each}
+          </div>
         {/if}
       </div>
     {:else if currentBench}
-      <!-- Bench header — large display name, becomes back-arrow + secondary
-           menu in future iterations. -->
+      <!--
+        Bench header. The back-arrow returns to the bench picker — a clear
+        wayfinding target that the dropdown-only model lacked. The Switch
+        dropdown stays for fast switching without leaving the current bench
+        (UI audit f-7).
+      -->
       <div class="bench-head">
+        <button
+          type="button"
+          class="back-to-picker"
+          aria-label="Back to bench picker"
+          title="Back to bench picker"
+          onclick={() => {
+            benchStore?.closeBench();
+            onNavigate?.("/");
+          }}
+        >
+          <span aria-hidden="true">←</span>
+        </button>
         <div class="crumb">
           <span class="bench-label">Bench</span>
           <span class="bench-count">{conversationCount} convos</span>
         </div>
         <h2 class="name">{currentBench.name}</h2>
-        <!-- TODO(debt): swap BenchSelector dropdown for a back-arrow that
-             returns to the bench picker. The picker is not yet a dedicated
-             route. Blocked by: bench picker view component. -->
         <BenchSelector {benchStore} {onBenchChange} />
       </div>
 
@@ -513,9 +551,9 @@
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
-      <!-- No bench selected: nav shows a "Recent" list per workup view 04 plus
-           a quick legend. Selection still happens in the body via BenchPicker;
-           the nav's recent list is a fast lane for re-opening recent work. -->
+      <!-- No bench selected: nav shows a "Recent" list plus a quick legend.
+           Selection still happens in the body via BenchPicker; the nav's
+           recent list is a fast lane for re-opening recent work. -->
       <div class="bench-head picker-mode">
         <div class="crumb">
           <span class="bench-label">Choose a bench</span>
@@ -550,18 +588,33 @@
           the preview.
         </p>
       </div>
+      <div class="footer">
+        <button
+          class="footer-item"
+          class:active={settingsTab !== null}
+          onclick={() => onNavigate?.("/settings/providers")}
+        >
+          Settings
+        </button>
+        <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
+      </div>
     {/if}
   </aside>
 
   <main
     class="body"
     class:full={!currentBench || settingsMode}
+    class:conversation-dominant={isConversationDominant && !settingsMode}
     class:stage-dominant={isStageDominant && !settingsMode}
   >
     {#if settingsBenchSlug}
       <BenchSettingsPage bench={settingsBench} tab={settingsBenchTab ?? "overview"} />
     {:else if settingsTab}
-      <SettingsPage tab={settingsTab} />
+      <SettingsPage
+        tab={settingsTab}
+        benchId={currentBench?.id ?? null}
+        sessionId={activeConversation?.id ?? null}
+      />
     {:else if !currentBench}
       <!-- Bench picker view: full card grid with two-stage selection. -->
       <BenchPicker
@@ -575,24 +628,19 @@
            scope — without one, no WebSocket is attempted, so a "lost" banner
            would be misleading. -->
       <section class="pane conversation-pane" aria-label="Conversation">
+        <!-- The pane head carries the conversation's own running stat — token
+             usage against the model budget. Live/working state is not repeated
+             here: the topbar stamp and the streaming cursor already show it. -->
         <header class="pane-head">
           <span class="pane-label">Conversation</span>
-          <span class="pane-index">
-            {#if streamingStore.isStreaming}
-              Live
-            {:else if streamingStore.turnError}
-              Retrying
-            {:else}
-              Idle
-            {/if}
-          </span>
+          <span class="pane-index">tokens · {tokenUsageLabel}</span>
         </header>
         {#if activeConversation}
           <ConnectionIndicator store={connectionStore} {onRetry} />
         {/if}
         <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
         {#if streamingStore.pendingApproval}
-          <!-- Approval replaces the input box (workup view 03). -->
+          <!-- Approval replaces the input box. -->
           <ApprovalCard approval={streamingStore.pendingApproval} />
         {:else}
           <MessageInput
@@ -601,14 +649,6 @@
             selectedModelId={activeConversation?.selected_model_id ?? defaultModelId}
           />
         {/if}
-        <footer class="conv-meta" aria-hidden="false">
-          <span class="conv-meta-tokens">
-            tokens · <span>{tokenUsageLabel}</span>
-          </span>
-          <span class="conv-meta-state" data-tone={stampState.tone}>
-            ● {stampState.label}
-          </span>
-        </footer>
       </section>
 
       <!-- Stage pane: shows the module placed by the active lens. -->
@@ -624,6 +664,9 @@
             {#if builderDeckModule}
               {#await builderDeckModule then module}
                 {@const BuilderDeck = module.default}
+                <!-- The operator deck and the operations panel lost their
+                     home when the WorkbenchRail was dropped; the builder
+                     stage is where operators land, so they live here. -->
                 <BuilderDeck
                   {benchStore}
                   {desktopRuntime}
@@ -633,7 +676,11 @@
                   {onSelectLens}
                   {onRefreshLenses}
                   showSharedReferences={false}
-                  showOperatorDeck={false}
+                  showOperatorDeck={true}
+                />
+                <WorkbenchOperations
+                  benchId={currentBench?.id ?? null}
+                  sessionId={activeConversation?.id ?? null}
                 />
               {:catch error}
                 <div class="surface-error" role="alert">
@@ -641,20 +688,33 @@
                 </div>
               {/await}
             {:else}
-              <div class="surface-loading">Loading builder…</div>
+              <div class="surface-skeleton" role="status" aria-label="Loading builder">
+                <div class="sk sk-line sk-line-lg"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line sk-line-sm"></div>
+              </div>
             {/if}
           {:else if stageSurface === "operator"}
             {#if operatorDashboardModule}
               {#await operatorDashboardModule then module}
                 {@const OperatorDashboard = module.default}
                 <OperatorDashboard />
+                <WorkbenchOperations
+                  benchId={currentBench?.id ?? null}
+                  sessionId={activeConversation?.id ?? null}
+                />
               {:catch error}
                 <div class="surface-error" role="alert">
                   {error instanceof Error ? error.message : "Failed to load operator."}
                 </div>
               {/await}
             {:else}
-              <div class="surface-loading">Loading operator…</div>
+              <div class="surface-skeleton" role="status" aria-label="Loading operator">
+                <div class="sk sk-line sk-line-lg"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line sk-line-sm"></div>
+              </div>
             {/if}
           {/if}
         </section>
@@ -717,15 +777,18 @@
     height: 100%;
     background: var(--paper);
     color: var(--ink);
-    border: 2px solid var(--ink);
+    border: var(--border-strong);
     display: grid;
     grid-template-rows: 48px 1fr;
-    grid-template-columns: 280px 1fr;
+    /* Fluid chrome: the nav shrinks to content rather than claiming a fixed
+       280px allotment. It yields before the conversation pane (the primary
+       surface) does. UI audit f-21. */
+    grid-template-columns: clamp(220px, 18vw, 280px) 1fr;
     grid-template-areas:
       "nav top"
       "nav body";
     font-family: var(--font-body);
-    font-size: 13px;
+    font-size: var(--font-body-sm);
     /* The translucent orange offset shadow needs the window above its trail. */
     isolation: isolate;
     position: relative;
@@ -788,53 +851,85 @@
     background: var(--accent);
   }
 
-  /* Parked bench-head in settings nav: same ink block as the regular nav,
-     but the orange registration band underneath is suppressed (the bench
-     isn't currently active, just the destination of × CLOSE). */
+  /* Parked bench-head in settings nav: now a real link back to the
+     conversation/picker rather than a label that looks like a breadcrumb.
+     Same ink block as the regular nav, but the orange registration band
+     underneath is suppressed (the bench isn't currently active, just the
+     destination of × CLOSE). UI audit f-16. */
   .nav.settings .bench-head {
-    padding: 14px 22px;
+    padding: 12px 16px;
+    width: 100%;
+    text-align: left;
+    background: var(--ink);
+    color: var(--paper);
+    cursor: pointer;
+    border: none;
+    font: inherit;
+  }
+
+  .nav.settings .bench-head:hover {
+    background: var(--ink-soft);
+  }
+
+  .nav.settings .bench-head:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .nav.settings .bench-head::after {
     display: none;
   }
 
-  .nav.settings .bench-head .crumb {
-    margin-bottom: 6px;
-  }
-
   .return-mark {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
-  }
-
-  /* Decorative pip — orange on cream is below AA so it stays as a pure
-     graphic element; the text colour reads against the ink block instead. */
-  .return-mark::before {
-    content: "";
-    width: 8px;
-    height: 8px;
-    background: var(--accent);
+    text-transform: uppercase;
+    color: rgba(255, 248, 238, 0.7);
+    margin-bottom: 6px;
   }
 
   .nav.settings .bench-head .name {
-    font-size: 26px;
+    font-size: var(--font-display-2);
     letter-spacing: 0.03em;
   }
 
-  .nav.settings .bench-head .meta {
-    margin-top: 4px;
-    font-family: var(--font-body);
-    font-weight: 500;
-    font-size: 11px;
-    line-height: 1.5;
-    color: rgba(255, 248, 238, 0.7);
+  /* Back-to-picker affordance in the active bench header — a clear wayfinding
+     target that the dropdown-only model lacked. UI audit f-7. */
+  .back-to-picker {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid rgba(255, 248, 238, 0.4);
+    color: var(--paper);
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    margin-bottom: 8px;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+
+  .back-to-picker:hover,
+  .back-to-picker:focus-visible {
+    border-color: var(--paper);
+    background: rgba(255, 248, 238, 0.12);
+  }
+
+  .back-to-picker:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .settings-pages {
-    padding: 16px 14px;
+    padding: 12px 14px;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -853,7 +948,7 @@
     border: 1px solid transparent;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 12px;
+    font-size: var(--font-label-md);
     line-height: 1;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -885,32 +980,49 @@
   .settings-page .ix {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     opacity: 0.6;
   }
 
-  /* Non-functional settings entries advertise themselves with an explicit
-     SHELL chip rather than fading into the background. The intent is that
-     the user can still see what's coming without thinking they're broken. */
-  .settings-page.shell .ix {
-    opacity: 1;
+  /* Coming-soon group — functional pages lead; non-functional ones collapse
+     into a muted footer so the roadmap stays visible without competing for
+     scan attention. UI audit f-5. */
+  .settings-coming-soon {
+    margin: 14px 0 4px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--rule-soft);
   }
 
-  .shell-mark {
-    display: inline-block;
-    padding: 2px 6px;
-    background: var(--accent);
-    color: var(--paper);
+  .coming-soon-label {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 9px;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
     text-transform: uppercase;
+    color: var(--ink-soft);
+    opacity: 0.7;
   }
 
-  .settings-page.active .shell-mark {
-    background: var(--paper);
+  .settings-coming-soon-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding-top: 4px;
+  }
+
+  .settings-coming-soon-grid .settings-page {
+    /* Low-emphasis entries — they read as a roadmap, not as peers of the
+       working pages above. */
+    padding: 4px 0;
+    color: var(--ink-soft);
+    opacity: 0.7;
+    letter-spacing: 0.1em;
+  }
+
+  .settings-coming-soon-grid .settings-page:hover:not(.active) {
+    background: transparent;
+    opacity: 1;
     color: var(--ink);
   }
 
@@ -1044,8 +1156,8 @@
     text-transform: uppercase;
   }
 
-  /* Caret as a separate button beside the Builder lens — workup view 05.
-     The split lets clicking the lens body activate it without opening the
+  /* Caret as a separate button beside the Builder lens. The split lets
+     clicking the lens body activate it without opening the
      menu, while the caret toggles the menu independently. */
   .lens-wrap {
     display: flex;
@@ -1086,7 +1198,7 @@
     filter: brightness(1.1);
   }
 
-  /* Builder mode dropdown — workup view 05. */
+  /* Builder mode dropdown. */
   .builder-pop {
     position: absolute;
     top: 48px;
@@ -1181,7 +1293,9 @@
   .bench-head {
     background: var(--ink);
     color: var(--paper);
-    padding: 18px 22px;
+    /* Density hierarchy: chrome padding tightens to 12–16px; generous air is
+       reserved for content surfaces. UI audit f-21. */
+    padding: 12px 16px;
     position: relative;
   }
 
@@ -1200,19 +1314,19 @@
     background: var(--paper);
     color: var(--ink);
     text-align: center;
-    border-bottom: 2px solid var(--ink);
+    border-bottom: var(--border-strong);
   }
 
   .bench-head .crumb {
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     letter-spacing: 0.18em;
     text-transform: uppercase;
     display: flex;
     justify-content: space-between;
     color: rgba(255, 248, 238, 0.7);
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
 
   .bench-head.picker-mode .crumb {
@@ -1223,7 +1337,9 @@
   .bench-head .name {
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: 36px;
+    /* Right-size display type to content: a single bench name doesn't need
+       36px. 24–28px is still emphatically Bebas. UI audit f-21. */
+    font-size: var(--font-display-2);
     line-height: 1;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -1380,10 +1496,23 @@
     grid-template-columns: 1fr;
   }
 
-  /* Stage-dominant lenses (builder, team-running) put the module pane wide
-     and the conversation narrow. */
+  /* Conversation-dominant lenses keep the conversation pane wide and park the
+     module pane as a narrow rail. */
+  .body.conversation-dominant {
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+
+  .body.conversation-dominant > .conversation-pane {
+    grid-column: 1;
+  }
+
+  .body.conversation-dominant > .stage-pane {
+    grid-column: 2;
+  }
+
+  /* Stage-dominant lenses put the module pane wide and the conversation narrow. */
   .body.stage-dominant {
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: 360px minmax(0, 1fr);
   }
 
   .body.stage-dominant > .conversation-pane {
@@ -1425,10 +1554,18 @@
 
   .stage-pane {
     background: var(--paper);
+    /* The stage stacks whole surfaces (builder deck, operator deck, the
+       operations panel); it scrolls as one column rather than squeezing
+       each surface into the viewport. */
+    overflow-y: auto;
   }
 
-  /* Pane heads — workup view 01/02/05 place a small label + index above each
-     pane. Index expresses live state such as "LIVE", "Builder", or a count. */
+  .stage-pane > :global(*) {
+    flex-shrink: 0;
+  }
+
+  /* Pane heads place a small label + index above each pane. Index expresses
+     live state such as "LIVE", "Builder", or a count. */
   .pane-head {
     display: flex;
     justify-content: space-between;
@@ -1459,38 +1596,6 @@
     color: var(--ink-soft);
   }
 
-  /* Conversation meta footer — workup view 01 places token / state below the input. */
-  .conv-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 22px 12px;
-    border-top: 1px dotted var(--rule-soft);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--ink-soft);
-    flex-shrink: 0;
-  }
-
-  .conv-meta-state {
-    padding: 2px 6px;
-    border: 1px solid var(--rule-soft);
-  }
-
-  .conv-meta-state[data-tone="busy"] {
-    background: var(--accent);
-    color: var(--paper);
-    border-color: var(--accent);
-  }
-
-  .conv-meta-state[data-tone="alert"] {
-    color: var(--ink-orange);
-    border-color: var(--accent);
-  }
-
   /* Stage modules placed by the active lens runtime. */
   .stage-pane.stage-shell {
     padding: 0;
@@ -1515,8 +1620,7 @@
     position: relative;
   }
 
-  /* Tonal hint on the left edge — preserves the workup vocabulary
-     (auto = ink rule, streaming = orange rule). */
+  /* Tonal hint on the left edge: auto = ink rule, streaming = orange rule. */
   .stage-module[data-tone="auto"] {
     border-left-width: 4px;
   }
@@ -1594,16 +1698,49 @@
     line-height: 1.4;
   }
 
-  .surface-loading,
   .surface-error {
     margin: auto;
     padding: 14px 18px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-label-md);
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--ink-orange);
-    border: 1px dashed var(--accent);
+    color: var(--error);
+    border: 1px dashed var(--error);
+  }
+
+  /* Low-fidelity skeleton: the layout paints before the lazy module fills it,
+     so the surface reads as "the right thing is loading" rather than a bare
+     text fragment. aria-label on the wrapper carries the announcement. */
+  .surface-skeleton {
+    margin: auto;
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+  }
+
+  .sk {
+    height: 12px;
+    background: var(--paper-deep);
+    border-left: 3px solid var(--rule-soft);
+    opacity: 0.7;
+    animation: sk-pulse 1.4s ease-in-out infinite;
+  }
+
+  .sk-line { width: 100%; }
+  .sk-line-lg { width: 60%; height: 18px; }
+  .sk-line-sm { width: 35%; }
+
+  @keyframes sk-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 0.85; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sk { animation: none; }
   }
 
   /* ---------------------------------------------------------------------------
@@ -1635,6 +1772,7 @@
 
     .body,
     .body.full,
+    .body.conversation-dominant,
     .body.stage-dominant {
       grid-template-columns: 1fr;
     }

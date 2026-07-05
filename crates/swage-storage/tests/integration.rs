@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 03 (Persistence).
+//! Cross-task integration tests for persistence.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together. Each test documents
@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use swage_core::Role;
+use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
 use swage_storage::model::NewBench;
 use swage_storage::store::{
     BenchStore, MessageStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
@@ -94,16 +94,26 @@ async fn create_full_hierarchy(
             call_id: "toolu_int_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"echo hi"}"#.to_string(),
+            model_arguments: compact_tool_arguments_for_model(
+                &serde_json::json!({"cmd": "echo hi"}),
+            ),
             result: Some("hi".to_string()),
+            model_result: Some(compact_tool_result_for_model("hi", false)),
             status: Some("success".to_string()),
             duration_ms: Some(5),
             truncated: false,
             total_bytes: Some(2),
+            provider_round: 1,
             position: 0,
             parent_call_id: None,
         })
         .await
         .expect("create tool call");
+    let expected_model_result = compact_tool_result_for_model("hi", false);
+    assert_eq!(
+        tool_call.model_result.as_deref(),
+        Some(expected_model_result.as_str())
+    );
 
     (session.id, thread.id, turn.id, message.id, tool_call.id)
 }
@@ -124,7 +134,7 @@ async fn full_hierarchy_survives_reconnection() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("hierarchy.db");
 
-    // Phase 1: create all entities and drop the connection.
+    // Step 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
         let bench = BenchStore::create(
@@ -141,7 +151,7 @@ async fn full_hierarchy_survives_reconnection() {
         create_full_hierarchy(&storage, bench.id, AGENT_A).await
     };
 
-    // Phase 2: reconnect and verify everything is readable.
+    // Step 2: reconnect and verify everything is readable.
     let storage = SqliteStorage::open(&db_path).expect("reopen");
 
     let session = storage.get_session(session_id).await.expect("get session");

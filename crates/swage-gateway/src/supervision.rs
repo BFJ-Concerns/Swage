@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{
-    HeartbeatRunState, NodeExecutionState, ScheduledRunState, TopologyRunState, TurnState,
+    NodeExecutionState, ScheduleRunState, SessionPolicy, TopologyRunState, TurnState,
 };
 
 use crate::state::AppState;
@@ -66,8 +66,7 @@ pub async fn get_run_detail(
 ) -> Result<RunDetailResponse, GatewayError> {
     match kind {
         "user_turn" | "delegated_turn" => get_turn_detail(state, id).await,
-        "scheduled_run" => get_scheduled_run_detail(state, id).await,
-        "heartbeat_run" => get_heartbeat_run_detail(state, id).await,
+        "schedule_run" => get_schedule_run_detail(state, id).await,
         "topology_run" => get_topology_run_detail(state, id).await,
         "node_execution" => get_node_execution_detail(state, id).await,
         other => Err(GatewayError::ValidationError(format!(
@@ -114,40 +113,28 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
         }
     }
 
-    let scheduled_jobs = state.storage.list_scheduled_jobs().await?;
-    for job in &scheduled_jobs {
-        for run in state.storage.list_scheduled_runs_by_job(job.id).await? {
-            runs.push(RunSummary {
-                kind: "scheduled_run".to_string(),
-                id: run.id,
-                status: classify_scheduled_run_status(run.state.clone(), run.created_at, now),
-                title: job.message.clone(),
-                session_id: Some(job.session_id),
-                bench_id: session_benches.get(&job.session_id).copied(),
-                started_at: run.created_at,
-                updated_at: run
-                    .completed_at
-                    .or(run.started_at)
-                    .unwrap_or(run.created_at),
-                completed_at: run.completed_at,
+    let schedules = state.storage.list_schedules().await?;
+    for schedule in &schedules {
+        for run in state.storage.list_schedule_runs(schedule.id).await? {
+            // Fresh-policy runs record their own session; continuation runs
+            // fall back to the schedule's target session before they start.
+            let session_id = run.session_id.or(match &schedule.session_policy {
+                SessionPolicy::Continuation { session_id } => Some(*session_id),
+                SessionPolicy::Fresh { .. } => None,
             });
-        }
-    }
-
-    let heartbeats = state.storage.list_heartbeats().await?;
-    for heartbeat in &heartbeats {
-        for run in state
-            .storage
-            .list_heartbeat_runs_by_heartbeat(heartbeat.id)
-            .await?
-        {
+            let bench_id = match &schedule.session_policy {
+                SessionPolicy::Fresh { bench_id, .. } => Some(*bench_id),
+                SessionPolicy::Continuation { .. } => {
+                    session_id.and_then(|id| session_benches.get(&id).copied())
+                }
+            };
             runs.push(RunSummary {
-                kind: "heartbeat_run".to_string(),
+                kind: "schedule_run".to_string(),
                 id: run.id,
-                status: classify_heartbeat_run_status(run.state.clone(), run.created_at, now),
-                title: heartbeat.message.clone(),
-                session_id: Some(heartbeat.session_id),
-                bench_id: session_benches.get(&heartbeat.session_id).copied(),
+                status: classify_schedule_run_status(run.state, run.created_at, now),
+                title: schedule.message.clone(),
+                session_id,
+                bench_id,
                 started_at: run.created_at,
                 updated_at: run
                     .completed_at
@@ -257,34 +244,42 @@ async fn get_turn_detail(state: &AppState, id: Uuid) -> Result<RunDetailResponse
     })
 }
 
-async fn get_scheduled_run_detail(
+async fn get_schedule_run_detail(
     state: &AppState,
     id: Uuid,
 ) -> Result<RunDetailResponse, GatewayError> {
     let run = state
         .storage
-        .get_scheduled_run(id)
+        .get_schedule_run(id)
         .await?
-        .ok_or_else(|| not_found("scheduled_run", id))?;
-    let job = state
+        .ok_or_else(|| not_found("schedule_run", id))?;
+    let schedule = state
         .storage
-        .get_scheduled_job(run.job_id)
+        .get_schedule(run.schedule_id)
         .await?
-        .ok_or_else(|| not_found("scheduled_job", run.job_id))?;
-    let summary = RunSummary {
-        kind: "scheduled_run".to_string(),
-        id: run.id,
-        status: classify_scheduled_run_status(run.state.clone(), run.created_at, Utc::now()),
-        title: job.message.clone(),
-        session_id: Some(job.session_id),
-        bench_id: Some(
+        .ok_or_else(|| not_found("schedule", run.schedule_id))?;
+    let session_id = run.session_id.or(match &schedule.session_policy {
+        SessionPolicy::Continuation { session_id } => Some(*session_id),
+        SessionPolicy::Fresh { .. } => None,
+    });
+    let bench_id = match &schedule.session_policy {
+        SessionPolicy::Fresh { bench_id, .. } => Some(*bench_id),
+        SessionPolicy::Continuation { session_id } => Some(
             state
                 .storage
-                .get_session(job.session_id)
+                .get_session(*session_id)
                 .await?
-                .ok_or_else(|| not_found("session", job.session_id))?
+                .ok_or_else(|| not_found("session", *session_id))?
                 .bench_id,
         ),
+    };
+    let summary = RunSummary {
+        kind: "schedule_run".to_string(),
+        id: run.id,
+        status: classify_schedule_run_status(run.state, run.created_at, Utc::now()),
+        title: schedule.message.clone(),
+        session_id,
+        bench_id,
         started_at: run.created_at,
         updated_at: run
             .completed_at
@@ -293,62 +288,17 @@ async fn get_scheduled_run_detail(
         completed_at: run.completed_at,
     };
     let detail = json!({
-        "job_id": run.job_id,
+        "schedule_id": run.schedule_id,
         "trigger": run.trigger.to_string(),
         "scheduled_for": run.scheduled_for,
+        "session_id": run.session_id,
         "turn_id": run.turn_id,
+        "skip_reason": run.skip_reason.map(|reason| reason.to_string()),
+        "gate": run.gate,
         "output_text": run.output_text,
         "error_message": run.error_message,
-        "schedule_expression": job.schedule_expression,
-    });
-    Ok(RunDetailResponse {
-        run: summary,
-        detail,
-    })
-}
-
-async fn get_heartbeat_run_detail(
-    state: &AppState,
-    id: Uuid,
-) -> Result<RunDetailResponse, GatewayError> {
-    let run = state
-        .storage
-        .get_heartbeat_run(id)
-        .await?
-        .ok_or_else(|| not_found("heartbeat_run", id))?;
-    let heartbeat = state
-        .storage
-        .get_heartbeat(run.heartbeat_id)
-        .await?
-        .ok_or_else(|| not_found("heartbeat", run.heartbeat_id))?;
-    let summary = RunSummary {
-        kind: "heartbeat_run".to_string(),
-        id: run.id,
-        status: classify_heartbeat_run_status(run.state.clone(), run.created_at, Utc::now()),
-        title: heartbeat.message.clone(),
-        session_id: Some(heartbeat.session_id),
-        bench_id: Some(
-            state
-                .storage
-                .get_session(heartbeat.session_id)
-                .await?
-                .ok_or_else(|| not_found("session", heartbeat.session_id))?
-                .bench_id,
-        ),
-        started_at: run.created_at,
-        updated_at: run
-            .completed_at
-            .or(run.started_at)
-            .unwrap_or(run.created_at),
-        completed_at: run.completed_at,
-    };
-    let detail = json!({
-        "heartbeat_id": run.heartbeat_id,
-        "scheduled_for": run.scheduled_for,
-        "turn_id": run.turn_id,
-        "output_text": run.output_text,
-        "error_message": run.error_message,
-        "interval_seconds": heartbeat.interval_seconds,
+        "expression": schedule.expression,
+        "session_policy": schedule.session_policy,
     });
     Ok(RunDetailResponse {
         run: summary,
@@ -472,39 +422,22 @@ fn classify_turn_status(state: TurnState, created_at: DateTime<Utc>, now: DateTi
     }
 }
 
-fn classify_scheduled_run_status(
-    state: ScheduledRunState,
+fn classify_schedule_run_status(
+    state: ScheduleRunState,
     created_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> String {
     match state {
-        ScheduledRunState::Pending | ScheduledRunState::Running => {
+        ScheduleRunState::Pending | ScheduleRunState::Running => {
             if now - created_at > STUCK_AFTER {
                 "stuck".to_string()
             } else {
                 "running".to_string()
             }
         }
-        ScheduledRunState::Completed => "completed".to_string(),
-        ScheduledRunState::Failed => "failed".to_string(),
-    }
-}
-
-fn classify_heartbeat_run_status(
-    state: HeartbeatRunState,
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> String {
-    match state {
-        HeartbeatRunState::Pending | HeartbeatRunState::Running => {
-            if now - created_at > STUCK_AFTER {
-                "stuck".to_string()
-            } else {
-                "running".to_string()
-            }
-        }
-        HeartbeatRunState::Completed => "completed".to_string(),
-        HeartbeatRunState::Failed => "failed".to_string(),
+        ScheduleRunState::Completed => "completed".to_string(),
+        ScheduleRunState::Failed => "failed".to_string(),
+        ScheduleRunState::Skipped => "skipped".to_string(),
     }
 }
 

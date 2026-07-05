@@ -42,6 +42,7 @@ function mockBenchStore(overrides: Partial<BenchStore> = {}): BenchStore {
     get isLoading() { return false; },
     loadBenches: vi.fn(),
     selectBench: vi.fn().mockResolvedValue(undefined),
+    closeBench: vi.fn(),
     createBench: vi.fn().mockResolvedValue(undefined),
     deleteBench: vi.fn().mockResolvedValue(undefined),
     ...overrides,

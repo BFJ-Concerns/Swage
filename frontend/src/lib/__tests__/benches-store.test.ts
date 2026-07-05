@@ -106,7 +106,7 @@ describe("loadBenches", () => {
     await store.loadBenches();
 
     // Even when a default bench exists, leave currentBench null so the
-    // bench picker is shown on entry (Progress.md, workup view 04).
+    // bench picker is shown on entry.
     expect(store.currentBench).toBeNull();
   });
 

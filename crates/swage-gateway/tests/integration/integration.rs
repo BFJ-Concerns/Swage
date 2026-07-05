@@ -651,7 +651,7 @@ async fn reject_message_during_active_turn() {
 }
 
 // ===========================================================================
-// Phase 04: Built-in Tools & Task Execution — cross-task integration tests
+// Built-in tools and task execution — cross-task integration tests
 // ===========================================================================
 
 /// Conversation history includes tool_calls on assistant messages.
@@ -706,7 +706,7 @@ async fn conversation_history_includes_tool_calls_field() {
         .find(|m| m["role"] == "assistant")
         .expect("assistant message should exist");
 
-    // Phase 04 requires tool_calls on assistant messages.
+    // Tool-dispatch tests require tool_calls on assistant messages.
     // For a text-only response, the field should be present (empty array).
     assert!(
         assistant_msg.get("tool_calls").is_some(),

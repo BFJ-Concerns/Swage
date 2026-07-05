@@ -406,30 +406,18 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     assert_eq!(link_status, StatusCode::CREATED);
     let session_id = link_body["session_id"].as_str().unwrap();
 
-    let (job_status, _) = post_json(
+    let (schedule_status, _) = post_json(
         origin_addr,
-        "/api/scheduled-jobs",
+        "/api/schedules",
         json!({
-            "session_id": session_id,
             "message": "Nightly sweep",
-            "schedule": { "kind": "interval", "every": "every 10 minutes" },
+            "spec": { "kind": "interval", "every": "every 10 minutes" },
+            "session": { "policy": "continuation", "session_id": session_id },
             "routing": { "deliver_to_origin": false, "store_local_output": true }
         }),
     )
     .await;
-    assert_eq!(job_status, StatusCode::CREATED);
-
-    let (heartbeat_status, _) = post_json(
-        origin_addr,
-        "/api/heartbeats",
-        json!({
-            "session_id": session_id,
-            "message": "Builder heartbeat",
-            "interval_seconds": 300
-        }),
-    )
-    .await;
-    assert_eq!(heartbeat_status, StatusCode::CREATED);
+    assert_eq!(schedule_status, StatusCode::CREATED);
 
     let (export_status, export_body) = get_json(origin_addr, "/api/recovery/export").await;
     assert_eq!(export_status, StatusCode::OK);
@@ -470,13 +458,11 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         "import should restore execution hosts: {hosts_body:?}"
     );
 
-    let (_, jobs_body) = get_json(destination_addr, "/api/scheduled-jobs").await;
-    assert_eq!(jobs_body["jobs"][0]["message"], "Nightly sweep");
-
-    let (_, heartbeats_body) = get_json(destination_addr, "/api/heartbeats").await;
+    let (_, schedules_body) = get_json(destination_addr, "/api/schedules").await;
+    assert_eq!(schedules_body["schedules"][0]["message"], "Nightly sweep");
     assert_eq!(
-        heartbeats_body["heartbeats"][0]["message"],
-        "Builder heartbeat"
+        schedules_body["schedules"][0]["session"]["policy"],
+        "continuation"
     );
 
     node.join_handle.abort();

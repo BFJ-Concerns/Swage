@@ -1,9 +1,9 @@
 <!--
-  Two-stage bench picker per Progress.md:
-    1. Card grid of bench names. Single click on a card selects it and reveals
+  Two-stage bench picker:
+    1. Card grid of bench names. Single click on a bench name selects it and reveals
        a details panel below the grid (about, last opened, conversation count,
        attached folders — though the data is still thin server-side).
-    2. A deliberate second action — the "Open bench" button or double-click —
+    2. A deliberate second action — the bench card's "Open" button —
        enters the bench, which is what calls benchStore.selectBench().
 
   This component renders as the body content when no bench is selected. The
@@ -232,71 +232,49 @@
   <div class="bench-grid">
     {#each benches as bench (bench.id)}
       {@const isSelected = selectedId === bench.id}
-      <!-- A native <button> avoids the a11y_no_noninteractive_element_to_interactive_role
-           warning and gives Enter/Space activation for free. The visual still
-           looks like a card; we just opt out of the default chrome via CSS. -->
-      <button
-        type="button"
-        class="bench-card"
-        class:selected={isSelected}
-        onclick={() => selectCard(bench)}
-        ondblclick={() => openBench(bench.id)}
-      >
+      <!--
+        Card is a non-interactive container; every interactive target inside is
+        a real sibling <button>. The previous markup nested <span role="button">
+        for Open and Settings inside a card <button>, which is invalid HTML and
+        produces unpredictable accessibility-tree behaviour (UI audit f-2).
+        Preview (select) is the bench-name button; Open and Settings are its
+        siblings. Double-click as a skip-preview shortcut is gone — it doesn't
+        translate to touch and was only discoverable after first selecting a
+        card (UI audit f-11). Open is always visible, so preview is optional.
+      -->
+      <article class="bench-card" class:selected={isSelected} aria-label={`Bench ${bench.name}`}>
         <div class="card-top">
-          <h2 class="bench-name">{bench.name}</h2>
-          <!-- ▾ secondary trigger. Same nesting concern as the open button:
-               render as a span with button semantics so the outer card-button
-               stays valid HTML. -->
-          <span
-            role="button"
-            tabindex="0"
-            class="bench-menu"
-            title="Open bench settings"
-            onclick={(event) => {
-              event.stopPropagation();
-              onOpenBenchSettings?.(bench);
-            }}
-            onkeydown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenBenchSettings?.(bench);
-              }
-            }}
+          <button
+            type="button"
+            class="bench-name-btn"
+            onclick={() => selectCard(bench)}
+            aria-pressed={isSelected}
+            aria-label={isSelected ? `Previewing bench ${bench.name}` : `Preview bench ${bench.name}`}
           >
-            ▾
-          </span>
+            <h2 class="bench-name">{bench.name}</h2>
+          </button>
+          {#if onOpenBenchSettings}
+            <button
+              type="button"
+              class="bench-settings"
+              aria-label={`Bench settings for ${bench.name}`}
+              title="Bench settings"
+              onclick={() => onOpenBenchSettings?.(bench)}
+            >
+              ⚙
+            </button>
+          {/if}
         </div>
         {#if bench.is_default}
           <span class="default-mark">Default</span>
         {/if}
-        {#if isSelected}
-          <div class="card-actions">
-            <!-- Inner buttons render as spans-with-events to avoid nesting
-                 <button> inside the card-button (invalid HTML). They keep
-                 keyboard activation via tabindex + key handlers. -->
-            <span
-              role="button"
-              tabindex="0"
-              class="open-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                openBench(bench.id);
-              }}
-              onkeydown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  openBench(bench.id);
-                }
-              }}
-            >
-              Open bench
-            </span>
-            <span class="hint">or double-click the card</span>
-          </div>
-        {/if}
-      </button>
+        <div class="card-actions">
+          <button type="button" class="open-btn" onclick={() => openBench(bench.id)}>
+            Open
+          </button>
+          <span class="hint">Enter to open</span>
+        </div>
+      </article>
     {/each}
 
     <!-- New bench: dashed-border card that flips into an inline form. -->
@@ -545,17 +523,18 @@
     gap: 14px;
   }
 
-  /* Cards — flat ink frame, fluoro orange offset shadow on the active card. */
+  /* Cards — flat ink frame. The offset orange shadow is reserved for the
+     single active selection only, not hover, so it keeps meaning "selected"
+     (UI audit f-18). Hovered cards signal state through border/fill alone. */
   .bench-card {
     position: relative;
     background: var(--paper);
     color: var(--ink);
-    border: 2px solid var(--ink);
+    border: var(--border-strong);
     padding: 18px 20px;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    cursor: pointer;
     text-align: left;
     font: inherit;
     isolation: isolate;
@@ -574,7 +553,8 @@
     transition: opacity 120ms ease;
   }
 
-  .bench-card:hover::after,
+  /* Shadow on selected only — the single active selection. Hover no longer
+     paints the offset so it stops competing for emphasis (UI audit f-18). */
   .bench-card.selected::after {
     opacity: var(--shadow-opacity);
   }
@@ -591,42 +571,83 @@
     gap: 12px;
   }
 
+  /* The bench name is the preview/select trigger — a real button so keyboard
+     and SR are clean (UI audit f-2, f-12). It carries the display type; the
+     <h2> inside keeps the heading semantics. */
+  .bench-name-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    max-width: 100%;
+  }
+
+  .bench-name-btn:hover {
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 4px;
+  }
+
+  .bench-name-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
   .bench-name {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: 28px;
+    font-size: var(--font-display-3);
     line-height: 1;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: inherit;
   }
 
-  .bench-menu {
+  .bench-settings {
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid var(--rule-soft);
     color: inherit;
-    opacity: 0.55;
-    font-family: var(--font-mono);
-    font-size: 13px;
+    opacity: 0.7;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
     line-height: 1;
-    padding: 0 4px;
-    user-select: none;
     cursor: pointer;
+    padding: 0;
   }
 
-  .bench-menu:hover,
-  .bench-menu:focus-visible {
+  .bench-settings:hover,
+  .bench-settings:focus-visible {
     opacity: 1;
+    border-color: var(--ink);
+  }
+
+  .bench-settings:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .default-mark {
     align-self: flex-start;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     line-height: 1;
     letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: var(--accent);
+    /* Text label on paper — use the AA-safe ink-orange, not the decorative
+       accent (UI audit f-8). On the selected (ink) card the accent reads
+       fine as a fill-equivalent, so keep it there. */
+    color: var(--ink-orange);
   }
 
   .bench-card.selected .default-mark {
@@ -642,6 +663,8 @@
     padding-top: 10px;
   }
 
+  /* Always visible — preview is optional when Open is right here (UI audit
+     f-11). Real <button>, sibling to the name/settings buttons (UI audit f-2). */
   .open-btn {
     display: inline-block;
     background: var(--accent);
@@ -649,7 +672,7 @@
     border: none;
     padding: 7px 14px;
     font-family: var(--font-display);
-    font-size: 14px;
+    font-size: var(--font-label-md);
     line-height: 1;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -674,7 +697,7 @@
   .hint {
     font-family: var(--font-body);
     font-style: italic;
-    font-size: 11.5px;
+    font-size: var(--font-label-sm);
     color: rgba(255, 248, 238, 0.7);
   }
 
@@ -738,10 +761,10 @@
     margin: 0;
     font-family: var(--font-mono);
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--font-meta);
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--ink-orange);
+    color: var(--error);
   }
 
   .form-actions {
@@ -996,8 +1019,8 @@
 
   .detail-error {
     margin: 0;
-    color: var(--ink-orange);
-    font-size: 12px;
+    color: var(--error);
+    font-size: var(--font-label-md);
   }
 
   .mono {

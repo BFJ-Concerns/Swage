@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.3 Phase 01: Turn Loop Unification.
+//! Cross-task integration tests for unified turn-loop behaviour.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.

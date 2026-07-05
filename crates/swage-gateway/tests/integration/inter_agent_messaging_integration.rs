@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.3 Phase 04: Inter-Agent Communication.
+//! Cross-task integration tests for inter-agent communication.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full messaging and delegation stack is wired.

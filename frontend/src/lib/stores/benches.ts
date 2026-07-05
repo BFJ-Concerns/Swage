@@ -15,6 +15,8 @@ export interface BenchStore {
   readonly isLoading: boolean;
   loadBenches(): Promise<void>;
   selectBench(id: string): Promise<void>;
+  /** Drop the current bench selection and return to the picker. */
+  closeBench(): void;
   createBench(name: string): Promise<void>;
   deleteBench(id: string): Promise<void>;
 }
@@ -92,7 +94,7 @@ export function createBenchStore(): BenchStore {
         benchesStore.set(benches);
 
         // Deliberately leave currentBench null. The user lands on the bench
-        // picker (Progress.md, workup view 04) and chooses where to work —
+        // picker and chooses where to work —
         // auto-selecting a bench would skip past it.
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
@@ -114,6 +116,13 @@ export function createBenchStore(): BenchStore {
       );
       currentBenchStore.set(opened);
       rememberBenchOpen(id);
+    },
+
+    closeBench() {
+      // Return to the bench picker. The bench list is preserved so reopening
+      // is instant; only the active selection is dropped. The caller is
+      // responsible for navigating the URL to the picker route.
+      currentBenchStore.set(null);
     },
 
     async createBench(name) {

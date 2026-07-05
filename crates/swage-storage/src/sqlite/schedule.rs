@@ -6,8 +6,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewScheduledJob, NewScheduledRun, ScheduledJob, ScheduledRun, ScheduledRunState,
-    UpdateScheduledJob,
+    GateConfig, GateDecision, NewSchedule, NewScheduleRun, Schedule, ScheduleRun, ScheduleRunState,
+    ScheduleRunUpdate, SessionPolicy, UpdateSchedule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
@@ -30,47 +30,130 @@ fn parse_optional_dt(s: Option<String>) -> rusqlite::Result<Option<DateTime<Utc>
     s.map(|value| parse_dt(&value)).transpose()
 }
 
-fn row_to_scheduled_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledJob> {
-    let id: String = row.get(0)?;
-    let session_id: String = row.get(1)?;
-    let agent_id: String = row.get(2)?;
-    let message: String = row.get(3)?;
-    let status: String = row.get(4)?;
-    let kind: String = row.get(5)?;
-    let schedule_expression: String = row.get(6)?;
-    let delivery_json: String = row.get(7)?;
-    let next_run_at: Option<String> = row.get(8)?;
-    let last_run_at: Option<String> = row.get(9)?;
-    let created_at: String = row.get(10)?;
-    let updated_at: String = row.get(11)?;
+fn parse_enum<T: std::str::FromStr<Err = String>>(
+    column: usize,
+    value: &str,
+) -> rusqlite::Result<T> {
+    value.parse().map_err(|error: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })
+}
 
-    Ok(ScheduledJob {
+/// Reassemble the session policy from its flattened columns.
+fn parse_session_policy(
+    policy: &str,
+    bench_id: Option<String>,
+    agent_id: Option<String>,
+    session_id: Option<String>,
+) -> rusqlite::Result<SessionPolicy> {
+    let invalid = |message: &str| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message.to_string(),
+            )),
+        )
+    };
+    match policy {
+        "fresh" => Ok(SessionPolicy::Fresh {
+            bench_id: parse_uuid(
+                &bench_id.ok_or_else(|| invalid("fresh policy row is missing bench_id"))?,
+            )?,
+            agent_id: agent_id.ok_or_else(|| invalid("fresh policy row is missing agent_id"))?,
+        }),
+        "continuation" => Ok(SessionPolicy::Continuation {
+            session_id: parse_uuid(
+                &session_id
+                    .ok_or_else(|| invalid("continuation policy row is missing session_id"))?,
+            )?,
+        }),
+        other => Err(invalid(&format!("unknown session policy: {other}"))),
+    }
+}
+
+/// Flatten the session policy into its column values.
+fn session_policy_columns(
+    policy: &SessionPolicy,
+) -> (&'static str, Option<String>, Option<String>, Option<String>) {
+    match policy {
+        SessionPolicy::Fresh { bench_id, agent_id } => (
+            "fresh",
+            Some(bench_id.to_string()),
+            Some(agent_id.clone()),
+            None,
+        ),
+        SessionPolicy::Continuation { session_id } => {
+            ("continuation", None, None, Some(session_id.to_string()))
+        }
+    }
+}
+
+fn gate_from_columns(model: Option<String>, criteria: Option<String>) -> Option<GateConfig> {
+    model.map(|model| GateConfig { model, criteria })
+}
+
+/// A gate decision is stored as three columns that are always written
+/// together; a row with a verdict but no model (or vice versa) cannot be
+/// produced through this module.
+fn gate_decision_from_columns(
+    column: usize,
+    model: Option<String>,
+    verdict: Option<String>,
+    reasoning: Option<String>,
+) -> rusqlite::Result<Option<GateDecision>> {
+    match (model, verdict) {
+        (Some(model), Some(verdict)) => Ok(Some(GateDecision {
+            model,
+            verdict: parse_enum(column, &verdict)?,
+            reasoning: reasoning.unwrap_or_default(),
+        })),
+        _ => Ok(None),
+    }
+}
+
+const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, bench_id, \
+     agent_id, session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at, \
+     created_at, updated_at";
+
+fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
+    let id: String = row.get(0)?;
+    let message: String = row.get(1)?;
+    let status: String = row.get(2)?;
+    let kind: String = row.get(3)?;
+    let expression: String = row.get(4)?;
+    let session_policy: String = row.get(5)?;
+    let bench_id: Option<String> = row.get(6)?;
+    let agent_id: Option<String> = row.get(7)?;
+    let session_id: Option<String> = row.get(8)?;
+    let delivery_json: String = row.get(9)?;
+    let gate_model: Option<String> = row.get(10)?;
+    let gate_criteria: Option<String> = row.get(11)?;
+    let next_run_at: Option<String> = row.get(12)?;
+    let last_run_at: Option<String> = row.get(13)?;
+    let created_at: String = row.get(14)?;
+    let updated_at: String = row.get(15)?;
+
+    Ok(Schedule {
         id: parse_uuid(&id)?,
-        session_id: parse_uuid(&session_id)?,
-        agent_id,
         message,
-        status: status.parse().map_err(|error: String| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-            )
-        })?,
-        kind: kind.parse().map_err(|error: String| {
-            rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-            )
-        })?,
-        schedule_expression,
+        status: parse_enum(2, &status)?,
+        kind: parse_enum(3, &kind)?,
+        expression,
+        session_policy: parse_session_policy(&session_policy, bench_id, agent_id, session_id)?,
         delivery_routing: serde_json::from_str(&delivery_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                7,
+                9,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
+        gate: gate_from_columns(gate_model, gate_criteria),
         next_run_at: parse_optional_dt(next_run_at)?,
         last_run_at: parse_optional_dt(last_run_at)?,
         created_at: parse_dt(&created_at)?,
@@ -78,38 +161,41 @@ fn row_to_scheduled_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledJo
     })
 }
 
-fn row_to_scheduled_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledRun> {
+const SCHEDULE_RUN_COLUMNS: &str = "id, schedule_id, trigger_kind, state, skip_reason, \
+     scheduled_for, session_id, turn_id, gate_model, gate_verdict, gate_reasoning, output_text, \
+     error_message, created_at, started_at, completed_at";
+
+fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun> {
     let id: String = row.get(0)?;
-    let job_id: String = row.get(1)?;
+    let schedule_id: String = row.get(1)?;
     let trigger_kind: String = row.get(2)?;
     let state: String = row.get(3)?;
-    let scheduled_for: Option<String> = row.get(4)?;
-    let turn_id: Option<String> = row.get(5)?;
-    let output_text: Option<String> = row.get(6)?;
-    let error_message: Option<String> = row.get(7)?;
-    let created_at: String = row.get(8)?;
-    let started_at: Option<String> = row.get(9)?;
-    let completed_at: Option<String> = row.get(10)?;
+    let skip_reason: Option<String> = row.get(4)?;
+    let scheduled_for: Option<String> = row.get(5)?;
+    let session_id: Option<String> = row.get(6)?;
+    let turn_id: Option<String> = row.get(7)?;
+    let gate_model: Option<String> = row.get(8)?;
+    let gate_verdict: Option<String> = row.get(9)?;
+    let gate_reasoning: Option<String> = row.get(10)?;
+    let output_text: Option<String> = row.get(11)?;
+    let error_message: Option<String> = row.get(12)?;
+    let created_at: String = row.get(13)?;
+    let started_at: Option<String> = row.get(14)?;
+    let completed_at: Option<String> = row.get(15)?;
 
-    Ok(ScheduledRun {
+    Ok(ScheduleRun {
         id: parse_uuid(&id)?,
-        job_id: parse_uuid(&job_id)?,
-        trigger: trigger_kind.parse().map_err(|error: String| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-            )
-        })?,
-        state: state.parse().map_err(|error: String| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-            )
-        })?,
+        schedule_id: parse_uuid(&schedule_id)?,
+        trigger: parse_enum(2, &trigger_kind)?,
+        state: parse_enum(3, &state)?,
+        skip_reason: skip_reason
+            .as_deref()
+            .map(|value| parse_enum(4, value))
+            .transpose()?,
         scheduled_for: parse_optional_dt(scheduled_for)?,
+        session_id: session_id.as_deref().map(parse_uuid).transpose()?,
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
+        gate: gate_decision_from_columns(9, gate_model, gate_verdict, gate_reasoning)?,
         output_text,
         error_message,
         created_at: parse_dt(&created_at)?,
@@ -118,9 +204,8 @@ fn row_to_scheduled_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledRu
     })
 }
 
-fn serialise_json(value: &serde_json::Value) -> Result<String, rusqlite::Error> {
-    serde_json::to_string(value)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+fn serialise_json(value: &serde_json::Value) -> Result<String, StorageError> {
+    serde_json::to_string(value).map_err(|error| StorageError::QueryFailed(error.to_string()))
 }
 
 fn serialise_optional_dt(value: Option<DateTime<Utc>>) -> Option<String> {
@@ -129,49 +214,57 @@ fn serialise_optional_dt(value: Option<DateTime<Utc>>) -> Option<String> {
 
 #[async_trait]
 impl ScheduleStore for SqliteStorage {
-    async fn create_scheduled_job(
-        &self,
-        job: NewScheduledJob,
-    ) -> Result<ScheduledJob, StorageError> {
-        let delivery_json = serialise_json(&job.delivery_routing)
-            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
-        self.with_conn(|conn| {
+    async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
+        let delivery_json = serialise_json(&schedule.delivery_routing)?;
+        self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            let next_run_at = serialise_optional_dt(job.next_run_at);
-            let last_run_at = serialise_optional_dt(job.last_run_at);
+            let (policy, bench_id, agent_id, session_id) =
+                session_policy_columns(&schedule.session_policy);
+            let next_run_at = serialise_optional_dt(schedule.next_run_at);
+            let last_run_at = serialise_optional_dt(schedule.last_run_at);
+            let (gate_model, gate_criteria) = match &schedule.gate {
+                Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
+                None => (None, None),
+            };
 
             conn.execute(
-                "INSERT INTO scheduled_jobs
-                 (id, session_id, agent_id, message, status, kind, schedule_expression, delivery_json, next_run_at, last_run_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                "INSERT INTO schedules
+                 (id, message, status, kind, expression, session_policy, bench_id, agent_id,
+                  session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at,
+                  created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
                 params![
                     id.to_string(),
-                    job.session_id.to_string(),
-                    &job.agent_id,
-                    &job.message,
-                    job.status.to_string(),
-                    job.kind.to_string(),
-                    &job.schedule_expression,
+                    &schedule.message,
+                    schedule.status.to_string(),
+                    schedule.kind.to_string(),
+                    &schedule.expression,
+                    policy,
+                    &bench_id,
+                    &agent_id,
+                    &session_id,
                     &delivery_json,
+                    &gate_model,
+                    &gate_criteria,
                     &next_run_at,
                     &last_run_at,
                     &now_str
                 ],
             )?;
 
-            Ok(ScheduledJob {
+            Ok(Schedule {
                 id,
-                session_id: job.session_id,
-                agent_id: job.agent_id,
-                message: job.message,
-                status: job.status,
-                kind: job.kind,
-                schedule_expression: job.schedule_expression,
-                delivery_routing: job.delivery_routing,
-                next_run_at: job.next_run_at,
-                last_run_at: job.last_run_at,
+                message: schedule.message,
+                status: schedule.status,
+                kind: schedule.kind,
+                expression: schedule.expression,
+                session_policy: schedule.session_policy,
+                delivery_routing: schedule.delivery_routing,
+                gate: schedule.gate,
+                next_run_at: schedule.next_run_at,
+                last_run_at: schedule.last_run_at,
                 created_at: now,
                 updated_at: now,
             })
@@ -179,106 +272,102 @@ impl ScheduleStore for SqliteStorage {
         .await
     }
 
-    async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, StorageError> {
-        self.with_conn(|conn| {
+    async fn get_schedule(&self, id: Uuid) -> Result<Option<Schedule>, StorageError> {
+        self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, session_id, agent_id, message, status, kind, schedule_expression,
-                        delivery_json, next_run_at, last_run_at, created_at, updated_at
-                 FROM scheduled_jobs WHERE id = ?1",
+                &format!("SELECT {SCHEDULE_COLUMNS} FROM schedules WHERE id = ?1"),
                 params![id.to_string()],
-                row_to_scheduled_job,
+                row_to_schedule,
             )
             .optional()
         })
         .await
     }
 
-    async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, StorageError> {
+    async fn list_schedules(&self) -> Result<Vec<Schedule>, StorageError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, agent_id, message, status, kind, schedule_expression,
-                        delivery_json, next_run_at, last_run_at, created_at, updated_at
-                 FROM scheduled_jobs ORDER BY created_at ASC",
-            )?;
-            let rows = stmt.query_map([], row_to_scheduled_job)?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCHEDULE_COLUMNS} FROM schedules ORDER BY created_at ASC"
+            ))?;
+            let rows = stmt.query_map([], row_to_schedule)?;
             rows.collect()
         })
         .await
     }
 
-    async fn list_due_scheduled_jobs(
-        &self,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<ScheduledJob>, StorageError> {
+    async fn list_due_schedules(&self, now: DateTime<Utc>) -> Result<Vec<Schedule>, StorageError> {
         let now = now.to_rfc3339();
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, agent_id, message, status, kind, schedule_expression,
-                        delivery_json, next_run_at, last_run_at, created_at, updated_at
-                 FROM scheduled_jobs
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCHEDULE_COLUMNS} FROM schedules
                  WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?1
-                 ORDER BY next_run_at ASC, created_at ASC",
-            )?;
-            let rows = stmt.query_map(params![&now], row_to_scheduled_job)?;
+                 ORDER BY next_run_at ASC, created_at ASC"
+            ))?;
+            let rows = stmt.query_map(params![&now], row_to_schedule)?;
             rows.collect()
         })
         .await
     }
 
-    async fn update_scheduled_job(
+    async fn update_schedule(
         &self,
         id: Uuid,
-        update: UpdateScheduledJob,
-    ) -> Result<ScheduledJob, StorageError> {
+        update: UpdateSchedule,
+    ) -> Result<Schedule, StorageError> {
         let existing = self
-            .get_scheduled_job(id)
+            .get_schedule(id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "ScheduledJob".into(),
+                entity: "Schedule".into(),
                 id: id.to_string(),
             })?;
 
-        let updated = ScheduledJob {
+        let updated = Schedule {
             id: existing.id,
-            session_id: existing.session_id,
-            agent_id: existing.agent_id,
             message: update.message.unwrap_or(existing.message),
             status: update.status.unwrap_or(existing.status),
             kind: update.kind.unwrap_or(existing.kind),
-            schedule_expression: update
-                .schedule_expression
-                .unwrap_or(existing.schedule_expression),
+            expression: update.expression.unwrap_or(existing.expression),
+            session_policy: existing.session_policy,
             delivery_routing: update.delivery_routing.unwrap_or(existing.delivery_routing),
+            gate: update.gate.unwrap_or(existing.gate),
             next_run_at: update.next_run_at.unwrap_or(existing.next_run_at),
             last_run_at: update.last_run_at.unwrap_or(existing.last_run_at),
             created_at: existing.created_at,
             updated_at: Utc::now(),
         };
 
-        let delivery_json = serialise_json(&updated.delivery_routing)
-            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let delivery_json = serialise_json(&updated.delivery_routing)?;
         let next_run_at = serialise_optional_dt(updated.next_run_at);
         let last_run_at = serialise_optional_dt(updated.last_run_at);
         let updated_at = updated.updated_at.to_rfc3339();
+        let (gate_model, gate_criteria) = match &updated.gate {
+            Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
+            None => (None, None),
+        };
 
-        self.with_conn(|conn| {
+        self.with_conn(move |conn| {
             conn.execute(
-                "UPDATE scheduled_jobs
+                "UPDATE schedules
                  SET message = ?1,
                      status = ?2,
                      kind = ?3,
-                     schedule_expression = ?4,
+                     expression = ?4,
                      delivery_json = ?5,
-                     next_run_at = ?6,
-                     last_run_at = ?7,
-                     updated_at = ?8
-                 WHERE id = ?9",
+                     gate_model = ?6,
+                     gate_criteria = ?7,
+                     next_run_at = ?8,
+                     last_run_at = ?9,
+                     updated_at = ?10
+                 WHERE id = ?11",
                 params![
                     &updated.message,
                     updated.status.to_string(),
                     updated.kind.to_string(),
-                    &updated.schedule_expression,
+                    &updated.expression,
                     &delivery_json,
+                    &gate_model,
+                    &gate_criteria,
                     &next_run_at,
                     &last_run_at,
                     &updated_at,
@@ -290,10 +379,10 @@ impl ScheduleStore for SqliteStorage {
         .await
     }
 
-    async fn delete_scheduled_job(&self, id: Uuid) -> Result<bool, StorageError> {
-        self.with_conn(|conn| {
+    async fn delete_schedule(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.with_conn(move |conn| {
             let affected = conn.execute(
-                "DELETE FROM scheduled_jobs WHERE id = ?1",
+                "DELETE FROM schedules WHERE id = ?1",
                 params![id.to_string()],
             )?;
             Ok(affected > 0)
@@ -301,122 +390,144 @@ impl ScheduleStore for SqliteStorage {
         .await
     }
 
-    async fn create_scheduled_run(
-        &self,
-        run: NewScheduledRun,
-    ) -> Result<ScheduledRun, StorageError> {
-        self.with_conn(|conn| {
+    async fn create_schedule_run(&self, run: NewScheduleRun) -> Result<ScheduleRun, StorageError> {
+        self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let created_at = now.to_rfc3339();
             let scheduled_for = serialise_optional_dt(run.scheduled_for);
-            let turn_id = run.turn_id.map(|value| value.to_string());
-            let started_at = serialise_optional_dt(run.started_at);
-            let completed_at = serialise_optional_dt(run.completed_at);
+            let state = run.state.to_string();
+            let skip_reason = run.skip_reason.map(|reason| reason.to_string());
+            // A run born terminal (an overlap skip) is complete the moment it
+            // is recorded; a pending run has not finished.
+            let completed_at = matches!(
+                run.state,
+                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+            )
+            .then(|| now.to_rfc3339());
 
             conn.execute(
-                "INSERT INTO scheduled_runs
-                 (id, job_id, trigger_kind, state, scheduled_for, turn_id, output_text, error_message, created_at, started_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO schedule_runs
+                 (id, schedule_id, trigger_kind, state, skip_reason, scheduled_for,
+                  error_message, created_at, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     id.to_string(),
-                    run.job_id.to_string(),
+                    run.schedule_id.to_string(),
                     run.trigger.to_string(),
-                    run.state.to_string(),
+                    &state,
+                    &skip_reason,
                     &scheduled_for,
-                    &turn_id,
-                    &run.output_text,
                     &run.error_message,
                     &created_at,
-                    &started_at,
-                    &completed_at
+                    &completed_at,
                 ],
             )?;
 
-            Ok(ScheduledRun {
+            Ok(ScheduleRun {
                 id,
-                job_id: run.job_id,
+                schedule_id: run.schedule_id,
                 trigger: run.trigger,
                 state: run.state,
+                skip_reason: run.skip_reason,
                 scheduled_for: run.scheduled_for,
-                turn_id: run.turn_id,
-                output_text: run.output_text,
+                session_id: None,
+                turn_id: None,
+                gate: None,
+                output_text: None,
                 error_message: run.error_message,
                 created_at: now,
-                started_at: run.started_at,
-                completed_at: run.completed_at,
+                started_at: None,
+                completed_at: completed_at.as_deref().map(parse_dt).transpose()?,
             })
         })
         .await
     }
 
-    async fn get_scheduled_run(&self, id: Uuid) -> Result<Option<ScheduledRun>, StorageError> {
-        self.with_conn(|conn| {
+    async fn get_schedule_run(&self, id: Uuid) -> Result<Option<ScheduleRun>, StorageError> {
+        self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, job_id, trigger_kind, state, scheduled_for, turn_id, output_text, error_message, created_at, started_at, completed_at
-                 FROM scheduled_runs WHERE id = ?1",
+                &format!("SELECT {SCHEDULE_RUN_COLUMNS} FROM schedule_runs WHERE id = ?1"),
                 params![id.to_string()],
-                row_to_scheduled_run,
+                row_to_schedule_run,
             )
             .optional()
         })
         .await
     }
 
-    async fn list_scheduled_runs_by_job(
+    async fn list_schedule_runs(
         &self,
-        job_id: Uuid,
-    ) -> Result<Vec<ScheduledRun>, StorageError> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, job_id, trigger_kind, state, scheduled_for, turn_id, output_text, error_message, created_at, started_at, completed_at
-                 FROM scheduled_runs WHERE job_id = ?1 ORDER BY created_at ASC",
-            )?;
-            let rows = stmt.query_map(params![job_id.to_string()], row_to_scheduled_run)?;
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleRun>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCHEDULE_RUN_COLUMNS} FROM schedule_runs
+                 WHERE schedule_id = ?1 ORDER BY created_at ASC"
+            ))?;
+            let rows = stmt.query_map(params![schedule_id.to_string()], row_to_schedule_run)?;
             rows.collect()
         })
         .await
     }
 
-    async fn update_scheduled_run_state(
+    async fn update_schedule_run(
         &self,
         id: Uuid,
-        state: ScheduledRunState,
-        turn_id: Option<Uuid>,
-        output_text: Option<&str>,
-        error_message: Option<&str>,
+        update: ScheduleRunUpdate,
     ) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
+        self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
-            let turn_id = turn_id.map(|value| value.to_string());
-            let started_at = if matches!(state, ScheduledRunState::Running) {
-                Some(now.clone())
-            } else {
-                None
+            let state = update.state.map(|state| state.to_string());
+            let skip_reason = update.skip_reason.map(|reason| reason.to_string());
+            let session_id = update.session_id.map(|value| value.to_string());
+            let turn_id = update.turn_id.map(|value| value.to_string());
+            let (gate_model, gate_verdict, gate_reasoning) = match update.gate {
+                Some(gate) => (
+                    Some(gate.model),
+                    Some(gate.verdict.to_string()),
+                    Some(gate.reasoning),
+                ),
+                None => (None, None, None),
             };
-            let completed_at = if matches!(
-                state,
-                ScheduledRunState::Completed | ScheduledRunState::Failed
-            ) {
-                Some(now)
-            } else {
-                None
-            };
+            // Timestamps follow the state transition: entering Running
+            // stamps started_at, any terminal state stamps completed_at.
+            let started_at =
+                matches!(update.state, Some(ScheduleRunState::Running)).then(|| now.clone());
+            let completed_at = matches!(
+                update.state,
+                Some(
+                    ScheduleRunState::Completed
+                        | ScheduleRunState::Failed
+                        | ScheduleRunState::Skipped
+                )
+            )
+            .then_some(now);
 
             conn.execute(
-                "UPDATE scheduled_runs
-                 SET state = ?1,
-                     turn_id = COALESCE(?2, turn_id),
-                     output_text = COALESCE(?3, output_text),
-                     error_message = COALESCE(?4, error_message),
-                     started_at = COALESCE(?5, started_at),
-                     completed_at = COALESCE(?6, completed_at)
-                 WHERE id = ?7",
+                "UPDATE schedule_runs
+                 SET state = COALESCE(?1, state),
+                     skip_reason = COALESCE(?2, skip_reason),
+                     session_id = COALESCE(?3, session_id),
+                     turn_id = COALESCE(?4, turn_id),
+                     gate_model = COALESCE(?5, gate_model),
+                     gate_verdict = COALESCE(?6, gate_verdict),
+                     gate_reasoning = COALESCE(?7, gate_reasoning),
+                     output_text = COALESCE(?8, output_text),
+                     error_message = COALESCE(?9, error_message),
+                     started_at = COALESCE(?10, started_at),
+                     completed_at = COALESCE(?11, completed_at)
+                 WHERE id = ?12",
                 params![
-                    state.to_string(),
+                    &state,
+                    &skip_reason,
+                    &session_id,
                     &turn_id,
-                    &output_text,
-                    &error_message,
+                    &gate_model,
+                    &gate_verdict,
+                    &gate_reasoning,
+                    &update.output_text,
+                    &update.error_message,
                     &started_at,
                     &completed_at,
                     id.to_string()
@@ -427,19 +538,20 @@ impl ScheduleStore for SqliteStorage {
         .await
     }
 
-    async fn recover_incomplete_scheduled_runs(
+    async fn recover_incomplete_schedule_runs(
         &self,
         error_message: &str,
     ) -> Result<u64, StorageError> {
-        self.with_conn(|conn| {
+        let error_message = error_message.to_string();
+        self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
             let changed = conn.execute(
-                "UPDATE scheduled_runs
+                "UPDATE schedule_runs
                  SET state = 'failed',
                      error_message = ?1,
                      completed_at = ?2
                  WHERE state IN ('pending', 'running')",
-                params![error_message, now],
+                params![&error_message, now],
             )?;
             Ok(changed as u64)
         })
@@ -450,13 +562,13 @@ impl ScheduleStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::{
-        NewBench, ScheduledJobKind, ScheduledJobStatus, ScheduledRunState, ScheduledRunTrigger,
+        GateVerdict, NewBench, ScheduleKind, ScheduleRunTrigger, ScheduleStatus, SkipReason,
     };
     use crate::store::{BenchStore, SessionStore};
 
     use super::*;
 
-    async fn make_storage_with_session() -> (SqliteStorage, Uuid) {
+    async fn make_storage_with_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let bench = storage
             .create(NewBench {
@@ -474,190 +586,322 @@ mod tests {
             })
             .await
             .unwrap();
-        (storage, session.id)
+        (storage, bench.id, session.id)
+    }
+
+    fn fresh_schedule(bench_id: Uuid) -> NewSchedule {
+        NewSchedule {
+            message: "run now".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Interval,
+            expression: "every 5 seconds".into(),
+            session_policy: SessionPolicy::Fresh {
+                bench_id,
+                agent_id: "gateway".into(),
+            },
+            delivery_routing: serde_json::json!({"store_local_output": true}),
+            gate: None,
+            next_run_at: Some(Utc::now()),
+            last_run_at: None,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn scheduled_job_round_trips_and_due_query_filters_active_rows() {
-        let (storage, session_id) = make_storage_with_session().await;
-        let now = Utc::now();
-        let due = storage
-            .create_scheduled_job(NewScheduledJob {
-                session_id,
-                agent_id: "gateway".into(),
-                message: "run now".into(),
-                status: ScheduledJobStatus::Active,
-                kind: ScheduledJobKind::Interval,
-                schedule_expression: "every 5 seconds".into(),
-                delivery_routing: serde_json::json!({"store_local_output": true}),
-                next_run_at: Some(now),
-                last_run_at: None,
+    async fn schedule_round_trips_both_session_policies_and_gate() {
+        let (storage, bench_id, session_id) = make_storage_with_session().await;
+
+        let fresh = storage
+            .create_schedule(NewSchedule {
+                gate: Some(GateConfig {
+                    model: "small".into(),
+                    criteria: Some("only when the queue is non-empty".into()),
+                }),
+                ..fresh_schedule(bench_id)
             })
+            .await
+            .unwrap();
+        let continuation = storage
+            .create_schedule(NewSchedule {
+                message: "check in".into(),
+                session_policy: SessionPolicy::Continuation { session_id },
+                ..fresh_schedule(bench_id)
+            })
+            .await
+            .unwrap();
+
+        let fetched = storage.get_schedule(fresh.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.session_policy,
+            SessionPolicy::Fresh {
+                bench_id,
+                agent_id: "gateway".into()
+            }
+        );
+        let gate = fetched.gate.expect("gate persisted");
+        assert_eq!(gate.model, "small");
+        assert_eq!(
+            gate.criteria.as_deref(),
+            Some("only when the queue is non-empty")
+        );
+
+        let fetched = storage
+            .get_schedule(continuation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fetched.session_policy,
+            SessionPolicy::Continuation { session_id }
+        );
+        assert!(fetched.gate.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn due_query_only_returns_active_rows() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        let due = storage
+            .create_schedule(fresh_schedule(bench_id))
             .await
             .unwrap();
         storage
-            .create_scheduled_job(NewScheduledJob {
-                session_id,
-                agent_id: "gateway".into(),
-                message: "paused".into(),
-                status: ScheduledJobStatus::Paused,
-                kind: ScheduledJobKind::Interval,
-                schedule_expression: "every 5 seconds".into(),
-                delivery_routing: serde_json::json!({"store_local_output": true}),
-                next_run_at: Some(now),
-                last_run_at: None,
+            .create_schedule(NewSchedule {
+                status: ScheduleStatus::Paused,
+                ..fresh_schedule(bench_id)
             })
             .await
             .unwrap();
 
-        let due_jobs = storage.list_due_scheduled_jobs(now).await.unwrap();
-        assert_eq!(due_jobs.len(), 1);
-        assert_eq!(due_jobs[0].id, due.id);
-
-        let fetched = storage.get_scheduled_job(due.id).await.unwrap().unwrap();
-        assert_eq!(fetched.message, "run now");
-        assert_eq!(fetched.delivery_routing["store_local_output"], true);
+        let due_schedules = storage.list_due_schedules(Utc::now()).await.unwrap();
+        assert_eq!(due_schedules.len(), 1);
+        assert_eq!(due_schedules[0].id, due.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn scheduled_run_round_trips_and_updates_state() {
-        let (storage, session_id) = make_storage_with_session().await;
-        let job = storage
-            .create_scheduled_job(NewScheduledJob {
-                session_id,
-                agent_id: "gateway".into(),
-                message: "run".into(),
-                status: ScheduledJobStatus::Active,
-                kind: ScheduledJobKind::OneShot,
-                schedule_expression: "2026-04-17T12:00:00Z".into(),
-                delivery_routing: serde_json::json!({"store_local_output": true}),
-                next_run_at: None,
-                last_run_at: None,
+    async fn update_can_remove_the_gate() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                gate: Some(GateConfig {
+                    model: "small".into(),
+                    criteria: None,
+                }),
+                ..fresh_schedule(bench_id)
             })
+            .await
+            .unwrap();
+
+        let updated = storage
+            .update_schedule(
+                schedule.id,
+                UpdateSchedule {
+                    gate: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated.gate.is_none());
+        let fetched = storage.get_schedule(schedule.id).await.unwrap().unwrap();
+        assert!(fetched.gate.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_accumulates_gate_decision_skip_reason_and_state() {
+        let (storage, bench_id, session_id) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(bench_id))
             .await
             .unwrap();
         let run = storage
-            .create_scheduled_run(NewScheduledRun {
-                job_id: job.id,
-                trigger: ScheduledRunTrigger::Manual,
-                state: ScheduledRunState::Pending,
-                scheduled_for: None,
-                turn_id: None,
-                output_text: None,
-                error_message: None,
-                started_at: None,
-                completed_at: None,
-            })
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
             .await
             .unwrap();
+        assert_eq!(run.state, ScheduleRunState::Pending);
 
         storage
-            .update_scheduled_run_state(
+            .update_schedule_run(
                 run.id,
-                ScheduledRunState::Completed,
-                Some(Uuid::new_v4()),
-                Some("done"),
-                None,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Skipped),
+                    skip_reason: Some(SkipReason::Gate),
+                    gate: Some(GateDecision {
+                        model: "small".into(),
+                        verdict: GateVerdict::Skip,
+                        reasoning: "nothing has changed since the last run".into(),
+                    }),
+                    session_id: Some(session_id),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
 
-        let fetched = storage.get_scheduled_run(run.id).await.unwrap().unwrap();
-        assert_eq!(fetched.state, ScheduledRunState::Completed);
-        assert_eq!(fetched.output_text.as_deref(), Some("done"));
-        assert!(fetched.completed_at.is_some());
+        let fetched = storage.get_schedule_run(run.id).await.unwrap().unwrap();
+        assert_eq!(fetched.state, ScheduleRunState::Skipped);
+        assert_eq!(fetched.skip_reason, Some(SkipReason::Gate));
+        assert_eq!(fetched.session_id, Some(session_id));
+        let gate = fetched.gate.expect("gate decision persisted");
+        assert_eq!(gate.verdict, GateVerdict::Skip);
+        assert_eq!(gate.reasoning, "nothing has changed since the last run");
+        assert!(
+            fetched.completed_at.is_some(),
+            "skipping is a terminal state and stamps completed_at"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn recovery_fails_incomplete_scheduled_runs() {
-        let (storage, session_id) = make_storage_with_session().await;
-        let job = storage
-            .create_scheduled_job(NewScheduledJob {
-                session_id,
-                agent_id: "gateway".into(),
-                message: "run".into(),
-                status: ScheduledJobStatus::Active,
-                kind: ScheduledJobKind::OneShot,
-                schedule_expression: "2026-04-17T12:00:00Z".into(),
-                delivery_routing: serde_json::json!({"store_local_output": true}),
-                next_run_at: None,
-                last_run_at: None,
-            })
+    async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+
+        // The first pending run claims the schedule's one in-flight slot.
+        let first = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        // A second in-flight run for the same schedule is refused by the
+        // partial unique index — the insert *is* the overlap check.
+        let clash = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await;
+        assert!(
+            matches!(clash, Err(StorageError::ConstraintViolation(_))),
+            "a second in-flight run must trip the guard, got {clash:?}"
+        );
+
+        // A run born terminal (an overlap skip) sits outside the predicate,
+        // so it coexists with the live run freely.
+        storage
+            .create_schedule_run(NewScheduleRun::skipped_overlap(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+                "a previous run of this schedule was still in flight",
+            ))
+            .await
+            .unwrap();
+
+        // Once the first run finishes, the slot frees and a fresh run inserts.
+        storage
+            .update_schedule_run(
+                first.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Completed),
+                    output_text: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .expect("a new run inserts once the slot is free");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_fails_incomplete_runs_and_leaves_finished_ones() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        // Incomplete runs land on separate schedules: the one-in-flight
+        // guard forbids two non-terminal runs on a single schedule, and
+        // recovery sweeps them across the whole table regardless.
+        let schedule_a = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+        let schedule_b = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+
+        // A finished run first, so it frees schedule A's slot for the
+        // still-running run that follows.
+        let completed = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_a.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                completed.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Completed),
+                    output_text: Some("done".into()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let running = storage
-            .create_scheduled_run(NewScheduledRun {
-                job_id: job.id,
-                trigger: ScheduledRunTrigger::Scheduled,
-                state: ScheduledRunState::Running,
-                scheduled_for: Some(Utc::now()),
-                turn_id: Some(Uuid::new_v4()),
-                output_text: None,
-                error_message: None,
-                started_at: Some(Utc::now()),
-                completed_at: None,
-            })
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_a.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                running.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Running),
+                    turn_id: Some(Uuid::new_v4()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let pending = storage
-            .create_scheduled_run(NewScheduledRun {
-                job_id: job.id,
-                trigger: ScheduledRunTrigger::Scheduled,
-                state: ScheduledRunState::Pending,
-                scheduled_for: Some(Utc::now()),
-                turn_id: None,
-                output_text: None,
-                error_message: None,
-                started_at: None,
-                completed_at: None,
-            })
-            .await
-            .unwrap();
-        let completed = storage
-            .create_scheduled_run(NewScheduledRun {
-                job_id: job.id,
-                trigger: ScheduledRunTrigger::Manual,
-                state: ScheduledRunState::Completed,
-                scheduled_for: None,
-                turn_id: Some(Uuid::new_v4()),
-                output_text: Some("done".into()),
-                error_message: None,
-                started_at: Some(Utc::now()),
-                completed_at: Some(Utc::now()),
-            })
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule_b.id,
+                ScheduleRunTrigger::Tick,
+                Some(Utc::now()),
+            ))
             .await
             .unwrap();
 
         let count = storage
-            .recover_incomplete_scheduled_runs("gateway stopped")
+            .recover_incomplete_schedule_runs("gateway stopped")
             .await
             .unwrap();
         assert_eq!(count, 2);
 
-        let recovered = storage
-            .get_scheduled_run(running.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.state, ScheduledRunState::Failed);
-        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
-        assert!(recovered.completed_at.is_some());
-
-        let recovered = storage
-            .get_scheduled_run(pending.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.state, ScheduledRunState::Failed);
-        assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
-        assert!(recovered.completed_at.is_some());
+        for id in [running.id, pending.id] {
+            let recovered = storage.get_schedule_run(id).await.unwrap().unwrap();
+            assert_eq!(recovered.state, ScheduleRunState::Failed);
+            assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
+            assert!(recovered.completed_at.is_some());
+        }
 
         let untouched = storage
-            .get_scheduled_run(completed.id)
+            .get_schedule_run(completed.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(untouched.state, ScheduledRunState::Completed);
+        assert_eq!(untouched.state, ScheduleRunState::Completed);
         assert_eq!(untouched.output_text.as_deref(), Some("done"));
     }
 }

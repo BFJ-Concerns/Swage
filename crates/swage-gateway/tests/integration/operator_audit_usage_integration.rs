@@ -23,14 +23,14 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, HeartbeatRunState, HeartbeatStatus, NewAgentMemoryRecord, NewApprovalRequest,
-    NewHeartbeat, NewNodeExecution, NewScheduledJob, NewScheduledRun, NewSession, NewTeam,
-    NewThread, NewTopologyRun, NewTurn, NodeExecutionState, ScheduledJobKind, ScheduledJobStatus,
-    ScheduledRunState, ScheduledRunTrigger, SqliteStorage, TopologyRunState, TurnState,
+    ApprovalKind, NewAgentMemoryRecord, NewApprovalRequest, NewNodeExecution, NewSchedule,
+    NewScheduleRun, NewSession, NewTeam, NewThread, NewTopologyRun, NewTurn, NodeExecutionState,
+    ScheduleKind, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus,
+    SessionPolicy, SqliteStorage, TopologyRunState, TurnState,
     model::{AppendMessage, TopologyNodeRecordKind},
     store::{
-        AgentMemoryStore, ApprovalStore, BenchStore, HeartbeatStore, MessageStore, ScheduleStore,
-        SessionStore, Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
+        AgentMemoryStore, ApprovalStore, BenchStore, MessageStore, ScheduleStore, SessionStore,
+        Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
     },
 };
 
@@ -182,32 +182,38 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         })
         .await
         .unwrap();
-    let job = storage
-        .create_scheduled_job(NewScheduledJob {
-            session_id,
-            agent_id: "gateway".into(),
+    let schedule = storage
+        .create_schedule(NewSchedule {
             message: "schedule needle".into(),
-            status: ScheduledJobStatus::Active,
-            kind: ScheduledJobKind::Interval,
-            schedule_expression: "every minute".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Interval,
+            expression: "every 1 minutes".into(),
+            session_policy: SessionPolicy::Continuation { session_id },
             delivery_routing: json!({"store_local_output": true}),
+            gate: None,
             next_run_at: None,
             last_run_at: None,
         })
         .await
         .unwrap();
-    let scheduled_run = storage
-        .create_scheduled_run(NewScheduledRun {
-            job_id: job.id,
-            trigger: ScheduledRunTrigger::Manual,
-            state: ScheduledRunState::Completed,
-            scheduled_for: None,
-            turn_id: Some(turn.id),
-            output_text: Some("run output".into()),
-            error_message: None,
-            started_at: Some(chrono::Utc::now()),
-            completed_at: Some(chrono::Utc::now()),
-        })
+    let schedule_run = storage
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Manual,
+            None,
+        ))
+        .await
+        .unwrap();
+    storage
+        .update_schedule_run(
+            schedule_run.id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Completed),
+                turn_id: Some(turn.id),
+                output_text: Some("run output".into()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     deliver_to_targets(
@@ -242,11 +248,11 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
 
     let (run_status, run_body) = get_json(
         &router,
-        "/api/operator/search?kind=scheduled_run&q=schedule%20needle",
+        "/api/operator/search?kind=schedule_run&q=schedule%20needle",
     )
     .await;
     assert_eq!(run_status, StatusCode::OK);
-    assert_eq!(run_body["results"][0]["id"], scheduled_run.id.to_string());
+    assert_eq!(run_body["results"][0]["id"], schedule_run.id.to_string());
 
     let (delivery_status, delivery_body) = get_json(
         &router,
@@ -413,68 +419,48 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
     .await;
     assert_eq!(approval_status, StatusCode::OK);
 
-    let job = storage
-        .create_scheduled_job(NewScheduledJob {
-            session_id,
-            agent_id: "gateway".into(),
+    let schedule = storage
+        .create_schedule(NewSchedule {
             message: "nightly".into(),
-            status: ScheduledJobStatus::Active,
-            kind: ScheduledJobKind::Interval,
-            schedule_expression: "every minute".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Interval,
+            expression: "every 1 minutes".into(),
+            session_policy: SessionPolicy::Continuation { session_id },
             delivery_routing: json!({"store_local_output": true}),
+            gate: None,
             next_run_at: None,
             last_run_at: None,
         })
         .await
         .unwrap();
     let run = storage
-        .create_scheduled_run(NewScheduledRun {
-            job_id: job.id,
-            trigger: ScheduledRunTrigger::Scheduled,
-            state: ScheduledRunState::Running,
-            scheduled_for: None,
-            turn_id: None,
-            output_text: None,
-            error_message: None,
-            started_at: Some(chrono::Utc::now()),
-            completed_at: None,
-        })
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Tick,
+            None,
+        ))
         .await
         .unwrap();
     storage
-        .update_scheduled_run_state(
+        .update_schedule_run(
             run.id,
-            ScheduledRunState::Failed,
-            None,
-            None,
-            Some("failed later"),
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Running),
+                session_id: Some(session_id),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-
-    let heartbeat = storage
-        .create_heartbeat(NewHeartbeat {
-            session_id,
-            agent_id: "gateway".into(),
-            message: "hb".into(),
-            interval_seconds: 60,
-            status: HeartbeatStatus::Enabled,
-            last_beat_at: None,
-            next_beat_at: None,
-        })
-        .await
-        .unwrap();
-    let _heartbeat_run = storage
-        .create_heartbeat_run(swage_storage::NewHeartbeatRun {
-            heartbeat_id: heartbeat.id,
-            state: HeartbeatRunState::Completed,
-            scheduled_for: None,
-            turn_id: None,
-            output_text: Some("ok".into()),
-            error_message: None,
-            started_at: Some(chrono::Utc::now()),
-            completed_at: Some(chrono::Utc::now()),
-        })
+    storage
+        .update_schedule_run(
+            run.id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Failed),
+                error_message: Some("failed later".into()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
 
@@ -580,10 +566,10 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
     );
     assert!(
         excerpts.iter().any(|excerpt| {
-            excerpt.contains("scheduled run state running -> failed")
+            excerpt.contains("schedule run state running -> failed")
                 && excerpt.contains("\"from_state\":\"running\"")
         }),
-        "expected scheduled-run transition audit event, got: {body:?}"
+        "expected schedule-run transition audit event, got: {body:?}"
     );
     assert!(
         excerpts.iter().any(|excerpt| {
@@ -623,40 +609,46 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
         .await
         .unwrap();
 
-    let job = storage
-        .create_scheduled_job(NewScheduledJob {
-            session_id,
-            agent_id: "gateway".into(),
-            message: "usage job".into(),
-            status: ScheduledJobStatus::Active,
-            kind: ScheduledJobKind::Interval,
-            schedule_expression: "every minute".into(),
+    let schedule = storage
+        .create_schedule(NewSchedule {
+            message: "usage schedule".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Interval,
+            expression: "every 1 minutes".into(),
+            session_policy: SessionPolicy::Continuation { session_id },
             delivery_routing: json!({"store_local_output": true}),
+            gate: None,
             next_run_at: None,
             last_run_at: None,
         })
         .await
         .unwrap();
+    let usage_run = storage
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            ScheduleRunTrigger::Manual,
+            None,
+        ))
+        .await
+        .unwrap();
     storage
-        .create_scheduled_run(NewScheduledRun {
-            job_id: job.id,
-            trigger: ScheduledRunTrigger::Manual,
-            state: ScheduledRunState::Completed,
-            scheduled_for: None,
-            turn_id: Some(turn.id),
-            output_text: Some("done".into()),
-            error_message: None,
-            started_at: Some(chrono::Utc::now()),
-            completed_at: Some(chrono::Utc::now()),
-        })
+        .update_schedule_run(
+            usage_run.id,
+            ScheduleRunUpdate {
+                state: Some(ScheduleRunState::Completed),
+                turn_id: Some(turn.id),
+                output_text: Some("done".into()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
 
     let (status, body) = get_json(
         &router,
         &format!(
-            "/api/operator/usage?run_kind=user_turn&run_id={}&session_id={}&scheduled_job_id={}",
-            turn.id, session_id, job.id
+            "/api/operator/usage?run_kind=user_turn&run_id={}&session_id={}&schedule_id={}",
+            turn.id, session_id, schedule.id
         ),
     )
     .await;
@@ -667,7 +659,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
     assert_eq!(body["session"]["input_tokens"], 120);
     assert_eq!(body["session"]["output_tokens"], 45);
     assert_eq!(body["session"]["cost_microcents"], 700);
-    assert_eq!(body["scheduled_job"]["run_count"], 1);
-    assert_eq!(body["scheduled_job"]["input_tokens"], 120);
-    assert_eq!(body["scheduled_job"]["cost_microcents"], 700);
+    assert_eq!(body["schedule"]["run_count"], 1);
+    assert_eq!(body["schedule"]["input_tokens"], 120);
+    assert_eq!(body["schedule"]["cost_microcents"], 700);
 }

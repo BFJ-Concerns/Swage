@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::provider::{LlmProvider, ProviderConfig};
@@ -253,27 +253,8 @@ impl GoogleProvider {
 
                 let mut parts = Vec::new();
 
-                // Tool result messages produce function_response parts.
-                if msg.role() == Role::Tool {
-                    if let Some(call_id) = msg.tool_call_id() {
-                        let text: String = msg
-                            .content()
-                            .iter()
-                            .filter_map(|p| match p {
-                                ContentPart::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        parts.push(GeminiPart {
-                            text: None,
-                            function_call: None,
-                            function_response: Some(GeminiFunctionResponse {
-                                name: call_id.to_string(),
-                                response: serde_json::json!({ "result": text }),
-                            }),
-                        });
-                    }
+                if let Some(replay) = msg.tool_replay() {
+                    parts.extend(Self::convert_tool_replay_parts(replay));
                 } else {
                     // Regular text parts.
                     for part in msg.content() {
@@ -284,20 +265,6 @@ impl GoogleProvider {
                             parts.push(GeminiPart {
                                 text: Some(text.clone()),
                                 function_call: None,
-                                function_response: None,
-                            });
-                        }
-                    }
-
-                    // Assistant messages may include tool calls as function_call parts.
-                    if let Some(calls) = msg.tool_calls() {
-                        for tc in calls {
-                            parts.push(GeminiPart {
-                                text: None,
-                                function_call: Some(GeminiFunctionCall {
-                                    name: tc.name.clone(),
-                                    args: tc.arguments.clone(),
-                                }),
                                 function_response: None,
                             });
                         }
@@ -317,6 +284,44 @@ impl GoogleProvider {
                     role: Some(role.to_string()),
                     parts,
                 }
+            })
+            .collect()
+    }
+
+    fn convert_tool_replay_parts(replay: &[ToolReplayPart]) -> Vec<GeminiPart> {
+        replay
+            .iter()
+            .map(|part| match part {
+                ToolReplayPart::Text { text } => GeminiPart {
+                    text: Some(text.clone()),
+                    function_call: None,
+                    function_response: None,
+                },
+                ToolReplayPart::Reasoning { content, .. } => GeminiPart {
+                    text: Some(content.clone()),
+                    function_call: None,
+                    function_response: None,
+                },
+                ToolReplayPart::ToolCall {
+                    name, arguments, ..
+                } => GeminiPart {
+                    text: None,
+                    function_call: Some(GeminiFunctionCall {
+                        name: name.clone(),
+                        args: arguments.clone(),
+                    }),
+                    function_response: None,
+                },
+                ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } => GeminiPart {
+                    text: None,
+                    function_call: None,
+                    function_response: Some(GeminiFunctionResponse {
+                        name: call_id.clone(),
+                        response: serde_json::json!({ "result": content }),
+                    }),
+                },
             })
             .collect()
     }
@@ -352,7 +357,7 @@ impl GoogleProvider {
                 let parameters = def
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
-                    .cloned()
+                    .map(crate::tool_schema::provider_tool_schema)
                     .unwrap_or_else(|| serde_json::json!({"type": "object"}));
                 Some(GeminiFunctionDeclaration {
                     name,
@@ -406,7 +411,7 @@ impl GoogleProvider {
                 let parameters = def
                     .get("parameters")
                     .or_else(|| def.get("input_schema"))
-                    .cloned()
+                    .map(crate::tool_schema::provider_tool_schema)
                     .unwrap_or_else(|| serde_json::json!({"type": "object"}));
                 Some(GeminiFunctionDeclaration {
                     name,
@@ -549,6 +554,19 @@ impl GoogleProvider {
 impl LlmProvider for GoogleProvider {
     fn model_id(&self) -> &str {
         &self.config.model
+    }
+
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "google",
+            "protocol": "generate_content",
+            "stream": stream,
+            "body": self.build_request(request),
+        })
     }
 
     async fn complete(
@@ -804,34 +822,50 @@ mod tests {
     }
 
     #[test]
-    fn convert_tool_result_to_function_response() {
-        let msg = ChatMessage::tool_result("get_weather", "result text");
-        let converted = GoogleProvider::convert_messages(&[&msg]);
-        assert_eq!(converted[0].role.as_deref(), Some("user"));
-        let fr = converted[0].parts[0].function_response.as_ref().unwrap();
-        assert_eq!(fr.name, "get_weather");
-        assert_eq!(fr.response["result"], "result text");
-    }
-
-    #[test]
-    fn convert_assistant_with_tool_calls() {
-        let msg = ChatMessage::assistant_tool_calls(
-            "",
-            vec![ToolCall {
+    fn convert_tool_replay_to_function_call_and_response_parts() {
+        let messages = swage_core::build_tool_round_messages(
+            &[ToolCall {
                 call_id: "call_1".into(),
                 name: "search".into(),
                 arguments: serde_json::json!({"query": "rust"}),
             }],
+            &[swage_core::ToolResult {
+                call_id: "call_1".into(),
+                content: "found rust".into(),
+                is_error: false,
+            }],
+            "Searching.",
         );
-        let converted = GoogleProvider::convert_messages(&[&msg]);
+        assert!(
+            messages[0].tool_replay().is_some(),
+            "fixture should exercise canonical replay"
+        );
+        assert!(
+            messages[1].tool_replay().is_some(),
+            "fixture should exercise canonical replay"
+        );
+
+        let converted = GoogleProvider::convert_messages(&messages.iter().collect::<Vec<_>>());
+
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].role.as_deref(), Some("model"));
+        assert_eq!(converted[0].parts[0].text.as_deref(), Some("Searching."));
         let fc = converted[0]
             .parts
             .iter()
-            .find(|p| p.function_call.is_some())
-            .and_then(|p| p.function_call.as_ref())
-            .unwrap();
+            .find_map(|part| part.function_call.as_ref())
+            .expect("function call should be present");
         assert_eq!(fc.name, "search");
         assert_eq!(fc.args["query"], "rust");
+
+        assert_eq!(converted[1].role.as_deref(), Some("user"));
+        let fr = converted[1]
+            .parts
+            .iter()
+            .find_map(|part| part.function_response.as_ref())
+            .expect("function response should be present");
+        assert_eq!(fr.name, "call_1");
+        assert_eq!(fr.response["result"], "found rust");
     }
 
     // --- Request building ---
@@ -865,6 +899,51 @@ mod tests {
     }
 
     #[test]
+    fn provider_request_snapshot_uses_generate_content_wire_body() {
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
+        let request = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::System, "Be helpful"),
+                ChatMessage::new(Role::User, "Use a tool"),
+            ],
+            model: None,
+            max_tokens: Some(100),
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![serde_json::json!({
+                "name": "ping",
+                "description": "Echoes the input value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    }
+                }
+            })],
+        };
+
+        let snapshot = provider.provider_request_snapshot(&request, true);
+
+        assert_eq!(snapshot["provider"], "google");
+        assert_eq!(snapshot["protocol"], "generate_content");
+        assert_eq!(snapshot["stream"], true);
+        assert_eq!(
+            snapshot["body"]["systemInstruction"]["parts"][0]["text"],
+            "Be helpful"
+        );
+        assert_eq!(snapshot["body"]["contents"][0]["role"], "user");
+        assert_eq!(
+            snapshot["body"]["tools"][0]["functionDeclarations"][0]["name"],
+            "ping"
+        );
+    }
+
+    #[test]
     fn build_tool_request_includes_function_declarations() {
         let provider = GoogleProvider::from_config(ProviderConfig::new(
             "key",
@@ -888,6 +967,49 @@ mod tests {
         assert_eq!(body.tools.len(), 1);
         assert_eq!(body.tools[0].function_declarations.len(), 1);
         assert_eq!(body.tools[0].function_declarations[0].name, "search");
+    }
+
+    #[test]
+    fn build_tool_request_flattens_provider_facing_schema() {
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-pro",
+            "https://generativelanguage.googleapis.com",
+        ));
+        let request = ToolCompletionRequest {
+            messages: vec![ChatMessage::new(Role::User, "search")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![serde_json::json!({
+                "name": "search",
+                "description": "Web search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 3,
+                            "pattern": "^[a-z]+$"
+                        },
+                        "oneOf": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "oneOf": [{"required": ["query"]}]
+                }
+            })],
+        };
+
+        let body = provider.build_tool_request(&request);
+        let schema = &body.tools[0].function_declarations[0].parameters;
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema["properties"]["query"].get("minLength").is_none());
+        assert!(schema["properties"]["query"].get("pattern").is_none());
+        assert_eq!(schema["properties"]["oneOf"]["type"], "string");
     }
 
     // --- URL building ---

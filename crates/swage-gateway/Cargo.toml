@@ -17,6 +17,7 @@ swage-tool = { path = "../swage-tool" }
 swage-config = { path = "../swage-config" }
 swage-provider = { path = "../swage-provider" }
 swage-storage = { path = "../swage-storage" }
+swage-protocol = { path = "../swage-protocol" }
 swage-python = { path = "../swage-python" }
 swage-sandbox = { path = "../swage-sandbox" }
 swage-agent = { path = "../swage-agent" }
@@ -41,6 +42,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
 tokio-util = "0.7"
 reqwest = { version = "0.13", features = ["json", "query"] }
 html2text = "0.17"
@@ -49,6 +51,7 @@ mime_guess = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 cron = "0.16"
+chromiumoxide = "0.9.1"
 
 [dev-dependencies]
 swage-safety = { path = "../swage-safety" }

@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Phase 06: Bench Workspace & Agent Memory.
+//! Cross-task integration tests for bench workspace and agent memory.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together:

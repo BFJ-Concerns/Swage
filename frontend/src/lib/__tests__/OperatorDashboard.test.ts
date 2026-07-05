@@ -10,12 +10,11 @@ type MountedComponent = ReturnType<typeof mount>;
 
 vi.mock("../api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
+  fetchScheduleRuns: vi.fn(),
   approvePendingAction: vi.fn(),
   rejectPendingAction: vi.fn(),
-  pauseScheduledJob: vi.fn(),
-  resumeScheduledJob: vi.fn(),
-  disableHeartbeat: vi.fn(),
-  enableHeartbeat: vi.fn(),
+  pauseSchedule: vi.fn(),
+  resumeSchedule: vi.fn(),
 }));
 
 function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOverview {
@@ -52,30 +51,25 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         timeout_at: "2026-04-07T12:10:00Z",
       },
     ],
-    scheduled_jobs: {
-      jobs: [
+    schedules: {
+      schedules: [
         {
-          id: "job-1",
-          session_id: "conv-1",
+          id: "schedule-1",
           message: "Daily digest",
           status: "active",
-          schedule: { kind: "interval", every: "every 5 minutes" },
-          routing: {},
+          spec: { kind: "interval", every: "every 5 minutes" },
+          session: { policy: "continuation", session_id: "conv-1" },
+          routing: {
+            deliver_to_origin: false,
+            home_target: null,
+            explicit_targets: [],
+            store_local_output: true,
+          },
+          gate: { model: "cheap", criteria: null },
           next_run_at: null,
           last_run_at: null,
-        },
-      ],
-    },
-    heartbeats: {
-      heartbeats: [
-        {
-          id: "hb-1",
-          session_id: "conv-1",
-          message: "Check in",
-          status: "disabled",
-          interval_seconds: 90,
-          next_beat_at: null,
-          last_beat_at: null,
+          created_at: "2026-04-07T12:00:00Z",
+          updated_at: "2026-04-07T12:00:00Z",
         },
       ],
     },
@@ -146,13 +140,12 @@ describe("OperatorDashboard", () => {
     expect(document.body.textContent).toContain("dev_dm");
   });
 
-  it("runs approval and automation actions from the operator deck", async () => {
+  it("runs approval and schedule actions from the operator deck", async () => {
     vi.mocked(operatorApi.fetchOperatorOverview)
       .mockResolvedValueOnce(makeOverview())
       .mockResolvedValue(makeOverview());
     vi.mocked(operatorApi.approvePendingAction).mockResolvedValueOnce();
-    vi.mocked(operatorApi.pauseScheduledJob).mockResolvedValueOnce();
-    vi.mocked(operatorApi.enableHeartbeat).mockResolvedValueOnce();
+    vi.mocked(operatorApi.pauseSchedule).mockResolvedValueOnce();
 
     component = mount(OperatorDashboard, { target: document.body });
     await settleUi();
@@ -160,11 +153,9 @@ describe("OperatorDashboard", () => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const approve = buttons.find((button) => button.textContent?.includes("Approve"));
     const pause = buttons.find((button) => button.textContent?.includes("Pause"));
-    const restart = buttons.find((button) => button.textContent?.includes("Restart"));
 
     expect(approve).toBeDefined();
     expect(pause).toBeDefined();
-    expect(restart).toBeDefined();
 
     flushSync(() => approve!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await settleUi();
@@ -175,10 +166,52 @@ describe("OperatorDashboard", () => {
 
     flushSync(() => pause!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await settleUi();
-    expect(operatorApi.pauseScheduledJob).toHaveBeenCalledWith("job-1");
+    expect(operatorApi.pauseSchedule).toHaveBeenCalledWith("schedule-1");
+  });
 
-    flushSync(() => restart!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  it("inspects a schedule's recorded runs, gate verdicts included", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview)
+      .mockResolvedValueOnce(makeOverview())
+      .mockResolvedValue(makeOverview());
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({
+      runs: [
+        {
+          id: "run-1",
+          schedule_id: "schedule-1",
+          trigger: "tick",
+          state: "skipped",
+          skip_reason: "gate",
+          scheduled_for: "2026-04-07T12:05:00Z",
+          session_id: null,
+          turn_id: null,
+          gate: {
+            model: "cheap",
+            verdict: "skip",
+            reasoning: "nothing new since the last digest",
+          },
+          output_text: null,
+          error_message: null,
+          created_at: "2026-04-07T12:05:00Z",
+          started_at: null,
+          completed_at: "2026-04-07T12:05:01Z",
+        },
+      ],
+    });
+
+    component = mount(OperatorDashboard, { target: document.body });
     await settleUi();
-    expect(operatorApi.enableHeartbeat).toHaveBeenCalledWith("hb-1");
+
+    const runsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Runs",
+    );
+    expect(runsButton).toBeDefined();
+    flushSync(() => runsButton!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await settleUi();
+
+    expect(operatorApi.fetchScheduleRuns).toHaveBeenCalledWith("schedule-1");
+    expect(document.body.textContent).toContain("skipped");
+    expect(document.body.textContent).toContain(
+      "nothing new since the last digest",
+    );
   });
 });

@@ -7,11 +7,13 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use swage_client::runtime::RuntimeMetadata;
 use swage_config::LogLevel;
+use swage_storage::ChannelQueueStore;
 use tokio_util::sync::CancellationToken;
 
 /// Run the gateway to completion.
@@ -51,9 +53,11 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 2: Initialise logging from (possibly overridden) configuration.
     init_logging(&config);
 
-    // Step 3: Resolve database path under the canonical Swage data root.
-    let db_path = {
-        match swage_database_path() {
+    // Step 3: Resolve the canonical Swage data root and make sure managed
+    // secrets have an encryption key before migrations or provider setup can
+    // read/write encrypted rows.
+    let root = {
+        match swage_config::discovery::resolve_root() {
             Ok(path) => path,
             Err(problem) => {
                 eprintln!("{problem}");
@@ -61,11 +65,28 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
             }
         }
     };
+    if let Err(problem) = ensure_managed_secret_key(&root) {
+        eprintln!("{problem}");
+        std::process::exit(1);
+    }
+    let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
     let raw_storage = open_storage(&db_path);
 
-    // Step 5: Recover orphaned turns from a previous unclean shutdown.
+    // Step 5: Requeue channel messages claimed by a crashed gateway before
+    // interrupting the orphaned turns they were attached to. A running process
+    // cannot survive startup, so any in-flight turn here is a crash orphan.
+    match raw_storage.requeue_presented_for_inflight_turns().await {
+        Ok(0) => {}
+        Ok(n) => info!("Requeued {n} channel message(s) from orphaned turn(s)"),
+        Err(e) => {
+            eprintln!("Channel queue startup recovery failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    // Step 5b: Recover orphaned turns from a previous unclean shutdown.
     match crate::shutdown::recover_orphaned_turns(&*raw_storage, &*raw_storage).await {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
@@ -77,16 +98,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
     match crate::shutdown::recover_orphaned_background_runs(&*raw_storage).await {
         Ok(counts) => {
-            if counts.scheduled_runs_failed > 0 {
+            if counts.schedule_runs_failed > 0 {
                 info!(
-                    "Recovered {} orphaned scheduled run(s) from a previous shutdown",
-                    counts.scheduled_runs_failed
-                );
-            }
-            if counts.heartbeat_runs_failed > 0 {
-                info!(
-                    "Recovered {} orphaned heartbeat run(s) from a previous shutdown",
-                    counts.heartbeat_runs_failed
+                    "Recovered {} orphaned schedule run(s) from a previous shutdown",
+                    counts.schedule_runs_failed
                 );
             }
             if counts.background_jobs_retried > 0 {
@@ -102,7 +117,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5b: Apply timeout policy to any approval requests that expired
+    // Step 5c: Apply timeout policy to any approval requests that expired
     // while the gateway was offline. Approvals still within their window are
     // left as-is and will be re-emitted to clients on WebSocket connect.
     let message_ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
@@ -140,11 +155,21 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     let provider = create_provider(&config, &startup_secret_manager).await;
     let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
+    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
     // Step 7: Build the tool dispatch pipeline.
-    let tool_dispatcher = build_tool_dispatcher(
+    let browser_host = match crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
+    {
+        Ok(browser_config) => Some(crate::browser::BrowserHost::new(browser_config)),
+        Err(error) => {
+            warn!("Browser tools disabled: {error}");
+            None
+        }
+    };
+    let tool_dispatcher = build_tool_dispatcher_with_browser(
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+        browser_host.clone(),
     );
 
     // Step 8: Assemble application state and build the router.
@@ -160,6 +185,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
     );
     state.voice_provider = voice_provider;
+    state.telegram = telegram;
     state.start_agent_message_expiry();
     crate::execution_host::register_local_execution_host(&state).await;
     if let Err(error) = crate::execution_host::restore_registered_execution_hosts(&state).await {
@@ -168,11 +194,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     }
     let router = crate::server::build_router(state.clone());
     let background_shutdown = CancellationToken::new();
-    let scheduler_handle = crate::schedule::spawn_scheduler_loop_until_cancelled(
-        state.clone(),
-        background_shutdown.clone(),
-    );
-    let heartbeat_handle = crate::heartbeat::spawn_heartbeat_loop_until_cancelled(
+    let schedule_handle = crate::schedule::spawn_schedule_loop_until_cancelled(
         state.clone(),
         background_shutdown.clone(),
     );
@@ -180,6 +202,39 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    let queue_handle = crate::background_loop::spawn_periodic_loop(
+        std::time::Duration::from_millis(250),
+        background_shutdown.clone(),
+        "channel queue drain failed",
+        {
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    crate::channel_gateway::drain_channel_queue(state).await;
+                    Ok(())
+                }
+            }
+        },
+    );
+    let telegram_handle = crate::telegram::spawn_poll_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
+    let browser_idle_handle = browser_host.clone().map(|browser_host| {
+        crate::background_loop::spawn_periodic_loop(
+            std::time::Duration::from_secs(30),
+            background_shutdown.clone(),
+            "browser idle sweep failed",
+            move || {
+                let browser_host = Arc::clone(&browser_host);
+                async move {
+                    browser_host.sweep_idle().await;
+                    Ok(())
+                }
+            },
+        )
+    });
 
     // Step 10: Bind the TCP listener.
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -238,14 +293,28 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.stop_agent_message_expiry();
         background_shutdown.cancel();
         for (name, handle) in [
-            ("scheduler", scheduler_handle),
-            ("heartbeat", heartbeat_handle),
+            ("schedule", schedule_handle),
             ("attachment ingestion", attachment_handle),
+            ("channel queue", queue_handle),
         ] {
             if let Err(error) = handle.await {
                 warn!(%error, "background {name} loop did not shut down cleanly");
             }
         }
+        if let Some(handle) = telegram_handle
+            && let Err(error) = handle.await
+        {
+            warn!(%error, "background telegram polling loop did not shut down cleanly");
+        }
+        if let Some(handle) = browser_idle_handle
+            && let Err(error) = handle.await
+        {
+            warn!(%error, "background browser idle loop did not shut down cleanly");
+        }
+    }
+
+    if let Some(browser_host) = browser_host {
+        browser_host.shutdown().await;
     }
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
@@ -344,6 +413,74 @@ async fn resolve_provider_config(
         &model.model_id,
         base_url,
     ))
+}
+
+async fn create_telegram_client(
+    config: &swage_config::ResolvedConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Option<Arc<crate::telegram::TelegramClient>> {
+    let Some(telegram) = config.channels.telegram.as_ref() else {
+        return None;
+    };
+
+    let token = match resolve_telegram_token(telegram, secret_manager).await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(
+                "Telegram channel credential resolution failed: {error}. \
+                 The server will start, but Telegram polling will stay disabled \
+                 until configuration is fixed."
+            );
+            return None;
+        }
+    };
+
+    let timeout = std::time::Duration::from_secs(telegram.poll_timeout_secs.saturating_add(10));
+    match crate::telegram::TelegramClient::new(crate::telegram::TelegramClientConfig {
+        base_url: telegram.api_base_url.clone(),
+        token,
+        request_timeout: timeout,
+    }) {
+        Ok(client) => Some(Arc::new(client)),
+        Err(error) => {
+            tracing::warn!(
+                "Telegram channel startup failed: {error}. \
+                 The server will start, but Telegram polling will stay disabled \
+                 until configuration is fixed."
+            );
+            None
+        }
+    }
+}
+
+async fn resolve_telegram_token(
+    telegram: &swage_config::TelegramChannelConfig,
+    secret_manager: &crate::secret::SecretManager,
+) -> Result<String, String> {
+    if let Some(reference) = telegram.bot_token_secret_ref.as_deref() {
+        let resolved = secret_manager.resolve(reference).await.map_err(|error| {
+            format!("failed to resolve telegram credential {reference}: {error}")
+        })?;
+        if resolved.record.material_kind != "channel_token" {
+            return Err(format!(
+                "telegram credential {reference} has material_kind '{}', expected 'channel_token'",
+                resolved.record.material_kind
+            ));
+        }
+        return Ok(resolved.value);
+    }
+
+    if let Some(env_var) = telegram.bot_token_env.as_deref() {
+        warn!(
+            "Telegram channel is using legacy bot_token_env credential resolution. \
+             Store it as a governed channel_token secret and set bot_token_secret_ref \
+             to audit credential access."
+        );
+        return std::env::var(env_var)
+            .map_err(|_| format!("environment variable '{env_var}' is not set"));
+    }
+
+    Err("telegram channel configured without bot_token_secret_ref or bot_token_env".into())
 }
 
 fn default_provider_model(
@@ -455,10 +592,22 @@ pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
+    let browser_host = crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
+        .ok()
+        .map(crate::browser::BrowserHost::new);
+    build_tool_dispatcher_with_browser(config, storage, browser_host)
+}
+
+pub(crate) fn build_tool_dispatcher_with_browser(
+    config: &swage_config::ResolvedConfig,
+    storage: Arc<dyn swage_storage::store::Storage>,
+    browser_host: Option<Arc<crate::browser::BrowserHost>>,
+) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, agent_memory::AgentMemoryTool, file_list::FileListTool, file_read::FileReadTool,
-        file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool, shell::ShellTool,
+        Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
+        file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
+        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, shell::ShellTool, tool_result_read::ToolResultReadTool,
         url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
@@ -474,6 +623,7 @@ pub(crate) fn build_tool_dispatcher(
         Arc::new(FileReadTool {
             max_output_bytes: max_output,
         }),
+        Arc::new(FileEditTool),
         Arc::new(FileWriteTool),
         Arc::new(FileSearchTool {
             max_output_bytes: max_output,
@@ -483,11 +633,22 @@ pub(crate) fn build_tool_dispatcher(
             provider_config: config.tools.search.clone(),
         }),
         Arc::new(UrlFetchTool::default()),
+        Arc::new(ToolResultReadTool {
+            max_output_bytes: max_output,
+        }),
         Arc::new(swage_tool::delegate::DelegateTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
         Arc::new(AgentMemoryTool),
     ];
+
+    let base_tools = if let Some(browser_host) = browser_host {
+        let mut tools = base_tools;
+        tools.extend(browser_tools(browser_host));
+        tools
+    } else {
+        base_tools
+    };
 
     let plugin_tools = resolve_plugin_directory(config)
         .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))
@@ -558,6 +719,91 @@ fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<Pat
     }
 }
 
+fn ensure_managed_secret_key(root: &std::path::Path) -> Result<PathBuf, String> {
+    if std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV).is_some() {
+        return Ok(root.join("secrets").join("managed-secret.key"));
+    }
+
+    let key_path = root.join("secrets").join("managed-secret.key");
+    let encoded = if key_path.exists() {
+        std::fs::read_to_string(&key_path).map_err(|error| {
+            format!(
+                "failed to read managed secret key at {}: {error}",
+                key_path.display()
+            )
+        })?
+    } else {
+        let mut key = [0_u8; 32];
+        rand::fill(&mut key);
+        let encoded = BASE64.encode(key);
+        if let Some(parent) = key_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create managed secret key directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        write_managed_secret_key(&key_path, &encoded)?;
+        encoded
+    };
+
+    let encoded = encoded.trim();
+    let bytes = BASE64.decode(encoded).map_err(|error| {
+        format!(
+            "managed secret key at {} is invalid base64: {error}",
+            key_path.display()
+        )
+    })?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "managed secret key at {} must decode to exactly 32 bytes",
+            key_path.display()
+        ));
+    }
+
+    // SAFETY: this runs during gateway startup before serving requests. The
+    // storage encryption code intentionally reads the key from the process
+    // environment, so the local key file is bridged into that existing path.
+    unsafe { std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, encoded) };
+    Ok(key_path)
+}
+
+#[cfg(unix)]
+fn write_managed_secret_key(path: &std::path::Path, encoded: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "failed to create managed secret key at {}: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(encoded.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write managed secret key at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn write_managed_secret_key(path: &std::path::Path, encoded: &str) -> Result<(), String> {
+    std::fs::write(path, encoded).map_err(|error| {
+        format!(
+            "failed to write managed secret key at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
 fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
     swage_config::discovery::resolve_root().map(|root| root.join("swage.db"))
 }
@@ -720,11 +966,13 @@ fn build_provider_chain(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::SwageHomeGuard;
+
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig,
@@ -732,23 +980,77 @@ mod tests {
     use swage_storage::store::AuditStore;
     use tokio::net::TcpListener;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn swage_database_path_uses_swage_root() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let temp_dir = tempfile::TempDir::new().unwrap();
         let root = temp_dir.path().join("app-data");
-        unsafe { std::env::set_var("SWAGE_HOME", &root) };
+        let _swage_home = SwageHomeGuard::set_to(&root);
 
         let path = swage_database_path().unwrap();
 
-        unsafe { std::env::remove_var("SWAGE_HOME") };
         assert_eq!(path, root.join("swage.db"));
         assert!(
             root.is_dir(),
             "database path resolution should auto-create root"
         );
+    }
+
+    #[test]
+    fn ensure_managed_secret_key_creates_local_key_when_env_is_missing() {
+        let _swage_home = SwageHomeGuard::new();
+        let previous_key = std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV);
+        unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) };
+
+        let result = ensure_managed_secret_key(_swage_home.path());
+
+        let key_path = result.expect("managed secret key should be provisioned");
+        let encoded = std::fs::read_to_string(&key_path).expect("key file should exist");
+        let decoded = BASE64
+            .decode(encoded.trim())
+            .expect("key should be base64 encoded");
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(
+            std::env::var(swage_storage::MANAGED_SECRET_KEY_ENV).unwrap(),
+            encoded.trim()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        match previous_key {
+            Some(value) => unsafe {
+                std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, value)
+            },
+            None => unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) },
+        }
+    }
+
+    #[test]
+    fn ensure_managed_secret_key_uses_existing_env_key() {
+        let _swage_home = SwageHomeGuard::new();
+        let previous_key = std::env::var_os(swage_storage::MANAGED_SECRET_KEY_ENV);
+        let explicit_key = BASE64.encode([23_u8; 32]);
+        unsafe { std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, &explicit_key) };
+
+        let result = ensure_managed_secret_key(_swage_home.path());
+
+        let key_path = result.expect("explicit managed secret key should be accepted");
+        assert!(!key_path.exists());
+        assert_eq!(
+            std::env::var(swage_storage::MANAGED_SECRET_KEY_ENV).unwrap(),
+            explicit_key
+        );
+
+        match previous_key {
+            Some(value) => unsafe {
+                std::env::set_var(swage_storage::MANAGED_SECRET_KEY_ENV, value)
+            },
+            None => unsafe { std::env::remove_var(swage_storage::MANAGED_SECRET_KEY_ENV) },
+        }
     }
 
     // log_level_to_directive must map every LogLevel variant correctly.
@@ -974,6 +1276,7 @@ mod tests {
             aliases: vec![],
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         }
     }
 
@@ -1112,6 +1415,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                capabilities: swage_config::ModelCapabilitiesConfig::default(),
             },
         );
 
@@ -1173,6 +1477,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
         let config = resolve_provider_config(&provider, &model, &secret_manager)

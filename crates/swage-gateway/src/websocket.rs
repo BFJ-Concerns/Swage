@@ -24,6 +24,15 @@ static TEST_SKILL_ROOTS: std::sync::LazyLock<
 // Client → Server event types
 // ---------------------------------------------------------------------------
 
+// TODO Move WebSocket wire types into the swage-protocol crate
+// ClientEvent, ServerEvent, and SchemaValidationError are the wire contract,
+// currently re-implemented by hand in swage-client and
+// frontend/src/lib/types.ts. They should live once in swage-protocol (client
+// surface) as plain serde types, with schemars emitting the canonical schema
+// and ts-rs generating the frontend types. See the wire-contract section in
+// CLAUDE.md and the swage-protocol mote in .motes/TODO.md.
+// ---
+
 /// Events sent by the client over the WebSocket connection.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

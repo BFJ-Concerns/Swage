@@ -1,5 +1,8 @@
 use rusqlite::{Connection, params};
-use swage_core::StorageError;
+use swage_core::{
+    StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model_with_reference,
+    tool_result_reference,
+};
 
 /// Track which migrations have been applied.
 const CREATE_MIGRATIONS_TABLE: &str = "
@@ -34,10 +37,9 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
         ("015_bench_default_flag", ADD_BENCH_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
-        ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
-        ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
+        // 017/018 were the scheduled-job and heartbeat tables, absorbed into
+        // the unified schedules schema in 001 during the private alpha.
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
-        ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
@@ -85,6 +87,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("039_bench_description", ADD_BENCH_DESCRIPTION),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
+        ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
+        ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
     ]
 }
 
@@ -113,26 +117,6 @@ const CREATE_EXECUTION_HOST_TABLE: &str = "
 
 const ADD_EXECUTION_HOST_WORKSPACE_ROOTS: &str = "
     ALTER TABLE execution_hosts ADD COLUMN workspace_roots_json TEXT NOT NULL DEFAULT '[]';
-";
-
-const CREATE_CHANNEL_LINK_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS channel_links (
-        integration      TEXT NOT NULL,
-        account          TEXT NOT NULL,
-        conversation     TEXT NOT NULL,
-        bench_id       TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
-        agent_id         TEXT NOT NULL,
-        session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        home_target_json TEXT,
-        linked_at        TEXT NOT NULL,
-        updated_at       TEXT NOT NULL,
-        PRIMARY KEY (integration, account, conversation)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
-        ON channel_links(bench_id);
-    CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
-        ON channel_links(session_id);
 ";
 
 const CREATE_LENS_PREFERENCES_TABLE: &str = "
@@ -230,6 +214,8 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         target_json  TEXT NOT NULL,
         content      TEXT NOT NULL,
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+        error        TEXT,
         delivered_at TEXT NOT NULL
     );
 
@@ -306,47 +292,26 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         );
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_scheduled_runs_state_audit
-    AFTER UPDATE OF state ON scheduled_runs
+    CREATE TRIGGER IF NOT EXISTS trg_schedule_runs_state_audit
+    AFTER UPDATE OF state ON schedule_runs
     WHEN OLD.state <> NEW.state
     BEGIN
         INSERT INTO audit_events (
             id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
         ) VALUES (
             lower(hex(randomblob(16))),
-            (SELECT session_id FROM scheduled_jobs WHERE id = NEW.job_id),
-            'scheduled_run',
+            NEW.session_id,
+            'schedule_run',
             NEW.id,
             'state_transition',
-            'scheduled run state ' || OLD.state || ' -> ' || NEW.state,
+            'schedule run state ' || OLD.state || ' -> ' || NEW.state,
             json_object(
                 'from_state', OLD.state,
                 'to_state', NEW.state,
-                'job_id', NEW.job_id,
-                'turn_id', COALESCE(NEW.turn_id, ''),
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_heartbeat_runs_state_audit
-    AFTER UPDATE OF state ON heartbeat_runs
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (SELECT session_id FROM heartbeats WHERE id = NEW.heartbeat_id),
-            'heartbeat_run',
-            NEW.id,
-            'state_transition',
-            'heartbeat run state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'heartbeat_id', NEW.heartbeat_id,
+                'schedule_id', NEW.schedule_id,
+                'trigger', NEW.trigger_kind,
+                'skip_reason', COALESCE(NEW.skip_reason, ''),
+                'gate_verdict', COALESCE(NEW.gate_verdict, ''),
                 'turn_id', COALESCE(NEW.turn_id, ''),
                 'error_message', COALESCE(NEW.error_message, '')
             ),
@@ -439,7 +404,41 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
             'delivery recorded',
             json_object(
                 'target', NEW.target_json,
-                'content', NEW.content
+                'content', NEW.content,
+                'status', NEW.status,
+                'error', COALESCE(NEW.error, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_channel_inbound_state_audit
+    AFTER UPDATE OF state ON channel_inbound_messages
+    WHEN OLD.state <> NEW.state
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (
+                SELECT th.session_id
+                FROM turns t
+                INNER JOIN threads th ON th.id = t.thread_id
+                WHERE t.id = NEW.turn_id
+            ),
+            'channel_inbound_message',
+            NEW.id,
+            'state_transition',
+            'channel inbound message state ' || OLD.state || ' -> ' || NEW.state,
+            json_object(
+                'from_state', OLD.state,
+                'to_state', NEW.state,
+                'integration', NEW.integration,
+                'account', NEW.account,
+                'conversation', NEW.conversation,
+                'external_id', NEW.external_id,
+                'turn_id', COALESCE(NEW.turn_id, ''),
+                'discard_reason', COALESCE(NEW.discard_reason, '')
             ),
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
@@ -703,76 +702,91 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_bench_id ON sessions(bench_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
-    CREATE TABLE IF NOT EXISTS scheduled_jobs (
-        id                  TEXT NOT NULL PRIMARY KEY,
-        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id            TEXT NOT NULL,
-        message             TEXT NOT NULL,
-        status              TEXT NOT NULL,
-        kind                TEXT NOT NULL,
-        schedule_expression TEXT NOT NULL,
-        delivery_json       TEXT NOT NULL,
-        next_run_at         TEXT,
-        last_run_at         TEXT,
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
-        ON scheduled_jobs(status, next_run_at);
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
-        ON scheduled_jobs(session_id);
-
-    CREATE TABLE IF NOT EXISTS scheduled_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
-        trigger_kind  TEXT NOT NULL,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
-        ON scheduled_runs(job_id, created_at);
-
-    CREATE TABLE IF NOT EXISTS heartbeats (
-        id               TEXT NOT NULL PRIMARY KEY,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Channel links: durable one-time binding from an external conversation
+    -- origin to the bench/agent/session it should resume.
+    CREATE TABLE IF NOT EXISTS channel_links (
+        integration      TEXT NOT NULL,
+        account          TEXT NOT NULL,
+        conversation     TEXT NOT NULL,
+        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
         agent_id         TEXT NOT NULL,
-        message          TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL,
-        status           TEXT NOT NULL,
-        last_beat_at     TEXT,
-        next_beat_at     TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL
+        session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        home_target_json TEXT,
+        linked_at        TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        PRIMARY KEY (integration, account, conversation)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
-        ON heartbeats(status, next_beat_at);
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
-        ON heartbeats(session_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
+        ON channel_links(bench_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
+        ON channel_links(session_id);
 
-    CREATE TABLE IF NOT EXISTS heartbeat_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
+    -- Schedules: one durable definition per recurring or one-off piece of
+    -- agent work. The session policy is flattened into columns: fresh rows
+    -- carry the target bench/agent, continuation rows the session each run
+    -- returns to.
+    CREATE TABLE IF NOT EXISTS schedules (
+        id             TEXT NOT NULL PRIMARY KEY,
+        message        TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        kind           TEXT NOT NULL,
+        expression     TEXT NOT NULL,
+        session_policy TEXT NOT NULL,
+        bench_id       TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        agent_id       TEXT,
+        session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        delivery_json  TEXT NOT NULL,
+        gate_model     TEXT,
+        gate_criteria  TEXT,
+        next_run_at    TEXT,
+        last_run_at    TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
-        ON heartbeat_runs(heartbeat_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_schedules_next_run
+        ON schedules(status, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_schedules_session_id
+        ON schedules(session_id);
+
+    -- Schedule runs: the complete record of what the scheduler did with
+    -- each due occurrence — executed, gated out, or skipped for overlap.
+    -- session_id/turn_id have no FK on purpose: runs are audit records and
+    -- outlive the sessions they executed in.
+    CREATE TABLE IF NOT EXISTS schedule_runs (
+        id             TEXT NOT NULL PRIMARY KEY,
+        schedule_id    TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        trigger_kind   TEXT NOT NULL,
+        state          TEXT NOT NULL,
+        skip_reason    TEXT,
+        scheduled_for  TEXT,
+        session_id     TEXT,
+        turn_id        TEXT,
+        gate_model     TEXT,
+        gate_verdict   TEXT,
+        gate_reasoning TEXT,
+        output_text    TEXT,
+        error_message  TEXT,
+        created_at     TEXT NOT NULL,
+        started_at     TEXT,
+        completed_at   TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_id
+        ON schedule_runs(schedule_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_schedule_runs_state
+        ON schedule_runs(schedule_id, state);
+
+    -- At most one in-flight run per schedule. This partial unique index is
+    -- the overlap guard itself: the pending-run insert either succeeds
+    -- (this run owns the schedule) or trips the constraint (a predecessor is
+    -- still running), which the scheduler turns into a deliberate skip.
+    -- Terminal rows fall outside the predicate, so any number of finished
+    -- runs — including skipped-for-overlap ones — coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_runs_one_active
+        ON schedule_runs(schedule_id)
+        WHERE state IN ('pending', 'running');
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
@@ -812,6 +826,69 @@ const COMPLETE_SCHEMA: &str = "
         ON turns(thread_id)
         WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
 
+    -- Inbound external-channel messages are durably queued before any turn
+    -- begins. Queue rows keep Telegram/update provenance even though the turn
+    -- itself receives one composed input string.
+    CREATE TABLE IF NOT EXISTS channel_inbound_messages (
+        id             TEXT NOT NULL PRIMARY KEY,
+        integration    TEXT NOT NULL,
+        account        TEXT NOT NULL,
+        conversation   TEXT NOT NULL,
+        external_id    TEXT NOT NULL,
+        sender         TEXT NOT NULL,
+        content        TEXT NOT NULL,
+        state          TEXT NOT NULL CHECK (state IN ('pending', 'presented', 'discarded')),
+        discard_reason TEXT,
+        turn_id        TEXT,
+        received_at    TEXT NOT NULL,
+        presented_at   TEXT,
+        UNIQUE (integration, account, external_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_inbound_pending_origin
+        ON channel_inbound_messages(state, integration, account, conversation, received_at);
+    CREATE INDEX IF NOT EXISTS idx_channel_inbound_turn_id
+        ON channel_inbound_messages(turn_id);
+
+    CREATE TABLE IF NOT EXISTS channel_cursors (
+        integration TEXT NOT NULL,
+        account     TEXT NOT NULL,
+        cursor      TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (integration, account)
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_records (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        target_json  TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+        error        TEXT,
+        delivered_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delivery_records_session_id
+        ON delivery_records(session_id, delivered_at);
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+        id           TEXT NOT NULL PRIMARY KEY,
+        session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        entity_kind  TEXT NOT NULL,
+        entity_id    TEXT NOT NULL,
+        event_kind   TEXT NOT NULL,
+        summary      TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at   TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_session_id
+        ON audit_events(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_entity
+        ON audit_events(entity_kind, entity_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+        ON audit_events(created_at);
+
     -- Messages: individual messages within a thread.
     CREATE TABLE IF NOT EXISTS messages (
         id           TEXT    NOT NULL PRIMARY KEY,
@@ -843,8 +920,8 @@ const COMPLETE_SCHEMA: &str = "
         status         TEXT,
         duration_ms    INTEGER,
         truncated      INTEGER NOT NULL DEFAULT 0,
-        total_bytes    INTEGER,
-        position       INTEGER NOT NULL,
+	        total_bytes    INTEGER,
+	        position       INTEGER NOT NULL,
         parent_call_id TEXT,
         created_at     TEXT    NOT NULL
     );
@@ -898,81 +975,13 @@ const ADD_SESSION_SELECTED_MODEL: &str = "
     ALTER TABLE sessions ADD COLUMN selected_model_id TEXT;
 ";
 
-/// Scheduled jobs and their recorded executions.
-const CREATE_SCHEDULED_JOB_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS scheduled_jobs (
-        id                  TEXT NOT NULL PRIMARY KEY,
-        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id            TEXT NOT NULL,
-        message             TEXT NOT NULL,
-        status              TEXT NOT NULL,
-        kind                TEXT NOT NULL,
-        schedule_expression TEXT NOT NULL,
-        delivery_json       TEXT NOT NULL,
-        next_run_at         TEXT,
-        last_run_at         TEXT,
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
-        ON scheduled_jobs(status, next_run_at);
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
-        ON scheduled_jobs(session_id);
-
-    CREATE TABLE IF NOT EXISTS scheduled_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
-        trigger_kind  TEXT NOT NULL,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
-        ON scheduled_runs(job_id, created_at);
+const ADD_TOOL_CALL_MODEL_REPLAY: &str = "
+    ALTER TABLE tool_calls ADD COLUMN model_arguments TEXT;
+    ALTER TABLE tool_calls ADD COLUMN model_result TEXT;
 ";
 
-/// Additive migration: durable heartbeat configuration and run history.
-const CREATE_HEARTBEAT_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS heartbeats (
-        id               TEXT NOT NULL PRIMARY KEY,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id         TEXT NOT NULL,
-        message          TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL,
-        status           TEXT NOT NULL,
-        last_beat_at     TEXT,
-        next_beat_at     TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
-        ON heartbeats(status, next_beat_at);
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
-        ON heartbeats(session_id);
-
-    CREATE TABLE IF NOT EXISTS heartbeat_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
-        ON heartbeat_runs(heartbeat_id, created_at);
+const ADD_TOOL_CALL_PROVIDER_ROUND: &str = "
+    ALTER TABLE tool_calls ADD COLUMN provider_round INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.
@@ -1264,6 +1273,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
         } else if name == "030_team_agent_and_task_authoring" {
             super::team::migrate_team_authoring_model(conn)?;
+        } else if name == "041_tool_call_model_replay" {
+            migrate_tool_call_model_replay(conn)?;
         } else {
             // Apply migration inside a transaction for atomicity.
             conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
@@ -1281,6 +1292,63 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 
     // Seed the default bench if it does not already exist.
     seed_default_bench(conn)
+}
+
+fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(&format!("BEGIN; {ADD_TOOL_CALL_MODEL_REPLAY} COMMIT;"))
+        .map_err(|e| {
+            StorageError::MigrationFailed(format!(
+                "migration '041_tool_call_model_replay' failed: {e}"
+            ))
+        })?;
+
+    let legacy_rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, turn_id, call_id, arguments, result, status
+                 FROM tool_calls
+                 WHERE model_arguments IS NULL
+                    OR (result IS NOT NULL AND model_result IS NULL)",
+            )
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?
+    };
+
+    for (id, turn_id, call_id, arguments, result, status) in legacy_rows {
+        let argument_value = serde_json::from_str(&arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+        let model_arguments = compact_tool_arguments_for_model(&argument_value);
+        let model_result = result.as_ref().map(|result| {
+            compact_tool_result_for_model_with_reference(
+                result,
+                status.as_deref() != Some("success"),
+                tool_result_reference(&turn_id, &call_id),
+            )
+        });
+
+        conn.execute(
+            "UPDATE tool_calls
+             SET model_arguments = ?1, model_result = ?2
+             WHERE id = ?3",
+            params![model_arguments, model_result, id],
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    }
+
+    Ok(())
 }
 
 /// Insert the default bench on first run. Idempotent via INSERT OR IGNORE.
@@ -1310,6 +1378,42 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory DB");
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         super::run_migrations(&conn).expect("migrations should succeed");
+        conn
+    }
+
+    fn open_migrated_until_exclusive(stop_name: &str) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory DB");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(super::CREATE_MIGRATIONS_TABLE)
+            .expect("create migrations table");
+
+        for (name, sql) in super::migrations() {
+            if name == stop_name {
+                break;
+            }
+
+            if name == "023_encrypt_managed_secrets_at_rest" {
+                super::super::secret::migrate_managed_secret_storage(&conn)
+                    .expect("managed secret migration");
+            } else if name == "028_deduplicate_attachment_ingestion_content" {
+                super::super::attachment::migrate_attachment_ingested_markdown_dedup(&conn)
+                    .expect("attachment dedup migration");
+            } else if name == "030_team_agent_and_task_authoring" {
+                super::super::team::migrate_team_authoring_model(&conn)
+                    .expect("team authoring migration");
+            } else {
+                conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
+                    .unwrap_or_else(|error| panic!("migration {name} should apply: {error}"));
+            }
+
+            conn.execute(
+                "INSERT INTO _swage_migrations (name, applied_at) VALUES (?1, datetime('now'))",
+                rusqlite::params![name],
+            )
+            .expect("record applied migration");
+        }
+
+        super::seed_default_bench(&conn).expect("seed default bench");
         conn
     }
 
@@ -1787,6 +1891,77 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_replay_columns_exist() {
+        let conn = open_migrated();
+        for column in &["model_arguments", "model_result", "provider_round"] {
+            let col_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name=?1",
+                    rusqlite::params![column],
+                    |r| r.get(0),
+                )
+                .expect("pragma_table_info query");
+            assert_eq!(col_count, 1, "tool_calls.{column} column should exist");
+        }
+    }
+
+    #[test]
+    fn tool_call_model_replay_migration_backfills_legacy_rows() {
+        let conn = open_migrated_until_exclusive("041_tool_call_model_replay");
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
+        let call_id = "legacy_call";
+
+        conn.execute(
+            "INSERT INTO tool_calls
+             (id, turn_id, call_id, tool, arguments, agent_id, result, status,
+              duration_ms, truncated, total_bytes, position, created_at)
+             VALUES (?1, ?2, ?3, 'shell', ?4, 'agent-test', ?5, 'error',
+                     12, 0, 17, 0, ?6)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                &turn_id,
+                call_id,
+                r#"{"cmd":"missing-command"}"#,
+                "command not found",
+                now,
+            ],
+        )
+        .expect("insert legacy tool call");
+
+        super::run_migrations(&conn).expect("remaining migrations should apply");
+
+        let (model_arguments, model_result): (String, String) = conn
+            .query_row(
+                "SELECT model_arguments, model_result
+                 FROM tool_calls
+                 WHERE call_id = ?1",
+                rusqlite::params![call_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("select backfilled replay columns");
+
+        let arguments: swage_core::CompactToolReplay =
+            serde_json::from_str(&model_arguments).expect("arguments compact replay");
+        assert_eq!(arguments.kind, "tool_arguments");
+        assert_eq!(arguments.preview, r#"{"cmd":"missing-command"}"#);
+
+        let result: swage_core::CompactToolReplay =
+            serde_json::from_str(&model_result).expect("result compact replay");
+        assert_eq!(result.kind, "tool_result");
+        assert_eq!(result.preview, "command not found");
+        assert_eq!(result.is_error, Some(true));
+        let expected_ref = swage_core::tool_result_reference(&turn_id, call_id);
+        assert_eq!(
+            result.full_result_ref.as_deref(),
+            Some(expected_ref.as_str())
+        );
+    }
+
+    #[test]
     fn threads_indices_exist() {
         let conn = open_migrated();
         for idx in &["idx_threads_session_id", "idx_threads_agent_id"] {
@@ -1879,6 +2054,39 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "messages should cascade-delete when thread is deleted"
+        );
+    }
+
+    #[test]
+    fn deleting_turn_orphans_but_keeps_messages() {
+        let conn = open_migrated();
+        let bench_id = default_bench_id(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_id = insert_session(&conn, &bench_id, &now);
+        let thread_id = insert_thread(&conn, &session_id, &now);
+        let turn_id = insert_turn(&conn, &thread_id, &now);
+        let message_id = uuid::Uuid::new_v4().to_string();
+
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, created_at)
+             VALUES (?1,?2,?3,'assistant','hello',0,'agent-test',?4)",
+            rusqlite::params![message_id, thread_id, turn_id, now],
+        )
+        .expect("insert message");
+
+        conn.execute("DELETE FROM turns WHERE id=?1", rusqlite::params![turn_id])
+            .expect("delete turn");
+
+        let retained_turn_id: Option<String> = conn
+            .query_row(
+                "SELECT turn_id FROM messages WHERE id=?1",
+                rusqlite::params![message_id],
+                |r| r.get(0),
+            )
+            .expect("message should survive turn deletion");
+        assert!(
+            retained_turn_id.is_none(),
+            "deleting a turn should retain its messages with turn_id set to NULL"
         );
     }
 

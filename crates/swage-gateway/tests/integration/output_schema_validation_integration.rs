@@ -1,4 +1,4 @@
-//! Cross-task integration tests for Era 0.3 Phase 02: Output Schema Validation.
+//! Cross-task integration tests for output schema validation.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.
@@ -116,7 +116,7 @@ impl LlmProvider for MockProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Test helpers — match the phase01_era03 patterns
+// Test helpers — match the unified turn-loop patterns
 // ---------------------------------------------------------------------------
 
 async fn start_test_server_with_config(

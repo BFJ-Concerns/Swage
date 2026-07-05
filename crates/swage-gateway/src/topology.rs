@@ -24,7 +24,7 @@ use crate::state::AppState;
 use crate::turn::{
     GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config_for_bench_workspace,
     build_assembly_elements, build_gateway_dispatcher_with_unsandboxed_degradation,
-    load_bench_memory,
+    load_active_skills_for_agent, load_bench_memory, resolve_swage_root,
 };
 use crate::websocket::ServerEvent;
 
@@ -703,9 +703,19 @@ async fn execute_agent_node(
         .map(|(level, path)| (level.clone(), path.as_path()))
         .collect();
 
+    let swage_root_opt = resolve_swage_root();
+    let active_skills = load_active_skills_for_agent(
+        state,
+        session_id,
+        &bench.slug,
+        agent_id,
+        swage_root_opt.as_deref(),
+        false,
+    )
+    .await;
     let elements = build_assembly_elements(
         &config.instructions,
-        vec![],
+        active_skills,
         history_messages,
         memory_content,
         bench.name.clone(),
@@ -1207,13 +1217,15 @@ mod tests {
 
     use async_trait::async_trait;
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
-    use swage_storage::model::{NewBench, NewTeam};
-    use swage_storage::store::BenchStore;
-    use swage_storage::store::TeamStore;
+    use swage_storage::model::{NewBench, NewSession, NewTeam};
+    use swage_storage::store::{BenchStore, SessionStore, SkillActivationStore, TeamStore};
     use swage_topology::TopologyNodeKind;
 
     use super::*;
-    use crate::turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider};
+    use crate::test_support::SwageHomeGuard;
+    use crate::turn::tests::{
+        CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
+    };
 
     fn team_agents(ids: &[&str]) -> Vec<swage_storage::model::TeamAgentDefinition> {
         ids.iter()
@@ -1452,6 +1464,213 @@ mod tests {
             .unwrap();
         assert_eq!(edges.len(), 1);
         assert!(edges[0].matched);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topology_agent_node_includes_agent_level_skills_in_provider_request() {
+        let swage_home = SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("benches/topology-skill-bench/agents/planner/skills/planning-style");
+        std::fs::create_dir_all(&skill_dir).expect("create topology skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Planning style\n---\nUse the topology planning skill.\n",
+        )
+        .expect("write topology skill");
+
+        let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"answer\":\"done\"}".into(),
+            },
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]]);
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let bench = BenchStore::create(
+            storage.as_ref(),
+            NewBench {
+                name: "Topology Skill Bench".into(),
+                slug: "topology-skill-bench".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                bench_id: bench.id,
+                name: "skill-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["plan"]),
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget::default(),
+            nodes: vec![TopologyNode {
+                id: "plan".into(),
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "planner".into(),
+                    task_name: Some("plan".into()),
+                },
+                output_schema: Some(schema(serde_json::json!({
+                    "answer": {"type": "string"}
+                }))),
+                iteration_limit: None,
+            }],
+            edges: vec![],
+        };
+
+        TopologyExecutor::new(state)
+            .execute(TopologyExecutionRequest {
+                team,
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect("topology run should complete");
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let request_text = captured_requests[0]
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            request_text.contains("Use the topology planning skill."),
+            "topology provider request should include agent-level skill instructions: {request_text}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topology_agent_node_does_not_inherit_user_activated_session_skills() {
+        let swage_home = SwageHomeGuard::new();
+        let bench_dir = swage_home.path().join("benches/topology-skill-bench");
+        std::fs::create_dir_all(bench_dir.join("skills/foreground-only"))
+            .expect("create bench skill directory");
+        std::fs::write(
+            bench_dir.join("skills/foreground-only/SKILL.md"),
+            "---\ndescription: Foreground only\n---\nUse the foreground-only skill.\n",
+        )
+        .expect("write bench skill");
+        let agent_skill_dir = bench_dir.join("agents/planner/skills/planning-style");
+        std::fs::create_dir_all(&agent_skill_dir).expect("create agent skill directory");
+        std::fs::write(
+            agent_skill_dir.join("SKILL.md"),
+            "---\ndescription: Planning style\n---\nUse the topology planning skill.\n",
+        )
+        .expect("write agent skill");
+
+        let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+            swage_core::StreamChunk::Delta {
+                content: "{\"answer\":\"done\"}".into(),
+            },
+            swage_core::StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ]]);
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::new(provider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let bench = BenchStore::create(
+            storage.as_ref(),
+            NewBench {
+                name: "Topology Skill Bench".into(),
+                slug: "topology-skill-bench".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .activate_skill(session.id, "foreground-only")
+            .await
+            .unwrap();
+        let team = storage
+            .create_team(NewTeam {
+                bench_id: bench.id,
+                name: "skill-team".into(),
+                description: String::new(),
+                entry_agent_id: "planner".into(),
+                agents: team_agents(&["planner"]),
+                tasks: team_tasks(&["plan"]),
+            })
+            .await
+            .unwrap();
+        let graph = TopologyGraph {
+            entry_node_id: "plan".into(),
+            budget: swage_topology::TopologyBudget::default(),
+            nodes: vec![TopologyNode {
+                id: "plan".into(),
+                kind: TopologyNodeKind::Llm {
+                    agent_id: "planner".into(),
+                    task_name: Some("plan".into()),
+                },
+                output_schema: Some(schema(serde_json::json!({
+                    "answer": {"type": "string"}
+                }))),
+                iteration_limit: None,
+            }],
+            edges: vec![],
+        };
+
+        TopologyExecutor::new(state)
+            .execute(TopologyExecutionRequest {
+                team,
+                graph,
+                initial_input: serde_json::json!({"message": "hello"}),
+                session_id: Some(session.id),
+                source_turn_id: None,
+            })
+            .await
+            .expect("topology run should complete");
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let request_text = captured_requests[0]
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            request_text.contains("Use the topology planning skill."),
+            "topology provider request should include target agent-level skill instructions: {request_text}"
+        );
+        assert!(
+            !request_text.contains("Use the foreground-only skill."),
+            "topology provider request must not inherit user-activated foreground skills: {request_text}"
+        );
     }
 
     #[tokio::test]

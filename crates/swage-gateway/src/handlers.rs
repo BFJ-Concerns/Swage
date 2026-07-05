@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
+use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
 use swage_storage::SharedReferenceKind;
 
 use crate::{
@@ -51,10 +52,6 @@ use crate::{
     execution_host::{
         ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
     },
-    heartbeat::{
-        CreateHeartbeatRequest, HeartbeatListResponse, HeartbeatResponse, HeartbeatRunListResponse,
-        UpdateHeartbeatRequest,
-    },
     lens::{
         CreateLensRequest, InstallLensRequest, LensDescriptor, LensListResponse,
         LensRuntimeResponse, UpdateLensRequest, UpdateLensRuntimeRequest,
@@ -69,10 +66,6 @@ use crate::{
     },
     operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
-    schedule::{
-        CreateScheduledJobRequest, ScheduledJobListResponse, ScheduledJobResponse,
-        ScheduledRunListResponse, TriggerScheduledJobResponse, UpdateScheduledJobRequest,
-    },
     secret::{
         CreateSecretRequest, GenerateSecretRequest, RotateSecretRequest, SecretListResponse,
         SecretResponse, SecretValidationResponse,
@@ -702,6 +695,17 @@ pub async fn create_channel_link(
     ))
 }
 
+/// `POST /api/onboarding/channels/link-codes` — issue a one-time channel link code.
+pub async fn create_channel_link_code(
+    State(state): State<AppState>,
+    Json(req): Json<channel_wire::CreateChannelLinkCodeRequest>,
+) -> Result<(StatusCode, Json<channel_wire::ChannelLinkCodeResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::onboarding::create_channel_link_code(&state, req).await?),
+    ))
+}
+
 /// `POST /api/onboarding/nodes/pairing-codes` — issue a one-time node pairing code.
 pub async fn create_node_pairing_code(
     State(state): State<AppState>,
@@ -761,148 +765,80 @@ pub async fn import_gateway_recovery(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `POST /api/scheduled-jobs` — create a durable scheduled job.
-pub async fn create_scheduled_job(
+/// `POST /api/schedules` — create a durable schedule.
+pub async fn create_schedule(
     State(state): State<AppState>,
-    Json(req): Json<CreateScheduledJobRequest>,
-) -> Result<(StatusCode, Json<ScheduledJobResponse>), ApiError> {
-    let response = crate::schedule::create_scheduled_job(&state, req).await?;
+    Json(req): Json<schedule_wire::CreateScheduleRequest>,
+) -> Result<(StatusCode, Json<schedule_wire::Schedule>), ApiError> {
+    let response = crate::schedule::create_schedule(&state, req).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// `GET /api/scheduled-jobs` — list all configured scheduled jobs.
-pub async fn list_scheduled_jobs(
+/// `GET /api/schedules` — list all configured schedules.
+pub async fn list_schedules(
     State(state): State<AppState>,
-) -> Result<Json<ScheduledJobListResponse>, ApiError> {
-    Ok(Json(crate::schedule::list_scheduled_jobs(&state).await?))
+) -> Result<Json<schedule_wire::ScheduleListResponse>, ApiError> {
+    Ok(Json(crate::schedule::list_schedules(&state).await?))
 }
 
-/// `PUT /api/scheduled-jobs/:id` — edit an existing scheduled job.
-pub async fn update_scheduled_job(
+/// `PUT /api/schedules/:id` — edit an existing schedule.
+pub async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateScheduledJobRequest>,
-) -> Result<Json<ScheduledJobResponse>, ApiError> {
+    Json(req): Json<schedule_wire::UpdateScheduleRequest>,
+) -> Result<Json<schedule_wire::Schedule>, ApiError> {
     Ok(Json(
-        crate::schedule::update_scheduled_job(&state, id, req).await?,
+        crate::schedule::update_schedule(&state, id, req).await?,
     ))
 }
 
-/// `POST /api/scheduled-jobs/:id/pause` — pause a scheduled job.
-pub async fn pause_scheduled_job(
+/// `POST /api/schedules/:id/pause` — pause a schedule.
+pub async fn pause_schedule(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ScheduledJobResponse>, ApiError> {
-    Ok(Json(
-        crate::schedule::pause_scheduled_job(&state, id).await?,
-    ))
+) -> Result<Json<schedule_wire::Schedule>, ApiError> {
+    Ok(Json(crate::schedule::pause_schedule(&state, id).await?))
 }
 
-/// `POST /api/scheduled-jobs/:id/resume` — resume a scheduled job.
-pub async fn resume_scheduled_job(
+/// `POST /api/schedules/:id/resume` — resume a paused schedule.
+pub async fn resume_schedule(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ScheduledJobResponse>, ApiError> {
-    Ok(Json(
-        crate::schedule::resume_scheduled_job(&state, id).await?,
-    ))
+) -> Result<Json<schedule_wire::Schedule>, ApiError> {
+    Ok(Json(crate::schedule::resume_schedule(&state, id).await?))
 }
 
-/// `POST /api/scheduled-jobs/:id/trigger` — execute a job immediately.
-pub async fn trigger_scheduled_job(
+/// `POST /api/schedules/:id/trigger` — fire a schedule immediately.
+///
+/// The response carries the recorded run in its terminal state; a failed
+/// or skipped run is reported through the record, not as an HTTP error.
+pub async fn trigger_schedule(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<(StatusCode, Json<TriggerScheduledJobResponse>), ApiError> {
+) -> Result<(StatusCode, Json<schedule_wire::TriggerScheduleResponse>), ApiError> {
     Ok((
         StatusCode::ACCEPTED,
-        Json(crate::schedule::trigger_scheduled_job(&state, id).await?),
+        Json(crate::schedule::trigger_schedule(&state, id).await?),
     ))
 }
 
-/// `GET /api/scheduled-jobs/:id/runs` — list recorded executions for a job.
-pub async fn list_scheduled_runs(
+/// `GET /api/schedules/:id/runs` — list recorded runs for a schedule.
+pub async fn list_schedule_runs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ScheduledRunListResponse>, ApiError> {
-    Ok(Json(
-        crate::schedule::list_scheduled_runs(&state, id).await?,
-    ))
+) -> Result<Json<schedule_wire::ScheduleRunListResponse>, ApiError> {
+    Ok(Json(crate::schedule::list_schedule_runs(&state, id).await?))
 }
 
-/// `DELETE /api/scheduled-jobs/:id` — delete a job and its recorded runs.
-pub async fn delete_scheduled_job(
+/// `DELETE /api/schedules/:id` — delete a schedule and its recorded runs.
+pub async fn delete_schedule(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    if crate::schedule::delete_scheduled_job(&state, id).await? {
+    if crate::schedule::delete_schedule(&state, id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found("scheduled_job", id))
-    }
-}
-
-/// `POST /api/heartbeats` — create a durable heartbeat.
-pub async fn create_heartbeat(
-    State(state): State<AppState>,
-    Json(req): Json<CreateHeartbeatRequest>,
-) -> Result<(StatusCode, Json<HeartbeatResponse>), ApiError> {
-    let response = crate::heartbeat::create_heartbeat(&state, req).await?;
-    Ok((StatusCode::CREATED, Json(response)))
-}
-
-/// `GET /api/heartbeats` — list all configured heartbeats.
-pub async fn list_heartbeats(
-    State(state): State<AppState>,
-) -> Result<Json<HeartbeatListResponse>, ApiError> {
-    Ok(Json(crate::heartbeat::list_heartbeats(&state).await?))
-}
-
-/// `PUT /api/heartbeats/:id` — edit an existing heartbeat.
-pub async fn update_heartbeat(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(req): Json<UpdateHeartbeatRequest>,
-) -> Result<Json<HeartbeatResponse>, ApiError> {
-    Ok(Json(
-        crate::heartbeat::update_heartbeat(&state, id, req).await?,
-    ))
-}
-
-/// `POST /api/heartbeats/:id/enable` — enable heartbeat execution.
-pub async fn enable_heartbeat(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<HeartbeatResponse>, ApiError> {
-    Ok(Json(crate::heartbeat::enable_heartbeat(&state, id).await?))
-}
-
-/// `POST /api/heartbeats/:id/disable` — disable heartbeat execution.
-pub async fn disable_heartbeat(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<HeartbeatResponse>, ApiError> {
-    Ok(Json(crate::heartbeat::disable_heartbeat(&state, id).await?))
-}
-
-/// `GET /api/heartbeats/:id/runs` — list recorded heartbeat runs.
-pub async fn list_heartbeat_runs(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<HeartbeatRunListResponse>, ApiError> {
-    Ok(Json(
-        crate::heartbeat::list_heartbeat_runs(&state, id).await?,
-    ))
-}
-
-/// `DELETE /api/heartbeats/:id` — delete a heartbeat and its run history.
-pub async fn delete_heartbeat(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    if crate::heartbeat::delete_heartbeat(&state, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("heartbeat", id))
+        Err(ApiError::not_found("schedule", id))
     }
 }
 
@@ -2081,6 +2017,11 @@ async fn execute_external_delegate_message(
     )
     .await;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+    let target_instructions = crate::turn::delegated_target_instructions_for_bench(
+        &target_resolved.instructions,
+        &bench.slug,
+        &delegate_msg.recipient_agent_id,
+    );
 
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
@@ -2122,6 +2063,7 @@ async fn execute_external_delegate_message(
             sender_turn_id,
             bench_id,
             target_agent_config,
+            target_instructions,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
             tokio_util::sync::CancellationToken::new(),
@@ -2592,7 +2534,9 @@ mod tests {
     use crate::{
         server::build_router,
         state::AppState,
-        turn::tests::{MockProvider, MockStorage, MultiRoundMockProvider},
+        turn::tests::{
+            CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
+        },
         websocket::ServerEvent,
     };
 
@@ -2709,15 +2653,19 @@ mod tests {
             .expect("submit async turn");
 
         let poll = {
+            // Generous deadline: under a full-workspace test run the async
+            // turn competes with every other suite for CPU, and a one-second
+            // budget starves reliably.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut completed = None;
-            for _ in 0..50 {
+            while std::time::Instant::now() < deadline {
                 let current = client.poll_turn(turn_id).await.expect("poll turn");
                 let state = current["state"].as_str().expect("poll state string");
                 if matches!(state, "completed" | "failed" | "interrupted") {
                     completed = Some(current);
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             completed.expect("turn should reach a terminal state")
         };
@@ -2925,6 +2873,68 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_message_includes_target_instructions() {
+        use swage_agent::MessageRouter;
+        use swage_core::{FinishReason, MessageKind, StreamChunk};
+        use swage_storage::model::NewAgentMessage;
+
+        let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "External delegate answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]]);
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let bench = storage
+            .get_or_create_default()
+            .await
+            .expect("get default bench");
+        let config = swage_config::ResolvedConfig {
+            instructions: "Use the external delegated specialist instructions.".to_string(),
+            ..swage_config::ResolvedConfig::default()
+        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = MessageRouter::new(state.storage.clone(), None);
+        let delegate_msg = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".to_string(),
+                recipient_agent_id: "agent-b".to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "summarise externally" }),
+            })
+            .await
+            .expect("create external delegate message");
+
+        execute_external_delegate_message(state, delegate_msg, bench.id, None)
+            .await
+            .expect("external delegation should complete");
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let request_text = captured_requests[0]
+            .messages
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            request_text.contains("Use the external delegated specialist instructions."),
+            "external delegated provider request should include target agent instructions: {request_text}"
+        );
     }
 
     #[tokio::test]

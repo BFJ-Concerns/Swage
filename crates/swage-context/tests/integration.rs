@@ -47,7 +47,7 @@ impl LlmProvider for StubProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 1: Default assembly produces era 0.1-equivalent output
+// Test 1: Default assembly preserves the legacy prompt shape
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Sustained Conversation Quality — baseline behaviour.
@@ -61,7 +61,7 @@ impl LlmProvider for StubProvider {
 // from instructions, then history in order).
 
 #[test]
-fn default_assembly_produces_era_01_equivalent_output() {
+fn default_assembly_preserves_legacy_prompt_shape() {
     // Set up: create prompt rules at two hierarchy levels with different priorities
     let root = TempDir::new().unwrap();
     let global_prompts = root.path().join("prompts");
@@ -125,7 +125,7 @@ fn default_assembly_produces_era_01_equivalent_output() {
 
     let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
 
-    // Verify era 0.1 equivalence:
+    // Verify the legacy prompt-compatible ordering:
     // 1. First message should be Role::System with combined prompt rule content
     assert!(
         !output.messages.is_empty(),

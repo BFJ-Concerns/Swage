@@ -25,6 +25,7 @@ function benchStore(): BenchStore {
     get isLoading() { return false; },
     loadBenches: async () => {},
     selectBench: async () => {},
+    closeBench: () => {},
     createBench: async () => {},
     deleteBench: async () => {},
   };
@@ -39,15 +40,31 @@ describe("BenchPicker", () => {
     document.body.innerHTML = "";
   });
 
-  it("routes the bench card secondary menu to bench settings", () => {
+  it("routes the bench card settings button to bench settings", () => {
     const onOpenBenchSettings = vi.fn();
     component = mount(BenchPicker, {
       target: document.body,
       props: { benchStore: benchStore(), onOpenBenchSettings },
     });
 
-    (document.querySelector(".bench-menu") as HTMLElement).click();
+    (document.querySelector(".bench-settings") as HTMLElement).click();
 
     expect(onOpenBenchSettings).toHaveBeenCalledWith(bench);
+  });
+
+  it("renders Open as a real sibling button, not a nested span", () => {
+    // UI audit f-2: Open and Settings must be first-class <button> siblings of
+    // the card container, never nested interactive widgets inside a button.
+    component = mount(BenchPicker, {
+      target: document.body,
+      props: { benchStore: benchStore() },
+    });
+
+    const openBtn = document.querySelector(".open-btn");
+    expect(openBtn).toBeInstanceOf(HTMLButtonElement);
+    // The card itself is no longer a button — it's a container.
+    expect(document.querySelector(".bench-card")).not.toBeInstanceOf(HTMLButtonElement);
+    // No nested role="button" spans remain.
+    expect(document.querySelectorAll('[role="button"]')).toHaveLength(0);
   });
 });

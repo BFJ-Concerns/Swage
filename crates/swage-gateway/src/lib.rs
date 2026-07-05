@@ -48,6 +48,7 @@ pub mod authoring_definition;
 pub mod automated_turn;
 pub mod background_loop;
 pub mod bench_extension;
+pub mod browser;
 pub mod builder_runtime;
 pub mod capabilities;
 pub mod capability_bundle;
@@ -57,7 +58,6 @@ pub mod context;
 pub mod error;
 pub mod execution_host;
 pub mod handlers;
-pub mod heartbeat;
 pub mod lens;
 pub mod lifecycle;
 pub mod material;
@@ -76,6 +76,7 @@ pub mod startup;
 pub mod state;
 pub mod subscription;
 pub mod supervision;
+pub mod telegram;
 pub mod thread_selection;
 pub mod tool;
 pub mod tool_executor;
@@ -83,3 +84,101 @@ pub mod topology;
 pub mod turn;
 pub mod voice;
 pub mod websocket;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+
+    static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
+    pub(crate) struct SwageHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp_dir: Option<tempfile::TempDir>,
+        root: PathBuf,
+    }
+
+    impl SwageHomeGuard {
+        pub(crate) fn new() -> Self {
+            let lock = PROCESS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
+            let root = temp_dir.path().to_path_buf();
+            unsafe { std::env::set_var("SWAGE_HOME", &root) };
+            Self {
+                _lock: lock,
+                _temp_dir: Some(temp_dir),
+                root,
+            }
+        }
+
+        pub(crate) fn set_to(path: impl AsRef<Path>) -> Self {
+            let lock = PROCESS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let root = path.as_ref().to_path_buf();
+            unsafe { std::env::set_var("SWAGE_HOME", &root) };
+            Self {
+                _lock: lock,
+                _temp_dir: None,
+                root,
+            }
+        }
+
+        pub(crate) fn isolate() -> Self {
+            Self::new()
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for SwageHomeGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("SWAGE_HOME") };
+        }
+    }
+
+    /// Serialises tests that mutate `XDG_RUNTIME_DIR`, which controls runtime
+    /// gateway metadata discovery.
+    pub(crate) struct XdgRuntimeDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp_dir: tempfile::TempDir,
+        previous: Option<OsString>,
+    }
+
+    impl XdgRuntimeDirGuard {
+        pub(crate) fn new() -> Self {
+            let lock = PROCESS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let temp_dir = tempfile::TempDir::new().expect("temporary runtime dir");
+            let previous = std::env::var_os("XDG_RUNTIME_DIR");
+            unsafe { std::env::set_var("XDG_RUNTIME_DIR", temp_dir.path()) };
+            Self {
+                _lock: lock,
+                _temp_dir: temp_dir,
+                previous,
+            }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            self._temp_dir.path()
+        }
+    }
+
+    impl Drop for XdgRuntimeDirGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe { std::env::set_var("XDG_RUNTIME_DIR", previous) };
+            } else {
+                unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+            }
+        }
+    }
+}

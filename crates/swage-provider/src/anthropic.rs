@@ -5,10 +5,12 @@ use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use swage_core::ToolResult;
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmRequest,
     LlmResponse, ProviderError, Role, StreamChunk, TokenUsage, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolResult,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::http::{HttpClient, SseEvent};
@@ -296,6 +298,7 @@ impl AnthropicProvider {
     /// These two messages are appended to the conversation history before the
     /// next streaming request so the model can see its own tool invocations and
     /// their results.
+    #[cfg(test)]
     pub(crate) fn build_tool_result_messages(
         tool_calls: &[ToolCall],
         tool_results: &[ToolResult],
@@ -355,34 +358,12 @@ impl AnthropicProvider {
 
     fn build_messages_request(&self, request: &LlmRequest, stream: bool) -> MessagesRequest {
         // Convert regular conversation messages (skip system — it goes in the top-level field).
-        let mut messages: Vec<AnthropicMessage> = request
+        let messages: Vec<AnthropicMessage> = request
             .messages
             .iter()
             .filter(|m| m.role() != swage_core::Role::System)
             .map(|m| {
-                // Tool messages carry structured content_blocks (tool_use / tool_result).
-                // Plain text messages use the simple Text variant.
-                let content = match m.content_blocks() {
-                    Some(blocks) => MessageContent::Blocks(blocks.to_vec()),
-                    None => {
-                        // Extract plain text from ContentPart::Text entries.
-                        // Multi-modal messages (with images) are not currently
-                        // supported in this code path; image parts are dropped.
-                        let text = m
-                            .content()
-                            .iter()
-                            .filter_map(|p| {
-                                if let swage_core::ContentPart::Text { text } = p {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        MessageContent::Text(text)
-                    }
-                };
+                let content = Self::message_content_for_anthropic(m);
                 AnthropicMessage {
                     role: m.role().to_string(),
                     content,
@@ -390,26 +371,13 @@ impl AnthropicProvider {
             })
             .collect();
 
-        // Append tool-use round history.  Each round becomes an assistant message
-        // (reconstructing the tool_use blocks) followed by a user message carrying
-        // the tool_result blocks.  This gives the model the context it needs to
-        // produce a coherent response after seeing all its tool results.
-        for round in &request.tool_history {
-            let round_messages = Self::build_tool_result_messages(
-                &round.tool_calls,
-                &round.tool_results,
-                &round.assistant_text,
-            );
-            messages.extend(round_messages);
-        }
-
         let tools = request
             .tools
             .iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
+                input_schema: crate::tool_schema::provider_tool_schema(&t.input_schema),
             })
             .collect();
 
@@ -629,24 +597,7 @@ impl AnthropicProvider {
             .iter()
             .filter(|m| m.role() != Role::System)
             .map(|m| {
-                let content = match m.content_blocks() {
-                    Some(blocks) => MessageContent::Blocks(blocks.to_vec()),
-                    None => {
-                        let text = m
-                            .content()
-                            .iter()
-                            .filter_map(|p| {
-                                if let ContentPart::Text { text } = p {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        MessageContent::Text(text)
-                    }
-                };
+                let content = Self::message_content_for_anthropic(m);
                 AnthropicMessage {
                     role: m.role().to_string(),
                     content,
@@ -655,6 +606,67 @@ impl AnthropicProvider {
             .collect();
 
         (system, wire_messages)
+    }
+
+    fn message_content_for_anthropic(message: &ChatMessage) -> MessageContent {
+        if let Some(replay) = message.tool_replay() {
+            return MessageContent::Blocks(Self::tool_replay_to_anthropic_blocks(replay));
+        }
+
+        let text = message
+            .content()
+            .iter()
+            .filter_map(|p| {
+                if let ContentPart::Text { text } = p {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        MessageContent::Text(text)
+    }
+
+    fn tool_replay_to_anthropic_blocks(replay: &[ToolReplayPart]) -> Vec<serde_json::Value> {
+        replay
+            .iter()
+            .map(|part| match part {
+                ToolReplayPart::Text { text } => serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                }),
+                ToolReplayPart::Reasoning { content, .. } => serde_json::json!({
+                    "type": "text",
+                    "text": content,
+                }),
+                ToolReplayPart::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } => serde_json::json!({
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "input": arguments,
+                }),
+                ToolReplayPart::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } => {
+                    let mut block = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": content,
+                    });
+                    if *is_error {
+                        block["is_error"] = serde_json::Value::Bool(true);
+                    }
+                    block
+                }
+            })
+            .collect()
     }
 
     /// Build a `MessagesRequest` from a `CompletionRequest`.
@@ -686,7 +698,7 @@ impl AnthropicProvider {
                     let input_schema = def
                         .get("input_schema")
                         .or_else(|| def.get("parameters"))
-                        .cloned()
+                        .map(crate::tool_schema::provider_tool_schema)
                         .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
                     Some(AnthropicTool {
                         name,
@@ -721,7 +733,7 @@ impl AnthropicProvider {
                 let input_schema = def
                     .get("input_schema")
                     .or_else(|| def.get("parameters"))
-                    .cloned()
+                    .map(crate::tool_schema::provider_tool_schema)
                     .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
                 Some(AnthropicTool {
                     name,
@@ -753,6 +765,19 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
     fn model_id(&self) -> &str {
         &self.config.model
+    }
+
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "anthropic",
+            "protocol": "messages",
+            "stream": stream,
+            "body": self.build_request_for_completion(request, stream),
+        })
     }
 
     async fn complete(
@@ -1208,6 +1233,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_request_snapshot_uses_messages_wire_body() {
+        let provider = AnthropicProvider::from_config(ProviderConfig::new(
+            "key",
+            "claude-3-5-sonnet",
+            "https://api.anthropic.com",
+        ));
+        let request = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::System, "Be careful"),
+                ChatMessage::new(Role::User, "Use a tool"),
+            ],
+            model: None,
+            max_tokens: Some(100),
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![serde_json::json!({
+                "name": "ping",
+                "description": "Echoes the input value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    }
+                }
+            })],
+        };
+
+        let snapshot = provider.provider_request_snapshot(&request, true);
+
+        assert_eq!(snapshot["provider"], "anthropic");
+        assert_eq!(snapshot["protocol"], "messages");
+        assert_eq!(snapshot["stream"], true);
+        assert_eq!(snapshot["body"]["system"], "Be careful");
+        assert_eq!(snapshot["body"]["messages"][0]["role"], "user");
+        assert_eq!(snapshot["body"]["tools"][0]["name"], "ping");
+    }
+
+    #[test]
     fn build_tool_result_messages_includes_text_in_assistant_message() {
         // When the model produced text before the tool calls, that text must
         // appear as a text content block in the assistant message alongside the
@@ -1290,6 +1354,42 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn to_anthropic_messages_renders_canonical_tool_replay_blocks() {
+        let messages = swage_core::build_tool_round_messages(
+            &[ToolCall {
+                call_id: "toolu_01".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "pwd"}),
+            }],
+            &[ToolResult {
+                call_id: "toolu_01".into(),
+                content: "/workspace".into(),
+                is_error: false,
+            }],
+            "Checking.",
+        );
+        assert!(
+            messages[0].tool_replay().is_some(),
+            "fixture should exercise canonical replay"
+        );
+
+        let (_system, wire_messages) = AnthropicProvider::to_anthropic_messages(&messages);
+        let assistant = serde_json::to_value(&wire_messages[0]).unwrap();
+        let user = serde_json::to_value(&wire_messages[1]).unwrap();
+        let assistant_blocks = assistant["content"].as_array().unwrap();
+        let user_blocks = user["content"].as_array().unwrap();
+
+        assert_eq!(assistant_blocks[0]["type"], "text");
+        assert_eq!(assistant_blocks[0]["text"], "Checking.");
+        assert_eq!(assistant_blocks[1]["type"], "tool_use");
+        assert_eq!(assistant_blocks[1]["id"], "toolu_01");
+        assert_eq!(assistant_blocks[1]["input"]["command"], "pwd");
+        assert_eq!(user_blocks[0]["type"], "tool_result");
+        assert_eq!(user_blocks[0]["tool_use_id"], "toolu_01");
+        assert_eq!(user_blocks[0]["content"], "/workspace");
     }
 
     // --- multi-block content for tool results ---
@@ -1626,6 +1726,47 @@ mod tests {
             tools[0].get("parameters").is_none(),
             "parameters must not appear in Anthropic wire format"
         );
+    }
+
+    #[test]
+    fn build_request_for_tool_completion_flattens_provider_facing_schema() {
+        use swage_core::ToolCompletionRequest;
+        let provider = AnthropicProvider::new("key", "model");
+        let request = ToolCompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![serde_json::json!({
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 3,
+                            "pattern": "^[a-z]+$"
+                        },
+                        "oneOf": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "oneOf": [{"required": ["query"]}]
+                }
+            })],
+        };
+
+        let body = provider.build_request_for_tool_completion(&request, false);
+        let json = serde_json::to_value(&body).unwrap();
+        let schema = &json["tools"][0]["input_schema"];
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema["properties"]["query"].get("minLength").is_none());
+        assert!(schema["properties"]["query"].get("pattern").is_none());
+        assert_eq!(schema["properties"]["oneOf"]["type"], "string");
     }
 
     #[test]
