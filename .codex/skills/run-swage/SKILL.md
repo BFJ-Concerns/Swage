@@ -21,13 +21,14 @@ Playwright's Chromium were already present. A fresh machine needs:
 - **Node** (verified with v24) and **npm** on PATH.
 - **`just`** (verified 1.51) — the task runner that wraps `xtask`.
 - **`tmux`** — only for driving the TUI.
-- **Playwright Chromium** for the web driver. It is installed as part of the
-  desktop dependencies; provision it with:
+- **Playwright Chromium** for the web driver. npm installs the Playwright
+  package; provision the matching browser revision explicitly:
 
 ```bash
-npm --prefix desktop ci          # installs Playwright + downloads Chromium
+npm --prefix desktop ci
+npm --prefix desktop exec playwright install chromium
 # On a bare machine also run, for the system libs Chromium needs:
-#   (cd desktop && npx playwright install --with-deps chromium)
+#   npm --prefix desktop exec playwright install --with-deps chromium
 ```
 
 The driver borrows this Chromium from `desktop/node_modules` — there is no
@@ -170,6 +171,9 @@ this skill's `driver.mjs`.
   not a plain `cargo build`.
 - **Driver: `Cannot read properties of undefined (reading 'launch')`**:
   Playwright didn't resolve. Run `npm --prefix desktop ci`.
+- **Driver: `Executable doesn't exist` under `~/.cache/ms-playwright`**:
+  the Playwright package resolved, but its browser revision is not installed.
+  Run `npm --prefix desktop exec playwright install chromium`.
 - **Driver hangs / `waitForFunction` times out**: the SPA didn't mount — usually
   the bundle 404'd. Check `probe` output for console errors and confirm
   `curl http://127.0.0.1:PORT/` returns the SPA `index.html`, not a 503.
