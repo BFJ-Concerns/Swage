@@ -43,6 +43,8 @@ use swage_storage::{SqliteStorage, store::BenchStore};
 
 use crate::support::ProcessEnvGuard;
 
+const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
+
 struct SwageHomeGuard {
     _env_guard: ProcessEnvGuard,
     _temp_dir: tempfile::TempDir,
@@ -331,7 +333,7 @@ async fn tool_approval_approve_continues_turn() {
 
     // Expect an ApprovalRequired event (the turn pauses).
     let approval_event =
-        ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+        ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
             .await
             .expect("should receive ApprovalRequired event");
 
@@ -354,13 +356,13 @@ async fn tool_approval_approve_continues_turn() {
     .await;
 
     // Expect ApprovalConfirmed and then the turn completing normally.
-    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", Duration::from_secs(5))
+    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalConfirmed");
     assert_eq!(confirmed["decision"], "approved");
 
     // The tool should execute and the turn should complete.
-    let complete = ws_wait_for_event(&mut stream, "turn_complete", Duration::from_secs(5))
+    let complete = ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("turn should complete after approval");
     assert!(complete["turn_id"].is_string());

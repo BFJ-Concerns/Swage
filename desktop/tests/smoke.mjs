@@ -388,8 +388,11 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  await page.getByRole("button", { name: /default/i }).click();
-  await page.getByRole("button", { name: "Open bench", exact: true }).click();
+  const defaultBench = page.getByRole("article", { name: "Bench Default" });
+  await defaultBench
+    .getByRole("button", { name: "Preview bench Default", exact: true })
+    .click();
+  await defaultBench.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page
