@@ -25,10 +25,9 @@ vi.mock("../api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
   approvePendingAction: vi.fn(),
   rejectPendingAction: vi.fn(),
-  pauseScheduledJob: vi.fn(),
-  resumeScheduledJob: vi.fn(),
-  disableHeartbeat: vi.fn(),
-  enableHeartbeat: vi.fn(),
+  pauseSchedule: vi.fn(),
+  resumeSchedule: vi.fn(),
+  fetchScheduleRuns: vi.fn(),
 }));
 
 vi.mock("../api/builder", () => ({
@@ -258,8 +257,7 @@ describe("AppLayout: workbench shell", () => {
       },
       sessions: [],
       approvals: [],
-      scheduled_jobs: { jobs: [] },
-      heartbeats: { heartbeats: [] },
+      schedules: { schedules: [] },
       channels: { channels: [] },
       nodes: [],
     });
@@ -378,16 +376,16 @@ describe("AppLayout: workbench shell", () => {
     expect(document.body.textContent).toContain(
       "Author the workspace, then let the agent live in it.",
     );
-    // The stage pane sits next to the conversation pane as a secondary rail.
+    // Stage-surface lenses take the wide pane; conversation becomes the rail.
     expect(document.querySelector(".stage-pane")).not.toBeNull();
-    expect(document.querySelector(".body.conversation-dominant")).not.toBeNull();
+    expect(document.querySelector(".body.stage-dominant")).not.toBeNull();
   });
 
-  it("keeps conversation as the primary pane when a stage is present", async () => {
+  it("gives the stage the primary pane when a stage surface is active", async () => {
     component = mountBuilderLayout();
     await waitForText("Author the workspace, then let the agent live in it.");
 
-    const body = document.querySelector(".body.conversation-dominant");
+    const body = document.querySelector(".body.stage-dominant");
     expect(body).not.toBeNull();
     expect(body!.firstElementChild?.classList.contains("conversation-pane")).toBe(true);
     expect(body!.lastElementChild?.classList.contains("stage-pane")).toBe(true);

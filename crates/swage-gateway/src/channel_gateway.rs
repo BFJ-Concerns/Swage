@@ -28,45 +28,11 @@ use crate::state::AppState;
 use crate::subscription::SubscriptionState;
 use crate::thread_selection::resolve_thread_for_session;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalChannelIntegration {
-    DevDm,
-    DevThread,
-}
-
-impl ExternalChannelIntegration {
-    pub fn as_metadata_value(&self) -> &'static str {
-        match self {
-            Self::DevDm => "dev_dm",
-            Self::DevThread => "dev_thread",
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, GatewayError> {
-        match value {
-            "dev_dm" => Ok(Self::DevDm),
-            "dev_thread" => Ok(Self::DevThread),
-            other => Err(GatewayError::ValidationError(format!(
-                "unknown channel integration: {other}"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeliveryTarget {
-    Channel {
-        integration: ExternalChannelIntegration,
-        account: String,
-        conversation: String,
-    },
-    LocalStorage,
-    Webhook {
-        url: String,
-    },
-}
+// The delivery wire types live in the protocol crate (the schedule contract
+// embeds them); re-exported here so gateway call sites keep their paths.
+pub use swage_protocol::client::delivery::{
+    DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -98,29 +64,6 @@ pub struct ChannelInboundResponse {
     pub session_id: Uuid,
     pub delivered_to: Vec<DeliveryTarget>,
     pub response: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeliveryRoutingRequest {
-    #[serde(default = "default_true")]
-    pub deliver_to_origin: bool,
-    #[serde(default)]
-    pub home_target: Option<DeliveryTarget>,
-    #[serde(default)]
-    pub explicit_targets: Vec<DeliveryTarget>,
-    #[serde(default)]
-    pub store_local_output: bool,
-}
-
-impl Default for DeliveryRoutingRequest {
-    fn default() -> Self {
-        Self {
-            deliver_to_origin: true,
-            home_target: None,
-            explicit_targets: Vec::new(),
-            store_local_output: false,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -584,10 +527,6 @@ async fn record_delivery(
 
 fn parse_delivery_target(target: serde_json::Value) -> Option<DeliveryTarget> {
     serde_json::from_value(target).ok()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]

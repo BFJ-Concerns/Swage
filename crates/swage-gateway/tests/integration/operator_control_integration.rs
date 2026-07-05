@@ -20,12 +20,12 @@ use swage_core::{
 use swage_gateway::{
     channel_gateway::{ChannelOrigin, DeliveryTarget},
     execution_host::{RegisterExecutionHostRequest, register_remote_execution_host},
-    heartbeat::{CreateHeartbeatRequest, create_heartbeat},
-    schedule::{CreateScheduledJobRequest, ScheduleSpecRequest, create_scheduled_job},
+    schedule::create_schedule,
     secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
 };
+use swage_protocol::client::schedule::{CreateScheduleRequest, ScheduleSpec, SessionPolicy};
 use swage_provider::LlmProvider;
 use swage_storage::{
     ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
@@ -144,31 +144,16 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
         .await
         .insert(session_id, CancellationToken::new());
 
-    create_scheduled_job(
+    create_schedule(
         &state,
-        CreateScheduledJobRequest {
-            session_id,
+        CreateScheduleRequest {
             message: "Nightly sweep".into(),
-            schedule: ScheduleSpecRequest::Interval {
+            spec: ScheduleSpec::Interval {
                 every: "every 5 minutes".into(),
             },
-            routing: swage_gateway::channel_gateway::DeliveryRoutingRequest {
-                deliver_to_origin: false,
-                home_target: None,
-                explicit_targets: Vec::new(),
-                store_local_output: true,
-            },
-        },
-    )
-    .await
-    .unwrap();
-
-    create_heartbeat(
-        &state,
-        CreateHeartbeatRequest {
-            session_id,
-            message: "Heartbeat".into(),
-            interval_seconds: 60,
+            session: SessionPolicy::Continuation { session_id },
+            routing: None,
+            gate: None,
         },
     )
     .await
@@ -266,10 +251,9 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
     assert_eq!(body["sessions"][0]["has_running_turn"], true);
     assert_eq!(body["approvals"][0]["tool_name"], "shell");
     assert_eq!(
-        body["scheduled_jobs"]["jobs"][0]["message"],
+        body["schedules"]["schedules"][0]["message"],
         "Nightly sweep"
     );
-    assert_eq!(body["heartbeats"]["heartbeats"][0]["message"], "Heartbeat");
     assert_eq!(body["channels"]["channels"][0]["integration"], "dev_dm");
     assert_eq!(body["channels"]["channels"][0]["status"], "active");
     let docker_node = body["nodes"]
@@ -288,36 +272,21 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn operator_controls_manage_approvals_jobs_and_heartbeats_without_full_restart() {
+async fn operator_controls_manage_approvals_and_schedules_without_full_restart() {
     let state = test_state();
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
 
-    let scheduled = create_scheduled_job(
+    let scheduled = create_schedule(
         &state,
-        CreateScheduledJobRequest {
-            session_id,
+        CreateScheduleRequest {
             message: "Digest".into(),
-            schedule: ScheduleSpecRequest::Interval {
+            spec: ScheduleSpec::Interval {
                 every: "every 10 minutes".into(),
             },
-            routing: swage_gateway::channel_gateway::DeliveryRoutingRequest {
-                deliver_to_origin: false,
-                home_target: None,
-                explicit_targets: Vec::new(),
-                store_local_output: true,
-            },
-        },
-    )
-    .await
-    .unwrap();
-
-    let heartbeat = create_heartbeat(
-        &state,
-        CreateHeartbeatRequest {
-            session_id,
-            message: "Check in".into(),
-            interval_seconds: 120,
+            session: SessionPolicy::Continuation { session_id },
+            routing: None,
+            gate: None,
         },
     )
     .await
@@ -354,7 +323,7 @@ async fn operator_controls_manage_approvals_jobs_and_heartbeats_without_full_res
 
     let (pause_status, pause_body) = post_json(
         &router,
-        &format!("/api/scheduled-jobs/{}/pause", scheduled.id),
+        &format!("/api/schedules/{}/pause", scheduled.id),
         json!({}),
     )
     .await;
@@ -363,7 +332,7 @@ async fn operator_controls_manage_approvals_jobs_and_heartbeats_without_full_res
 
     let (resume_status, resume_body) = post_json(
         &router,
-        &format!("/api/scheduled-jobs/{}/resume", scheduled.id),
+        &format!("/api/schedules/{}/resume", scheduled.id),
         json!({}),
     )
     .await;
@@ -381,22 +350,4 @@ async fn operator_controls_manage_approvals_jobs_and_heartbeats_without_full_res
     .await;
     assert_eq!(reject_status, StatusCode::OK);
     assert_eq!(reject_body["decision"], "rejected");
-
-    let (disable_status, disable_body) = post_json(
-        &router,
-        &format!("/api/heartbeats/{}/disable", heartbeat.id),
-        json!({}),
-    )
-    .await;
-    assert_eq!(disable_status, StatusCode::OK);
-    assert_eq!(disable_body["status"], "disabled");
-
-    let (enable_status, enable_body) = post_json(
-        &router,
-        &format!("/api/heartbeats/{}/enable", heartbeat.id),
-        json!({}),
-    )
-    .await;
-    assert_eq!(enable_status, StatusCode::OK);
-    assert_eq!(enable_body["status"], "enabled");
 }

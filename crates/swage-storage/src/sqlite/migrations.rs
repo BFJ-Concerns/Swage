@@ -37,8 +37,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
         ("015_bench_default_flag", ADD_BENCH_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
-        ("017_scheduled_jobs", CREATE_SCHEDULED_JOB_TABLES),
-        ("018_heartbeats", CREATE_HEARTBEAT_TABLES),
+        // 017/018 were the scheduled-job and heartbeat tables, absorbed into
+        // the unified schedules schema in 001 during the private alpha.
         ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
         ("020_channel_links", CREATE_CHANNEL_LINK_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
@@ -311,47 +311,26 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         );
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_scheduled_runs_state_audit
-    AFTER UPDATE OF state ON scheduled_runs
+    CREATE TRIGGER IF NOT EXISTS trg_schedule_runs_state_audit
+    AFTER UPDATE OF state ON schedule_runs
     WHEN OLD.state <> NEW.state
     BEGIN
         INSERT INTO audit_events (
             id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
         ) VALUES (
             lower(hex(randomblob(16))),
-            (SELECT session_id FROM scheduled_jobs WHERE id = NEW.job_id),
-            'scheduled_run',
+            NEW.session_id,
+            'schedule_run',
             NEW.id,
             'state_transition',
-            'scheduled run state ' || OLD.state || ' -> ' || NEW.state,
+            'schedule run state ' || OLD.state || ' -> ' || NEW.state,
             json_object(
                 'from_state', OLD.state,
                 'to_state', NEW.state,
-                'job_id', NEW.job_id,
-                'turn_id', COALESCE(NEW.turn_id, ''),
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_heartbeat_runs_state_audit
-    AFTER UPDATE OF state ON heartbeat_runs
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (SELECT session_id FROM heartbeats WHERE id = NEW.heartbeat_id),
-            'heartbeat_run',
-            NEW.id,
-            'state_transition',
-            'heartbeat run state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'heartbeat_id', NEW.heartbeat_id,
+                'schedule_id', NEW.schedule_id,
+                'trigger', NEW.trigger_kind,
+                'skip_reason', COALESCE(NEW.skip_reason, ''),
+                'gate_verdict', COALESCE(NEW.gate_verdict, ''),
                 'turn_id', COALESCE(NEW.turn_id, ''),
                 'error_message', COALESCE(NEW.error_message, '')
             ),
@@ -708,76 +687,71 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_bench_id ON sessions(bench_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
-    CREATE TABLE IF NOT EXISTS scheduled_jobs (
-        id                  TEXT NOT NULL PRIMARY KEY,
-        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id            TEXT NOT NULL,
-        message             TEXT NOT NULL,
-        status              TEXT NOT NULL,
-        kind                TEXT NOT NULL,
-        schedule_expression TEXT NOT NULL,
-        delivery_json       TEXT NOT NULL,
-        next_run_at         TEXT,
-        last_run_at         TEXT,
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
+    -- Schedules: one durable definition per recurring or one-off piece of
+    -- agent work. The session policy is flattened into columns: fresh rows
+    -- carry the target bench/agent, continuation rows the session each run
+    -- returns to.
+    CREATE TABLE IF NOT EXISTS schedules (
+        id             TEXT NOT NULL PRIMARY KEY,
+        message        TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        kind           TEXT NOT NULL,
+        expression     TEXT NOT NULL,
+        session_policy TEXT NOT NULL,
+        bench_id       TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        agent_id       TEXT,
+        session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        delivery_json  TEXT NOT NULL,
+        gate_model     TEXT,
+        gate_criteria  TEXT,
+        next_run_at    TEXT,
+        last_run_at    TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
-        ON scheduled_jobs(status, next_run_at);
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
-        ON scheduled_jobs(session_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_next_run
+        ON schedules(status, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_schedules_session_id
+        ON schedules(session_id);
 
-    CREATE TABLE IF NOT EXISTS scheduled_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
-        trigger_kind  TEXT NOT NULL,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
+    -- Schedule runs: the complete record of what the scheduler did with
+    -- each due occurrence — executed, gated out, or skipped for overlap.
+    -- session_id/turn_id have no FK on purpose: runs are audit records and
+    -- outlive the sessions they executed in.
+    CREATE TABLE IF NOT EXISTS schedule_runs (
+        id             TEXT NOT NULL PRIMARY KEY,
+        schedule_id    TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        trigger_kind   TEXT NOT NULL,
+        state          TEXT NOT NULL,
+        skip_reason    TEXT,
+        scheduled_for  TEXT,
+        session_id     TEXT,
+        turn_id        TEXT,
+        gate_model     TEXT,
+        gate_verdict   TEXT,
+        gate_reasoning TEXT,
+        output_text    TEXT,
+        error_message  TEXT,
+        created_at     TEXT NOT NULL,
+        started_at     TEXT,
+        completed_at   TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
-        ON scheduled_runs(job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_id
+        ON schedule_runs(schedule_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_schedule_runs_state
+        ON schedule_runs(schedule_id, state);
 
-    CREATE TABLE IF NOT EXISTS heartbeats (
-        id               TEXT NOT NULL PRIMARY KEY,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id         TEXT NOT NULL,
-        message          TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL,
-        status           TEXT NOT NULL,
-        last_beat_at     TEXT,
-        next_beat_at     TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
-        ON heartbeats(status, next_beat_at);
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
-        ON heartbeats(session_id);
-
-    CREATE TABLE IF NOT EXISTS heartbeat_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
-        ON heartbeat_runs(heartbeat_id, created_at);
+    -- At most one in-flight run per schedule. This partial unique index is
+    -- the overlap guard itself: the pending-run insert either succeeds
+    -- (this run owns the schedule) or trips the constraint (a predecessor is
+    -- still running), which the scheduler turns into a deliberate skip.
+    -- Terminal rows fall outside the predicate, so any number of finished
+    -- runs — including skipped-for-overlap ones — coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_runs_one_active
+        ON schedule_runs(schedule_id)
+        WHERE state IN ('pending', 'running');
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
@@ -910,83 +884,6 @@ const ADD_TOOL_CALL_MODEL_REPLAY: &str = "
 
 const ADD_TOOL_CALL_PROVIDER_ROUND: &str = "
     ALTER TABLE tool_calls ADD COLUMN provider_round INTEGER NOT NULL DEFAULT 0;
-";
-
-/// Scheduled jobs and their recorded executions.
-const CREATE_SCHEDULED_JOB_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS scheduled_jobs (
-        id                  TEXT NOT NULL PRIMARY KEY,
-        session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id            TEXT NOT NULL,
-        message             TEXT NOT NULL,
-        status              TEXT NOT NULL,
-        kind                TEXT NOT NULL,
-        schedule_expression TEXT NOT NULL,
-        delivery_json       TEXT NOT NULL,
-        next_run_at         TEXT,
-        last_run_at         TEXT,
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
-        ON scheduled_jobs(status, next_run_at);
-    CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session_id
-        ON scheduled_jobs(session_id);
-
-    CREATE TABLE IF NOT EXISTS scheduled_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        job_id        TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
-        trigger_kind  TEXT NOT NULL,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_job_id
-        ON scheduled_runs(job_id, created_at);
-";
-
-/// Additive migration: durable heartbeat configuration and run history.
-const CREATE_HEARTBEAT_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS heartbeats (
-        id               TEXT NOT NULL PRIMARY KEY,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        agent_id         TEXT NOT NULL,
-        message          TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL,
-        status           TEXT NOT NULL,
-        last_beat_at     TEXT,
-        next_beat_at     TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_next_beat
-        ON heartbeats(status, next_beat_at);
-    CREATE INDEX IF NOT EXISTS idx_heartbeats_session_id
-        ON heartbeats(session_id);
-
-    CREATE TABLE IF NOT EXISTS heartbeat_runs (
-        id            TEXT NOT NULL PRIMARY KEY,
-        heartbeat_id  TEXT NOT NULL REFERENCES heartbeats(id) ON DELETE CASCADE,
-        state         TEXT NOT NULL,
-        scheduled_for TEXT,
-        turn_id       TEXT,
-        output_text   TEXT,
-        error_message TEXT,
-        created_at    TEXT NOT NULL,
-        started_at    TEXT,
-        completed_at  TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_heartbeat_id
-        ON heartbeat_runs(heartbeat_id, created_at);
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.
