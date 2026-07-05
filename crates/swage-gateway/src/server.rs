@@ -218,6 +218,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_channel_links).post(handlers::create_channel_link),
         )
         .route(
+            "/api/onboarding/channels/link-codes",
+            post(handlers::create_channel_link_code),
+        )
+        .route(
             "/api/onboarding/nodes/pairing-codes",
             post(handlers::create_node_pairing_code),
         )

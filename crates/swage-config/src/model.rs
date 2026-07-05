@@ -731,6 +731,45 @@ pub struct GenerationConfig {
     pub presets: HashMap<String, GenerationPresetConfig>,
 }
 
+/// Configured external communication channels.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ChannelsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramChannelConfig>,
+}
+
+/// Telegram bot API polling settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelegramChannelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_secret_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_env: Option<String>,
+    #[serde(default = "default_telegram_api_base_url")]
+    pub api_base_url: String,
+    #[serde(default = "default_telegram_poll_timeout_secs")]
+    pub poll_timeout_secs: u64,
+}
+
+impl Default for TelegramChannelConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_secret_ref: None,
+            bot_token_env: None,
+            api_base_url: default_telegram_api_base_url(),
+            poll_timeout_secs: default_telegram_poll_timeout_secs(),
+        }
+    }
+}
+
+fn default_telegram_api_base_url() -> String {
+    "https://api.telegram.org".to_string()
+}
+
+fn default_telegram_poll_timeout_secs() -> u64 {
+    25
+}
+
 /// Fully resolved configuration — the merged output of all hierarchy levels.
 ///
 /// This is what consumers receive after discovery, loading, validation, and
@@ -767,6 +806,8 @@ pub struct ResolvedConfig {
     pub communication: CommunicationConfig,
     /// Named generation parameter presets available to model entries.
     pub generation: GenerationConfig,
+    /// External communication channel configuration.
+    pub channels: ChannelsConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
     /// When true, the entire permission and approval system is bypassed:

@@ -14,6 +14,7 @@ use ts_rs::TS;
 pub enum ExternalChannelIntegration {
     DevDm,
     DevThread,
+    Telegram,
 }
 
 impl ExternalChannelIntegration {
@@ -22,6 +23,7 @@ impl ExternalChannelIntegration {
         match self {
             Self::DevDm => "dev_dm",
             Self::DevThread => "dev_thread",
+            Self::Telegram => "telegram",
         }
     }
 }
@@ -33,6 +35,7 @@ impl std::str::FromStr for ExternalChannelIntegration {
         match s {
             "dev_dm" => Ok(Self::DevDm),
             "dev_thread" => Ok(Self::DevThread),
+            "telegram" => Ok(Self::Telegram),
             other => Err(format!("unknown channel integration: {other}")),
         }
     }

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
-use swage_protocol::client::schedule as schedule_wire;
+use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
 use swage_storage::SharedReferenceKind;
 
 use crate::{
@@ -692,6 +692,17 @@ pub async fn create_channel_link(
     Ok((
         StatusCode::CREATED,
         Json(crate::onboarding::create_channel_link(&state, req).await?),
+    ))
+}
+
+/// `POST /api/onboarding/channels/link-codes` — issue a one-time channel link code.
+pub async fn create_channel_link_code(
+    State(state): State<AppState>,
+    Json(req): Json<channel_wire::CreateChannelLinkCodeRequest>,
+) -> Result<(StatusCode, Json<channel_wire::ChannelLinkCodeResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::onboarding::create_channel_link_code(&state, req).await?),
     ))
 }
 
