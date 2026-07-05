@@ -9,6 +9,7 @@
     resumeSchedule,
   } from "../api/operator";
   import type { OperatorOverview } from "../types";
+  import StatusBadge from "./StatusBadge.svelte";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
 
@@ -171,13 +172,13 @@
                 <div class="primary-line">
                   <span class="mono">{session.id}</span>
                   {#if session.has_active_connection}
-                    <span class="badge good">connected</span>
+                    <StatusBadge register="calm" label="connected" />
                   {/if}
                   {#if session.has_running_turn}
-                    <span class="badge busy">running</span>
+                    <StatusBadge register="in-motion" label="running" />
                   {/if}
                   {#if session.has_interrupted_turn}
-                    <span class="badge warn">interrupted</span>
+                    <StatusBadge register="wants-a-human" label="interrupted" />
                   {/if}
                 </div>
                 <div class="secondary-line">
@@ -207,7 +208,7 @@
               <section class="control-card">
                 <div class="primary-line">
                   <span class="mono">{approval.tool_name ?? approval.kind}</span>
-                  <span class="badge warn">{approval.agent_id}</span>
+                  <StatusBadge register="wants-a-human" label={approval.agent_id} />
                 </div>
                 <p class="detail-copy">{approval.prompt}</p>
                 <div class="action-row">
@@ -254,9 +255,10 @@
               <section class="control-card">
                 <div class="primary-line">
                   <span>{schedule.message}</span>
-                  <span class="badge {schedule.status === 'active' ? 'good' : 'muted'}">
-                    {schedule.status}
-                  </span>
+                  <StatusBadge
+                    register={schedule.status === "active" ? "calm" : "not-yet"}
+                    label={schedule.status}
+                  />
                 </div>
                 <p class="detail-copy">
                   {describeSpec(schedule)} · {describeSession(schedule)}
@@ -302,11 +304,14 @@
                     {#each scheduleRuns[schedule.id] ?? [] as run (run.id)}
                       <div class="run-entry">
                         <div class="primary-line">
-                          <span class="badge {run.state === 'completed'
-                            ? 'good'
-                            : run.state === 'failed'
-                              ? 'warn'
-                              : 'muted'}">{run.state}</span>
+                          <StatusBadge
+                            register={run.state === "completed"
+                              ? "calm"
+                              : run.state === "failed"
+                                ? "wants-a-human"
+                                : "not-yet"}
+                            label={run.state}
+                          />
                           <span class="mono">{run.trigger}</span>
                           {#if run.skip_reason}
                             <span class="mono">skipped: {run.skip_reason}</span>
@@ -349,9 +354,10 @@
               <div>
                 <div class="primary-line">
                   <span class="mono">{channel.integration}</span>
-                  <span class="badge {channel.status === 'active' ? 'good' : 'muted'}">
-                    {channel.status}
-                  </span>
+                  <StatusBadge
+                    register={channel.status === "active" ? "calm" : "not-yet"}
+                    label={channel.status}
+                  />
                 </div>
                 <div class="secondary-line">
                   {channel.route_count} route(s) · {channel.delivery_count} delivered response(s)
@@ -381,9 +387,10 @@
               <div>
                 <div class="primary-line">
                   <span>{node.label ?? node.host_id}</span>
-                  <span class="badge {node.state === 'connected' ? 'good' : 'warn'}">
-                    {node.state}
-                  </span>
+                  <StatusBadge
+                    register={node.state === "connected" ? "calm" : "wants-a-human"}
+                    label={node.state}
+                  />
                 </div>
                 <div class="secondary-line">
                   {node.kind} · {node.base_url ?? node.workspace_root}
@@ -690,42 +697,9 @@
     letter-spacing: 0.04em;
   }
 
-  /* ---- Badges ---- */
-
-  .badge {
-    padding: 3px 8px;
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 10px;
-    line-height: 1;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    border: 1px solid var(--ink);
-    background: transparent;
-    color: var(--ink);
-  }
-
-  .badge.good {
-    background: var(--ink);
-    color: var(--paper);
-  }
-
-  .badge.busy {
-    background: var(--accent);
-    color: var(--paper);
-    border-color: var(--accent);
-  }
-
-  .badge.warn {
-    background: var(--paper);
-    color: var(--ink-orange);
-    border-color: var(--accent);
-  }
-
-  .badge.muted {
-    color: var(--ink-soft);
-    border-color: var(--rule-soft);
-  }
+  /* Status badges now render through StatusBadge.svelte — see it for the
+     register → hue treatment. The dashboard maps domain state to a register
+     at each call site and never reaches for a colour. */
 
   /* ---- Action buttons ---- */
 

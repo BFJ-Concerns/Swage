@@ -97,6 +97,28 @@
   --ink-orange: #c54115;
   /* Distinct warm red for the error family. ~8:1 on cream paper. */
   --error: #a8321a;
+
+  /* ---- Status registers (hue channel) ------------------------------------
+     Six semantic registers name "what state is this thing in", and the status
+     badge maps a domain state to a register — nothing maps straight to a
+     colour. These --status-*-hue tokens are the register palette, read ONLY by
+     StatusBadge.svelte (no other surface reaches for the raw hues). Distances
+     between them, and their contrast on paper, are gated by the in-repo script
+     scripts/verify-status-hues.mjs — the arbiter of these values.
+
+     calm reads ink and trouble reads the error red (their salience and hue
+     coincide, so they alias rather than invent a colour); the four spot hues
+     are pulled cool — azure, violet, slate, teal — to stay measurably clear
+     (ΔE00) of the two warm roles the palette reserves: --accent (action) and
+     --error (trouble). Colour is never the only cue: the badge keeps its label
+     and its treatment (solid stamp / outline / dashed / pulse). */
+  --status-calm-hue: var(--ink); /* steady, present — the quiet default, no spot colour */
+  --status-in-motion-hue: #0f6fb2; /* azure — actively working (outline + pulsing pip) */
+  --status-wants-human-hue: #6d3c86; /* deep riso violet — needs a human (solid stamp) */
+  --status-not-yet-hue: #4f5d70; /* slate — dormant / not active yet (outline) */
+  --status-elsewhere-hue: #1d6f68; /* teal — external / remote (dashed outline) */
+  --status-trouble-hue: var(--error); /* a real failure reads as the error red */
+
   --shadow-blend: multiply;
   --shadow-opacity: 0.5;
 }
@@ -113,8 +135,25 @@
   --rule-faint: rgba(255, 248, 238, 0.18);
   /* On dark paper, the fluoro orange has enough contrast to act as ink-orange. */
   --ink-orange: var(--accent);
-  /* Lighter warm red readable on the dark cyanotype paper. */
-  --error: #ff7a5a;
+  /* A cooler rose-red for the deep cyanotype paper. The old #ff7a5a sat only
+     ΔE00 ~6 from --accent (#f06a3a) — a failure could read as "another orange
+     thing" — so it moved off the orange to a rose-red that holds ~20 ΔE00 of
+     separation (matching the light scheme), while still light enough to carry
+     deep-navy text on the trouble stamp. Gated by verify-status-hues.mjs. */
+  --error: #f85d78;
+
+  /* ---- Status registers (hue channel), re-lit for the deep navy -----------
+     The spot hues brighten so their outline text/line holds AA on navy, and
+     the violet flips light (the wants-a-human stamp now carries deep-navy
+     text), while staying measurably clear of --accent and --error. See the
+     light theme for the register model; see StatusBadge.svelte for treatment. */
+  --status-calm-hue: var(--ink); /* steady, present — cream ink, no spot colour */
+  --status-in-motion-hue: #5fb0ee; /* light azure — actively working (outline + pulsing pip) */
+  --status-wants-human-hue: #d0abe6; /* pale riso violet — needs a human (solid stamp) */
+  --status-not-yet-hue: #9aa8bd; /* light slate — dormant / not active yet (outline) */
+  --status-elsewhere-hue: #6fc3ba; /* light teal — external / remote (dashed outline) */
+  --status-trouble-hue: var(--error); /* the rose-red trouble stamp */
+
   --shadow-blend: screen;
   --shadow-opacity: 0.7;
 }

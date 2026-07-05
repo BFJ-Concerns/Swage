@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "verify:hues": "node scripts/verify-status-hues.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
