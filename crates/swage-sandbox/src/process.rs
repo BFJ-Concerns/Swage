@@ -150,7 +150,7 @@ impl ChildProcessManager {
 
 /// Best-effort cleanup for a child that failed before the sandbox stored its
 /// process handle. The caller keeps and returns the original startup error.
-pub(crate) async fn cleanup_failed_startup_process(
+pub async fn cleanup_failed_startup_process(
     mut process: ChildProcessManager,
     grace_period: Duration,
     context: &'static str,

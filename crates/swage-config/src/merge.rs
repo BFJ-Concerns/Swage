@@ -1,13 +1,13 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    ChannelsConfig, ContextConfig, ExperimentLocationConfig, ExperimentationConfig,
-    GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel, LoggingConfig,
-    ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
-    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, TelegramChannelConfig,
-    ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, ContextConfig,
+    ExperimentLocationConfig, ExperimentationConfig, GenerationConfig, GenerationPresetConfig,
+    HitlConfig, LogLevel, LoggingConfig, ModelCapabilitiesConfig, ModelCatalogConfig,
+    ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
+    ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -140,10 +140,21 @@ pub struct PartialToolConfig {
     pub max_output_bytes: Option<usize>,
     pub plugin_directory: Option<Option<String>>,
     pub search: Option<Option<SearchProviderConfig>>,
+    pub browser: Option<PartialBrowserToolConfig>,
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
     pub bundles: Option<HashMap<String, Vec<String>>>,
     pub require_approval: Option<Vec<RequireApprovalEntry>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialBrowserToolConfig {
+    pub binary_path: Option<Option<String>>,
+    pub page_idle_secs: Option<u64>,
+    pub process_idle_secs: Option<u64>,
+    pub max_snapshot_bytes: Option<usize>,
+    pub screenshots: Option<BrowserScreenshotPolicy>,
+    pub allow_hosts: Option<Vec<String>>,
 }
 
 /// Partial mirror of `PythonExecuteToolConfig`.
@@ -330,6 +341,14 @@ impl From<ResolvedConfig> for PartialConfig {
                 max_output_bytes: Some(r.tools.max_output_bytes),
                 plugin_directory: Some(r.tools.plugin_directory),
                 search: Some(r.tools.search),
+                browser: Some(PartialBrowserToolConfig {
+                    binary_path: Some(r.tools.browser.binary_path),
+                    page_idle_secs: Some(r.tools.browser.page_idle_secs),
+                    process_idle_secs: Some(r.tools.browser.process_idle_secs),
+                    max_snapshot_bytes: Some(r.tools.browser.max_snapshot_bytes),
+                    screenshots: Some(r.tools.browser.screenshots),
+                    allow_hosts: Some(r.tools.browser.allow_hosts),
+                }),
                 allow: Some(r.tools.permissions.allow),
                 deny: Some(r.tools.permissions.deny),
                 bundles: Some(r.tools.permissions.bundles),
@@ -559,6 +578,14 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
                 plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
+                browser: merge_section(b.browser, o.browser, |b, o| PartialBrowserToolConfig {
+                    binary_path: o.binary_path.or(b.binary_path),
+                    page_idle_secs: o.page_idle_secs.or(b.page_idle_secs),
+                    process_idle_secs: o.process_idle_secs.or(b.process_idle_secs),
+                    max_snapshot_bytes: o.max_snapshot_bytes.or(b.max_snapshot_bytes),
+                    screenshots: o.screenshots.or(b.screenshots),
+                    allow_hosts: o.allow_hosts.or(b.allow_hosts),
+                }),
                 allow: o.allow.or(b.allow),
                 deny: o.deny.or(b.deny),
                 bundles,
@@ -713,7 +740,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let t = partial.tools.unwrap_or_default();
             let dp = ToolPermissionConfig::default();
             let dpy = PythonExecuteToolConfig::default();
+            let db = BrowserToolConfig::default();
             let py = t.python_execute.unwrap_or_default();
+            let browser = t.browser.unwrap_or_default();
             ToolConfig {
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 python_execute: PythonExecuteToolConfig {
@@ -733,6 +762,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 plugin_directory: t.plugin_directory.unwrap_or(dt.plugin_directory),
                 // Double-option: outer None → default (None), Some(x) → use x.
                 search: t.search.unwrap_or(dt.search),
+                browser: BrowserToolConfig {
+                    binary_path: browser.binary_path.unwrap_or(db.binary_path),
+                    page_idle_secs: browser.page_idle_secs.unwrap_or(db.page_idle_secs),
+                    process_idle_secs: browser.process_idle_secs.unwrap_or(db.process_idle_secs),
+                    max_snapshot_bytes: browser.max_snapshot_bytes.unwrap_or(db.max_snapshot_bytes),
+                    screenshots: browser.screenshots.unwrap_or(db.screenshots),
+                    allow_hosts: browser.allow_hosts.unwrap_or(db.allow_hosts),
+                },
                 permissions: ToolPermissionConfig {
                     allow: t.allow.unwrap_or(dp.allow),
                     deny: t.deny.unwrap_or(dp.deny),
@@ -1339,7 +1376,14 @@ mod tests {
         let resolved = resolve(PartialConfig::default());
         assert_eq!(resolved.tools.permissions.allow, vec!["*".to_string()]);
         assert!(resolved.tools.permissions.deny.is_empty());
-        assert!(resolved.tools.permissions.bundles.is_empty());
+        assert!(resolved.tools.permissions.bundles.contains_key("browsing"));
+        assert!(
+            resolved
+                .tools
+                .permissions
+                .bundles
+                .contains_key("browser_actions")
+        );
     }
 
     #[test]

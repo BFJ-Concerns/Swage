@@ -319,20 +319,54 @@ fn test() -> Result<()> {
 
 fn run_test_suite() -> Result<()> {
     setup()?;
-    run_command(
+
+    let mut failures = Vec::new();
+    record_stage_result(
+        &mut failures,
         "Running Rust tests",
         command("cargo", ["test", "--workspace"]),
-    )?;
-    run_command(
+    );
+    record_stage_result(
+        &mut failures,
         "Running frontend tests",
         npm_command(FRONTEND_DIR, ["test"]),
-    )?;
-    build_frontend_release_if_needed(false)?;
-    install_desktop_deps_if_needed()?;
-    run_command(
-        "Running desktop smoke test",
-        npm_command(DESKTOP_DIR, ["test"]),
-    )?;
+    );
+
+    // Desktop smoke runs last, but must still run if earlier test stages fail:
+    // otherwise a broken desktop shell can hide behind unrelated failures.
+    match build_frontend_release_if_needed(false).and_then(|_| install_desktop_deps_if_needed()) {
+        Ok(()) => record_stage_result(
+            &mut failures,
+            "Running desktop smoke test",
+            npm_command(DESKTOP_DIR, ["test"]),
+        ),
+        Err(error) => failures.push(format!("Preparing desktop smoke test failed: {error}")),
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "test failed in {} stage(s): {}",
+        failures.len(),
+        failures.join("; ")
+    )
+    .into())
+}
+
+fn record_stage_result(failures: &mut Vec<String>, label: &str, command: Command) {
+    if let Err(error) = run_command(label, command) {
+        failures.push(error.to_string());
+    }
+}
+
+fn run_command(label: &str, mut command: Command) -> Result<()> {
+    println!("==> {label}");
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("{label} failed with {status}").into());
+    }
     Ok(())
 }
 
@@ -739,15 +773,6 @@ fn require_command(program: &str) -> Result<()> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn run_command(label: &str, mut command: Command) -> Result<()> {
-    println!("==> {label}");
-    let status = command.status()?;
-    if !status.success() {
-        return Err(format!("{label} failed with {status}").into());
-    }
-    Ok(())
 }
 
 fn command<const N: usize>(program: &str, args: [&str; N]) -> Command {

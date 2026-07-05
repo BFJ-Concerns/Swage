@@ -19,7 +19,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
-use swage_gateway::{server::build_router, state::AppState};
+use swage_gateway::{assets::FrontendAssets, server::build_router, state::AppState};
 use swage_storage::SqliteStorage;
 
 // ---------------------------------------------------------------------------
@@ -92,6 +92,28 @@ async fn request(router: &Router, method: &str, uri: &str) -> (StatusCode, Vec<u
     (status, bytes.to_vec())
 }
 
+/// Return whether the production SPA assets were embedded in this test binary.
+///
+/// `cargo test` can compile this crate before `frontend/dist` exists. In that
+/// case rust-embed produces an empty asset set, and the gateway correctly
+/// returns its developer-facing 503. These tests prove production asset serving,
+/// so they declare that precondition instead of reporting a false regression.
+fn frontend_assets_available() -> bool {
+    FrontendAssets::get("index.html").is_some()
+}
+
+fn skip_without_frontend_assets(test_name: &str) -> bool {
+    if frontend_assets_available() {
+        return false;
+    }
+
+    eprintln!(
+        "skipping {test_name}: missing embedded frontend assets at frontend/dist/index.html; \
+         run `npm --prefix frontend run build` before compiling this test binary",
+    );
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -105,6 +127,10 @@ async fn request(router: &Router, method: &str, uri: &str) -> (StatusCode, Vec<u
 /// not a 404 or empty response.
 #[tokio::test(flavor = "multi_thread")]
 async fn root_serves_index_html() {
+    if skip_without_frontend_assets("root_serves_index_html") {
+        return;
+    }
+
     let router = make_router();
     let (status, body) = request(&router, "GET", "/").await;
 
@@ -131,6 +157,10 @@ async fn root_serves_index_html() {
 /// The frontend router then parses the URL and loads the correct conversation.
 #[tokio::test(flavor = "multi_thread")]
 async fn conversation_url_returns_spa_fallback() {
+    if skip_without_frontend_assets("conversation_url_returns_spa_fallback") {
+        return;
+    }
+
     let router = make_router();
     let (status, body) = request(
         &router,

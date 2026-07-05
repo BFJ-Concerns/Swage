@@ -123,6 +123,15 @@ jobs:
       - name: Build frontend assets
         run: npm --prefix frontend run build
 
+      - name: Install desktop dependencies
+        run: npm --prefix desktop ci
+
+      - name: Install Playwright Chromium
+        run: npm --prefix desktop exec -- playwright install --with-deps chromium
+
+      - name: Export browser binary
+        run: echo "SWAGE_BROWSER_BIN=$(npm --prefix desktop exec -- node -e \"const { chromium } = require('playwright'); console.log(chromium.executablePath())\")" >> "$GITHUB_ENV"
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -130,6 +139,7 @@ jobs:
         run: cargo test --workspace
         env:
           CARGO_PROFILE_TEST_DEBUG: 0
+          SWAGE_BROWSER_TESTS: required
 
   rust-test-package:
     name: Rust tests package (${{ matrix.package }})
@@ -163,6 +173,18 @@ jobs:
         if: matrix.package == 'swage-gateway'
         run: npm --prefix frontend run build
 
+      - name: Install desktop dependencies
+        if: matrix.package == 'swage-gateway'
+        run: npm --prefix desktop ci
+
+      - name: Install Playwright Chromium
+        if: matrix.package == 'swage-gateway'
+        run: npm --prefix desktop exec -- playwright install --with-deps chromium
+
+      - name: Export browser binary
+        if: matrix.package == 'swage-gateway'
+        run: echo "SWAGE_BROWSER_BIN=$(npm --prefix desktop exec -- node -e \"const { chromium } = require('playwright'); console.log(chromium.executablePath())\")" >> "$GITHUB_ENV"
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -170,6 +192,7 @@ jobs:
         run: cargo test -p "${{ matrix.package }}"
         env:
           CARGO_PROFILE_TEST_DEBUG: 0
+          SWAGE_BROWSER_TESTS: ${{ matrix.package == 'swage-gateway' && 'required' || '' }}
 
   rust-test-summary:
     name: Rust tests

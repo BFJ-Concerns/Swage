@@ -158,9 +158,18 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
     // Step 7: Build the tool dispatch pipeline.
-    let tool_dispatcher = build_tool_dispatcher(
+    let browser_host = match crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
+    {
+        Ok(browser_config) => Some(crate::browser::BrowserHost::new(browser_config)),
+        Err(error) => {
+            warn!("Browser tools disabled: {error}");
+            None
+        }
+    };
+    let tool_dispatcher = build_tool_dispatcher_with_browser(
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+        browser_host.clone(),
     );
 
     // Step 8: Assemble application state and build the router.
@@ -212,6 +221,20 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    let browser_idle_handle = browser_host.clone().map(|browser_host| {
+        crate::background_loop::spawn_periodic_loop(
+            std::time::Duration::from_secs(30),
+            background_shutdown.clone(),
+            "browser idle sweep failed",
+            move || {
+                let browser_host = Arc::clone(&browser_host);
+                async move {
+                    browser_host.sweep_idle().await;
+                    Ok(())
+                }
+            },
+        )
+    });
 
     // Step 10: Bind the TCP listener.
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -283,6 +306,15 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         {
             warn!(%error, "background telegram polling loop did not shut down cleanly");
         }
+        if let Some(handle) = browser_idle_handle
+            && let Err(error) = handle.await
+        {
+            warn!(%error, "background browser idle loop did not shut down cleanly");
+        }
+    }
+
+    if let Some(browser_host) = browser_host {
+        browser_host.shutdown().await;
     }
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
@@ -560,12 +592,23 @@ pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
 ) -> crate::tool::ToolDispatcher {
+    let browser_host = crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
+        .ok()
+        .map(crate::browser::BrowserHost::new);
+    build_tool_dispatcher_with_browser(config, storage, browser_host)
+}
+
+pub(crate) fn build_tool_dispatcher_with_browser(
+    config: &swage_config::ResolvedConfig,
+    storage: Arc<dyn swage_storage::store::Storage>,
+    browser_host: Option<Arc<crate::browser::BrowserHost>>,
+) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, agent_memory::AgentMemoryTool, file_edit::FileEditTool, file_list::FileListTool,
-        file_read::FileReadTool, file_search::FileSearchTool, file_write::FileWriteTool,
-        memory::MemoryTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
-        web_search::WebSearchTool,
+        Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
+        file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
+        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, shell::ShellTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -598,6 +641,14 @@ pub(crate) fn build_tool_dispatcher(
         Arc::new(MemoryTool),
         Arc::new(AgentMemoryTool),
     ];
+
+    let base_tools = if let Some(browser_host) = browser_host {
+        let mut tools = base_tools;
+        tools.extend(browser_tools(browser_host));
+        tools
+    } else {
+        base_tools
+    };
 
     let plugin_tools = resolve_plugin_directory(config)
         .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))

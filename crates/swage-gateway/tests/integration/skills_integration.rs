@@ -46,6 +46,8 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 
+const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
+
 // ---------------------------------------------------------------------------
 // Mock provider — streams tokens with usage metadata
 // ---------------------------------------------------------------------------
@@ -223,6 +225,28 @@ async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Valu
         }
     }
     events
+}
+
+/// Wait for a specific event type, ignoring interleaved stream events.
+async fn ws_wait_for_event(stream: &mut WsStream, event_type: &str, timeout: Duration) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut seen = Vec::new();
+    loop {
+        let event = tokio::time::timeout_at(deadline, ws_recv_lenient(stream))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for {event_type} event; recently saw {seen:#?}")
+            })
+            .unwrap_or_else(|| panic!("WebSocket closed while waiting for {event_type} event"));
+
+        if event.get("type").and_then(|t| t.as_str()) == Some(event_type) {
+            return event;
+        }
+        seen.push(event);
+        if seen.len() > 12 {
+            seen.remove(0);
+        }
+    }
 }
 
 /// Like ws_recv but returns None on close instead of panicking.
@@ -473,15 +497,14 @@ async fn activated_skill_persists_across_multiple_turns() {
     )
     .await;
 
-    // Expect SkillActivated but no turn (bare slash command).
-    let activation_events = ws_collect_events(&mut stream, Duration::from_secs(3)).await;
-    let activated = activation_events
-        .iter()
-        .find(|e| e["type"] == "skill_activated")
-        .expect("expected skill_activated for bare slash command");
+    // Expect SkillActivated. Use an event-driven wait so a loaded workspace
+    // does not turn a slow activation into a false missing-event failure.
+    let activated =
+        ws_wait_for_event(&mut stream, "skill_activated", WEBSOCKET_EVENT_DEADLINE).await;
     assert_eq!(activated["name"], "debug-helper");
 
     // No turn_complete should appear — bare activation doesn't start a turn.
+    let activation_events = ws_collect_events(&mut stream, Duration::from_millis(200)).await;
     assert!(
         !activation_events
             .iter()
@@ -499,12 +522,8 @@ async fn activated_skill_persists_across_multiple_turns() {
         )
         .await;
 
-        let turn_events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
-
-        let context_assembled = turn_events
-            .iter()
-            .find(|e| e["type"] == "context_assembled")
-            .unwrap_or_else(|| panic!("expected context_assembled on turn {i}"));
+        let context_assembled =
+            ws_wait_for_event(&mut stream, "context_assembled", WEBSOCKET_EVENT_DEADLINE).await;
 
         let skills_element = context_assembled["report"]["elements"]
             .as_array()
@@ -526,6 +545,11 @@ async fn activated_skill_persists_across_multiple_turns() {
             source.contains("debug-helper"),
             "skill should persist in provenance across turns, turn {i}: {source}"
         );
+
+        // Context is emitted near the start of a turn. Wait for the turn to
+        // finish before sending the next message, otherwise the next send can
+        // race the active-turn guard under load.
+        ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
     }
 
     // Token counts should be consistent across turns (same skill, same content).
