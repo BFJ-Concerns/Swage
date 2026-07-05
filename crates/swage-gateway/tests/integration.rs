@@ -7,6 +7,8 @@ mod agent_task_authoring_integration;
 mod attachment_ingestion_integration;
 #[path = "integration/bench_integration.rs"]
 mod bench_integration;
+#[path = "integration/browser_journey_integration.rs"]
+mod browser_journey_integration;
 #[path = "integration/builder_authoring_integration.rs"]
 mod builder_authoring_integration;
 #[path = "integration/builder_runtime_integration.rs"]
