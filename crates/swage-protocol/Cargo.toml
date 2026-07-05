@@ -1,0 +1,17 @@
+[package]
+name = "swage-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Swage wire contract: plain serde types defined once, projected to TypeScript (ts-rs) and JSON Schema (schemars)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ts-rs = { workspace = true }
+schemars = { workspace = true }

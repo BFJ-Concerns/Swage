@@ -1,4 +1,7 @@
 import type { OperatorOverview } from "../types";
+import type { ScheduleListResponse } from "../protocol/ScheduleListResponse";
+import type { ScheduleRunListResponse } from "../protocol/ScheduleRunListResponse";
+import type { TriggerScheduleResponse } from "../protocol/TriggerScheduleResponse";
 
 let baseUrl = "";
 
@@ -54,18 +57,29 @@ export async function rejectPendingAction(
   });
 }
 
-export async function pauseScheduledJob(jobId: string): Promise<void> {
-  await request(`/api/scheduled-jobs/${jobId}/pause`, "POST");
+export async function listSchedules(): Promise<ScheduleListResponse> {
+  const response = await request("/api/schedules", "GET");
+  return response.json() as Promise<ScheduleListResponse>;
 }
 
-export async function resumeScheduledJob(jobId: string): Promise<void> {
-  await request(`/api/scheduled-jobs/${jobId}/resume`, "POST");
+export async function triggerSchedule(
+  scheduleId: string,
+): Promise<TriggerScheduleResponse> {
+  const response = await request(`/api/schedules/${scheduleId}/trigger`, "POST");
+  return response.json() as Promise<TriggerScheduleResponse>;
 }
 
-export async function disableHeartbeat(heartbeatId: string): Promise<void> {
-  await request(`/api/heartbeats/${heartbeatId}/disable`, "POST");
+export async function pauseSchedule(scheduleId: string): Promise<void> {
+  await request(`/api/schedules/${scheduleId}/pause`, "POST");
 }
 
-export async function enableHeartbeat(heartbeatId: string): Promise<void> {
-  await request(`/api/heartbeats/${heartbeatId}/enable`, "POST");
+export async function resumeSchedule(scheduleId: string): Promise<void> {
+  await request(`/api/schedules/${scheduleId}/resume`, "POST");
+}
+
+export async function fetchScheduleRuns(
+  scheduleId: string,
+): Promise<ScheduleRunListResponse> {
+  const response = await request(`/api/schedules/${scheduleId}/runs`, "GET");
+  return response.json() as Promise<ScheduleRunListResponse>;
 }

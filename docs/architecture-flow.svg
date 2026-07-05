@@ -176,9 +176,9 @@
 
   <rect class="section external" x="1225" y="185" width="330" height="122"/>
   <text class="box-title" x="1250" y="222">External channels</text>
-  <text class="box-subtitle" x="1250" y="249">channel_gateway, schedule, heartbeat</text>
-  <text class="small" x="1250" y="276">Inbound dev DMs, scheduled jobs and</text>
-  <text class="small" x="1250" y="294">heartbeat triggers can create turns.</text>
+  <text class="box-subtitle" x="1250" y="249">channel_gateway, schedule</text>
+  <text class="small" x="1250" y="276">Inbound dev DMs and due schedules</text>
+  <text class="small" x="1250" y="294">can create turns.</text>
 
   <!-- Frontend layer -->
   <text class="layer-title" x="70" y="365">Frontend runtime</text>

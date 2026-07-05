@@ -23,8 +23,6 @@ mod external_channel_gateway_integration;
 mod gateway_cli_integration;
 #[path = "integration/gateway_observability_integration.rs"]
 mod gateway_observability_integration;
-#[path = "integration/heartbeat_integration.rs"]
-mod heartbeat_integration;
 #[path = "integration/integration.rs"]
 mod integration;
 #[path = "integration/inter_agent_messaging_integration.rs"]
@@ -51,8 +49,8 @@ mod run_supervision_integration;
 mod sandbox_entrypoint_integration;
 #[path = "integration/sandbox_observability_integration.rs"]
 mod sandbox_observability_integration;
-#[path = "integration/scheduled_jobs_integration.rs"]
-mod scheduled_jobs_integration;
+#[path = "integration/schedule_integration.rs"]
+mod schedule_integration;
 #[path = "integration/shared_reference_integration.rs"]
 mod shared_reference_integration;
 #[path = "integration/skills_endpoint_integration.rs"]

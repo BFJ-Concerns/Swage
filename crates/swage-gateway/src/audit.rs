@@ -36,7 +36,7 @@ pub struct OperatorSearchResult {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OperatorUsageQuery {
     pub session_id: Option<Uuid>,
-    pub scheduled_job_id: Option<Uuid>,
+    pub schedule_id: Option<Uuid>,
     pub run_kind: Option<String>,
     pub run_id: Option<Uuid>,
 }
@@ -65,7 +65,7 @@ pub struct RunUsage {
 pub struct OperatorUsageResponse {
     pub run: Option<RunUsage>,
     pub session: Option<UsageAggregate>,
-    pub scheduled_job: Option<UsageAggregate>,
+    pub schedule: Option<UsageAggregate>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -204,12 +204,20 @@ pub async fn operator_search(
         }
     }
 
-    if matches_kind(kind_filter, "scheduled_run") {
-        for job in state.storage.list_scheduled_jobs().await? {
-            if !matches_session(session_filter, job.session_id) {
-                continue;
-            }
-            for run in state.storage.list_scheduled_runs_by_job(job.id).await? {
+    if matches_kind(kind_filter, "schedule_run") {
+        for schedule in state.storage.list_schedules().await? {
+            for run in state.storage.list_schedule_runs(schedule.id).await? {
+                // Fresh-policy runs record their own session; continuation
+                // runs fall back to the schedule's target session.
+                let run_session = run.session_id.or(match &schedule.session_policy {
+                    swage_storage::SessionPolicy::Continuation { session_id } => Some(*session_id),
+                    swage_storage::SessionPolicy::Fresh { .. } => None,
+                });
+                if let Some(filter) = session_filter
+                    && run_session != Some(filter)
+                {
+                    continue;
+                }
                 let excerpt = run
                     .error_message
                     .clone()
@@ -220,17 +228,18 @@ pub async fn operator_search(
                     &[
                         &run.id.to_string(),
                         &run.state.to_string(),
-                        &job.schedule_expression,
+                        &schedule.expression,
                     ],
-                    Some(&job.message),
+                    Some(&schedule.message),
                 ) || matches_query(&search_text, &[], excerpt.as_deref())
                 {
                     results.push(OperatorSearchResult {
-                        kind: "scheduled_run".into(),
+                        kind: "schedule_run".into(),
                         id: run.id.to_string(),
-                        session_id: Some(job.session_id),
-                        bench_id: session_benches.get(&job.session_id).copied(),
-                        title: job.message.clone(),
+                        session_id: run_session,
+                        bench_id: run_session
+                            .and_then(|session_id| session_benches.get(&session_id).copied()),
+                        title: schedule.message.clone(),
                         excerpt,
                         occurred_at: run
                             .completed_at
@@ -432,11 +441,11 @@ pub async fn operator_usage(
                 cost_microcents: usage.3,
             })
         }
-        (Some("scheduled_run"), Some(run_id)) => {
-            if let Some(run) = state.storage.get_scheduled_run(run_id).await? {
+        (Some("schedule_run"), Some(run_id)) => {
+            if let Some(run) = state.storage.get_schedule_run(run_id).await? {
                 match run.turn_id {
                     Some(turn_id) => turn_usage(state, turn_id).await?.map(|usage| RunUsage {
-                        kind: "scheduled_run".into(),
+                        kind: "schedule_run".into(),
                         id: run_id.to_string(),
                         session_id: usage.0,
                         input_tokens: usage.1,
@@ -457,15 +466,15 @@ pub async fn operator_usage(
         None => None,
     };
 
-    let scheduled_job = match query.scheduled_job_id {
-        Some(job_id) => Some(scheduled_job_usage(state, job_id).await?),
+    let schedule = match query.schedule_id {
+        Some(schedule_id) => Some(schedule_usage(state, schedule_id).await?),
         None => None,
     };
 
     Ok(OperatorUsageResponse {
         run,
         session,
-        scheduled_job,
+        schedule,
     })
 }
 
@@ -496,20 +505,20 @@ async fn session_usage(state: &AppState, session_id: Uuid) -> Result<UsageAggreg
     Ok(aggregate)
 }
 
-async fn scheduled_job_usage(
+async fn schedule_usage(
     state: &AppState,
-    job_id: Uuid,
+    schedule_id: Uuid,
 ) -> Result<UsageAggregate, GatewayError> {
     let mut aggregate = UsageAggregate {
-        scope: "scheduled_job".into(),
-        id: job_id.to_string(),
+        scope: "schedule".into(),
+        id: schedule_id.to_string(),
         run_count: 0,
         input_tokens: 0,
         output_tokens: 0,
         cost_microcents: 0,
     };
 
-    for run in state.storage.list_scheduled_runs_by_job(job_id).await? {
+    for run in state.storage.list_schedule_runs(schedule_id).await? {
         if let Some(turn_id) = run.turn_id
             && let Some((_session_id, input_tokens, output_tokens, cost_microcents)) =
                 turn_usage(state, turn_id).await?
