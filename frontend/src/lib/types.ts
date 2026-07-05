@@ -5,9 +5,13 @@
 // Every interface in this file mirrors a gateway serde type by hand, with no
 // enforcement — drift surfaces only at runtime. Once wire types live in the
 // swage-protocol crate, this file should be generated (ts-rs), with the
-// committed JSON Schema as the canonical contract. See the wire-contract
-// section in CLAUDE.md and the swage-protocol mote in .motes/TODO.md.
+// committed JSON Schema as the canonical contract. The schedule types have
+// already made the move — they live under src/lib/protocol/, generated from
+// the swage-protocol crate. See the wire-contract section in CLAUDE.md and
+// the swage-protocol mote in .motes/TODO.md.
 // ---
+
+import type { Schedule } from "./protocol/Schedule";
 
 // -------------------------------------------------------------------------
 // Bench types
@@ -752,45 +756,6 @@ export interface OperatorApprovalSummary {
   timeout_at: string | null;
 }
 
-export interface ScheduledJobSummary {
-  id: string;
-  session_id: string;
-  message: string;
-  status: string;
-  schedule: Record<string, unknown>;
-  routing: Record<string, unknown>;
-  next_run_at: string | null;
-  last_run_at: string | null;
-}
-
-export type ScheduleSpecRequest =
-  | { kind: "one_shot"; at: string }
-  | { kind: "interval"; every: string }
-  | { kind: "cron"; cron: string };
-
-export interface CreateScheduledJobRequest {
-  session_id: string;
-  message: string;
-  schedule: ScheduleSpecRequest;
-  routing?: Record<string, unknown>;
-}
-
-export interface HeartbeatSummary {
-  id: string;
-  session_id: string;
-  message: string;
-  status: string;
-  interval_seconds: number;
-  next_beat_at: string | null;
-  last_beat_at: string | null;
-}
-
-export interface CreateHeartbeatRequest {
-  session_id: string;
-  message: string;
-  interval_seconds: number;
-}
-
 export interface VoiceCapabilitiesResponse {
   transcription: boolean;
   synthesis: boolean;
@@ -808,8 +773,7 @@ export interface RecoveryExportSummary {
   secrets: number;
   channel_links: number;
   execution_hosts: number;
-  scheduled_jobs: number;
-  heartbeats: number;
+  schedules: number;
 }
 
 export interface RecoveryExportListResponse {
@@ -841,11 +805,8 @@ export interface OperatorOverview {
   gateway: OperatorGatewaySummary;
   sessions: OperatorSessionSummary[];
   approvals: OperatorApprovalSummary[];
-  scheduled_jobs: {
-    jobs: ScheduledJobSummary[];
-  };
-  heartbeats: {
-    heartbeats: HeartbeatSummary[];
+  schedules: {
+    schedules: Schedule[];
   };
   channels: {
     channels: ChannelStatusSummary[];

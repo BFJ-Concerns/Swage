@@ -27,6 +27,7 @@
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import WorkbenchOperations from "./WorkbenchOperations.svelte";
   import { listTeams } from "../api/builder";
   import type { DisplayPreferences } from "../display-preferences";
   import type { BenchSettingsTab, Route } from "../router";
@@ -195,8 +196,10 @@
   // stage-dominant views are data-driven instead of inferred from module
   // presence.
   // ---
-  const isStageDominant = $derived(false);
-  const isConversationDominant = $derived(hasStage);
+  // Until then: a lens that places a builder/operator module on the stage
+  // gets the wide pane — those surfaces are unusable as a 320px rail.
+  const isStageDominant = $derived(stageSurface !== null);
+  const isConversationDominant = $derived(hasStage && !isStageDominant);
 
   // Stamp shown on the right of the topbar. The bench portion is real; the
   // state cycles through the streaming store. Team-live and approval states
@@ -607,7 +610,11 @@
     {#if settingsBenchSlug}
       <BenchSettingsPage bench={settingsBench} tab={settingsBenchTab ?? "overview"} />
     {:else if settingsTab}
-      <SettingsPage tab={settingsTab} />
+      <SettingsPage
+        tab={settingsTab}
+        benchId={currentBench?.id ?? null}
+        sessionId={activeConversation?.id ?? null}
+      />
     {:else if !currentBench}
       <!-- Bench picker view: full card grid with two-stage selection. -->
       <BenchPicker
@@ -657,6 +664,9 @@
             {#if builderDeckModule}
               {#await builderDeckModule then module}
                 {@const BuilderDeck = module.default}
+                <!-- The operator deck and the operations panel lost their
+                     home when the WorkbenchRail was dropped; the builder
+                     stage is where operators land, so they live here. -->
                 <BuilderDeck
                   {benchStore}
                   {desktopRuntime}
@@ -666,7 +676,11 @@
                   {onSelectLens}
                   {onRefreshLenses}
                   showSharedReferences={false}
-                  showOperatorDeck={false}
+                  showOperatorDeck={true}
+                />
+                <WorkbenchOperations
+                  benchId={currentBench?.id ?? null}
+                  sessionId={activeConversation?.id ?? null}
                 />
               {:catch error}
                 <div class="surface-error" role="alert">
@@ -686,6 +700,10 @@
               {#await operatorDashboardModule then module}
                 {@const OperatorDashboard = module.default}
                 <OperatorDashboard />
+                <WorkbenchOperations
+                  benchId={currentBench?.id ?? null}
+                  sessionId={activeConversation?.id ?? null}
+                />
               {:catch error}
                 <div class="surface-error" role="alert">
                   {error instanceof Error ? error.message : "Failed to load operator."}
@@ -1536,6 +1554,14 @@
 
   .stage-pane {
     background: var(--paper);
+    /* The stage stacks whole surfaces (builder deck, operator deck, the
+       operations panel); it scrolls as one column rather than squeezing
+       each surface into the viewport. */
+    overflow-y: auto;
+  }
+
+  .stage-pane > :global(*) {
+    flex-shrink: 0;
   }
 
   /* Pane heads place a small label + index above each pane. Index expresses
