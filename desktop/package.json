@@ -10,6 +10,9 @@
   "devDependencies": {
     "electron": "^42.1.0",
     "playwright": "^1.60.0",
-    "ws": "^8.20.1"
+    "ws": "8.21.0"
+  },
+  "overrides": {
+    "undici": "7.28.0"
   }
 }

@@ -164,7 +164,8 @@ function createMockGateway() {
           has_running_turn: false,
         })),
         approvals: [],
-        schedules: { schedules: [] },
+        scheduled_jobs: { jobs: [] },
+        heartbeats: { heartbeats: [] },
         channels: { channels: [] },
         nodes: [],
       });
@@ -190,7 +191,8 @@ function createMockGateway() {
         secrets: [],
         channel_links: [],
         execution_hosts: [],
-        schedules: [],
+        scheduled_jobs: [],
+        heartbeats: [],
       });
       return;
     }
@@ -386,8 +388,11 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  await page.getByRole("button", { name: /preview bench default/i }).click();
-  await page.getByRole("button", { name: "Open", exact: true }).click();
+  const defaultBench = page.getByRole("article", { name: "Bench Default" });
+  await defaultBench
+    .getByRole("button", { name: "Preview bench Default", exact: true })
+    .click();
+  await defaultBench.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page

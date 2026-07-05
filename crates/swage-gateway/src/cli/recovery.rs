@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn parses_ipv4_proc_net_address() {
         let parsed = parse_proc_net_local_address("0100007F:0BB8").unwrap();
-        assert_eq!(parsed, (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000));
+        assert_eq!(parsed, (IpAddr::V4(Ipv4Addr::LOCALHOST), 3000));
     }
 
     #[cfg(target_os = "linux")]
