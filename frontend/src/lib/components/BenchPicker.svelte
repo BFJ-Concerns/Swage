@@ -1,9 +1,9 @@
 <!--
   Two-stage bench picker:
-    1. Card grid of bench names. Single click on a card selects it and reveals
+    1. Card grid of bench names. Single click on a bench name selects it and reveals
        a details panel below the grid (about, last opened, conversation count,
        attached folders — though the data is still thin server-side).
-    2. A deliberate second action — the "Open bench" button or double-click —
+    2. A deliberate second action — the bench card's "Open" button —
        enters the bench, which is what calls benchStore.selectBench().
 
   This component renders as the body content when no bench is selected. The
