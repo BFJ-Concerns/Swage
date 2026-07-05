@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_storage::{NewAuditEvent, NewChannelInboundMessage, PendingChannelOrigin};
+use swage_storage::{NewAuditEvent, NewChannelInboundMessage};
 
 use crate::{
     channel_gateway::{DeliveryTarget, ExternalChannelIntegration},
@@ -241,6 +241,8 @@ struct TelegramMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TelegramChat {
     id: i64,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 pub fn spawn_poll_loop_until_cancelled(
@@ -263,7 +265,10 @@ async fn run_poll_loop(state: AppState, client: Arc<TelegramClient>, shutdown: C
             break;
         }
 
-        let bot_id = match client.ensure_bot_id().await {
+        let bot_id = match tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = client.ensure_bot_id() => result,
+        } {
             Ok(bot_id) => bot_id.to_string(),
             Err(error) => {
                 warn!("{error}");
@@ -373,6 +378,10 @@ async fn ingest_updates(
             unsupported.push((update.update_id, "missing_message"));
             continue;
         };
+        if message.chat.kind != "private" {
+            unsupported.push((update.update_id, "non_private_chat"));
+            continue;
+        }
         let Some(text) = message.text else {
             unsupported.push((update.update_id, "non_text_message"));
             continue;
@@ -383,6 +392,7 @@ async fn ingest_updates(
                 chat_id: message.chat.id.to_string(),
                 code,
             });
+            continue;
         }
         messages.push(NewChannelInboundMessage {
             integration: "telegram".into(),
@@ -406,12 +416,12 @@ async fn ingest_updates(
             warn!("failed to audit unsupported telegram update: {error}");
         }
     }
-    if inserted > 0 {
-        for control in controls {
-            if let Err(error) = redeem_link_control(state, client, bot_id, control).await {
-                warn!("failed to redeem telegram link control: {error}");
-            }
+    for control in controls {
+        if let Err(error) = redeem_link_control(state, client, bot_id, control).await {
+            warn!("failed to redeem telegram link control: {error}");
         }
+    }
+    if inserted > 0 {
         crate::channel_gateway::drain_channel_queue(state.clone()).await;
     }
     Ok(())
@@ -443,31 +453,12 @@ async fn redeem_link_control(
     bot_id: &str,
     control: LinkControl,
 ) -> Result<(), GatewayError> {
-    let row = state
-        .storage
-        .list_pending_by_origin(PendingChannelOrigin {
-            integration: "telegram".into(),
-            account: bot_id.to_string(),
-            conversation: control.chat_id.clone(),
-        })
-        .await?
-        .into_iter()
-        .find(|row| row.external_id == control.update_id);
-
-    let Some(row) = row else {
-        return Ok(());
-    };
-
     let record = {
         let mut codes = state.channel_link_codes.lock().await;
         codes.remove(&control.code)
     };
 
     let Some(record) = record else {
-        state
-            .storage
-            .discard_channel_messages(vec![row.id], "link_attempt")
-            .await?;
         client
             .send_message(
                 &control.chat_id,
@@ -480,10 +471,6 @@ async fn redeem_link_control(
     if record.expires_at < chrono::Utc::now()
         || record.integration != ExternalChannelIntegration::Telegram
     {
-        state
-            .storage
-            .discard_channel_messages(vec![row.id], "link_attempt")
-            .await?;
         client
             .send_message(
                 &control.chat_id,
@@ -509,10 +496,6 @@ async fn redeem_link_control(
         },
     )
     .await?;
-    state
-        .storage
-        .discard_channel_messages(vec![row.id], "link_attempt")
-        .await?;
     record_telegram_audit(
         state,
         "link_redeemed",
@@ -520,6 +503,7 @@ async fn redeem_link_control(
         serde_json::json!({
             "bot_id": bot_id,
             "chat_id": control.chat_id,
+            "update_id": control.update_id,
             "session_id": response.session_id,
         }),
     )
@@ -847,7 +831,24 @@ mod tests {
             self.updates.lock().unwrap().push(TelegramUpdate {
                 update_id,
                 message: Some(TelegramMessage {
-                    chat: TelegramChat { id: chat_id },
+                    chat: TelegramChat {
+                        id: chat_id,
+                        kind: "private".into(),
+                    },
+                    from: Some(TelegramUser { id: chat_id }),
+                    text: Some(text.into()),
+                }),
+            });
+        }
+
+        fn push_non_private_update(&self, update_id: i64, chat_id: i64, text: &str) {
+            self.updates.lock().unwrap().push(TelegramUpdate {
+                update_id,
+                message: Some(TelegramMessage {
+                    chat: TelegramChat {
+                        id: chat_id,
+                        kind: "group".into(),
+                    },
                     from: Some(TelegramUser { id: chat_id }),
                     text: Some(text.into()),
                 }),
@@ -858,7 +859,10 @@ mod tests {
             self.updates.lock().unwrap().push(TelegramUpdate {
                 update_id,
                 message: Some(TelegramMessage {
-                    chat: TelegramChat { id: chat_id },
+                    chat: TelegramChat {
+                        id: chat_id,
+                        kind: "private".into(),
+                    },
                     from: Some(TelegramUser { id: chat_id }),
                     text: None,
                 }),
@@ -1113,6 +1117,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn link_redemption_survives_periodic_drain_race() {
+        let (base_url, telegram) = start_mock_telegram().await;
+        let client = connect_mock_client(base_url).await;
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = test_state(
+            storage.clone(),
+            MockProvider::new(vec![MockProvider::text_round("unused")]),
+            client.clone(),
+        );
+        let bot_id = client.bot_id().unwrap().to_string();
+        let code = issue_link_code(&state).await;
+        let update_id = "1".to_string();
+        let chat_id = "777".to_string();
+
+        // Reproduce the pre-fix interleaving: ingest commits the /link row,
+        // the periodic queue drain sees an unlinked origin and discards it,
+        // then redemption runs against the same control update.
+        storage
+            .ingest_channel_inbound(
+                vec![NewChannelInboundMessage {
+                    integration: "telegram".into(),
+                    account: bot_id.clone(),
+                    conversation: chat_id.clone(),
+                    external_id: update_id.clone(),
+                    sender: chat_id.clone(),
+                    content: format!("/link {code}"),
+                }],
+                "telegram",
+                &bot_id,
+                &update_id,
+            )
+            .await
+            .unwrap();
+        crate::channel_gateway::drain_channel_queue_checked(&state)
+            .await
+            .unwrap();
+
+        redeem_link_control(
+            &state,
+            &client,
+            &bot_id,
+            LinkControl {
+                update_id,
+                chat_id: chat_id.clone(),
+                code,
+            },
+        )
+        .await
+        .unwrap();
+
+        let links = storage.list_channel_links().await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].conversation, chat_id);
+        let sent = telegram.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].text, "Telegram is linked to Swage.");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn restart_polling_resumes_offset_without_replaying_update() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("telegram-restart.db");
@@ -1360,6 +1423,49 @@ mod tests {
                 .iter()
                 .any(|event| event.event_kind == "unsupported_update")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_private_chat_is_ignored_without_queueing_or_reply() {
+        let (base_url, telegram) = start_mock_telegram().await;
+        let client = connect_mock_client(base_url).await;
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = test_state(
+            storage.clone(),
+            MockProvider::new(vec![MockProvider::text_round("should not run")]),
+            client.clone(),
+        );
+        let code = issue_link_code(&state).await;
+
+        telegram.push_non_private_update(9, 444, &format!("/link {code}"));
+        poll_once(&state, &client).await.unwrap();
+
+        assert!(storage.list_channel_links().await.unwrap().is_empty());
+        assert!(
+            storage
+                .list_pending_channel_origins()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(telegram.sent.lock().unwrap().is_empty());
+        assert_eq!(
+            storage
+                .get_channel_cursor("telegram", client.bot_id().unwrap())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("9")
+        );
+        let audits = storage.list_audit_events().await.unwrap();
+        assert!(audits.iter().any(|event| {
+            event.event_kind == "unsupported_update"
+                && event
+                    .metadata
+                    .get("reason")
+                    .and_then(|reason| reason.as_str())
+                    == Some("non_private_chat")
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
