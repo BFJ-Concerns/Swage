@@ -6,17 +6,18 @@ use swage_core::StorageError;
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, BenchSlug,
-    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, EdgeEvaluation,
-    ExecutionHostRegistration, InboundAudit, LensPreference, LensRecord, Material, Message,
-    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
-    NewBackgroundJob, NewBench, NewChannelLink, NewConfigurationVersion, NewDeliveryRecord,
-    NewEdgeEvaluation, NewExecutionHostRegistration, NewLensRecord, NewMaterial, NewMessage,
-    NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
+    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
+    DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, InboundAudit, LensPreference,
+    LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest,
+    NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelInboundMessage,
+    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation,
+    NewExecutionHostRegistration, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
+    NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
     NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Team,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
-    TurnState, UpdateSchedule, WorkspaceAttachment,
+    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent,
+    SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
+    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -838,6 +839,48 @@ pub trait ScheduleStore: Send + Sync {
     ) -> Result<u64, StorageError>;
 }
 
+/// Durable queue for inbound external-channel messages.
+#[async_trait]
+pub trait ChannelQueueStore: Send + Sync {
+    async fn ingest_channel_inbound(
+        &self,
+        messages: Vec<NewChannelInboundMessage>,
+        cursor_integration: &str,
+        cursor_account: &str,
+        cursor: &str,
+    ) -> Result<usize, StorageError>;
+
+    async fn get_channel_cursor(
+        &self,
+        integration: &str,
+        account: &str,
+    ) -> Result<Option<String>, StorageError>;
+
+    async fn list_pending_channel_origins(&self)
+    -> Result<Vec<PendingChannelOrigin>, StorageError>;
+
+    async fn list_pending_by_origin(
+        &self,
+        origin: PendingChannelOrigin,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
+    async fn begin_channel_turn(
+        &self,
+        thread_id: Uuid,
+        agent_id: &str,
+        composed_input: &str,
+        message_ids: Vec<Uuid>,
+    ) -> Result<Turn, StorageError>;
+
+    async fn discard_channel_messages(
+        &self,
+        message_ids: Vec<Uuid>,
+        reason: &str,
+    ) -> Result<u64, StorageError>;
+
+    async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -871,6 +914,7 @@ pub trait Storage:
     + ApprovalStore
     + AgentMessageStore
     + ScheduleStore
+    + ChannelQueueStore
     + TopologyTraceStore
     + Send
     + Sync
@@ -903,6 +947,7 @@ impl<T> Storage for T where
         + ApprovalStore
         + AgentMessageStore
         + ScheduleStore
+        + ChannelQueueStore
         + TopologyTraceStore
         + Send
         + Sync
@@ -1104,6 +1149,62 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<DeliveryRecord>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelQueueStore for StubStorage {
+        async fn ingest_channel_inbound(
+            &self,
+            _: Vec<NewChannelInboundMessage>,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<usize, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_channel_cursor(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_channel_origins(
+            &self,
+        ) -> Result<Vec<PendingChannelOrigin>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_by_origin(
+            &self,
+            _: PendingChannelOrigin,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn begin_channel_turn(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+            _: Vec<Uuid>,
+        ) -> Result<Turn, StorageError> {
+            unimplemented!()
+        }
+
+        async fn discard_channel_messages(
+            &self,
+            _: Vec<Uuid>,
+            _: &str,
+        ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+
+        async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
     }

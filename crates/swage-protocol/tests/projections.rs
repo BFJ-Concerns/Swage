@@ -27,6 +27,10 @@ fn typescript_bindings_are_regenerated() {
 
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
+    client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)
+        .expect("export channel link code request");
+    client::channel::ChannelLinkCodeResponse::export_all(&cfg)
+        .expect("export channel link code response");
     client::schedule::CreateScheduleRequest::export_all(&cfg).expect("export create");
     client::schedule::UpdateScheduleRequest::export_all(&cfg).expect("export update");
     client::schedule::Schedule::export_all(&cfg).expect("export schedule");

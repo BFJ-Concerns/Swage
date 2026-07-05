@@ -5316,6 +5316,8 @@ pub(crate) mod tests {
                 session_id: delivery.session_id,
                 target: delivery.target,
                 content: delivery.content,
+                status: delivery.status,
+                error: delivery.error,
                 delivered_at: chrono::Utc::now(),
             })
         }
@@ -5331,6 +5333,62 @@ pub(crate) mod tests {
             _session_id: Uuid,
         ) -> Result<Vec<swage_storage::DeliveryRecord>, StorageError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl swage_storage::store::ChannelQueueStore for MockStorage {
+        async fn ingest_channel_inbound(
+            &self,
+            _messages: Vec<swage_storage::NewChannelInboundMessage>,
+            _cursor_integration: &str,
+            _cursor_account: &str,
+            _cursor: &str,
+        ) -> Result<usize, StorageError> {
+            Ok(0)
+        }
+
+        async fn get_channel_cursor(
+            &self,
+            _integration: &str,
+            _account: &str,
+        ) -> Result<Option<String>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_pending_channel_origins(
+            &self,
+        ) -> Result<Vec<swage_storage::PendingChannelOrigin>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pending_by_origin(
+            &self,
+            _origin: swage_storage::PendingChannelOrigin,
+        ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn begin_channel_turn(
+            &self,
+            _thread_id: Uuid,
+            _agent_id: &str,
+            _composed_input: &str,
+            _message_ids: Vec<Uuid>,
+        ) -> Result<Turn, StorageError> {
+            unimplemented!("MockStorage does not support channel queue turn claims")
+        }
+
+        async fn discard_channel_messages(
+            &self,
+            _message_ids: Vec<Uuid>,
+            _reason: &str,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
+            Ok(0)
         }
     }
 

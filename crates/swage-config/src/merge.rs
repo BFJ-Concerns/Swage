@@ -1,13 +1,13 @@
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
-    BrowserScreenshotPolicy, BrowserToolConfig, ContextConfig, ExperimentLocationConfig,
-    ExperimentationConfig, GenerationConfig, GenerationPresetConfig, HitlConfig, LogLevel,
-    LoggingConfig, ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, ProviderCatalogConfig,
-    ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
-    ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, ToolConfig,
-    ToolPermissionConfig, WorkspaceConfig,
+    BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, ContextConfig,
+    ExperimentLocationConfig, ExperimentationConfig, GenerationConfig, GenerationPresetConfig,
+    HitlConfig, LogLevel, LoggingConfig, ModelCapabilitiesConfig, ModelCatalogConfig,
+    ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
+    ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,6 +83,21 @@ pub struct PartialPricingConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialGenerationConfig {
     pub presets: Option<HashMap<String, GenerationPresetConfig>>,
+}
+
+/// Partial mirror of `ChannelsConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialChannelsConfig {
+    pub telegram: Option<PartialTelegramChannelConfig>,
+}
+
+/// Partial mirror of `TelegramChannelConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialTelegramChannelConfig {
+    pub bot_token_secret_ref: Option<Option<String>>,
+    pub bot_token_env: Option<Option<String>>,
+    pub api_base_url: Option<String>,
+    pub poll_timeout_secs: Option<u64>,
 }
 
 /// Partial mirror of `ObservabilityConfig`.
@@ -229,6 +244,7 @@ pub struct PartialConfig {
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
     pub generation: Option<PartialGenerationConfig>,
+    pub channels: Option<PartialChannelsConfig>,
     /// Top-level bypass for the permission and approval system.
     /// Mirrors `ResolvedConfig::dangerously_skip_permissions`.
     #[serde(default)]
@@ -382,6 +398,17 @@ impl From<ResolvedConfig> for PartialConfig {
                 } else {
                     Some(r.generation.presets)
                 },
+            }),
+            channels: Some(PartialChannelsConfig {
+                telegram: r
+                    .channels
+                    .telegram
+                    .map(|telegram| PartialTelegramChannelConfig {
+                        bot_token_secret_ref: Some(telegram.bot_token_secret_ref),
+                        bot_token_env: Some(telegram.bot_token_env),
+                        api_base_url: Some(telegram.api_base_url),
+                        poll_timeout_secs: Some(telegram.poll_timeout_secs),
+                    }),
             }),
             dangerously_skip_permissions: Some(r.dangerously_skip_permissions),
         }
@@ -610,6 +637,18 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 presets: Some(presets),
             }
         }),
+        channels: merge_section(base.channels, overlay.channels, |b, o| {
+            PartialChannelsConfig {
+                telegram: merge_section(b.telegram, o.telegram, |bt, ot| {
+                    PartialTelegramChannelConfig {
+                        bot_token_secret_ref: ot.bot_token_secret_ref.or(bt.bot_token_secret_ref),
+                        bot_token_env: ot.bot_token_env.or(bt.bot_token_env),
+                        api_base_url: ot.api_base_url.or(bt.api_base_url),
+                        poll_timeout_secs: ot.poll_timeout_secs.or(bt.poll_timeout_secs),
+                    }
+                }),
+            }
+        }),
         dangerously_skip_permissions: overlay
             .dangerously_skip_permissions
             .or(base.dangerously_skip_permissions),
@@ -761,6 +800,22 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 .and_then(|generation| generation.presets)
                 .unwrap_or_default();
             GenerationConfig { presets }
+        },
+        channels: {
+            let default = TelegramChannelConfig::default();
+            let channels = partial.channels.unwrap_or_default();
+            ChannelsConfig {
+                telegram: channels.telegram.map(|telegram| TelegramChannelConfig {
+                    bot_token_secret_ref: telegram
+                        .bot_token_secret_ref
+                        .unwrap_or(default.bot_token_secret_ref),
+                    bot_token_env: telegram.bot_token_env.unwrap_or(default.bot_token_env),
+                    api_base_url: telegram.api_base_url.unwrap_or(default.api_base_url),
+                    poll_timeout_secs: telegram
+                        .poll_timeout_secs
+                        .unwrap_or(default.poll_timeout_secs),
+                }),
+            }
         },
         observability: {
             let do_ = ObservabilityConfig::default();

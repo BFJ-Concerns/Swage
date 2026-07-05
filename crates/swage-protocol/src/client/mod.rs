@@ -1,6 +1,7 @@
 //! Client surface: types spoken between the gateway and its own clients
 //! (web frontend, TUI, desktop shell) over HTTP and WebSocket.
 
+pub mod channel;
 pub mod delivery;
 pub mod schedule;
 
@@ -15,6 +16,8 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
+    channel_link_code_response: channel::ChannelLinkCodeResponse,
     create_schedule_request: schedule::CreateScheduleRequest,
     update_schedule_request: schedule::UpdateScheduleRequest,
     schedule: schedule::Schedule,

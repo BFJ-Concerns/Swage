@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
+use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLinkCodeRequest};
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
     NewWorkspaceAttachment, ScheduleKind, ScheduleStatus, SessionPolicy,
@@ -16,7 +17,7 @@ use crate::{
     execution_host::{
         ExecutionHostResponse, RegisterExecutionHostRequest, register_remote_execution_host,
     },
-    state::{AppState, PairingCodeRecord},
+    state::{AppState, ChannelLinkCodeRecord, PairingCodeRecord},
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,6 +315,28 @@ pub async fn list_channel_links(state: &AppState) -> Result<ChannelLinkListRespo
     });
     Ok(ChannelLinkListResponse {
         links: links.into_iter().map(map_channel_link_response).collect(),
+    })
+}
+
+pub async fn create_channel_link_code(
+    state: &AppState,
+    request: CreateChannelLinkCodeRequest,
+) -> Result<ChannelLinkCodeResponse, GatewayError> {
+    let expires_at = Utc::now() + Duration::minutes(10);
+    let link_code = Uuid::new_v4().to_string();
+    state.channel_link_codes.lock().await.insert(
+        link_code.clone(),
+        ChannelLinkCodeRecord {
+            integration: request.integration,
+            bench_id: request.bench_id,
+            agent_id: request.agent_id,
+            home_target: request.home_target,
+            expires_at,
+        },
+    );
+    Ok(ChannelLinkCodeResponse {
+        link_code,
+        expires_at,
     })
 }
 

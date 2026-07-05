@@ -109,7 +109,10 @@ pub async fn recover_orphaned_turns(
                     // ---
                     if !matches!(
                         turn.state,
-                        TurnState::Processing | TurnState::AwaitingApproval | TurnState::Delegating
+                        TurnState::Pending
+                            | TurnState::Processing
+                            | TurnState::AwaitingApproval
+                            | TurnState::Delegating
                     ) {
                         continue;
                     }
@@ -450,6 +453,48 @@ mod tests {
             "delegating turn should become Interrupted"
         );
         assert_eq!(n_delegating, 0, "no turns should remain Delegating");
+    }
+
+    #[tokio::test]
+    async fn recovery_marks_pending_turns_interrupted() {
+        let storage = Arc::new(MockStorage::new());
+        let bench = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "gateway".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let pending_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("claimed but not processed".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let count = recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert_eq!(count, 1, "pending channel placeholder should be recovered");
+        let recovered = storage.get_turn(pending_turn.id).await.unwrap().unwrap();
+        assert_eq!(recovered.state, TurnState::Interrupted);
     }
 
     #[tokio::test]

@@ -22,11 +22,11 @@ use swage_storage::{
     store::{BenchStore, Storage},
 };
 
-use crate::channel_gateway::ChannelOrigin;
+use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
 use crate::{
     capabilities::WorkflowCapabilities, execution_host::ExecutionHostRuntime,
     lifecycle::ActivityTracker, onboarding::RecoveryExportSnapshot, presence::PresenceRuntime,
-    secret::SecretManager, tool::ToolDispatcher, websocket::ServerEvent,
+    secret::SecretManager, telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
 };
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
@@ -101,8 +101,12 @@ pub struct AppState {
     pub execution_hosts: Arc<AsyncMutex<ExecutionHostRuntime>>,
     /// One-time node pairing codes awaiting redemption by a remote host.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
+    /// One-time external-channel link codes awaiting redemption by a chat sender.
+    pub channel_link_codes: Arc<AsyncMutex<HashMap<String, ChannelLinkCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
+    /// Configured Telegram bot client, if the channel is enabled.
+    pub telegram: Option<Arc<TelegramClient>>,
     /// Recently produced recovery exports available for operator download.
     ///
     /// Recovery bundles include secret material when managed secrets are in use,
@@ -133,6 +137,15 @@ struct AgentMessageExpiryRuntime {
 
 #[derive(Debug, Clone)]
 pub struct PairingCodeRecord {
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelLinkCodeRecord {
+    pub integration: ExternalChannelIntegration,
+    pub bench_id: Option<Uuid>,
+    pub agent_id: Option<String>,
+    pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -170,7 +183,9 @@ impl AppState {
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
+            channel_link_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
+            telegram: None,
             recovery_exports: Arc::new(AsyncMutex::new(Vec::new())),
             workflow_capabilities,
             restart_required: Arc::new(AtomicBool::new(false)),

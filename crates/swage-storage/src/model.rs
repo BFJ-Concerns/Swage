@@ -440,7 +440,76 @@ pub struct DeliveryRecord {
     pub session_id: Uuid,
     pub target: serde_json::Value,
     pub content: String,
+    pub status: String,
+    pub error: Option<String>,
     pub delivered_at: DateTime<Utc>,
+}
+
+/// Durable inbound channel message state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelInboundMessageState {
+    Pending,
+    Presented,
+    Discarded,
+}
+
+impl std::fmt::Display for ChannelInboundMessageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Pending => "pending",
+            Self::Presented => "presented",
+            Self::Discarded => "discarded",
+        })
+    }
+}
+
+impl std::str::FromStr for ChannelInboundMessageState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "presented" => Ok(Self::Presented),
+            "discarded" => Ok(Self::Discarded),
+            other => Err(format!("unknown channel inbound state: {other}")),
+        }
+    }
+}
+
+/// One durable inbound channel message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelInboundMessage {
+    pub id: Uuid,
+    pub integration: String,
+    pub account: String,
+    pub conversation: String,
+    pub external_id: String,
+    pub sender: String,
+    pub content: String,
+    pub state: ChannelInboundMessageState,
+    pub discard_reason: Option<String>,
+    pub turn_id: Option<Uuid>,
+    pub received_at: DateTime<Utc>,
+    pub presented_at: Option<DateTime<Utc>>,
+}
+
+/// A pending channel origin that has messages ready to drain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingChannelOrigin {
+    pub integration: String,
+    pub account: String,
+    pub conversation: String,
+}
+
+/// Input for inserting a durable inbound channel message.
+#[derive(Debug, Clone)]
+pub struct NewChannelInboundMessage {
+    pub integration: String,
+    pub account: String,
+    pub conversation: String,
+    pub external_id: String,
+    pub sender: String,
+    pub content: String,
 }
 
 /// A durable audit-trail event for operator inspection.
@@ -1841,6 +1910,8 @@ pub struct NewDeliveryRecord {
     pub session_id: Uuid,
     pub target: serde_json::Value,
     pub content: String,
+    pub status: String,
+    pub error: Option<String>,
 }
 
 /// Input for creating a new thread.
