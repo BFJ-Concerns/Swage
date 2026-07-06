@@ -25,6 +25,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "output",
     "hitl",
     "communication",
+    "scheduling",
 ];
 
 /// Top-level scalar keys (i.e. fields that live above any [section] header).
@@ -72,6 +73,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "message_ttl_secs",
             "expiry_interval_secs",
         ],
+        "scheduling" => &["run_history_max_age_days", "run_history_max_per_schedule"],
         _ => &[],
     }
 }
@@ -168,6 +170,12 @@ fn check_field_type(
         ("communication", "context_transfer") => ("table", matches!(value, Value::Table(_))),
         ("communication", "message_ttl_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("communication", "expiry_interval_secs") => {
+            ("integer", matches!(value, Value::Integer(_)))
+        }
+        ("scheduling", "run_history_max_age_days") => {
+            ("integer", matches!(value, Value::Integer(_)))
+        }
+        ("scheduling", "run_history_max_per_schedule") => {
             ("integer", matches!(value, Value::Integer(_)))
         }
         // Unknown field — already caught before this call, so no match needed.
@@ -347,6 +355,36 @@ fn check_field_semantics(
             if let Value::Table(table) = value {
                 problems.extend(validate_context_transfer_table(
                     table, file_path, field_path,
+                ));
+            }
+        }
+        ("scheduling", "run_history_max_age_days") => {
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "scheduling.run_history_max_age_days must be a positive integer, got {t}"
+                        ),
+                    },
+                ));
+            }
+        }
+        ("scheduling", "run_history_max_per_schedule") => {
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "scheduling.run_history_max_per_schedule must be a positive integer, got {t}"
+                        ),
+                    },
                 ));
             }
         }
@@ -1633,6 +1671,29 @@ allowed_fields = ["user"]
         assert!(
             problems.is_empty(),
             "valid [communication] should produce no errors, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn scheduling_section_validates_without_warnings() {
+        let toml =
+            "[scheduling]\nrun_history_max_age_days = 90\nrun_history_max_per_schedule = 500\n";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems.is_empty(),
+            "valid [scheduling] should produce no errors, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn scheduling_retention_zero_produces_semantic_error() {
+        let toml = "[scheduling]\nrun_history_max_age_days = 0\nrun_history_max_per_schedule = 0\n";
+        let problems = validate_toml_string(toml, &path("config.toml"));
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
+            "zero retention caps should produce SemanticError"
         );
     }
 

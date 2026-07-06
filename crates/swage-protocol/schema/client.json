@@ -528,6 +528,11 @@
           ]
         },
         {
+          "description": "Completed successfully but produced no assistant text.",
+          "type": "string",
+          "const": "completed_empty"
+        },
+        {
           "description": "Deliberately not executed — see the run's `skip_reason`.",
           "type": "string",
           "const": "skipped"

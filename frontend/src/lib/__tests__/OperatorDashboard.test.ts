@@ -214,4 +214,43 @@ describe("OperatorDashboard", () => {
       "nothing new since the last digest",
     );
   });
+
+  it("shows empty successful schedule runs as a visible non-outcome", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview)
+      .mockResolvedValueOnce(makeOverview())
+      .mockResolvedValue(makeOverview());
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({
+      runs: [
+        {
+          id: "run-empty",
+          schedule_id: "schedule-1",
+          trigger: "tick",
+          state: "completed_empty",
+          skip_reason: null,
+          scheduled_for: "2026-04-07T12:05:00Z",
+          session_id: "session-1",
+          turn_id: "turn-1",
+          gate: null,
+          output_text: "",
+          error_message: null,
+          created_at: "2026-04-07T12:05:00Z",
+          started_at: "2026-04-07T12:05:00Z",
+          completed_at: "2026-04-07T12:05:01Z",
+        },
+      ],
+    });
+
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+
+    const runsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Runs",
+    );
+    expect(runsButton).toBeDefined();
+    flushSync(() => runsButton!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await settleUi();
+
+    expect(document.body.textContent).toContain("completed empty");
+    expect(document.body.textContent).toContain("No assistant text produced.");
+  });
 });

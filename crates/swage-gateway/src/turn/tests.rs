@@ -1465,7 +1465,10 @@ impl ScheduleStore for MockStorage {
     async fn create_schedule_run(&self, run: NewScheduleRun) -> Result<ScheduleRun, StorageError> {
         let terminal = matches!(
             run.state,
-            ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+            ScheduleRunState::Completed
+                | ScheduleRunState::CompletedEmpty
+                | ScheduleRunState::Failed
+                | ScheduleRunState::Skipped
         );
         let created = ScheduleRun {
             id: Uuid::new_v4(),
@@ -1532,7 +1535,10 @@ impl ScheduleStore for MockStorage {
             }
             if matches!(
                 state,
-                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+                ScheduleRunState::Completed
+                    | ScheduleRunState::CompletedEmpty
+                    | ScheduleRunState::Failed
+                    | ScheduleRunState::Skipped
             ) {
                 run.completed_at = Some(chrono::Utc::now());
             }
@@ -1556,6 +1562,60 @@ impl ScheduleStore for MockStorage {
             run.error_message = Some(error_message);
         }
         Ok(())
+    }
+
+    async fn prune_schedule_runs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_age: std::time::Duration,
+        max_per_schedule: u32,
+    ) -> Result<u64, StorageError> {
+        let cutoff = now
+            - chrono::Duration::from_std(max_age)
+                .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let mut db = self.db.lock().await;
+        let mut terminal: Vec<(Uuid, Uuid, chrono::DateTime<chrono::Utc>)> = db
+            .schedule_runs
+            .values()
+            .filter(|run| {
+                matches!(
+                    run.state,
+                    ScheduleRunState::Completed
+                        | ScheduleRunState::CompletedEmpty
+                        | ScheduleRunState::Failed
+                        | ScheduleRunState::Skipped
+                )
+            })
+            .map(|run| (run.id, run.schedule_id, run.created_at))
+            .collect();
+
+        let mut remove: std::collections::HashSet<Uuid> = terminal
+            .iter()
+            .filter_map(|(id, _, created_at)| (*created_at < cutoff).then_some(*id))
+            .collect();
+
+        terminal.sort_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| right.0.cmp(&left.0))
+        });
+
+        let mut seen_by_schedule: std::collections::HashMap<Uuid, u32> =
+            std::collections::HashMap::new();
+        for (id, schedule_id, _) in terminal {
+            let seen = seen_by_schedule.entry(schedule_id).or_default();
+            *seen += 1;
+            if *seen > max_per_schedule {
+                remove.insert(id);
+            }
+        }
+
+        let count = remove.len() as u64;
+        for id in remove {
+            db.schedule_runs.remove(&id);
+        }
+        Ok(count)
     }
 
     async fn recover_incomplete_schedule_runs(
