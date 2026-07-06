@@ -419,9 +419,7 @@ async fn create_telegram_client(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
 ) -> Option<Arc<crate::telegram::TelegramClient>> {
-    let Some(telegram) = config.channels.telegram.as_ref() else {
-        return None;
-    };
+    let telegram = config.channels.telegram.as_ref()?;
 
     let token = match resolve_telegram_token(telegram, secret_manager).await {
         Ok(token) => token,

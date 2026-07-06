@@ -1206,12 +1206,7 @@ mod tests {
         poll_once(&restarted, &client).await.unwrap();
 
         assert!(
-            telegram
-                .offsets
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|offset| *offset == Some(3)),
+            telegram.offsets.lock().unwrap().contains(&Some(3)),
             "restarted poll should request offset after the last persisted update"
         );
         let session_after_restart = restarted_storage
@@ -1345,12 +1340,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            telegram
-                .offsets
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|offset| *offset == Some(2)),
+            telegram.offsets.lock().unwrap().contains(&Some(2)),
             "second poll should have consumed B/C through getUpdates"
         );
         assert_eq!(
