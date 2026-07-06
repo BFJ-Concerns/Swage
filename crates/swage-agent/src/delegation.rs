@@ -11,7 +11,8 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use swage_core::{
-    ChatMessage, MessageKind, Role, render_message_for_model_context, role_label_for_model_context,
+    ChatMessage, DelegateCompletionMode, MessageKind, Role, render_message_for_model_context,
+    role_label_for_model_context,
 };
 use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
@@ -141,6 +142,7 @@ impl DelegationExecutor {
         target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
         cancel_token: tokio_util::sync::CancellationToken,
+        started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
 
@@ -271,6 +273,15 @@ impl DelegationExecutor {
             delegation_id,
         };
 
+        if let Some(started_tx) = started_tx {
+            let _ = started_tx.send(DetachedDelegation {
+                delegate_message_id: delegate_msg.id,
+                child_session_id: session.id,
+                child_thread_id: thread.id,
+                target_agent_id: delegate_msg.recipient_agent_id.clone(),
+            });
+        }
+
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
@@ -396,6 +407,40 @@ fn build_delegated_context(
 // DelegationHandler — trait for tool-as-delegation
 // ---------------------------------------------------------------------------
 
+/// Result returned to the parent turn after the delegate tool call is handled.
+pub enum DelegationOutcome {
+    /// The parent waited and receives the delegate's completed result.
+    Completed(serde_json::Value),
+    /// The child was started and will finish independently.
+    Detached(DetachedDelegation),
+}
+
+/// Durable references for independently running delegated work.
+pub struct DetachedDelegation {
+    /// The delegate message that tracks lifecycle and correlates the result.
+    pub delegate_message_id: Uuid,
+    /// The child session created for the target agent.
+    pub child_session_id: Uuid,
+    /// The child thread created for the target agent.
+    pub child_thread_id: Uuid,
+    /// The target agent running the detached work.
+    pub target_agent_id: String,
+}
+
+impl DetachedDelegation {
+    /// Tool output shown to the parent model immediately after detaching.
+    pub fn tool_output(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": "detached",
+            "delegate_message_id": self.delegate_message_id,
+            "child_session_id": self.child_session_id,
+            "child_thread_id": self.child_thread_id,
+            "target_agent_id": self.target_agent_id,
+            "result_delivery": "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes.",
+        })
+    }
+}
+
 /// Trait for handling delegation requests from within the agent turn loop.
 ///
 /// When the LLM calls the "delegate" tool, the agent catches
@@ -408,7 +453,7 @@ fn build_delegated_context(
 /// actually running a second agent.
 #[async_trait::async_trait]
 pub trait DelegationHandler: Send + Sync {
-    /// Execute a delegation to the target agent and return its result.
+    /// Execute a delegation to the target agent and return its outcome.
     ///
     /// The handler is responsible for:
     /// - Resolving the target agent's config from the hierarchy
@@ -425,7 +470,8 @@ pub trait DelegationHandler: Send + Sync {
         sender_turn_id: Uuid,
         bench_id: Uuid,
         cancel_token: tokio_util::sync::CancellationToken,
-    ) -> Result<serde_json::Value, AgentError>;
+        completion_mode: DelegateCompletionMode,
+    ) -> Result<DelegationOutcome, AgentError>;
 }
 
 // ---------------------------------------------------------------------------
