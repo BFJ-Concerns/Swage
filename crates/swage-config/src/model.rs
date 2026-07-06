@@ -241,18 +241,13 @@ fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
 }
 
 /// Settings for the gateway-hosted browser tools.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BrowserScreenshotPolicy {
     Off,
+    #[default]
     Actions,
     All,
-}
-
-impl Default for BrowserScreenshotPolicy {
-    fn default() -> Self {
-        Self::Actions
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
