@@ -149,6 +149,16 @@ impl BrowserHost {
         }
     }
 
+    #[doc(hidden)]
+    pub async fn browser_pid_for_tests(&self) -> Option<u32> {
+        self.inner
+            .lock()
+            .await
+            .process
+            .as_ref()
+            .map(|process| process.child.pid())
+    }
+
     pub async fn sweep_idle(&self) {
         let mut state = self.inner.lock().await;
         let now = Instant::now();
