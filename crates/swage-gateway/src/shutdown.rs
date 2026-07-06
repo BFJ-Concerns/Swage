@@ -539,6 +539,54 @@ mod tests {
         assert_eq!(recovered.state, TurnState::Interrupted);
     }
 
+    #[tokio::test]
+    async fn recovery_interrupts_detached_child_turn_left_in_flight() {
+        let storage = Arc::new(MockStorage::new());
+        let bench = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                bench_id: bench.id,
+                agent_id: "agent-b".to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent-b".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent_turn_id = uuid::Uuid::new_v4();
+        let detached_child_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "agent-b".to_string(),
+                state: TurnState::Processing,
+                user_input: Some("detached child work".to_string()),
+                parent_turn_id: Some(parent_turn_id),
+            })
+            .await
+            .unwrap();
+
+        let count = recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert_eq!(count, 1, "detached child turn should be recovered");
+        let recovered = storage
+            .get_turn(detached_child_turn.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, TurnState::Interrupted);
+        assert_eq!(recovered.parent_turn_id, Some(parent_turn_id));
+    }
+
     // -----------------------------------------------------------------------
     // Approval startup recovery tests [sfb5]
     //

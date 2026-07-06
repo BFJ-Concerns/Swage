@@ -5,11 +5,13 @@ use super::{
     build_gateway_dispatcher_with_unsandboxed_degradation, delegated_target_instructions_for_bench,
     load_session_config, mpsc, shutdown_sandbox_guard,
 };
+use swage_agent::DelegationOutcome;
+use swage_core::DelegateCompletionMode;
 
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
     state: AppState,
-    active_delegations: swage_agent::ActiveDelegations,
+    pub(super) active_delegations: swage_agent::ActiveDelegations,
 }
 
 impl GatewayDelegationHandler {
@@ -32,7 +34,8 @@ impl DelegationHandler for GatewayDelegationHandler {
         sender_turn_id: Uuid,
         bench_id: Uuid,
         cancel_token: CancellationToken,
-    ) -> Result<serde_json::Value, AgentError> {
+        completion_mode: DelegateCompletionMode,
+    ) -> Result<DelegationOutcome, AgentError> {
         let bench = self.state.bench_store.get(bench_id).await?.ok_or_else(|| {
             AgentError::InvalidConfig(format!("delegation bench {bench_id} no longer exists"))
         })?;
@@ -139,48 +142,111 @@ impl DelegationHandler for GatewayDelegationHandler {
             return Err(error);
         }
 
-        let child_cancel_token = cancel_token.child_token();
-        let result_msg = match executor
-            .execute_delegation(
-                &delegate_msg,
-                Some(sender_turn_id),
-                bench_id,
-                target_agent_config,
-                target_instructions,
-                target_context_transfer_config,
-                Some(target_dispatcher),
-                child_cancel_token,
-            )
-            .await
-        {
-            Ok(result_msg) => result_msg,
-            Err(error) => {
+        match completion_mode {
+            DelegateCompletionMode::Wait => {
+                let child_cancel_token = cancel_token.child_token();
+                let result_msg = match executor
+                    .execute_delegation(
+                        &delegate_msg,
+                        Some(sender_turn_id),
+                        bench_id,
+                        target_agent_config,
+                        target_instructions,
+                        target_context_transfer_config,
+                        Some(target_dispatcher),
+                        child_cancel_token,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(result_msg) => result_msg,
+                    Err(error) => {
+                        shutdown_sandbox_guard(
+                            &target_sandbox_guard,
+                            "failed to shut down delegated sandbox after delegation error",
+                        )
+                        .await;
+                        let _ = router
+                            .fail_message(delegate_msg.id, &error.to_string())
+                            .await;
+                        return Err(error);
+                    }
+                };
                 shutdown_sandbox_guard(
                     &target_sandbox_guard,
-                    "failed to shut down delegated sandbox after delegation error",
+                    "failed to shut down delegated sandbox",
                 )
                 .await;
-                let _ = router
-                    .fail_message(delegate_msg.id, &error.to_string())
-                    .await;
-                return Err(error);
-            }
-        };
-        shutdown_sandbox_guard(
-            &target_sandbox_guard,
-            "failed to shut down delegated sandbox",
-        )
-        .await;
 
-        if let Err(error) = router.deliver_message(&result_msg).await {
-            shutdown_sandbox_guard(
-                &target_sandbox_guard,
-                "failed to shut down delegated sandbox after result delivery error",
-            )
-            .await;
-            return Err(error);
+                if let Err(error) = router.deliver_message(&result_msg).await {
+                    shutdown_sandbox_guard(
+                        &target_sandbox_guard,
+                        "failed to shut down delegated sandbox after result delivery error",
+                    )
+                    .await;
+                    return Err(error);
+                }
+                Ok(DelegationOutcome::Completed(result_msg.payload.clone()))
+            }
+            DelegateCompletionMode::Detach => {
+                let child_cancel_token = cancel_token.child_token();
+                let delegate_message_id = delegate_msg.id;
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let detached_router = router.clone();
+
+                tokio::spawn(async move {
+                    let result = executor
+                        .execute_delegation(
+                            &delegate_msg,
+                            Some(sender_turn_id),
+                            bench_id,
+                            target_agent_config,
+                            target_instructions,
+                            target_context_transfer_config,
+                            Some(target_dispatcher),
+                            child_cancel_token,
+                            Some(started_tx),
+                        )
+                        .await;
+
+                    shutdown_sandbox_guard(
+                        &target_sandbox_guard,
+                        "failed to shut down detached delegated sandbox",
+                    )
+                    .await;
+
+                    match result {
+                        Ok(result_msg) => {
+                            if let Err(error) = detached_router.deliver_message(&result_msg).await {
+                                tracing::warn!(
+                                    delegate_message_id = %delegate_message_id,
+                                    result_message_id = %result_msg.id,
+                                    error = ?error,
+                                    "failed to deliver detached delegate result"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            let _ = detached_router
+                                .fail_message(delegate_message_id, &error.to_string())
+                                .await;
+                            tracing::warn!(
+                                delegate_message_id = %delegate_message_id,
+                                error = ?error,
+                                "detached delegation failed"
+                            );
+                        }
+                    }
+                });
+
+                let detached = started_rx.await.map_err(|_| {
+                    AgentError::InvalidConfig(
+                        "detached delegation stopped before child turn startup".to_string(),
+                    )
+                })?;
+                Ok(DelegationOutcome::Detached(detached))
+            }
         }
-        Ok(result_msg.payload.clone())
     }
 }
 

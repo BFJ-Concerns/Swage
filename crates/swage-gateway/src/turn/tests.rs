@@ -12,8 +12,8 @@ use futures::stream;
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, SandboxError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
+    ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -32,16 +32,16 @@ use swage_storage::{
         TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
-        ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore, ChannelLinkStore,
-        ContextSnapshotStore, ExecutionHostStore, MaterialStore, MessageStore, ScheduleStore,
-        SessionStore, SkillActivationStore, TeamStore, ThreadStore, ToolCallStore,
+        AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore,
+        ChannelLinkStore, ContextSnapshotStore, ExecutionHostStore, MaterialStore, MessageStore,
+        ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore, ToolCallStore,
         TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
 use super::history::parse_model_arguments;
 
-use swage_agent::AgentEvent;
+use swage_agent::{AgentEvent, DelegationOutcome};
 use swage_sandbox::ToolCallResult;
 
 use super::*;
@@ -261,6 +261,125 @@ impl LlmProvider for MultiRoundMockProvider {
             .pop_front()
             .unwrap_or_default();
         Box::pin(stream::iter(chunks))
+    }
+}
+
+struct DetachedGatedProvider {
+    child_started: Arc<Notify>,
+    child_release: Arc<Notify>,
+    initial_parent_request_seen: AtomicUsize,
+    captured: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl DetachedGatedProvider {
+    fn new(
+        child_started: Arc<Notify>,
+        child_release: Arc<Notify>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                child_started,
+                child_release,
+                initial_parent_request_seen: AtomicUsize::new(0),
+                captured: captured.clone(),
+            },
+            captured,
+        )
+    }
+}
+
+#[async_trait]
+impl LlmProvider for DetachedGatedProvider {
+    fn model_id(&self) -> &str {
+        "mock-detached-gated"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("streaming provider only")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("streaming provider only")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let request_text = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.captured.lock().unwrap().push(request_text.clone());
+
+        if request_text.contains("Delegated Task\n\nSummarise independently") {
+            let started = self.child_started.clone();
+            let release = self.child_release.clone();
+            return Box::pin(stream::unfold(0_u8, move |state| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    match state {
+                        0 => {
+                            started.notify_one();
+                            release.notified().await;
+                            Some((
+                                StreamChunk::Delta {
+                                    content: "Detached child answer".into(),
+                                },
+                                1,
+                            ))
+                        }
+                        1 => Some((
+                            StreamChunk::Done {
+                                finish_reason: None,
+                            },
+                            2,
+                        )),
+                        _ => None,
+                    }
+                }
+            }));
+        }
+
+        if self
+            .initial_parent_request_seen
+            .fetch_add(1, Ordering::SeqCst)
+            > 0
+        {
+            return Box::pin(stream::iter(vec![
+                StreamChunk::Delta {
+                    content: "Parent continued without waiting".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]));
+        }
+
+        Box::pin(stream::iter(vec![
+            StreamChunk::ToolUse {
+                call_id: "delegate-detached".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({
+                    "target_agent": "agent-b",
+                    "task": "Summarise independently",
+                    "completion_mode": "detach",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]))
     }
 }
 
@@ -5668,6 +5787,341 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "target agent skill instructions must not bleed into the resumed parent request"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegate_tool_detaches_child_and_persists_result_after_release() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let bench = storage
+        .get_or_create_default()
+        .await
+        .expect("default bench");
+    let session = storage
+        .create_session(NewSession {
+            bench_id: bench.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+
+    let child_started = Arc::new(Notify::new());
+    let child_release = Arc::new(Notify::new());
+    let (provider, captured_requests) =
+        DetachedGatedProvider::new(child_started.clone(), child_release.clone());
+
+    let dispatcher =
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
+        ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        dispatcher,
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Delegate independently".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("detached parent turn should complete before child release");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), child_started.notified())
+        .await
+        .expect("detached child provider stream should have started");
+
+    let root_turns = state
+        .storage
+        .list_turns_by_thread(root_thread.id)
+        .await
+        .expect("list root turns");
+    assert_eq!(root_turns.len(), 1, "expected one root turn");
+    let root_turn = &root_turns[0];
+    assert_eq!(root_turn.state, TurnState::Completed);
+    assert_eq!(
+        root_turn.assistant_response.as_deref(),
+        Some("Parent continued without waiting"),
+    );
+
+    let tool_calls = state
+        .storage
+        .list_tool_calls_by_turn(root_turn.id)
+        .await
+        .expect("list tool calls");
+    let delegate_tool_call = tool_calls
+        .iter()
+        .find(|call| call.tool == "delegate")
+        .expect("delegate tool call should be stored");
+    let detached_output: serde_json::Value = serde_json::from_str(
+        delegate_tool_call
+            .result
+            .as_deref()
+            .expect("delegate tool result should be stored"),
+    )
+    .expect("delegate tool result should be JSON");
+    assert_eq!(detached_output["status"], "detached");
+    assert_eq!(
+        detached_output["result_delivery"],
+        "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes."
+    );
+
+    let delegate_message_id = detached_output["delegate_message_id"]
+        .as_str()
+        .expect("delegate message id should be a string")
+        .parse::<Uuid>()
+        .expect("delegate message id should be a uuid");
+    let delegate_message = state
+        .storage
+        .get_agent_message(delegate_message_id)
+        .await
+        .expect("get delegate message")
+        .expect("delegate message should exist");
+    assert_eq!(delegate_message.status, MessageStatus::Delivered);
+    assert_eq!(
+        state
+            .storage
+            .list_by_correlation(delegate_message_id)
+            .await
+            .expect("list correlated messages before release")
+            .len(),
+        0,
+        "child result should not exist until the gated provider is released"
+    );
+
+    child_release.notify_one();
+
+    let mut result_messages = Vec::new();
+    for _ in 0..20 {
+        result_messages = state
+            .storage
+            .list_by_correlation(delegate_message_id)
+            .await
+            .expect("list correlated messages after release");
+        if !result_messages.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(result_messages.len(), 1, "expected one result message");
+    let result_message = &result_messages[0];
+    assert_eq!(result_message.status, MessageStatus::Delivered);
+    assert_eq!(result_message.payload["response"], "Detached child answer");
+
+    let child_session_id = detached_output["child_session_id"]
+        .as_str()
+        .expect("child session id should be a string")
+        .parse::<Uuid>()
+        .expect("child session id should be a uuid");
+    let child_threads = state
+        .storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads");
+    assert_eq!(child_threads.len(), 1, "expected one child thread");
+    let child_turns = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list child turns");
+    assert_eq!(child_turns.len(), 1, "expected one child turn");
+    assert_eq!(child_turns[0].state, TurnState::Completed);
+    assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
+
+    let captured = captured_requests.lock().unwrap();
+    assert!(
+        captured.len() >= 3,
+        "expected initial parent, detached child, and resumed parent requests: {captured:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_delegate_can_be_cancelled_through_active_registry() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let bench = storage
+        .get_or_create_default()
+        .await
+        .expect("default bench");
+    let session = storage
+        .create_session(NewSession {
+            bench_id: bench.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("start detached work".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+
+    let child_started = Arc::new(Notify::new());
+    let child_release = Arc::new(Notify::new());
+    let (provider, _captured_requests) =
+        DetachedGatedProvider::new(child_started.clone(), child_release);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let handler = GatewayDelegationHandler::new(state.clone());
+
+    let outcome = handler
+        .handle_delegation(
+            "agent-b",
+            "Summarise independently",
+            None,
+            "gateway",
+            parent_turn.id,
+            bench.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("detached delegation should start");
+    let detached = match outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached outcome"),
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), child_started.notified())
+        .await
+        .expect("detached child should enter provider stream");
+
+    assert!(
+        handler
+            .active_delegations
+            .cancellation_target(detached.delegate_message_id)
+            .await
+            .is_some(),
+        "detached child should be registered for precise cancellation"
+    );
+
+    let cancel = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "gateway".to_string(),
+            recipient_agent_id: "agent-b".to_string(),
+            kind: swage_core::MessageKind::Cancel,
+            correlation_id: Some(detached.delegate_message_id),
+            payload: serde_json::json!({}),
+        })
+        .await
+        .expect("create cancel message");
+    swage_agent::cancel::handle_cancel(
+        storage.as_ref(),
+        &cancel,
+        Some(&handler.active_delegations),
+    )
+    .await
+    .expect("active-registry cancel should succeed");
+
+    let mut child_turns = Vec::new();
+    for _ in 0..20 {
+        child_turns = state
+            .storage
+            .list_turns_by_thread(detached.child_thread_id)
+            .await
+            .expect("list child turns");
+        if child_turns
+            .iter()
+            .any(|turn| turn.state == TurnState::Interrupted)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(child_turns.len(), 1, "expected one child turn");
+    assert_eq!(child_turns[0].state, TurnState::Interrupted);
+
+    let delegate = state
+        .storage
+        .get_agent_message(detached.delegate_message_id)
+        .await
+        .expect("get delegate message")
+        .expect("delegate message should exist");
+    assert_eq!(delegate.status, MessageStatus::Delivered);
+
+    let mut result_messages = Vec::new();
+    for _ in 0..20 {
+        result_messages = state
+            .storage
+            .list_by_correlation(detached.delegate_message_id)
+            .await
+            .expect("list correlated messages after cancellation");
+        if result_messages
+            .iter()
+            .any(|message| message.payload["error"] == "turn cancelled")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let cancellation_results = result_messages
+        .iter()
+        .filter(|message| message.kind == swage_core::MessageKind::Result)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cancellation_results.len(),
+        1,
+        "expected one cancellation result"
+    );
+    assert_eq!(cancellation_results[0].payload["error"], "turn cancelled");
+
+    for _ in 0..20 {
+        if handler
+            .active_delegations
+            .cancellation_target(detached.delegate_message_id)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("detached delegation registry entry should be removed after cancellation");
+}
+
+// -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
 // Bench context and config resolution tests

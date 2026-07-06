@@ -2067,6 +2067,7 @@ async fn execute_external_delegate_message(
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await;
 
