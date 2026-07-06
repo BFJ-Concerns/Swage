@@ -435,7 +435,7 @@ fn classify_schedule_run_status(
                 "running".to_string()
             }
         }
-        ScheduleRunState::Completed => "completed".to_string(),
+        ScheduleRunState::Completed | ScheduleRunState::CompletedEmpty => "completed".to_string(),
         ScheduleRunState::Failed => "failed".to_string(),
         ScheduleRunState::Skipped => "skipped".to_string(),
     }

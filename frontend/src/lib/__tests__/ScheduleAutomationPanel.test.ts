@@ -77,6 +77,13 @@ const RUN: ScheduleRun = {
   completed_at: "2026-01-01T00:30:05Z",
 };
 
+const EMPTY_RUN: ScheduleRun = {
+  ...RUN,
+  id: "run-empty",
+  state: "completed_empty",
+  output_text: "",
+};
+
 describe("ScheduleAutomationPanel", () => {
   let component: MountedComponent | undefined;
 
@@ -109,6 +116,18 @@ describe("ScheduleAutomationPanel", () => {
     expect(operatorApi.listSchedules).toHaveBeenCalled();
     expect(document.body.textContent).toContain("Review the queue.");
     expect(document.body.textContent).toContain("did the thing");
+  });
+
+  it("shows empty successful runs as a visible non-outcome", async () => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [EMPTY_RUN] });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { benchId: "bench-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("completed empty");
+    expect(document.body.textContent).toContain("No assistant text produced.");
   });
 
   it("runs a schedule now through the trigger endpoint", async () => {

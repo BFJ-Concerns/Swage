@@ -99,6 +99,8 @@ pub enum ScheduleRunState {
     Pending,
     Running,
     Completed,
+    /// Completed successfully but produced no assistant text.
+    CompletedEmpty,
     Failed,
     /// Deliberately not executed — see the run's `skip_reason`.
     Skipped,
@@ -176,6 +178,7 @@ string_round_trip!(ScheduleRunState {
     Pending => "pending",
     Running => "running",
     Completed => "completed",
+    CompletedEmpty => "completed_empty",
     Failed => "failed",
     Skipped => "skipped",
 });

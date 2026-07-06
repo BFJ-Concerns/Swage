@@ -12,6 +12,8 @@ use crate::model::{
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
 
+const TERMINAL_RUN_STATES_SQL: &str = "'completed', 'completed_empty', 'failed', 'skipped'";
+
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     s.parse::<Uuid>().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -402,7 +404,10 @@ impl ScheduleStore for SqliteStorage {
             // is recorded; a pending run has not finished.
             let completed_at = matches!(
                 run.state,
-                ScheduleRunState::Completed | ScheduleRunState::Failed | ScheduleRunState::Skipped
+                ScheduleRunState::Completed
+                    | ScheduleRunState::CompletedEmpty
+                    | ScheduleRunState::Failed
+                    | ScheduleRunState::Skipped
             )
             .then(|| now.to_rfc3339());
 
@@ -498,6 +503,7 @@ impl ScheduleStore for SqliteStorage {
                 update.state,
                 Some(
                     ScheduleRunState::Completed
+                        | ScheduleRunState::CompletedEmpty
                         | ScheduleRunState::Failed
                         | ScheduleRunState::Skipped
                 )
@@ -534,6 +540,46 @@ impl ScheduleStore for SqliteStorage {
                 ],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn prune_schedule_runs(
+        &self,
+        now: DateTime<Utc>,
+        max_age: std::time::Duration,
+        max_per_schedule: u32,
+    ) -> Result<u64, StorageError> {
+        let cutoff = chrono::Duration::from_std(max_age)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))
+            .map(|duration| now - duration)?
+            .to_rfc3339();
+        let max_per_schedule = i64::from(max_per_schedule);
+
+        self.with_conn(move |conn| {
+            let sql = format!(
+                "DELETE FROM schedule_runs
+                 WHERE state IN ({terminal_states})
+                   AND (
+                       created_at < ?1
+                       OR id IN (
+                           SELECT id
+                           FROM (
+                               SELECT id,
+                                      ROW_NUMBER() OVER (
+                                          PARTITION BY schedule_id
+                                          ORDER BY created_at DESC, id DESC
+                                      ) AS rn
+                               FROM schedule_runs
+                               WHERE state IN ({terminal_states})
+                           )
+                           WHERE rn > ?2
+                       )
+                   )",
+                terminal_states = TERMINAL_RUN_STATES_SQL,
+            );
+            let changed = conn.execute(&sql, params![&cutoff, max_per_schedule])?;
+            Ok(changed as u64)
         })
         .await
     }
@@ -604,6 +650,22 @@ mod tests {
             next_run_at: Some(Utc::now()),
             last_run_at: None,
         }
+    }
+
+    async fn force_run_timestamp(storage: &SqliteStorage, run_id: Uuid, timestamp: DateTime<Utc>) {
+        let value = timestamp.to_rfc3339();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE schedule_runs
+                     SET created_at = ?1, completed_at = COALESCE(completed_at, ?1)
+                     WHERE id = ?2",
+                    params![&value, run_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -903,5 +965,139 @@ mod tests {
             .unwrap();
         assert_eq!(untouched.state, ScheduleRunState::Completed);
         assert_eq!(untouched.output_text.as_deref(), Some("done"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retention_reaps_terminal_runs_older_than_the_age_cap() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let old = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                old.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Completed),
+                    output_text: Some("old".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        force_run_timestamp(&storage, old.id, now - chrono::Duration::days(91)).await;
+
+        let recent = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                recent.id,
+                ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::CompletedEmpty),
+                    output_text: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        force_run_timestamp(&storage, recent.id, now - chrono::Duration::days(10)).await;
+
+        let removed = storage
+            .prune_schedule_runs(now, std::time::Duration::from_secs(90 * 24 * 60 * 60), 500)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = storage.list_schedule_runs(schedule.id).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, recent.id);
+        assert_eq!(remaining[0].state, ScheduleRunState::CompletedEmpty);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retention_reaps_beyond_count_cap_but_spares_active_runs() {
+        let (storage, bench_id, _) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(bench_id))
+            .await
+            .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut terminal_ids = Vec::new();
+        for offset in 0..3 {
+            let run = storage
+                .create_schedule_run(NewScheduleRun::pending(
+                    schedule.id,
+                    ScheduleRunTrigger::Tick,
+                    None,
+                ))
+                .await
+                .unwrap();
+            storage
+                .update_schedule_run(
+                    run.id,
+                    ScheduleRunUpdate {
+                        state: Some(ScheduleRunState::Completed),
+                        output_text: Some(format!("run {offset}")),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            force_run_timestamp(&storage, run.id, now - chrono::Duration::hours(3 - offset)).await;
+            terminal_ids.push(run.id);
+        }
+
+        let active = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+            ))
+            .await
+            .unwrap();
+        force_run_timestamp(&storage, active.id, now - chrono::Duration::hours(10)).await;
+
+        let removed = storage
+            .prune_schedule_runs(now, std::time::Duration::from_secs(365 * 24 * 60 * 60), 2)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = storage.list_schedule_runs(schedule.id).await.unwrap();
+        let remaining_ids: std::collections::HashSet<_> =
+            remaining.iter().map(|run| run.id).collect();
+        assert!(!remaining_ids.contains(&terminal_ids[0]));
+        assert!(remaining_ids.contains(&terminal_ids[1]));
+        assert!(remaining_ids.contains(&terminal_ids[2]));
+        assert!(remaining_ids.contains(&active.id));
+        assert_eq!(
+            remaining
+                .iter()
+                .find(|run| run.id == active.id)
+                .unwrap()
+                .state,
+            ScheduleRunState::Pending
+        );
     }
 }

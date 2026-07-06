@@ -692,6 +692,38 @@ impl Default for CommunicationConfig {
     }
 }
 
+/// Scheduler settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulingConfig {
+    /// Maximum age for terminal schedule-run rows before retention may reap
+    /// them (days). Audit events remain the durable reconstruction record.
+    /// Default: 90 days.
+    #[serde(default = "default_run_history_max_age_days")]
+    pub run_history_max_age_days: u64,
+    /// Maximum terminal schedule-run rows kept per schedule. Active rows are
+    /// never counted against or removed by this cap.
+    /// Default: 500 rows.
+    #[serde(default = "default_run_history_max_per_schedule")]
+    pub run_history_max_per_schedule: u32,
+}
+
+fn default_run_history_max_age_days() -> u64 {
+    90
+}
+
+fn default_run_history_max_per_schedule() -> u32 {
+    500
+}
+
+impl Default for SchedulingConfig {
+    fn default() -> Self {
+        Self {
+            run_history_max_age_days: default_run_history_max_age_days(),
+            run_history_max_per_schedule: default_run_history_max_per_schedule(),
+        }
+    }
+}
+
 /// Named generation parameters that can be applied to provider requests.
 ///
 /// Empty presets are invalid at the settings API boundary. The config type is
@@ -799,6 +831,8 @@ pub struct ResolvedConfig {
     /// Inter-agent communication settings — context transfer policy.
     /// Defaults to no communication (context transfer mode = none).
     pub communication: CommunicationConfig,
+    /// Scheduler settings, including local run-history retention.
+    pub scheduling: SchedulingConfig,
     /// Named generation parameter presets available to model entries.
     pub generation: GenerationConfig,
     /// External communication channel configuration.
