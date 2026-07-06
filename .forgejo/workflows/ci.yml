@@ -1,0 +1,99 @@
+# CI on Forgejo Actions (self-hosted runner).
+#
+# Mirrors `just ci` in substance — fmt, frontend typecheck/tests, clippy,
+# Rust tests — but runs the Rust suite through cargo-nextest so flaky tests
+# (fail, then pass on retry) are detected and surfaced as a "Flaky Tests"
+# label on the PR instead of hiding behind a lucky green.
+#
+# Deliberately not covered yet:
+#   - desktop (electron) smoke test — the runner container has no display
+#     stack; revisit with xvfb or a dedicated image
+#   - justfile formatting check (`just --fmt --check`) — no `just` in the
+#     stock rust image; folds in when a dedicated CI image exists
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: docker
+    container:
+      image: rust:1.95
+    steps:
+      # Node for the frontend, jq for the labelling step.
+      - name: Install system deps
+        run: apt-get update -qq && apt-get install -y -qq nodejs npm jq
+
+      - uses: actions/checkout@v4
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Red runs still warm the cache — matters while the suite is
+          # being stabilised, or every retry rebuilds from cold.
+          cache-on-failure: true
+
+      # rust-toolchain.toml makes rustup auto-install the pinned toolchain
+      # with the minimal profile — rustfmt and clippy must be added on top.
+      - name: Install toolchain components
+        run: rustup component add rustfmt clippy
+
+      # Pinned rather than `latest`: bump deliberately (supply-chain
+      # cooling-off — pick releases at least a week old).
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/0.9.138/linux | tar zxf - -C /usr/local/cargo/bin
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Frontend install + typecheck
+        run: |
+          npm ci --prefix frontend
+          npm run check --prefix frontend
+
+      # web_interface_integration tests 503 without a built frontend/dist.
+      - name: Frontend build
+        run: npm run build --prefix frontend
+
+      - name: Frontend tests
+        run: npm test --prefix frontend
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests (nextest, ci profile)
+        run: cargo nextest run --workspace --profile ci
+
+      # A flaky test is one nextest saw fail and then pass on retry: the run
+      # is green, but the junit report carries <flakyFailure> elements and the
+      # log above marks the tests FLAKY. Label the PR so label-driven
+      # automation can react (e.g. dispatch a test hunter).
+      - name: Label PR on flaky tests
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          junit=target/nextest/ci/junit.xml
+          [ -f "$junit" ] || exit 0
+          n=$(grep -c '<flakyFailure' "$junit") || { echo "No flaky tests."; exit 0; }
+          echo "Detected $n flaky-test retry record(s) — see FLAKY lines in the nextest step."
+          api="${{ github.server_url }}/api/v1"
+          repo="${{ github.repository }}"
+          pr="${{ github.event.pull_request.number }}"
+          label_id=$(curl -sf -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "$api/repos/$repo/labels?limit=100" \
+            | jq '[.[] | select(.name == "Flaky Tests")][0].id')
+          if [ -z "$label_id" ] || [ "$label_id" = "null" ]; then
+            echo "::warning::'Flaky Tests' label not found on $repo — create it in repo settings"
+            exit 0
+          fi
+          curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"labels\":[$label_id]}" \
+            "$api/repos/$repo/issues/$pr/labels" >/dev/null
+          echo "Applied 'Flaky Tests' label to PR #$pr"
