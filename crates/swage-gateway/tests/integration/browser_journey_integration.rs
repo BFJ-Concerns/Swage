@@ -528,7 +528,7 @@ fn browser_config_with_screenshots(
 }
 
 fn browser_binary_or_skip() -> Option<String> {
-    for candidate in [
+    if let Some(candidate) = [
         std::env::var("SWAGE_BROWSER_BIN").ok(),
         which("chromium"),
         which("google-chrome-stable"),
@@ -536,12 +536,14 @@ fn browser_binary_or_skip() -> Option<String> {
     ]
     .into_iter()
     .flatten()
+    .next()
     {
         return Some(candidate);
     }
-    if std::env::var("SWAGE_BROWSER_TESTS").as_deref() == Ok("required") {
-        panic!("SWAGE_BROWSER_TESTS=required but no Chromium binary was found");
-    }
+    assert!(
+        std::env::var("SWAGE_BROWSER_TESTS").as_deref() != Ok("required"),
+        "SWAGE_BROWSER_TESTS=required but no Chromium binary was found"
+    );
     eprintln!("skipping browser journey: no Chromium binary found");
     None
 }
@@ -693,10 +695,9 @@ async fn ws_recv_until(stream: &mut WsStream, predicate: impl Fn(&Value) -> bool
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut seen = Vec::new();
     loop {
-        let event = match tokio::time::timeout_at(deadline, ws_recv(stream)).await {
-            Ok(event) => event,
-            Err(_) => panic!("timed out waiting for WebSocket event; seen: {seen:#?}"),
-        };
+        let event = tokio::time::timeout_at(deadline, ws_recv(stream))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for WebSocket event; seen: {seen:#?}"));
         if predicate(&event) {
             return event;
         }
