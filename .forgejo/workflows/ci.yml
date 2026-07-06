@@ -35,6 +35,11 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
+      # rust-toolchain.toml makes rustup auto-install the pinned toolchain
+      # with the minimal profile — rustfmt and clippy must be added on top.
+      - name: Install toolchain components
+        run: rustup component add rustfmt clippy
+
       # Pinned rather than `latest`: bump deliberately (supply-chain
       # cooling-off — pick releases at least a week old).
       - name: Install cargo-nextest
