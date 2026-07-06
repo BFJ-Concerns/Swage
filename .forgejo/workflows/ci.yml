@@ -34,6 +34,10 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Red runs still warm the cache — matters while the suite is
+          # being stabilised, or every retry rebuilds from cold.
+          cache-on-failure: true
 
       # rust-toolchain.toml makes rustup auto-install the pinned toolchain
       # with the minimal profile — rustfmt and clippy must be added on top.
