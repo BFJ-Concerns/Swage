@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -38,6 +38,8 @@ use swage_storage::{
         TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
+
+use super::history::parse_model_arguments;
 
 use swage_agent::AgentEvent;
 use swage_sandbox::ToolCallResult;
@@ -313,6 +315,7 @@ impl Hook for BlockInboundHook {
 /// In-memory storage for testing.
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
+    fail_secret_reads: AtomicBool,
 }
 
 #[derive(Default)]
@@ -383,7 +386,12 @@ impl MockStorage {
                 ]),
                 ..Default::default()
             }),
+            fail_secret_reads: AtomicBool::new(false),
         }
+    }
+
+    fn fail_secret_reads(&self) {
+        self.fail_secret_reads.store(true, Ordering::SeqCst);
     }
 }
 
@@ -3048,6 +3056,11 @@ impl swage_storage::store::SecretStore for MockStorage {
     }
 
     async fn list_secrets(&self) -> Result<Vec<swage_storage::SecretRecord>, StorageError> {
+        if self.fail_secret_reads.load(Ordering::SeqCst) {
+            return Err(StorageError::ConnectionFailed(
+                "injected secret storage failure".into(),
+            ));
+        }
         Ok(self.db.lock().await.secrets.values().cloned().collect())
     }
 
@@ -3113,6 +3126,11 @@ impl swage_storage::store::SecretStore for MockStorage {
     }
 
     async fn get_managed_secret_value(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        if self.fail_secret_reads.load(Ordering::SeqCst) {
+            return Err(StorageError::ConnectionFailed(
+                "injected managed-secret storage failure".into(),
+            ));
+        }
         Ok(self.db.lock().await.managed_secret_values.get(&id).cloned())
     }
 }
@@ -3257,7 +3275,13 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
 /// so that `process_turn` can look it up via `list_by_session`.
 pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
+    make_state_with_storage(provider_chunks, storage).await
+}
 
+async fn make_state_with_storage(
+    provider_chunks: Vec<StreamChunk>,
+    storage: Arc<MockStorage>,
+) -> (AppState, Uuid) {
     // Create the default bench via BenchStore.
     let bench = storage
         .get_or_create_default()
@@ -5131,7 +5155,8 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
         },
     ];
 
-    let replay = compact_tool_replay_messages(&records);
+    let replay = compact_tool_replay_messages(&records)
+        .expect("complete nested replay records should be valid");
     assert_eq!(replay.len(), 2);
 
     let assistant_replay = replay[0]
@@ -5170,6 +5195,79 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
     let envelope: swage_core::CompactToolReplay = serde_json::from_str(nested_result)
         .expect("nested result should contain compact replay JSON");
     assert_eq!(envelope.preview, r#"{"content":"workspace"}"#);
+}
+
+fn complete_replay_record(call_id: &str) -> ToolCallRecord {
+    ToolCallRecord {
+        id: Uuid::new_v4(),
+        turn_id: Uuid::new_v4(),
+        agent_id: "gateway".into(),
+        call_id: call_id.into(),
+        tool: "file_read".into(),
+        arguments: r#"{"path":"Cargo.toml"}"#.into(),
+        model_arguments: swage_core::compact_tool_arguments_for_model(
+            &serde_json::json!({"path": "Cargo.toml"}),
+        ),
+        result: Some("workspace".into()),
+        model_result: Some(swage_core::compact_tool_result_for_model(
+            "workspace",
+            false,
+        )),
+        status: Some("success".into()),
+        duration_ms: Some(1),
+        truncated: false,
+        total_bytes: Some(9),
+        provider_round: 1,
+        position: 0,
+        created_at: chrono::Utc::now(),
+        parent_call_id: None,
+    }
+}
+
+#[test]
+fn replay_uses_valid_raw_arguments_when_compact_arguments_are_unreadable() {
+    let mut record = complete_replay_record("legacy-call");
+    record.model_arguments = "not-json".into();
+
+    let arguments = parse_model_arguments(&record)
+        .expect("valid raw arguments are a safe legacy replay fallback");
+
+    assert_eq!(arguments["path"], "Cargo.toml");
+}
+
+#[test]
+fn replay_omits_calls_without_model_safe_results() {
+    let mut record = complete_replay_record("incomplete-call");
+    record.result = Some("raw result must not be replayed".into());
+    record.model_result = None;
+
+    let replay = compact_tool_replay_messages(&[record])
+        .expect("an incomplete call should be omitted rather than replaying raw data");
+
+    assert!(replay.is_empty());
+}
+
+#[test]
+fn corrupt_replay_arguments_are_rejected() {
+    let mut record = complete_replay_record("corrupt-call");
+    record.model_arguments = "{not-json".into();
+    record.arguments = "{also-not-json".into();
+
+    let error = compact_tool_replay_messages(&[record])
+        .expect_err("corrupt replay arguments must not be sent to the provider");
+
+    assert!(matches!(error, StorageError::Corruption { .. }));
+}
+
+#[test]
+fn orphaned_nested_replay_is_rejected() {
+    let mut record = complete_replay_record("nested-call");
+    record.parent_call_id = Some("missing-parent".into());
+
+    let error = compact_tool_replay_messages(&[record])
+        .expect_err("orphaned nested replay must not be regrouped silently");
+
+    assert!(matches!(error, StorageError::Corruption { .. }));
 }
 
 #[tokio::test]
@@ -6750,6 +6848,24 @@ async fn workspace_summary_only_aggregates_target_bench() {
     assert!(!summary.has_write);
 }
 
+#[tokio::test]
+async fn delegation_rejects_missing_sender_turn_lineage() {
+    let (state, _) = make_state_with_session(vec![]).await;
+    let handler = GatewayDelegationHandler::new(state);
+    let missing_turn_id = Uuid::new_v4();
+
+    let error = handler
+        .active_workspace_attachment_for_turn(missing_turn_id)
+        .await
+        .expect_err("a missing sender turn must not look like an unattached workspace");
+
+    assert!(matches!(
+        error,
+        AgentError::StorageFailed(StorageError::NotFound { entity, id })
+            if entity == "turn" && id == missing_turn_id.to_string()
+    ));
+}
+
 #[test]
 fn sandbox_config_skips_missing_trusted_workspace_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -7524,6 +7640,85 @@ async fn secret_refs_stay_out_of_snapshots_and_persisted_tool_arguments() {
     assert!(tool_calls[0].arguments.contains("secret://"));
     assert!(!tool_calls[0].arguments.contains(secret_value));
     assert!(!snapshot.contains(secret_value));
+}
+
+#[tokio::test]
+async fn provider_visible_capture_fails_closed_when_secret_inventory_is_unavailable() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Safe response".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(chunks, Arc::clone(&storage)).await;
+    let secret_value = "must-not-reach-context-snapshot";
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Snapshot guard".into(),
+            material_kind: "provider_secret".into(),
+            owner_kind: "provider".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "global".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some(secret_value.into()),
+            external_reference: None,
+        })
+        .await
+        .expect("create managed secret");
+    storage.fail_secret_reads();
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        format!("Never persist {secret_value}"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("redaction degradation should not abort the model turn");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .expect("list threads")
+        .into_iter()
+        .next()
+        .expect("session should have a thread");
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("list turns")
+        .into_iter()
+        .next()
+        .expect("turn should exist");
+    let snapshot = state
+        .storage
+        .get_snapshot(turn.id)
+        .await
+        .expect("get snapshot")
+        .expect("safe degradation marker should be persisted");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&snapshot).expect("snapshot should remain valid JSON");
+
+    assert!(!snapshot.contains(secret_value));
+    assert_eq!(
+        parsed["provider_visible"]["capture_errors"][0]["kind"],
+        "secret_redaction_unavailable"
+    );
+    assert_eq!(
+        parsed["provider_visible"]["capture_errors"][0]["round"],
+        serde_json::json!(1)
+    );
 }
 
 /// When subscription is off, ContextAssembled is not delivered but
