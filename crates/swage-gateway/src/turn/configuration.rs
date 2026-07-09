@@ -118,8 +118,17 @@ pub(crate) fn load_session_config(
     bench_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let Ok(root) = swage_config::discovery::resolve_root() else {
-        return Ok(state.active_config());
+    let root = match swage_config::discovery::resolve_root() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(
+                error = %error.kind,
+                bench_slug,
+                agent_id,
+                "failed to resolve swage root; using active runtime configuration"
+            );
+            return Ok(state.active_config());
+        }
     };
 
     let bench_dir = root.join("benches").join(bench_slug);

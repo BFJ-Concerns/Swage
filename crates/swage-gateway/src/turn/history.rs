@@ -17,7 +17,7 @@ pub(super) async fn rebuild_thread_history_messages(
             && replay_inserted_for_turn.insert(turn_id)
         {
             let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
-            rebuilt.extend(compact_tool_replay_messages(&tool_calls));
+            rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
         }
 
         match message.role {
@@ -33,7 +33,9 @@ pub(super) async fn rebuild_thread_history_messages(
     Ok(rebuilt)
 }
 
-pub(super) fn compact_tool_replay_messages(records: &[ToolCallRecord]) -> Vec<ChatMessage> {
+pub(super) fn compact_tool_replay_messages(
+    records: &[ToolCallRecord],
+) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
     let parent_rounds: HashMap<&str, i32> = records
         .iter()
         .filter(|record| record.parent_call_id.is_none())
@@ -45,12 +47,19 @@ pub(super) fn compact_tool_replay_messages(records: &[ToolCallRecord]) -> Vec<Ch
         .iter()
         .filter(|record| record.model_result.is_some())
     {
-        let effective_round = record
-            .parent_call_id
-            .as_deref()
-            .and_then(|parent_call_id| parent_rounds.get(parent_call_id))
-            .copied()
-            .unwrap_or(record.provider_round);
+        let effective_round = match record.parent_call_id.as_deref() {
+            Some(parent_call_id) => {
+                parent_rounds.get(parent_call_id).copied().ok_or_else(|| {
+                    swage_core::StorageError::Corruption {
+                        message: format!(
+                            "tool call '{}' references missing parent call '{parent_call_id}'",
+                            record.call_id
+                        ),
+                    }
+                })?
+            }
+            None => record.provider_round,
+        };
         records_by_round
             .entry(effective_round)
             .or_default()
@@ -64,17 +73,20 @@ pub(super) fn compact_tool_replay_messages(records: &[ToolCallRecord]) -> Vec<Ch
         let mut tool_results = Vec::new();
 
         for record in round_records {
+            // Only completed calls enter `records_by_round`; retaining the
+            // guard here prevents a future caller from replaying raw results
+            // when the compact, model-safe representation is absent.
+            let Some(model_result) = record.model_result.clone() else {
+                continue;
+            };
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
-                arguments: parse_model_arguments(record),
+                arguments: parse_model_arguments(record)?,
             });
             tool_results.push(ToolResult {
                 call_id: record.call_id.clone(),
-                content: record
-                    .model_result
-                    .clone()
-                    .unwrap_or_else(|| record.result.clone().unwrap_or_default()),
+                content: model_result,
                 is_error: record.status.as_deref() != Some("success"),
             });
         }
@@ -84,12 +96,33 @@ pub(super) fn compact_tool_replay_messages(records: &[ToolCallRecord]) -> Vec<Ch
         }
     }
 
-    replay_messages
+    Ok(replay_messages)
 }
 
-pub(super) fn parse_model_arguments(record: &ToolCallRecord) -> serde_json::Value {
-    serde_json::from_str(&record.model_arguments).unwrap_or_else(|_| {
-        serde_json::from_str(&record.arguments)
-            .unwrap_or_else(|_| serde_json::Value::String(record.arguments.clone()))
-    })
+pub(super) fn parse_model_arguments(
+    record: &ToolCallRecord,
+) -> Result<serde_json::Value, swage_core::StorageError> {
+    match serde_json::from_str(&record.model_arguments) {
+        Ok(arguments) => Ok(arguments),
+        Err(model_error) => match serde_json::from_str(&record.arguments) {
+            Ok(arguments) => {
+                // Older rows may predate compact model arguments. The raw
+                // arguments are still provider-valid JSON, so using them is
+                // an explicit degraded replay rather than invented context.
+                tracing::warn!(
+                    turn_id = %record.turn_id,
+                    call_id = %record.call_id,
+                    error = %model_error,
+                    "compact tool arguments are invalid; replaying validated raw arguments"
+                );
+                Ok(arguments)
+            }
+            Err(raw_error) => Err(swage_core::StorageError::Corruption {
+                message: format!(
+                    "tool call '{}' has invalid compact arguments ({model_error}) and raw arguments ({raw_error})",
+                    record.call_id
+                ),
+            }),
+        },
+    }
 }

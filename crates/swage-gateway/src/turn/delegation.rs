@@ -185,22 +185,26 @@ impl DelegationHandler for GatewayDelegationHandler {
 }
 
 impl GatewayDelegationHandler {
-    async fn active_workspace_attachment_for_turn(
+    pub(super) async fn active_workspace_attachment_for_turn(
         &self,
         turn_id: Uuid,
     ) -> Result<Option<Uuid>, AgentError> {
-        let Some(turn) = self.state.storage.get_turn(turn_id).await? else {
-            return Ok(None);
-        };
-        let Some(thread) =
+        let turn = self.state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+            swage_core::StorageError::NotFound {
+                entity: "turn".into(),
+                id: turn_id.to_string(),
+            }
+        })?;
+        let thread =
             swage_storage::store::ThreadStore::get(self.state.storage.as_ref(), turn.thread_id)
                 .await?
-        else {
-            return Ok(None);
-        };
-        let Some(session) = self.state.storage.get_session(thread.session_id).await? else {
-            return Ok(None);
-        };
+                .ok_or(AgentError::ThreadNotFound(turn.thread_id))?;
+        let session = self
+            .state
+            .storage
+            .get_session(thread.session_id)
+            .await?
+            .ok_or(AgentError::SessionNotFound(thread.session_id))?;
         Ok(session.active_workspace_attachment_id)
     }
 }
