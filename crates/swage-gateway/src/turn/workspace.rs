@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
+    ToolRequireApprovalEntry, Uuid,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
