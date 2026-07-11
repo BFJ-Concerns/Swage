@@ -1,5 +1,4 @@
-/// Well-known error codes for the `Error` event.
-
+//! Well-known error codes for the `Error` event.
 pub const PROVIDER_ERROR: &str = "provider_error";
 pub const TURN_IN_PROGRESS: &str = "turn_in_progress";
 pub const INVALID_CONFIG: &str = "invalid_config";

@@ -61,7 +61,9 @@ pub(crate) use configuration::*;
 pub(crate) use context::*;
 pub(crate) use delegation::*;
 pub(crate) use dispatcher::*;
-use history::*;
+#[cfg(test)]
+use history::compact_tool_replay_messages;
+use history::rebuild_thread_history_messages;
 pub(crate) use workspace::*;
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
