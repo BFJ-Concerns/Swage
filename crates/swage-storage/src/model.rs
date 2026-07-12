@@ -2077,6 +2077,99 @@ pub struct AppendMessage {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Workflow scripts and runs
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowScriptRecord {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub delivery_grant: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowScript {
+    pub space_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub delivery_grant: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowScriptVersion {
+    pub id: Uuid,
+    pub script_id: Uuid,
+    pub version: u32,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowRunRecord {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub script_version_id: Option<Uuid>,
+    pub source: Option<String>,
+    pub source_hash: String,
+    pub session_id: Option<Uuid>,
+    pub args: serde_json::Value,
+    pub budget: serde_json::Value,
+    pub state: String,
+    pub final_output: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub engine_version: String,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRun {
+    pub space_id: Uuid,
+    pub script_version_id: Option<Uuid>,
+    pub source: Option<String>,
+    pub source_hash: String,
+    pub args: serde_json::Value,
+    pub budget: serde_json::Value,
+    pub engine_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowJournalRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub seq: u64,
+    pub completed_order: Option<u64>,
+    pub kind: String,
+    pub status: String,
+    pub args_hash: String,
+    pub request: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub effect_kind: Option<String>,
+    pub idempotency_key: Option<Uuid>,
+    pub target_kind: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowJournalIntent {
+    pub run_id: Uuid,
+    pub seq: u64,
+    pub kind: String,
+    pub args_hash: String,
+    pub request: serde_json::Value,
+    pub effect_kind: Option<String>,
+    pub idempotency_key: Option<Uuid>,
+    pub target_kind: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

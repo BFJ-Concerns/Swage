@@ -24,6 +24,7 @@ pub mod thread;
 pub mod tool_call;
 pub mod topology;
 pub mod turn;
+pub mod workflow;
 pub mod workspace_attachment;
 
 use std::path::Path;
