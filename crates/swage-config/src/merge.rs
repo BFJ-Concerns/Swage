@@ -6,8 +6,8 @@ use crate::model::{
     HitlConfig, LogLevel, LoggingConfig, ModelCapabilitiesConfig, ModelCatalogConfig,
     ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
     ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
-    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
-    TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SchedulingConfig, SearchProviderConfig,
+    ServerConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -225,6 +225,13 @@ pub struct PartialCommunicationConfig {
     pub expiry_interval_secs: Option<u64>,
 }
 
+/// Partial mirror of `SchedulingConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialSchedulingConfig {
+    pub run_history_max_age_days: Option<u64>,
+    pub run_history_max_per_schedule: Option<u32>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -243,6 +250,7 @@ pub struct PartialConfig {
     pub output: Option<PartialOutputConfig>,
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
+    pub scheduling: Option<PartialSchedulingConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
     /// Top-level bypass for the permission and approval system.
@@ -391,6 +399,10 @@ impl From<ResolvedConfig> for PartialConfig {
                 }),
                 message_ttl_secs: Some(r.communication.message_ttl_secs),
                 expiry_interval_secs: Some(r.communication.expiry_interval_secs),
+            }),
+            scheduling: Some(PartialSchedulingConfig {
+                run_history_max_age_days: Some(r.scheduling.run_history_max_age_days),
+                run_history_max_per_schedule: Some(r.scheduling.run_history_max_per_schedule),
             }),
             generation: Some(PartialGenerationConfig {
                 presets: if r.generation.presets.is_empty() {
@@ -626,6 +638,14 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 context_transfer: ct,
                 message_ttl_secs: o.message_ttl_secs.or(b.message_ttl_secs),
                 expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
+            }
+        }),
+        scheduling: merge_section(base.scheduling, overlay.scheduling, |b, o| {
+            PartialSchedulingConfig {
+                run_history_max_age_days: o.run_history_max_age_days.or(b.run_history_max_age_days),
+                run_history_max_per_schedule: o
+                    .run_history_max_per_schedule
+                    .or(b.run_history_max_per_schedule),
             }
         }),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
@@ -895,6 +915,18 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     summary_budget: resolved_budget,
                     targets,
                 },
+            }
+        },
+        scheduling: {
+            let ds = SchedulingConfig::default();
+            let s = partial.scheduling.unwrap_or_default();
+            SchedulingConfig {
+                run_history_max_age_days: s
+                    .run_history_max_age_days
+                    .unwrap_or(ds.run_history_max_age_days),
+                run_history_max_per_schedule: s
+                    .run_history_max_per_schedule
+                    .unwrap_or(ds.run_history_max_per_schedule),
             }
         },
         // Instructions are assembled separately by the instructions module
@@ -1858,5 +1890,28 @@ mod tests {
             "overlay-model",
             "overlay should win"
         );
+    }
+
+    #[test]
+    fn scheduling_retention_fields_merge_overlay_wins() {
+        let global = PartialConfig {
+            scheduling: Some(PartialSchedulingConfig {
+                run_history_max_age_days: Some(30),
+                run_history_max_per_schedule: Some(250),
+            }),
+            ..Default::default()
+        };
+        let agent = PartialConfig {
+            scheduling: Some(PartialSchedulingConfig {
+                run_history_max_age_days: None,
+                run_history_max_per_schedule: Some(50),
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve(merge_chain(vec![global, agent]));
+
+        assert_eq!(resolved.scheduling.run_history_max_age_days, 30);
+        assert_eq!(resolved.scheduling.run_history_max_per_schedule, 50);
     }
 }

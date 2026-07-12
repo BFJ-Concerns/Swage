@@ -1441,6 +1441,7 @@ impl Agent {
                 target_agent_id,
                 task,
                 context,
+                completion_mode,
             }) => {
                 let handler = match &self.delegation_handler {
                     Some(h) => h.clone(),
@@ -1504,6 +1505,7 @@ impl Agent {
                         execution.turn_id,
                         bench_id,
                         cancel_token.clone(),
+                        completion_mode,
                     )
                     .await;
 
@@ -1516,12 +1518,20 @@ impl Agent {
                     .await;
 
                 match delegation_result {
-                    Ok(result) => {
+                    Ok(crate::delegation::DelegationOutcome::Completed(result)) => {
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
                             target_agent_id: target_agent_id.clone(),
                             success: true,
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
+                        Ok((result_str, false, "success".to_string()))
+                    }
+                    Ok(crate::delegation::DelegationOutcome::Detached(detached)) => {
+                        // The delegate has started, not completed. The actual
+                        // child completion is represented by the durable Result
+                        // message correlated to delegate_message_id.
+                        let result_str =
+                            serde_json::to_string(&detached.tool_output()).unwrap_or_default();
                         Ok((result_str, false, "success".to_string()))
                     }
                     Err(e) => {

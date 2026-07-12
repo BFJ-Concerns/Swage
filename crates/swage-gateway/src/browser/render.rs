@@ -23,6 +23,21 @@ pub struct RenderedSnapshot {
     pub refs: RefTable,
 }
 
+#[derive(Debug, Clone)]
+struct RenderLine {
+    text: String,
+    depth: usize,
+    meta: Option<RenderLineMeta>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderLineMeta {
+    subtree_end: usize,
+    subtree_nodes: usize,
+    subtree_weight: usize,
+    has_interactive: bool,
+}
+
 pub fn render_snapshot(
     nodes: &[AxNode],
     url: &str,
@@ -31,12 +46,7 @@ pub fn render_snapshot(
     max_bytes: usize,
     masked_backend_nodes: &HashSet<BackendNodeId>,
 ) -> RenderedSnapshot {
-    let header = vec![
-        format!("url: {url}"),
-        format!("title: {title}"),
-        format!("snapshot: {snapshot_seq}"),
-        String::new(),
-    ];
+    let header = snapshot_header(url, title, snapshot_seq);
     let mut renderer = Renderer::new(header.clone(), masked_backend_nodes);
     let roots = root_nodes(nodes);
     for node in &roots {
@@ -48,8 +58,8 @@ pub fn render_snapshot(
             renderer.render_node(nodes, node, 0);
         }
     }
-    let full_output = renderer.lines.join("\n");
-    let output = truncate_snapshot(&full_output, max_bytes);
+    let full_output = join_render_lines(&renderer.lines);
+    let output = truncate_snapshot(&renderer.lines, max_bytes);
     let full_spill = (output.len() < full_output.len()).then_some(full_output);
     RenderedSnapshot {
         output,
@@ -62,11 +72,11 @@ struct Renderer {
     refs: RefTable,
     next_ref: usize,
     masked_backend_nodes: HashSet<BackendNodeId>,
-    lines: Vec<String>,
+    lines: Vec<RenderLine>,
 }
 
 impl Renderer {
-    fn new(lines: Vec<String>, masked_backend_nodes: &HashSet<BackendNodeId>) -> Self {
+    fn new(lines: Vec<RenderLine>, masked_backend_nodes: &HashSet<BackendNodeId>) -> Self {
         Self {
             refs: HashMap::new(),
             next_ref: 1,
@@ -122,9 +132,8 @@ impl Renderer {
             line.push(' ');
             line.push_str(&state_text);
         }
-        if is_actionable(node, &role)
-            && let Some(backend_node_id) = node.backend_dom_node_id
-        {
+        let actionable = is_actionable(node, &role);
+        if actionable && let Some(backend_node_id) = node.backend_dom_node_id {
             let reference = format!("e{}", self.next_ref);
             self.next_ref += 1;
             line.push_str(&format!(" ref={reference}"));
@@ -139,19 +148,64 @@ impl Renderer {
                 },
             );
         }
-        self.lines.push(line);
+        let line_index = self.lines.len();
+        self.lines.push(RenderLine {
+            text: line,
+            depth,
+            meta: None,
+        });
         if masked {
+            self.finish_render_line(line_index, actionable);
             return;
         }
         for child in child_nodes(nodes, node) {
             self.render_node(nodes, child, depth + 1);
         }
+        self.finish_render_line(line_index, actionable);
     }
 
     fn is_masked(&self, node: &AxNode) -> bool {
         node.backend_dom_node_id
             .is_some_and(|id| self.masked_backend_nodes.contains(&id))
     }
+
+    fn finish_render_line(&mut self, line_index: usize, is_interactive: bool) {
+        let subtree_end = self.lines.len();
+        let mut subtree_nodes = 1;
+        let mut subtree_weight = self.lines[line_index].text.len();
+        let mut has_interactive = is_interactive;
+        for child in &self.lines[line_index + 1..subtree_end] {
+            if child.meta.is_some() {
+                subtree_nodes += 1;
+                subtree_weight += child.text.len();
+            }
+            if child.meta.as_ref().is_some_and(|meta| meta.has_interactive) {
+                has_interactive = true;
+            }
+        }
+        self.lines[line_index].meta = Some(RenderLineMeta {
+            subtree_end,
+            subtree_nodes,
+            subtree_weight,
+            has_interactive,
+        });
+    }
+}
+
+fn snapshot_header(url: &str, title: &str, snapshot_seq: u64) -> Vec<RenderLine> {
+    [
+        format!("url: {url}"),
+        format!("title: {title}"),
+        format!("snapshot: {snapshot_seq}"),
+        String::new(),
+    ]
+    .into_iter()
+    .map(|text| RenderLine {
+        text,
+        depth: 0,
+        meta: None,
+    })
+    .collect()
 }
 
 fn root_nodes(nodes: &[AxNode]) -> Vec<&AxNode> {
@@ -283,10 +337,114 @@ fn escape_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn truncate_snapshot(full: &str, max_bytes: usize) -> String {
+fn join_render_lines(lines: &[RenderLine]) -> String {
+    lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_snapshot(lines: &[RenderLine], max_bytes: usize) -> String {
+    let full = join_render_lines(lines);
     if full.len() <= max_bytes {
-        return full.to_string();
+        return full;
     }
+    let mut rendered = lines
+        .iter()
+        .map(|line| TruncLine {
+            text: line.text.clone(),
+            depth: line.depth,
+            meta: line.meta.clone(),
+            removed: false,
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let meta = line.meta.as_ref()?;
+            (meta.subtree_nodes > 1).then_some(ElisionCandidate {
+                index,
+                depth: line.depth,
+                subtree_weight: meta.subtree_weight,
+                has_interactive: meta.has_interactive,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Prefer large leaf-ish prose subtrees. Interactive subtrees are a fallback
+    // only for pathological pages where text-only elision cannot reach budget.
+    candidates.sort_by(|left, right| {
+        left.has_interactive
+            .cmp(&right.has_interactive)
+            .then_with(|| right.depth.cmp(&left.depth))
+            .then_with(|| right.subtree_weight.cmp(&left.subtree_weight))
+    });
+
+    for candidate in candidates {
+        if current_render_len(&rendered) <= max_bytes {
+            break;
+        }
+        if rendered[candidate.index].removed {
+            continue;
+        }
+        let Some(meta) = rendered[candidate.index].meta.clone() else {
+            continue;
+        };
+        if rendered[candidate.index + 1..meta.subtree_end]
+            .iter()
+            .any(|line| line.removed)
+        {
+            continue;
+        }
+        for line in &mut rendered[candidate.index + 1..meta.subtree_end] {
+            line.removed = true;
+        }
+        rendered[candidate.index].text = format!(
+            "{}... ({} nodes elided - full snapshot saved)",
+            "  ".repeat(rendered[candidate.index].depth),
+            meta.subtree_nodes.saturating_sub(1)
+        );
+    }
+
+    let output = join_truncated_lines(&rendered);
+    if output.len() <= max_bytes {
+        return output;
+    }
+    tail_truncate(&output, max_bytes)
+}
+
+#[derive(Debug, Clone)]
+struct TruncLine {
+    text: String,
+    depth: usize,
+    meta: Option<RenderLineMeta>,
+    removed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ElisionCandidate {
+    index: usize,
+    depth: usize,
+    subtree_weight: usize,
+    has_interactive: bool,
+}
+
+fn current_render_len(lines: &[TruncLine]) -> usize {
+    join_truncated_lines(lines).len()
+}
+
+fn join_truncated_lines(lines: &[TruncLine]) -> String {
+    lines
+        .iter()
+        .filter(|line| !line.removed)
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tail_truncate(full: &str, max_bytes: usize) -> String {
     let marker = "\n... (snapshot truncated - full snapshot saved)";
     let budget = max_bytes.saturating_sub(marker.len());
     let mut end = budget.min(full.len());
@@ -308,10 +466,10 @@ mod tests {
     #[test]
     fn renders_refs_for_actionable_nodes_only() {
         let nodes = vec![
-            node("1", None, "RootWebArea", "Example", None),
-            node("2", Some("1"), "heading", "Sign in", None),
-            node("3", Some("1"), "textbox", "Username", Some(10)),
-            node("4", Some("1"), "button", "Submit", Some(11)),
+            node("1", None, "RootWebArea", "Example", None, &["2", "3", "4"]),
+            node("2", Some("1"), "heading", "Sign in", None, &[]),
+            node("3", Some("1"), "textbox", "Username", Some(10), &[]),
+            node("4", Some("1"), "button", "Submit", Some(11), &[]),
         ];
         let rendered = render_snapshot(
             &nodes,
@@ -326,12 +484,73 @@ mod tests {
         assert_eq!(rendered.refs.len(), 2);
     }
 
+    #[test]
+    fn over_budget_snapshot_preserves_late_interactive_refs() {
+        let mut nodes = vec![node(
+            "1",
+            None,
+            "RootWebArea",
+            "Example",
+            None,
+            &["2", "5", "6"],
+        )];
+        nodes.extend([
+            node("2", Some("1"), "section", "Long article", None, &["3"]),
+            node("3", Some("2"), "paragraph", "Intro", None, &["4"]),
+            node(
+                "4",
+                Some("3"),
+                "StaticText",
+                &"Long non-interactive copy. ".repeat(80),
+                None,
+                &[],
+            ),
+            node("5", Some("1"), "link", "Useful late link", Some(50), &[]),
+            node("6", Some("1"), "button", "Final action", Some(51), &[]),
+        ]);
+
+        let rendered = render_snapshot(
+            &nodes,
+            "http://fixture/",
+            "Fixture",
+            1,
+            360,
+            &HashSet::new(),
+        );
+
+        assert!(
+            rendered.output.contains("Useful late link"),
+            "late interactive link vanished from truncated snapshot:\n{}",
+            rendered.output
+        );
+        assert!(
+            rendered.output.contains("Final action"),
+            "late interactive button vanished from truncated snapshot:\n{}",
+            rendered.output
+        );
+        assert!(
+            rendered.output.contains("ref=e1") && rendered.output.contains("ref=e2"),
+            "interactive refs should remain visible after truncation:\n{}",
+            rendered.output
+        );
+        assert!(
+            rendered.output.contains("nodes elided"),
+            "over-budget snapshot should mark elided subtrees in place:\n{}",
+            rendered.output
+        );
+        assert!(
+            rendered.full_output.is_some(),
+            "full snapshot should still spill"
+        );
+    }
+
     fn node(
         id: &str,
         parent: Option<&str>,
         role: &str,
         name: &str,
         backend: Option<i64>,
+        children: &[&str],
     ) -> AxNode {
         let mut node = AxNode::new(id.to_string(), false);
         node.parent_id = parent.map(|id| id.to_string().into());
@@ -347,19 +566,9 @@ mod tests {
                 sources: None,
             },
         )]);
-        if let Some(parent_id) = parent {
-            // The generated type stores child ids on the parent. Tests keep the
-            // fixture tiny enough that patching the parent after construction is clearer.
-            let _ = parent_id;
+        if !children.is_empty() {
+            node.child_ids = Some(children.iter().map(|id| (*id).to_string().into()).collect());
         }
-        node.child_ids = match id {
-            "1" => Some(vec![
-                "2".to_string().into(),
-                "3".to_string().into(),
-                "4".to_string().into(),
-            ]),
-            _ => None,
-        };
         node
     }
 

@@ -34,6 +34,9 @@
   }
 
   function describeRunOutcome(run: ScheduleRun): string {
+    if (run.state === "completed_empty") {
+      return "No assistant text produced.";
+    }
     if (run.state === "skipped") {
       return run.skip_reason === "gate"
         ? (run.gate?.reasoning ?? "gate decided no work was needed")
@@ -41,6 +44,10 @@
     }
     if (run.state === "failed") return run.error_message ?? "failed";
     return run.output_text ?? "";
+  }
+
+  function describeRunState(run: ScheduleRun): string {
+    return run.state === "completed_empty" ? "completed empty" : run.state;
   }
 
   async function toggleScheduleRuns(scheduleId: string): Promise<void> {
@@ -305,12 +312,12 @@
                       <div class="run-entry">
                         <div class="primary-line">
                           <StatusBadge
-                            register={run.state === "completed"
+                            register={run.state === "completed" || run.state === "completed_empty"
                               ? "calm"
                               : run.state === "failed"
                                 ? "wants-a-human"
                                 : "not-yet"}
-                            label={run.state}
+                            label={describeRunState(run)}
                           />
                           <span class="mono">{run.trigger}</span>
                           {#if run.skip_reason}

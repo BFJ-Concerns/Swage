@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{
@@ -205,9 +206,163 @@ async fn served_fixture_get_full_ax_tree_is_rich() {
         "renderer did not produce actionable AX refs from rich tree:\n{}",
         rendered.output
     );
+    maybe_record_ax_fixture("login", &nodes, &rendered.output);
     browser.close().await.expect("close probe browser");
     handler.abort();
     let _ = child.kill().await;
+}
+
+#[test]
+fn recorded_ax_fixtures_render_to_goldens() {
+    let fixture_dir = ax_fixture_dir();
+    let mut fixtures = std::fs::read_dir(&fixture_dir)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to read AX fixture directory '{}': {error}",
+                fixture_dir.display()
+            )
+        })
+        .filter_map(|entry| {
+            let path = entry.expect("fixture entry").path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("json")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    fixtures.sort();
+    assert!(
+        !fixtures.is_empty(),
+        "expected at least one committed AX fixture in {}",
+        fixture_dir.display()
+    );
+
+    for fixture in fixtures {
+        let nodes = read_ax_nodes(&fixture);
+        let rendered = render_snapshot(
+            &nodes,
+            &format!(
+                "https://fixture.local/{}",
+                fixture.file_stem().and_then(|stem| stem.to_str()).unwrap()
+            ),
+            "Fixture Login",
+            1,
+            40_000,
+            &HashSet::new(),
+        );
+        let golden = fixture.with_extension("rendered");
+        let expected = std::fs::read_to_string(&golden).unwrap_or_else(|error| {
+            panic!("failed to read golden '{}': {error}", golden.display())
+        });
+        assert_eq!(
+            rendered.output.trim_end(),
+            expected.trim_end(),
+            "rendered AX fixture did not match golden for {}",
+            fixture.display()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_reports_dynamic_stale_refs() {
+    let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+    let Some(binary) = browser_binary_or_skip() else {
+        return;
+    };
+    let fixture = FixtureServer::spawn().await;
+    let temp = TempDir::new().expect("tempdir");
+    let host = BrowserHost::new(browser_config(&binary, temp.path(), fixture.host()));
+
+    let login = host
+        .navigate("stale-session", &fixture.url("/login"))
+        .await
+        .expect("navigate login");
+    let old_ref = login
+        .refs
+        .values()
+        .find(|entry| entry.name == "Password")
+        .expect("password ref")
+        .reference
+        .clone();
+    host.navigate("stale-session", &fixture.url("/single-action"))
+        .await
+        .expect("navigate single action");
+    let old_ref_error = host
+        .click("stale-session", &old_ref)
+        .await
+        .expect_err("old snapshot ref should be rejected");
+    assert!(
+        old_ref_error
+            .to_string()
+            .contains("the page has navigated since that snapshot"),
+        "unexpected old-ref error: {old_ref_error}"
+    );
+
+    let mutating = host
+        .navigate("stale-session", &fixture.url("/mutate"))
+        .await
+        .expect("navigate mutating page");
+    let doomed_ref = mutating
+        .refs
+        .values()
+        .find(|entry| entry.name == "Remove me")
+        .expect("doomed ref")
+        .reference
+        .clone();
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let gone_error = host
+        .click("stale-session", &doomed_ref)
+        .await
+        .expect_err("removed element should fail resolution");
+    assert!(
+        gone_error
+            .to_string()
+            .contains("that element is no longer on the page"),
+        "unexpected gone-element error: {gone_error}"
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_recovers_after_process_crash_with_lost_state_error() {
+    let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+    let Some(binary) = browser_binary_or_skip() else {
+        return;
+    };
+    let fixture = FixtureServer::spawn().await;
+    let temp = TempDir::new().expect("tempdir");
+    let host = BrowserHost::new(browser_config(&binary, temp.path(), fixture.host()));
+
+    host.navigate("crash-session", &fixture.url("/login"))
+        .await
+        .expect("navigate before crash");
+    let pid = host
+        .browser_pid_for_tests()
+        .await
+        .expect("browser process should be running");
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let crash_error = host
+        .navigate("crash-session", &fixture.url("/whoami"))
+        .await
+        .expect_err("first call after browser crash should report lost state");
+    assert!(
+        crash_error
+            .to_string()
+            .contains("the browser restarted and page state was lost"),
+        "unexpected crash recovery error: {crash_error}"
+    );
+
+    let recovered = host
+        .navigate("crash-session", &fixture.url("/login"))
+        .await
+        .expect("fresh navigate after crash should respawn browser");
+    assert!(
+        recovered.output.contains("heading \"Sign in\""),
+        "expected recovered browser to navigate freshly, got:\n{}",
+        recovered.output
+    );
+    host.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -744,6 +899,58 @@ fn find_artifact_under(root: &std::path::Path, relative: &str) -> Option<std::pa
     None
 }
 
+fn ax_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("browser")
+        .join("ax")
+}
+
+fn maybe_record_ax_fixture(
+    name: &str,
+    nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+    rendered: &str,
+) {
+    if std::env::var("SWAGE_RECORD_AX_FIXTURES").as_deref() != Ok("1") {
+        return;
+    }
+    let fixture_dir = ax_fixture_dir();
+    std::fs::create_dir_all(&fixture_dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to create AX fixture directory '{}': {error}",
+            fixture_dir.display()
+        )
+    });
+    let json_path = fixture_dir.join(format!("{name}.json"));
+    let rendered_path = fixture_dir.join(format!("{name}.rendered"));
+    let json = serde_json::to_string_pretty(nodes).expect("serialise AX fixture");
+    let stable_rendered = rendered.replacen(
+        rendered.lines().next().unwrap_or_default(),
+        &format!("url: https://fixture.local/{name}"),
+        1,
+    );
+    std::fs::write(&json_path, format!("{json}\n")).unwrap_or_else(|error| {
+        panic!(
+            "failed to write AX fixture '{}': {error}",
+            json_path.display()
+        )
+    });
+    std::fs::write(&rendered_path, format!("{stable_rendered}\n")).unwrap_or_else(|error| {
+        panic!(
+            "failed to write AX rendered golden '{}': {error}",
+            rendered_path.display()
+        )
+    });
+}
+
+fn read_ax_nodes(path: &Path) -> Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> {
+    let json = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read AX fixture '{}': {error}", path.display()));
+    serde_json::from_str(&json)
+        .unwrap_or_else(|error| panic!("failed to parse AX fixture '{}': {error}", path.display()))
+}
+
 fn reserve_probe_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .and_then(|listener| listener.local_addr())
@@ -818,6 +1025,8 @@ impl FixtureServer {
         let app = Router::new()
             .route("/login", get(login_page).post(login_post))
             .route("/fallback-mask", get(fallback_mask_page))
+            .route("/single-action", get(single_action_page))
+            .route("/mutate", get(mutate_page))
             .route("/set-cookie", get(set_cookie))
             .route("/signed-in", get(signed_in))
             .route("/whoami", get(whoami))
@@ -898,6 +1107,29 @@ async fn fallback_mask_page() -> Html<&'static str> {
             document.querySelector('#ax-region').setAttribute('aria-hidden', 'true');
             document.querySelector('#ax-region').style.display = 'none';
         });
+        </script>"#,
+    )
+}
+
+async fn single_action_page() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+        <title>Single Action</title>
+        <h1>One action</h1>
+        <button>Only current action</button>"#,
+    )
+}
+
+async fn mutate_page() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+        <title>Mutating Page</title>
+        <main aria-hidden="true">
+            <h1>Mutating page</h1>
+            <button id="doomed">Remove me</button>
+        </main>
+        <script>
+        setTimeout(() => document.querySelector('#doomed')?.remove(), 1500);
         </script>"#,
     )
 }

@@ -35,6 +35,7 @@ use crate::service::ConversationService;
 use crate::state::AppState;
 
 const SCHEDULE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const RUN_HISTORY_RETENTION_INTERVAL: Duration = Duration::hours(1);
 
 /// Cap on the gate model's reply — a verdict and a sentence or two of
 /// reasoning, not an essay.
@@ -487,6 +488,23 @@ pub async fn tick_once(state: &AppState, now: DateTime<Utc>) -> Result<usize, Ga
     Ok(executed)
 }
 
+async fn prune_schedule_run_history(
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> Result<u64, GatewayError> {
+    let retention = state.active_config().scheduling;
+    let max_age = std::time::Duration::from_secs(
+        retention
+            .run_history_max_age_days
+            .saturating_mul(24 * 60 * 60),
+    );
+    state
+        .storage
+        .prune_schedule_runs(now, max_age, retention.run_history_max_per_schedule)
+        .await
+        .map_err(Into::into)
+}
+
 pub fn spawn_schedule_loop(state: AppState) -> JoinHandle<()> {
     spawn_schedule_loop_until_cancelled(state, CancellationToken::new())
 }
@@ -495,14 +513,39 @@ pub fn spawn_schedule_loop_until_cancelled(
     state: AppState,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
+    let last_retention_sweep = std::sync::Arc::new(std::sync::Mutex::new(None::<DateTime<Utc>>));
     crate::background_loop::spawn_periodic_loop(
         SCHEDULE_POLL_INTERVAL,
         shutdown,
         "schedule tick failed",
         move || {
             let state = state.clone();
+            let last_retention_sweep = last_retention_sweep.clone();
             async move {
-                tick_once(&state, Utc::now()).await?;
+                let now = Utc::now();
+                tick_once(&state, now).await?;
+
+                // The scheduler tick is deliberately frequent; retention is
+                // not. Reuse the existing loop without turning every clock
+                // check into a history-table DELETE.
+                let should_prune = {
+                    let mut last = last_retention_sweep
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let due = last
+                        .map(|previous| now - previous >= RUN_HISTORY_RETENTION_INTERVAL)
+                        .unwrap_or(true);
+                    if due {
+                        *last = Some(now);
+                    }
+                    due
+                };
+                if should_prune {
+                    let removed = prune_schedule_run_history(&state, now).await?;
+                    if removed > 0 {
+                        tracing::info!(removed, "pruned schedule run history");
+                    }
+                }
                 Ok(())
             }
         },
@@ -759,12 +802,17 @@ async fn complete_run(
     run_id: Uuid,
     output: String,
 ) -> Result<ScheduleRun, GatewayError> {
+    let state_value = if output.trim().is_empty() {
+        ScheduleRunState::CompletedEmpty
+    } else {
+        ScheduleRunState::Completed
+    };
     state
         .storage
         .update_schedule_run(
             run_id,
             ScheduleRunUpdate {
-                state: Some(ScheduleRunState::Completed),
+                state: Some(state_value),
                 output_text: Some(output),
                 ..Default::default()
             },
@@ -892,6 +940,9 @@ async fn previous_run_outcome(
     let runs = state.storage.list_schedule_runs(schedule_id).await?;
     Ok(runs.into_iter().rev().find_map(|run| match run.state {
         ScheduleRunState::Completed => run.output_text,
+        ScheduleRunState::CompletedEmpty => {
+            Some("The previous run completed without assistant output.".into())
+        }
         ScheduleRunState::Failed => Some(format!(
             "The previous run failed: {}",
             run.error_message.unwrap_or_else(|| "unknown error".into())

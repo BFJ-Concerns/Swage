@@ -144,7 +144,7 @@
     actionId = schedule.id;
     try {
       const response = await triggerSchedule(schedule.id);
-      notice = `Ran "${schedule.message}" — ${response.run.state}.`;
+      notice = `Ran "${schedule.message}" — ${describeRunState(response.run)}.`;
       await loadSchedules();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to run the schedule.";
@@ -185,6 +185,15 @@
 
   function formatTime(value: string | null): string {
     return value ? new Date(value).toLocaleString() : "—";
+  }
+
+  function describeRunState(run: ScheduleRun): string {
+    return run.state === "completed_empty" ? "completed empty" : run.state;
+  }
+
+  function describeRunOutcome(run: ScheduleRun): string {
+    if (run.state === "completed_empty") return "No assistant text produced.";
+    return "";
   }
 
   // Newest run first.
@@ -334,11 +343,12 @@
           {#each runHistory(schedule.id) as run (run.id)}
             <div class="run-row">
               <div class="run-head">
-                <span class="status status-run-{run.state}">{run.state}</span>
+                <span class="status status-run-{run.state}">{describeRunState(run)}</span>
                 <span>{run.trigger}</span>
                 {#if run.skip_reason}<span>skipped: {run.skip_reason}</span>{/if}
                 {#if run.gate}<span>gate {run.gate.verdict}</span>{/if}
               </div>
+              {#if describeRunOutcome(run)}<p class="run-detail">{describeRunOutcome(run)}</p>{/if}
               {#if run.output_text}<p class="run-detail">{run.output_text}</p>{/if}
               {#if run.error_message}<p class="run-detail error">{run.error_message}</p>{/if}
               <span class="run-time">{formatTime(run.created_at)}</span>
@@ -484,7 +494,8 @@
   }
 
   .status-active,
-  .status-run-completed {
+  .status-run-completed,
+  .status-run-completed_empty {
     color: #166534;
   }
 
