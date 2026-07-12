@@ -209,6 +209,18 @@ fn continuation(session_id: Uuid) -> SessionPolicy {
     SessionPolicy::Continuation { session_id }
 }
 
+/// Drive one tick to quiescence: `tick_once` now spawns each due run rather
+/// than awaiting it, so a test that reads run rows must first await the
+/// spawned handles. Returns how many runs the tick spawned.
+async fn tick_to_completion(state: &AppState, now: chrono::DateTime<Utc>) -> usize {
+    let handles = schedule::tick_once(state, now).await.unwrap();
+    let spawned = handles.len();
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    spawned
+}
+
 fn create_request(
     message: &str,
     spec: ScheduleSpec,
@@ -400,7 +412,7 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
         let due_at = created
             .next_run_at
             .expect("every kind computes a first occurrence");
-        let executed = schedule::tick_once(&state, due_at).await.unwrap();
+        let executed = tick_to_completion(&state, due_at).await;
         assert_eq!(executed, 1, "{kind} should fire when its occurrence is due");
 
         let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
@@ -426,6 +438,177 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
             assert!(next > due_at, "{kind} next occurrence should move forward");
         }
     }
+}
+
+/// Provider that stalls any turn whose input contains a marker until the
+/// test releases a gate, and streams a fixed reply for every other turn. It
+/// proves the tick executes runs concurrently: a stalled run cannot hold up
+/// a sibling due at the same instant.
+struct HeadOfLineProvider {
+    gate: Arc<tokio::sync::Semaphore>,
+    stall_marker: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for HeadOfLineProvider {
+    fn model_id(&self) -> &str {
+        "head-of-line-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("head-of-line test declares no gate")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("head-of-line test does not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let stalls = request
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains(self.stall_marker));
+        if !stalls {
+            return Box::pin(futures::stream::iter(MockProvider::text_round("fast done")));
+        }
+        // Wait on the gate before producing any output, so this run stays
+        // in flight until the test releases a permit.
+        let gate = Arc::clone(&self.gate);
+        Box::pin(
+            futures::stream::once(async move {
+                let _permit = gate.acquire().await.expect("gate open");
+                futures::stream::iter(MockProvider::text_round("slow done"))
+            })
+            .flatten(),
+        )
+    }
+}
+
+/// Poll a schedule's newest run until it reaches a terminal state, or panic
+/// on timeout. Used to observe one run finishing while another is stalled.
+async fn await_terminal_run(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> swage_storage::ScheduleRun {
+    let deadline = std::time::Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(run) = state
+            .storage
+            .list_schedule_runs(schedule_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next_back()
+        {
+            let terminal = matches!(
+                run.state,
+                ScheduleRunState::Completed
+                    | ScheduleRunState::CompletedEmpty
+                    | ScheduleRunState::Failed
+                    | ScheduleRunState::Skipped
+            );
+            if terminal {
+                return run;
+            }
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "run for schedule {schedule_id} never reached a terminal state"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_due_schedules_do_not_head_of_line_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let due_at = Utc::now() - Duration::seconds(5);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let state = test_state(
+        &dir.path().join("head-of-line.db"),
+        HeadOfLineProvider {
+            gate: Arc::clone(&gate),
+            stall_marker: "STALL",
+        },
+    );
+    let router = build_router(state.clone());
+    let slow_session = create_conversation(&router).await;
+    let fast_session = create_conversation(&router).await;
+
+    // Two one-shot schedules due at the same instant: the slow one's turn
+    // blocks on the gate, the fast one streams straight through.
+    let slow = schedule::create_schedule(
+        &state,
+        create_request(
+            "STALL until released",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(slow_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let fast = schedule::create_schedule(
+        &state,
+        create_request(
+            "run promptly",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(fast_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+
+    // tick_once returns as soon as both runs are spawned; it does not wait
+    // for them. A serial tick would block here inside the slow run.
+    let handles = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(handles.len(), 2);
+
+    // The fast schedule completes while the slow one is still gated — the
+    // proof that the slow run did not hold up the tick.
+    let fast_run = await_terminal_run(&state, fast.id).await;
+    assert_eq!(fast_run.state, ScheduleRunState::Completed);
+    assert_eq!(fast_run.output_text.as_deref(), Some("fast done"));
+
+    let slow_run = state
+        .storage
+        .list_schedule_runs(slow.id)
+        .await
+        .unwrap()
+        .pop()
+        .expect("slow run row exists");
+    assert!(
+        matches!(
+            slow_run.state,
+            ScheduleRunState::Pending | ScheduleRunState::Running
+        ),
+        "slow run should still be in flight while the fast run has finished, was {:?}",
+        slow_run.state
+    );
+
+    // Release the slow run and let both spawned tasks finish cleanly.
+    gate.add_permits(1);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    let slow_run = await_terminal_run(&state, slow.id).await;
+    assert_eq!(slow_run.state, ScheduleRunState::Completed);
+    assert_eq!(slow_run.output_text.as_deref(), Some("slow done"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -472,25 +655,32 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
     .await
     .unwrap();
 
-    let executed = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    let executed = tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         executed, 2,
         "one failing due schedule must not abort the rest of the tick"
     );
 
+    // Runs are spawned concurrently, so which of the two schedules pops the
+    // failing provider round is a race — the guarantee under test is
+    // isolation, not order: exactly one run fails and the other completes,
+    // each with a single Tick-triggered run.
     let first_runs = state.storage.list_schedule_runs(first.id).await.unwrap();
-    assert_eq!(first_runs.len(), 1);
-    assert_eq!(first_runs[0].trigger, ScheduleRunTrigger::Tick);
-    assert_eq!(first_runs[0].state, ScheduleRunState::Failed);
-    assert!(first_runs[0].error_message.is_some());
-    assert!(first_runs[0].completed_at.is_some());
-
     let second_runs = state.storage.list_schedule_runs(second.id).await.unwrap();
+    assert_eq!(first_runs.len(), 1);
     assert_eq!(second_runs.len(), 1);
-    assert_eq!(second_runs[0].trigger, ScheduleRunTrigger::Tick);
-    assert_eq!(second_runs[0].state, ScheduleRunState::Completed);
+    let (failed, completed) = match first_runs[0].state {
+        ScheduleRunState::Failed => (&first_runs[0], &second_runs[0]),
+        _ => (&second_runs[0], &first_runs[0]),
+    };
+    assert_eq!(failed.trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(failed.state, ScheduleRunState::Failed);
+    assert!(failed.error_message.is_some());
+    assert!(failed.completed_at.is_some());
+    assert_eq!(completed.trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(completed.state, ScheduleRunState::Completed);
     assert_eq!(
-        second_runs[0].output_text.as_deref(),
+        completed.output_text.as_deref(),
         Some("later schedule still ran")
     );
 
@@ -1017,9 +1207,8 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
     .await
     .unwrap();
 
-    schedule::tick_once(&state, created.next_run_at.unwrap())
-        .await
-        .unwrap();
+    tick_to_completion(&state, created.next_run_at.unwrap())
+        .await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
@@ -1067,9 +1256,8 @@ async fn empty_successful_run_records_a_distinct_state() {
     .await
     .unwrap();
 
-    schedule::tick_once(&state, created.next_run_at.unwrap())
-        .await
-        .unwrap();
+    tick_to_completion(&state, created.next_run_at.unwrap())
+        .await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
@@ -1268,7 +1456,7 @@ async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
     .unwrap();
 
     // Fire it.
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     let after_fire = state
         .storage
         .get_schedule(created.id)
@@ -1303,7 +1491,7 @@ async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
     .await
     .unwrap();
 
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         state
             .storage
@@ -1339,7 +1527,7 @@ async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
     .await
     .unwrap();
 
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         state
             .storage
@@ -1372,7 +1560,7 @@ async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
     );
 
     // The re-armed moment fires once more, then the schedule is spent again.
-    schedule::tick_once(&state, rearm_at).await.unwrap();
+    tick_to_completion(&state, rearm_at).await;
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 2, "re-armed one-shot fires exactly once more");
     assert!(
@@ -1686,7 +1874,7 @@ async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
         .expect("the manual turn should start before the tick fires");
 
     // The tick finds the schedule due, tries to run it, and trips the guard.
-    let executed = schedule::tick_once(&state, due_at).await.unwrap();
+    let executed = tick_to_completion(&state, due_at).await;
     assert_eq!(executed, 1);
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
