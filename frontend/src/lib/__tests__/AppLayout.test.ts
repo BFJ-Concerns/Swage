@@ -371,10 +371,10 @@ describe("AppLayout: space shell", () => {
 
   it("renders the builder deck on the stage when the builder lens is active", async () => {
     component = mountBuilderLayout();
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
-      "Author the workspace, then let the agent live in it.",
+      "Author the space, then let the agent live in it.",
     );
     // Stage-surface lenses take the wide pane; conversation becomes the rail.
     expect(document.querySelector(".stage-pane")).not.toBeNull();
@@ -383,7 +383,7 @@ describe("AppLayout: space shell", () => {
 
   it("gives the stage the primary pane when a stage surface is active", async () => {
     component = mountBuilderLayout();
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     const body = document.querySelector(".body.stage-dominant");
     expect(body).not.toBeNull();
@@ -393,7 +393,7 @@ describe("AppLayout: space shell", () => {
 
   it("selects and persists the builder mode from the lens menu", async () => {
     component = mountBuilderLayout();
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     (document.querySelector(".lens-caret") as HTMLButtonElement).click();
     await flushUi();
