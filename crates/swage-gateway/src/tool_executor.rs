@@ -22,12 +22,19 @@ use swage_tool::tool::Tool;
 
 use crate::device::RegisteredDevice;
 use crate::secret::SecretManager;
+use crate::state::AppState;
 use crate::websocket::ServerEvent;
 
 pub struct GatewayToolContext {
     base: SerializableToolContext,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     storage: Arc<dyn Storage>,
+    /// The full gateway state, present when the tool runs inside a live host
+    /// turn. Absent on the lighter construction paths (some tests build a
+    /// context from storage alone). Tools whose work reaches beyond storage —
+    /// the schedule tools, which drive the gateway's schedule service — read
+    /// it and fail cleanly when it is missing.
+    app_state: Option<AppState>,
 }
 
 impl GatewayToolContext {
@@ -40,7 +47,15 @@ impl GatewayToolContext {
             base: SerializableToolContext::from_context(ctx),
             ws_tx,
             storage,
+            app_state: None,
         }
+    }
+
+    /// Attach the live gateway state to a context. Used on the host turn path
+    /// so host-side tools can reach services beyond storage.
+    pub fn with_app_state(mut self, app_state: Option<AppState>) -> Self {
+        self.app_state = app_state;
+        self
     }
 
     pub fn ws_tx(&self) -> &mpsc::UnboundedSender<ServerEvent> {
@@ -49,6 +64,11 @@ impl GatewayToolContext {
 
     pub fn storage(&self) -> &Arc<dyn Storage> {
         &self.storage
+    }
+
+    /// The live gateway state, when this context was built inside a host turn.
+    pub fn app_state(&self) -> Option<&AppState> {
+        self.app_state.as_ref()
     }
 }
 
@@ -154,6 +174,10 @@ pub struct GatewayExecutionStrategy {
     secret_manager: Arc<SecretManager>,
     /// Durable storage surfaced to authorised host-side tools.
     storage: Arc<dyn Storage>,
+    /// The live gateway state, surfaced to host-side tools that reach beyond
+    /// storage. Present on the real turn path; `None` where a strategy is
+    /// built without a full state (tests exercising the strategy directly).
+    app_state: Option<AppState>,
 }
 
 impl GatewayExecutionStrategy {
@@ -163,6 +187,7 @@ impl GatewayExecutionStrategy {
         device: Option<RegisteredDevice>,
         secret_manager: Arc<SecretManager>,
         storage: Arc<dyn Storage>,
+        app_state: Option<AppState>,
     ) -> Self {
         Self {
             inner,
@@ -170,6 +195,7 @@ impl GatewayExecutionStrategy {
             device,
             secret_manager,
             storage,
+            app_state,
         }
     }
 }
@@ -189,7 +215,8 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
         };
         let gateway_ctx =
-            GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage));
+            GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
+                .with_app_state(self.app_state.clone());
 
         if self
             .device
@@ -570,6 +597,7 @@ mod tests {
             None,
             secret_manager,
             storage,
+            None,
         );
         let tool = ObservingTool::host_only(json!({"via": "tool"}));
         let turn_id =
@@ -621,6 +649,7 @@ mod tests {
             None,
             secret_manager,
             storage,
+            None,
         );
         let tool = ObservingTool::new(json!({"via": "tool"}));
 
@@ -686,6 +715,7 @@ mod tests {
             None,
             secret_manager,
             storage,
+            None,
         );
 
         let result = executor

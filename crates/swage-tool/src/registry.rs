@@ -31,6 +31,8 @@ const PROTECTED_NAMES: &[&str] = &[
     "python_execute",
     "workspace",
     "delegate",
+    "schedule",
+    "wake_me_later",
 ];
 
 /// Registry of tools available for dispatch.
