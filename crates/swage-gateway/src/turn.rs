@@ -476,6 +476,7 @@ pub async fn process_turn(
         subscription,
         output_schema_override,
         None,
+        None,
         TurnAttendance::Attended,
     )
     .await
@@ -495,6 +496,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
@@ -732,13 +734,16 @@ pub(crate) async fn process_turn_with_existing_turn(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     append_approved_location_paths(&mut allowed_paths, &session_approval_grants, space_id);
-    let agent_config = build_agent_config_with_workspace(
+    let mut agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
         output_schema_override,
         &workspace_root,
         allowed_paths,
     );
+    if let Some(max_retries) = max_output_retries_override {
+        agent_config.max_output_retries = max_retries;
+    }
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is

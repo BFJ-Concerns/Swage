@@ -85,6 +85,7 @@ pub mod topology;
 pub mod turn;
 pub mod voice;
 pub mod websocket;
+pub mod workflow;
 
 #[cfg(test)]
 pub(crate) mod test_support {

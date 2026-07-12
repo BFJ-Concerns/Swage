@@ -438,6 +438,110 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
 }
 
+#[async_trait]
+impl swage_storage::WorkflowStore for MockStorage {
+    async fn create_workflow_script(
+        &self,
+        _: swage_storage::NewWorkflowScript,
+    ) -> Result<
+        (
+            swage_storage::WorkflowScriptRecord,
+            swage_storage::WorkflowScriptVersion,
+        ),
+        StorageError,
+    > {
+        unimplemented!()
+    }
+    async fn append_workflow_script_version(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowScriptVersion, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_script(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowScriptRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_script_head(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowScriptVersion>, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_script_version(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowScriptVersion>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_workflow_script(
+        &self,
+        _: Uuid,
+        _: Option<&str>,
+        _: Option<serde_json::Value>,
+    ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_scripts(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowScriptRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_workflow_run(
+        &self,
+        _: swage_storage::NewWorkflowRun,
+    ) -> Result<swage_storage::WorkflowRunRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_run(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_runs(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_workflow_run_state(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: Option<serde_json::Value>,
+        _: Option<&str>,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+        unimplemented!()
+    }
+    async fn create_workflow_journal_intent(
+        &self,
+        _: swage_storage::NewWorkflowJournalIntent,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn complete_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_journal(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowJournalRecord>, StorageError> {
+        unimplemented!()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
     pub(crate) spaces: HashMap<Uuid, Space>,
@@ -7974,6 +8078,7 @@ async fn existing_placeholder_turn_receives_provider_visible_snapshot() {
         "Async hello".to_string(),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
         None,
         Some(placeholder.id),
         TurnAttendance::Attended,
