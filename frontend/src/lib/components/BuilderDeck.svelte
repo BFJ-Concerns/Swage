@@ -677,7 +677,7 @@
   <header class="builder-hero">
     <div class="hero-copy">
       <p class="eyebrow">Builder Lens</p>
-      <h1>Author the workspace, then let the agent live in it.</h1>
+      <h1>Author the space, then let the agent live in it.</h1>
       <p class="lede">
         Builder mode now edits the durable shape of a space: which team leads
         it, which extension bundles are trusted, and which presentation lens

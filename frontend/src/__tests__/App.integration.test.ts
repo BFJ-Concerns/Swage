@@ -583,10 +583,10 @@ describe("App", () => {
     // Open the space so the builder lens runtime is fetched and the deck
     // gets placed on the stage.
     await openSpaceFromPicker(defaultSpace.name);
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
-      "Author the workspace, then let the agent live in it.",
+      "Author the space, then let the agent live in it.",
     );
     // Space name still surfaces in the space head.
     expect(document.body.textContent).toContain("Space");
@@ -681,11 +681,11 @@ describe("App", () => {
     expect(builderLens).toBeDefined();
 
     flushSync(() => builderLens!.click());
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
     expect(document.body.textContent).toContain(
-      "Author the workspace, then let the agent live in it.",
+      "Author the space, then let the agent live in it.",
     );
   });
 });

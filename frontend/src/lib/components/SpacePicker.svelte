@@ -224,7 +224,7 @@
     <p class="eyebrow">Pick a space</p>
     <h1 class="display">Choose where to work.</h1>
     <p class="lede">
-      Each space is a separate workspace — its own conversations, memory, and
+      Each space is separate — its own conversations, memory, and
       attached files. Click a card to preview, then open it.
     </p>
   </header>
