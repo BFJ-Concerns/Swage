@@ -47,6 +47,7 @@ const SCHEDULE: Schedule = {
   status: "active",
   spec: { kind: "interval", every: "every 1 hours" },
   session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
+  creator: { kind: "user" },
   routing: {
     deliver_to_origin: false,
     home_target: null,
@@ -116,6 +117,28 @@ describe("ScheduleAutomationPanel", () => {
     expect(operatorApi.listSchedules).toHaveBeenCalled();
     expect(document.body.textContent).toContain("Review the queue.");
     expect(document.body.textContent).toContain("did the thing");
+  });
+
+  it("attributes each schedule to its creator", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({
+      schedules: [
+        SCHEDULE,
+        {
+          ...SCHEDULE,
+          id: "schedule-2",
+          message: "Agent sweep.",
+          creator: { kind: "agent", agent_id: "researcher" },
+        },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { spaceId: "space-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("by you");
+    expect(document.body.textContent).toContain("by agent researcher");
   });
 
   it("shows empty successful runs as a visible non-outcome", async () => {

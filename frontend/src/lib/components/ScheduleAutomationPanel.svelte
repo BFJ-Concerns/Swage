@@ -9,6 +9,7 @@
   } from "../api/operator";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
+  import type { ScheduleCreator } from "../protocol/ScheduleCreator";
   import type { ScheduleSpec } from "../protocol/ScheduleSpec";
   import type { SessionPolicy } from "../protocol/SessionPolicy";
 
@@ -183,6 +184,10 @@
       : "continues a conversation";
   }
 
+  function describeCreator(creator: ScheduleCreator): string {
+    return creator.kind === "agent" ? `agent ${creator.agent_id}` : "you";
+  }
+
   function formatTime(value: string | null): string {
     return value ? new Date(value).toLocaleString() : "—";
   }
@@ -311,6 +316,9 @@
         </div>
         <div class="schedule-facts">
           <span class="status status-{schedule.status}">{schedule.status}</span>
+          <span class="creator creator-{schedule.creator.kind}"
+            >by {describeCreator(schedule.creator)}</span
+          >
           <span>next {formatTime(schedule.next_run_at)}</span>
         </div>
         <div class="scope-toggle row-actions">
@@ -505,6 +513,20 @@
 
   .status-run-failed {
     color: #991b1b;
+  }
+
+  .creator {
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #efe7db;
+    font-size: 0.78rem;
+  }
+
+  /* An agent-made schedule stands out from a user's so the automation
+     panel answers "where did this come from" at a glance. */
+  .creator-agent {
+    background: #e0e7ff;
+    color: #3730a3;
   }
 
   .row-actions {
