@@ -435,6 +435,7 @@ impl Hook for BlockInboundHook {
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
     fail_secret_reads: AtomicBool,
+    fail_audit_writes: AtomicBool,
 }
 
 #[derive(Default)]
@@ -506,11 +507,16 @@ impl MockStorage {
                 ..Default::default()
             }),
             fail_secret_reads: AtomicBool::new(false),
+            fail_audit_writes: AtomicBool::new(false),
         }
     }
 
     fn fail_secret_reads(&self) {
         self.fail_secret_reads.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_audit_writes(&self) {
+        self.fail_audit_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -2992,6 +2998,11 @@ impl swage_storage::store::AuditStore for MockStorage {
         &self,
         event: swage_storage::NewAuditEvent,
     ) -> Result<swage_storage::AuditEvent, StorageError> {
+        if self.fail_audit_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected audit write failure".into(),
+            ));
+        }
         let event = swage_storage::AuditEvent {
             id: event.id,
             session_id: event.session_id,
@@ -3445,7 +3456,7 @@ pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -
     make_state_with_storage(provider_chunks, storage).await
 }
 
-async fn make_state_with_storage(
+pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
 ) -> (AppState, Uuid) {
@@ -8631,6 +8642,66 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
         .expect("approval task should finish")
         .expect("approval should succeed");
     assert_eq!(outcome, SandboxDegradationApproval::Approved);
+}
+
+#[tokio::test]
+async fn sandbox_degradation_rejection_refuses_the_attended_fallback() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turn = state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: threads[0].id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Pending,
+            user_input: Some("hello".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+
+    let turn_config = state.config.clone();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel_token = CancellationToken::new();
+    let approval_channels = Arc::clone(&state.approval_channels);
+    let state_for_task = state.clone();
+    let task = tokio::spawn(async move {
+        request_sandbox_degradation_approval(
+            &state_for_task,
+            SandboxDegradationApprovalRequest {
+                config: &turn_config,
+                ws_tx: &tx,
+                turn_id: turn.id,
+                agent_id: "gateway",
+                prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
+                context: serde_json::json!({ "degradation": "unsandboxed_execution" }),
+                cancel_token: &cancel_token,
+            },
+        )
+        .await
+    });
+
+    let approval_id = match rx.recv().await.expect("approval event should be sent") {
+        ServerEvent::ApprovalRequired { approval_id, .. } => Uuid::parse_str(&approval_id).unwrap(),
+        other => panic!("expected ApprovalRequired, got: {other:?}"),
+    };
+    approval_channels
+        .lock()
+        .unwrap()
+        .remove(&approval_id)
+        .expect("approval channel should be registered")
+        .send(swage_agent::ApprovalDecision {
+            decision: swage_agent::approval::ApprovalDecisionValue::Rejected,
+            scope: swage_agent::approval::ApprovalDecisionScope::Once,
+            reason: Some("Keep isolation mandatory".into()),
+        })
+        .expect("rejection should be delivered");
+
+    let outcome = task
+        .await
+        .expect("approval task should finish")
+        .expect("rejection should be a resolved approval outcome");
+    assert_eq!(outcome, SandboxDegradationApproval::Rejected);
 }
 
 #[tokio::test]
