@@ -928,6 +928,71 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_tool_calls_turn_id  ON tool_calls(turn_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id  ON tool_calls(call_id);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_agent_id ON tool_calls(agent_id);
+
+    CREATE TABLE IF NOT EXISTS workflow_scripts (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        space_id            TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        name                TEXT NOT NULL,
+        description         TEXT NOT NULL,
+        delivery_grant_json TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        UNIQUE (space_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS workflow_script_versions (
+        id         TEXT NOT NULL PRIMARY KEY,
+        script_id  TEXT NOT NULL REFERENCES workflow_scripts(id) ON DELETE CASCADE,
+        version    INTEGER NOT NULL,
+        source     TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (script_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        space_id            TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        script_version_id   TEXT REFERENCES workflow_script_versions(id),
+        source              TEXT,
+        source_hash         TEXT NOT NULL,
+        session_id          TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        args_json           TEXT NOT NULL,
+        budget_json         TEXT NOT NULL,
+        state               TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+        final_output_json   TEXT,
+        error_message       TEXT,
+        engine_version      TEXT NOT NULL,
+        created_at          TEXT NOT NULL,
+        completed_at        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
+        ON workflow_runs(space_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+        ON workflow_runs(state);
+
+    CREATE TABLE IF NOT EXISTS workflow_journal (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
 ";
 
 const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "

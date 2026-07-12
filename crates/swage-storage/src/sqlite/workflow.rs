@@ -1,0 +1,446 @@
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use rusqlite::{OptionalExtension, params};
+use uuid::Uuid;
+
+use swage_core::StorageError;
+
+use crate::model::{
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, WorkflowJournalRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+};
+use crate::sqlite::SqliteStorage;
+use crate::store::WorkflowStore;
+
+fn uuid(value: String) -> rusqlite::Result<Uuid> {
+    value.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+fn time(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+}
+
+fn script_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptRecord> {
+    let grant: Option<String> = row.get(4)?;
+    Ok(WorkflowScriptRecord {
+        id: uuid(row.get(0)?)?,
+        space_id: uuid(row.get(1)?)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        delivery_grant: grant
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        created_at: time(row.get(5)?)?,
+        updated_at: time(row.get(6)?)?,
+    })
+}
+
+fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptVersion> {
+    Ok(WorkflowScriptVersion {
+        id: uuid(row.get(0)?)?,
+        script_id: uuid(row.get(1)?)?,
+        version: row.get(2)?,
+        source: row.get(3)?,
+        created_at: time(row.get(4)?)?,
+    })
+}
+
+fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
+    let script_version_id: Option<String> = row.get(2)?;
+    let session_id: Option<String> = row.get(5)?;
+    let final_output: Option<String> = row.get(9)?;
+    let completed_at: Option<String> = row.get(13)?;
+    Ok(WorkflowRunRecord {
+        id: uuid(row.get(0)?)?,
+        space_id: uuid(row.get(1)?)?,
+        script_version_id: script_version_id.map(uuid).transpose()?,
+        source: row.get(3)?,
+        source_hash: row.get(4)?,
+        session_id: session_id.map(uuid).transpose()?,
+        args: serde_json::from_str(&row.get::<_, String>(6)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        budget: serde_json::from_str(&row.get::<_, String>(7)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(8)?,
+        final_output: final_output
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        error_message: row.get(10)?,
+        engine_version: row.get(11)?,
+        created_at: time(row.get(12)?)?,
+        completed_at: completed_at.map(time).transpose()?,
+    })
+}
+
+const SCRIPT_COLUMNS: &str =
+    "id, space_id, name, description, delivery_grant_json, created_at, updated_at";
+const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
+const RUN_COLUMNS: &str = "id, space_id, script_version_id, source, source_hash, session_id, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at";
+const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
+
+fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecord> {
+    let result: Option<String> = row.get(8)?;
+    let key: Option<String> = row.get(11)?;
+    let completed: Option<String> = row.get(14)?;
+    Ok(WorkflowJournalRecord {
+        id: uuid(row.get(0)?)?,
+        run_id: uuid(row.get(1)?)?,
+        seq: row.get::<_, i64>(2)? as u64,
+        completed_order: row.get::<_, Option<i64>>(3)?.map(|value| value as u64),
+        kind: row.get(4)?,
+        status: row.get(5)?,
+        args_hash: row.get(6)?,
+        request: serde_json::from_str(&row.get::<_, String>(7)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        result: result
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        error_message: row.get(9)?,
+        effect_kind: row.get(10)?,
+        idempotency_key: key.map(uuid).transpose()?,
+        target_kind: row.get(12)?,
+        started_at: time(row.get(13)?)?,
+        completed_at: completed.map(time).transpose()?,
+    })
+}
+
+#[async_trait]
+impl WorkflowStore for SqliteStorage {
+    async fn create_workflow_script(
+        &self,
+        script: NewWorkflowScript,
+    ) -> Result<(WorkflowScriptRecord, WorkflowScriptVersion), StorageError> {
+        let id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let now = Utc::now();
+        let grant = script
+            .delivery_grant
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let created = self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("INSERT INTO workflow_scripts (id, space_id, name, description, delivery_grant_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)", params![id.to_string(), script.space_id.to_string(), script.name, script.description, grant, now.to_rfc3339()])?;
+            tx.execute("INSERT INTO workflow_script_versions (id, script_id, version, source, created_at) VALUES (?1, ?2, 1, ?3, ?4)", params![version_id.to_string(), id.to_string(), script.source, now.to_rfc3339()])?;
+            tx.commit()?;
+            Ok((id, version_id))
+        }).await?;
+        let record = self
+            .get_workflow_script(created.0)
+            .await?
+            .expect("created script exists");
+        let version = self
+            .get_workflow_script_head(created.0)
+            .await?
+            .expect("created version exists");
+        Ok((record, version))
+    }
+
+    async fn append_workflow_script_version(
+        &self,
+        script_id: Uuid,
+        source: &str,
+    ) -> Result<WorkflowScriptVersion, StorageError> {
+        let id = Uuid::new_v4();
+        let source = source.to_string();
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            conn.execute("INSERT INTO workflow_script_versions (id, script_id, version, source, created_at) SELECT ?1, ?2, COALESCE(MAX(version), 0) + 1, ?3, ?4 FROM workflow_script_versions WHERE script_id = ?2", params![id.to_string(), script_id.to_string(), source, now.to_rfc3339()])?;
+            conn.query_row(&format!("SELECT {VERSION_COLUMNS} FROM workflow_script_versions WHERE id = ?1"), [id.to_string()], version_row)
+        }).await
+    }
+
+    async fn get_workflow_script(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id = ?1"),
+                [id.to_string()],
+                script_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn get_workflow_script_head(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptVersion>, StorageError> {
+        self.with_conn(move |conn| conn.query_row(&format!("SELECT {VERSION_COLUMNS} FROM workflow_script_versions WHERE script_id = ?1 ORDER BY version DESC LIMIT 1"), [id.to_string()], version_row).optional()).await
+    }
+
+    async fn get_workflow_script_version(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptVersion>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!("SELECT {VERSION_COLUMNS} FROM workflow_script_versions WHERE id = ?1"),
+                [id.to_string()],
+                version_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn update_workflow_script(
+        &self,
+        id: Uuid,
+        description: Option<&str>,
+        delivery_grant: Option<serde_json::Value>,
+    ) -> Result<WorkflowScriptRecord, StorageError> {
+        let description = description.map(str::to_string);
+        let grant = delivery_grant
+            .map(|value| serde_json::to_string(&value))
+            .transpose()
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| { conn.execute("UPDATE workflow_scripts SET description=COALESCE(?2,description), delivery_grant_json=COALESCE(?3,delivery_grant_json), updated_at=?4 WHERE id=?1",params![id.to_string(),description,grant,now])?; conn.query_row(&format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id=?1"),[id.to_string()],script_row) }).await
+    }
+
+    async fn list_workflow_scripts(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowScriptRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE space_id = ?1 ORDER BY name"
+            ))?;
+            stmt.query_map([space_id.to_string()], script_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn create_workflow_run(
+        &self,
+        run: NewWorkflowRun,
+    ) -> Result<WorkflowRunRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let args = serde_json::to_string(&run.args)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let budget = serde_json::to_string(&run.budget)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9)", params![id.to_string(), run.space_id.to_string(), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+    }
+
+    async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
+                [id.to_string()],
+                run_row,
+            )
+            .optional()
+        })
+        .await
+    }
+    async fn list_workflow_runs(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+        self.with_conn(move |conn| { let mut stmt = conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE space_id = ?1 ORDER BY created_at DESC"))?; stmt.query_map([space_id.to_string()], run_row)?.collect() }).await
+    }
+    async fn update_workflow_run_state(
+        &self,
+        id: Uuid,
+        state: &str,
+        final_output: Option<serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let state = state.to_string();
+        let output = final_output
+            .map(|v| serde_json::to_string(&v))
+            .transpose()
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let error = error_message.map(str::to_string);
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| { conn.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, error_message=?4, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?5 END WHERE id=?1", params![id.to_string(),state,output,error,now])?; Ok(()) }).await
+    }
+    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+        self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await
+    }
+
+    async fn create_workflow_journal_intent(
+        &self,
+        intent: NewWorkflowJournalIntent,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let request = serde_json::to_string(&intent.request)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_journal (id, run_id, seq, kind, status, args_hash, request_json, effect_kind, idempotency_key, target_kind, started_at) VALUES (?1, ?2, ?3, ?4, 'started', ?5, ?6, ?7, ?8, ?9, ?10)", params![id.to_string(),intent.run_id.to_string(),intent.seq as i64,intent.kind,intent.args_hash,request,intent.effect_kind,intent.idempotency_key.map(|v|v.to_string()),intent.target_kind,now.to_rfc3339()])?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
+    async fn complete_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        result: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let result =
+            serde_json::to_string(&result).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let now = Utc::now();
+        self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='completed', result_json=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),result,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
+    async fn list_workflow_journal(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE run_id=?1 ORDER BY seq"
+            ))?;
+            stmt.query_map([run_id.to_string()], journal_row)?.collect()
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NewSpace, SpaceStore};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_versions_append_and_runs_survive_reopen_shape() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "workflow-test".into(),
+                slug: "workflow-test".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let (script, first) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "publish".into(),
+                description: "reviewed delivery".into(),
+                source: "return 1".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("script");
+        let second = storage
+            .append_workflow_script_version(script.id, "return 2")
+            .await
+            .expect("version");
+        assert_eq!(first.version, 1);
+        assert_eq!(second.version, 2);
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                script_version_id: Some(second.id),
+                source: None,
+                source_hash: "hash".into(),
+                args: serde_json::json!({}),
+                budget: serde_json::json!({}),
+                engine_version: "rquickjs-0.12.0".into(),
+            })
+            .await
+            .expect("run");
+        storage
+            .interrupt_running_workflow_runs()
+            .await
+            .expect("recover");
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .expect("get")
+                .expect("present")
+                .state,
+            "interrupted"
+        );
+
+        let first = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "a".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("intent");
+        let second = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "effect".into(),
+                args_hash: "b".into(),
+                request: serde_json::json!({}),
+                effect_kind: Some("idempotency_key".into()),
+                idempotency_key: Some(Uuid::new_v4()),
+                target_kind: Some("webhook".into()),
+            })
+            .await
+            .expect("effect intent");
+        let second = storage
+            .complete_workflow_journal_entry(second.id, serde_json::json!({"delivered":true}))
+            .await
+            .expect("second completion");
+        let first = storage
+            .complete_workflow_journal_entry(first.id, serde_json::json!({"output":"draft"}))
+            .await
+            .expect("first completion");
+        assert_eq!(second.completed_order, Some(1));
+        assert_eq!(first.completed_order, Some(2));
+    }
+}

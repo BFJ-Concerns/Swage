@@ -13,11 +13,12 @@ use crate::model::{
     NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewLensRecord, NewMaterial,
     NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-    NewTurn, NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SharedReferenceEvent, SharedReferenceKind, Space, SpaceSlug, Team, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateSchedule,
-    WorkspaceAttachment,
+    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Space,
+    SpaceSlug, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
+    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -919,6 +920,72 @@ pub trait ChannelQueueStore: Send + Sync {
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError>;
 }
 
+/// Durable saved workflow definitions and detached run state.
+#[async_trait]
+pub trait WorkflowStore: Send + Sync {
+    async fn create_workflow_script(
+        &self,
+        script: NewWorkflowScript,
+    ) -> Result<(WorkflowScriptRecord, WorkflowScriptVersion), StorageError>;
+    async fn append_workflow_script_version(
+        &self,
+        script_id: Uuid,
+        source: &str,
+    ) -> Result<WorkflowScriptVersion, StorageError>;
+    async fn get_workflow_script(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptRecord>, StorageError>;
+    async fn get_workflow_script_head(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptVersion>, StorageError>;
+    async fn get_workflow_script_version(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowScriptVersion>, StorageError>;
+    async fn update_workflow_script(
+        &self,
+        id: Uuid,
+        description: Option<&str>,
+        delivery_grant: Option<serde_json::Value>,
+    ) -> Result<WorkflowScriptRecord, StorageError>;
+    async fn list_workflow_scripts(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowScriptRecord>, StorageError>;
+    async fn create_workflow_run(
+        &self,
+        run: NewWorkflowRun,
+    ) -> Result<WorkflowRunRecord, StorageError>;
+    async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    async fn list_workflow_runs(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    async fn update_workflow_run_state(
+        &self,
+        id: Uuid,
+        state: &str,
+        final_output: Option<serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<(), StorageError>;
+    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    async fn create_workflow_journal_intent(
+        &self,
+        intent: NewWorkflowJournalIntent,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+    async fn complete_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        result: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+    async fn list_workflow_journal(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowJournalRecord>, StorageError>;
+}
+
 // ---------------------------------------------------------------------------
 // Storage supertrait
 // ---------------------------------------------------------------------------
@@ -954,6 +1021,7 @@ pub trait Storage:
     + ScheduleStore
     + ChannelQueueStore
     + TopologyTraceStore
+    + WorkflowStore
     + Send
     + Sync
 {
@@ -987,6 +1055,7 @@ impl<T> Storage for T where
         + ScheduleStore
         + ChannelQueueStore
         + TopologyTraceStore
+        + WorkflowStore
         + Send
         + Sync
 {
@@ -2004,6 +2073,104 @@ mod tests {
             unimplemented!()
         }
         async fn expire_stale_messages(&self, _: std::time::Duration) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowStore for StubStorage {
+        async fn create_workflow_script(
+            &self,
+            _: NewWorkflowScript,
+        ) -> Result<(WorkflowScriptRecord, WorkflowScriptVersion), StorageError> {
+            unimplemented!()
+        }
+        async fn append_workflow_script_version(
+            &self,
+            _: Uuid,
+            _: &str,
+        ) -> Result<WorkflowScriptVersion, StorageError> {
+            unimplemented!()
+        }
+        async fn get_workflow_script(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkflowScriptRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_workflow_script_head(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkflowScriptVersion>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_workflow_script_version(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkflowScriptVersion>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_workflow_script(
+            &self,
+            _: Uuid,
+            _: Option<&str>,
+            _: Option<serde_json::Value>,
+        ) -> Result<WorkflowScriptRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_scripts(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowScriptRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_run(
+            &self,
+            _: NewWorkflowRun,
+        ) -> Result<WorkflowRunRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn get_workflow_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_runs(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_workflow_run_state(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: Option<serde_json::Value>,
+            _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_journal_intent(
+            &self,
+            _: NewWorkflowJournalIntent,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn complete_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_journal(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
             unimplemented!()
         }
     }
