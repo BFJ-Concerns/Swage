@@ -429,7 +429,7 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::turn::tests::make_state_with_session;
+    use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
 
     #[test]
     fn degraded_execution_is_denied_by_default() {
@@ -522,5 +522,41 @@ mod tests {
             event.entity_id == turn_id.to_string()
                 && event.metadata["reason"] == "bubblewrap_unavailable"
         }));
+    }
+
+    #[tokio::test]
+    async fn unattended_degraded_dispatcher_fails_closed_when_audit_write_fails() {
+        let storage = Arc::new(MockStorage::new());
+        let (state, session_id) = make_state_with_storage(Vec::new(), storage.clone()).await;
+        storage.fail_audit_writes();
+
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sandbox.allow_degraded_execution = true;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+
+        let result = build_gateway_dispatcher_for_unattended_execution(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                space_id: None,
+                active_workspace_attachment_id: None,
+                ws_tx,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+            "scheduled turn",
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("degraded execution must not receive a dispatcher without its audit record");
+        };
+
+        assert!(error.to_string().contains("injected audit write failure"));
     }
 }
