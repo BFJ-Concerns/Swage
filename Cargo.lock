@@ -3408,6 +3408,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "swage-codex"
+version = "0.202607.500"
+dependencies = [
+ "serde",
+ "serde_json",
+ "swage-sandbox",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "swage-config"
 version = "0.202607.500"
 dependencies = [
@@ -3470,6 +3484,7 @@ dependencies = [
  "cron",
  "futures",
  "html2text",
+ "jsonschema",
  "libc",
  "mime_guess",
  "rand 0.10.1",
@@ -3479,6 +3494,7 @@ dependencies = [
  "serde_json",
  "swage-agent",
  "swage-client",
+ "swage-codex",
  "swage-config",
  "swage-context",
  "swage-core",

@@ -1,0 +1,28 @@
+[package]
+name = "swage-codex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+fake-app-server = []
+
+[[bin]]
+name = "fake-app-server"
+path = "src/bin/fake-app-server.rs"
+required-features = ["fake-app-server"]
+
+[dependencies]
+swage-sandbox = { path = "../swage-sandbox" }
+tokio = { workspace = true }
+tokio-util = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

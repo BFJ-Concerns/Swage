@@ -11,6 +11,7 @@ members = [
     "crates/swage-storage",
     "crates/swage-agent",
     "crates/swage-sandbox",
+    "crates/swage-codex",
     "crates/swage-config",
     "crates/swage-context",
     "crates/swage-gateway",

@@ -744,9 +744,16 @@ pub(crate) async fn process_turn_with_existing_turn(
     // ToolDispatcher with the resolved permission set. When sandboxing is
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
+    let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
+    let mut dispatcher_config = config.clone();
+    if is_codex_turn {
+        // Bridged tools remain gateway-hosted. Codex-native actions are
+        // isolated by the App Server sandbox policy instead.
+        dispatcher_config.sandbox.enabled = false;
+    }
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &config,
+        &dispatcher_config,
         &agent_config,
         session.metadata.as_ref(),
         Some(space_id),
@@ -756,7 +763,9 @@ pub(crate) async fn process_turn_with_existing_turn(
     .await
     {
         Ok(build) => build,
-        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
+        Err(error)
+            if dispatcher_config.sandbox.enabled && attendance == TurnAttendance::Attended =>
+        {
             let detected_degradation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
@@ -887,77 +896,69 @@ pub(crate) async fn process_turn_with_existing_turn(
     let sandbox_guard = dispatcher_build.sandbox_guard;
     let dispatcher = dispatcher_build.dispatcher;
 
-    // Step 10: Build the Agent that will execute the turn.
-    let mut agent_builder = AgentBuilder::new()
-        .config(agent_config)
-        .provider(state.active_provider())
-        .storage(state.storage.clone())
-        .tool_dispatcher(dispatcher)
-        .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
-        .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
-        .context_transfer_config(config.communication.context_transfer.clone());
-    if let Some(hook_registry) = state.hook_registry.clone() {
-        agent_builder = agent_builder.hook_registry(hook_registry);
-    }
-    let agent = match agent_builder.build() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to build agent for turn");
-            let _ = ws_tx.send(ServerEvent::Error {
-                code: "agent_construction_error".to_string(),
-                message: e.to_string(),
-            });
-            if let Err(error) = state
-                .storage
-                .update_turn_state(prepared_turn_id, TurnState::Failed)
-                .await
-            {
-                tracing::warn!(
-                    turn_id = %prepared_turn_id,
-                    error = %error,
-                    "failed to mark turn failed after agent construction error"
-                );
-            }
-            if let Some(guard) = &sandbox_guard
-                && let Err(error) = guard.shutdown().await
-            {
-                tracing::warn!(error = %error, "failed to shut down turn sandbox after agent construction error");
-            }
-            // Cleanup cancellation token before returning.
-            let mut turns = state.active_turns.lock().await;
-            turns.remove(&session_id);
-            return Err(GatewayError::WebSocketError(format!(
-                "agent construction failed: {e}"
-            )));
-        }
-    };
-
-    // Step 11: Create the TurnRequest with assembled context and cancellation.
-    let turn_request = TurnRequest {
-        execution: swage_agent::context::TurnExecutionContext {
-            session_id,
-            thread_id,
-            turn_id: prepared_turn_id,
-            space_id: Some(space_id),
-        },
-        user_message: before_inbound.canonical_content.clone(),
-        assembled_context: assembled_messages,
-        parent_turn_id: None,
-        existing_turn_id: Some(prepared_turn_id),
-        cancellation_token: cancel_token,
-    };
-
-    // Step 12: Create the event channel and spawn the agent's streaming loop.
+    // Step 10: Both runtimes emit AgentEvents into the same projection loop.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-
-    // Spawn the agent on a tokio task — it manages turn creation, state
-    // transitions, tool dispatch, and message storage internally.
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
     let model_name = config.default_model_id().to_string();
-
-    let agent_handle =
-        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await });
+    let agent_handle = if is_codex_turn {
+        let session_approval_grants = state
+            .session_approval_grants
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let permissions = build_permission_config(
+            &config,
+            &state.config,
+            Some(space_id),
+            &session_approval_grants,
+        );
+        let codex_request = crate::codex::CodexTurnRequest {
+            session_id,
+            thread_id,
+            turn_id: prepared_turn_id,
+            agent_id: session.agent_id.clone(),
+            model: model_name.clone(),
+            user_message: before_inbound.canonical_content.clone(),
+            assembled_context: assembled_messages,
+            agent_config,
+            permissions,
+            dispatcher: Arc::new(dispatcher),
+            event_tx,
+            cancellation: cancel_token,
+        };
+        let codex_state = state.clone();
+        tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
+    } else {
+        let mut agent_builder = AgentBuilder::new()
+            .config(agent_config)
+            .provider(state.active_provider())
+            .storage(state.storage.clone())
+            .tool_dispatcher(dispatcher)
+            .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
+            .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
+            .context_transfer_config(config.communication.context_transfer.clone());
+        if let Some(hook_registry) = state.hook_registry.clone() {
+            agent_builder = agent_builder.hook_registry(hook_registry);
+        }
+        let agent = agent_builder.build().map_err(|error| {
+            GatewayError::WebSocketError(format!("agent construction failed: {error}"))
+        })?;
+        let turn_request = TurnRequest {
+            execution: swage_agent::context::TurnExecutionContext {
+                session_id,
+                thread_id,
+                turn_id: prepared_turn_id,
+                space_id: Some(space_id),
+            },
+            user_message: before_inbound.canonical_content.clone(),
+            assembled_context: assembled_messages,
+            parent_turn_id: None,
+            existing_turn_id: Some(prepared_turn_id),
+            cancellation_token: cancel_token,
+        };
+        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
+    };
 
     // Captures the turn_id emitted by TurnStarted so the agent result match
     // can use it for persistence and logging after the event loop finishes.

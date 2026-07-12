@@ -98,6 +98,8 @@ fn default_base_url(protocol: swage_config::Protocol) -> &'static str {
         swage_config::Protocol::Anthropic => "https://api.anthropic.com",
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
+        // Harness-backed providers never construct ProviderConfig.
+        swage_config::Protocol::Codex => "",
     }
 }
 
@@ -359,6 +361,8 @@ mod tests {
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into()),
             base_url: None,
+            command: None,
+            state_dir: None,
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),
@@ -384,6 +388,8 @@ mod tests {
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_API_KEY_XYZ".into()),
             base_url: Some("http://127.0.0.1:11434/v1".into()),
+            command: None,
+            state_dir: None,
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),

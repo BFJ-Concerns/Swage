@@ -285,6 +285,70 @@ impl ThreadStore for SqliteStorage {
         .await
     }
 
+    async fn get_codex_thread_id(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT codex_thread_id FROM threads WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+        })
+        .await
+    }
+
+    async fn set_codex_thread_id(
+        &self,
+        id: Uuid,
+        codex_thread_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if self.get(id).await?.is_none() {
+            return Err(StorageError::NotFound {
+                entity: "thread".to_string(),
+                id: id.to_string(),
+            });
+        }
+        let codex_thread_id = codex_thread_id.map(ToString::to_string);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE threads SET codex_thread_id = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), codex_thread_id, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_codex_tools_json(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT codex_tools_json FROM threads WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+        })
+        .await
+    }
+
+    async fn set_codex_tools_json(
+        &self,
+        id: Uuid,
+        tools_json: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let tools_json = tools_json.map(ToString::to_string);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE threads SET codex_tools_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), tools_json, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
         self.with_conn(|conn| {
             let affected =

@@ -67,6 +67,16 @@ impl ChildProcessManager {
         self.child.stdin.take()
     }
 
+    /// Take ownership of the child's stdout pipe, if one was configured.
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Take ownership of the child's stderr pipe, if one was configured.
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
     /// Returns true if the child process is still running.
     ///
     /// Uses a non-blocking `try_wait` — does not block the caller.

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use swage_core::ApprovalTimeoutPolicy;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ pub enum Protocol {
     Anthropic,
     Google,
     OpenRouter,
+    Codex,
 }
 
 /// Connection settings for one configured LLM provider.
@@ -42,6 +44,10 @@ pub struct ProviderEndpointConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for ProviderEndpointConfig {
@@ -51,6 +57,8 @@ impl Default for ProviderEndpointConfig {
             api_key_secret_ref: None,
             api_key_env: None,
             base_url: None,
+            command: None,
+            state_dir: None,
         }
     }
 }
