@@ -129,14 +129,14 @@ impl Tool for ScheduleTool {
         "Create and manage standing schedules — recurring or one-off background work the \
          gateway runs on its own clock, whether or not this conversation is still open. Set \
          `action` to create, list, update, or remove.\n\n\
-         A schedule created here runs in its OWN fresh session by default, assembled with just \
-         the task and the previous run's outcome — that is almost always what a recurring job \
-         wants: a clean, minimal context each time, not the entire history of the conversation \
-         that set it up. Do not reach for a running session to carry a repeating job; a schedule \
-         is how repeating work stays isolated and cheap. Choose the `continuation` session only \
-         when the job genuinely must build on one specific ongoing thread. To make THIS session \
-         resume once after a wait, use `wake_me_later` instead — that is a self-continuation, not \
-         a standing schedule.\n\n\
+         You choose where each run executes with `session` (required on create). Almost always \
+         set it to `fresh`: every run gets its own new session, opened with just the task and the \
+         previous run's outcome — a clean, minimal context each time, not the entire history of \
+         the conversation that set it up. Do not reach for a running session to carry a repeating \
+         job; a fresh schedule is how repeating work stays isolated and cheap. Set `session` to \
+         `continuation` only when the job genuinely must build on one specific ongoing thread. To \
+         make THIS session resume once after a wait, use `wake_me_later` instead — that is a \
+         self-continuation, not a standing schedule.\n\n\
          Creating a schedule writes a durable record attributed to you (the calling agent) and \
          starts the clock immediately; each run is recorded in the schedule's run history. \
          Removing one is permanent. Cron expressions are evaluated in UTC."
@@ -176,14 +176,17 @@ impl Tool for ScheduleTool {
                 },
                 "at": {
                     "type": "string",
-                    "description": "For timing=once: the RFC 3339 instant to fire at, e.g. an \
-                                    absolute UTC timestamp. Must be in the future."
+                    "description": "For timing=once: the RFC 3339 instant to fire at, as an \
+                                    absolute UTC timestamp. A future instant fires then; an instant \
+                                    already in the past is accepted and runs at the next tick — set \
+                                    it in the past deliberately to run once, right away."
                 },
                 "every": {
                     "type": "string",
-                    "description": "For timing=every: a recurrence like 'N seconds', 'N minutes', \
-                                    'N hours', or 'N days'. The first run happens one interval from \
-                                    now."
+                    "description": "For timing=every: a recurrence of the form 'every N seconds', \
+                                    'every N minutes', 'every N hours', or 'every N days' (the \
+                                    literal word 'every' is required). The first run happens one \
+                                    interval from now."
                 },
                 "cron": {
                     "type": "string",
@@ -195,12 +198,13 @@ impl Tool for ScheduleTool {
                     "enum": ["fresh", "continuation"],
                     "description": "Which session each run executes in, fixed at creation. fresh: \
                                     a new session in `space_id` for `agent_id`, opened with only \
-                                    the task and the last run's outcome — the isolated default for \
-                                    recurring work. continuation: reuse the existing \
+                                    the task and the last run's outcome — the isolated, recommended \
+                                    choice for recurring work. continuation: reuse the existing \
                                     `continuation_session_id`, running as whatever agent it \
                                     currently holds — pick this only when runs must build on one \
-                                    specific thread. Required for create; cannot be changed after \
-                                    (remove and recreate to move a schedule)."
+                                    specific thread. Required for create (there is no default); \
+                                    cannot be changed after (remove and recreate to move a \
+                                    schedule)."
                 },
                 "space_id": {
                     "type": "string",
@@ -221,9 +225,10 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "description": "Optional. A cheap model (a catalogue id or alias) that checks \
                                     before each clock-triggered run whether the work is actually \
-                                    needed, skipping the run when nothing has changed. Omit for no \
-                                    gate. On update, sets or replaces the gate; use \
-                                    gate_action=clear to remove one."
+                                    needed, skipping the run when nothing has changed. On create, \
+                                    supplying it installs the gate; omit for no gate. On update it \
+                                    takes effect only together with gate_action=set — gate_model \
+                                    alone changes nothing."
                 },
                 "gate_criteria": {
                     "type": "string",

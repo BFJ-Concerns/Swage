@@ -608,6 +608,131 @@ async fn two_due_schedules_do_not_head_of_line_block() {
     assert_eq!(slow_run.output_text.as_deref(), Some("slow done"));
 }
 
+/// Panics inside `complete` — the gate call, which the run awaits directly in
+/// its own spawned task (unlike `stream`, which the turn engine drives on a
+/// nested task). Proves a *panicking* run, not merely a failing one, is caught
+/// on the schedule's join handle without taking the tick down. `stream` serves
+/// a clean reply for the ungated sibling.
+struct PanicProvider;
+
+#[async_trait]
+impl LlmProvider for PanicProvider {
+    fn model_id(&self) -> &str {
+        "panic-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        panic!("injected panic inside a scheduled run's gate check");
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("panic test does not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        Box::pin(futures::stream::iter(MockProvider::text_round(
+            "survivor done",
+        )))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_spawned_run_is_caught_and_the_tick_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let due_at = Utc::now() - Duration::seconds(5);
+    let state = test_state_with_config(
+        &dir.path().join("panic.db"),
+        PanicProvider,
+        config_with_gate_model(),
+    );
+    let router = build_router(state.clone());
+    let panic_session = create_conversation(&router).await;
+    let survivor_session = create_conversation(&router).await;
+
+    // The panicking schedule declares a gate, so its run calls the (panicking)
+    // gate model inline before any turn machinery.
+    let panicking = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            gate: Some(GateConfig {
+                model: GATE_MODEL.into(),
+                criteria: None,
+            }),
+            ..create_request(
+                "this run panics in the gate",
+                ScheduleSpec::OneShot {
+                    at: due_at.to_rfc3339(),
+                },
+                continuation(panic_session),
+            )
+        },
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let survivor = schedule::create_schedule(
+        &state,
+        create_request(
+            "this run just works",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(survivor_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+
+    // tick_once returns without panicking, even though one of the runs it
+    // spawned will panic — a panic in a run does not take the tick down.
+    let handles = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(handles.len(), 2);
+
+    // Exactly one join handle carries a panic (the mechanism the loop reaps to
+    // surface it); the other completes cleanly.
+    let mut panicked = 0;
+    let mut completed = 0;
+    for handle in handles {
+        match handle.await {
+            Err(join_error) if join_error.is_panic() => panicked += 1,
+            Ok(()) => completed += 1,
+            Err(other) => panic!("unexpected join error: {other}"),
+        }
+    }
+    assert_eq!(
+        panicked, 1,
+        "the panicking run's handle must report a panic"
+    );
+    assert_eq!(completed, 1, "the sibling run must finish cleanly");
+
+    // The surviving schedule ran to completion; the panicking one's run row
+    // was left non-terminal (the task died mid-run) — recovered at next
+    // startup, exactly like a crash.
+    let survivor_run = await_terminal_run(&state, survivor.id).await;
+    assert_eq!(survivor_run.state, ScheduleRunState::Completed);
+    assert_eq!(survivor_run.output_text.as_deref(), Some("survivor done"));
+    let panic_runs = state
+        .storage
+        .list_schedule_runs(panicking.id)
+        .await
+        .unwrap();
+    assert_eq!(panic_runs.len(), 1);
+    assert!(matches!(
+        panic_runs[0].state,
+        ScheduleRunState::Pending | ScheduleRunState::Running
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tick_continues_after_a_due_schedule_run_fails() {
     let dir = tempfile::tempdir().unwrap();

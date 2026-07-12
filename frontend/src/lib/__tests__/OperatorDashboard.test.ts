@@ -59,7 +59,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
           status: "active",
           spec: { kind: "interval", every: "every 5 minutes" },
           session: { policy: "continuation", session_id: "conv-1" },
-          creator: { kind: "user" },
+          creator: { kind: "agent", agent_id: "researcher" },
           routing: {
             deliver_to_origin: false,
             home_target: null,
@@ -136,6 +136,8 @@ describe("OperatorDashboard", () => {
     await settleUi();
 
     expect(document.body.textContent).toContain("Daily digest");
+    // Attribution is shown on this surface too, not just the automation panel.
+    expect(document.body.textContent).toContain("created by agent researcher");
     expect(document.body.textContent).toContain("Allow shell command");
     expect(document.body.textContent).toContain("Build device");
     expect(document.body.textContent).toContain("dev_dm");
