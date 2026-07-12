@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use swage_client::runtime::RuntimeMetadata;
 use swage_config::LogLevel;
-use swage_storage::ChannelQueueStore;
+use swage_storage::{ChannelQueueStore, WorkflowStore};
 use tokio_util::sync::CancellationToken;
 
 /// Run the gateway to completion.
@@ -113,6 +113,15 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
         Err(e) => {
             eprintln!("Background startup recovery failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    match raw_storage.interrupt_running_workflow_runs().await {
+        Ok(0) => {}
+        Ok(n) => info!("Recovered {n} interrupted workflow run(s) from a previous shutdown"),
+        Err(e) => {
+            eprintln!("Workflow startup recovery failed: {e}");
             std::process::exit(1);
         }
     }
@@ -639,6 +648,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
             max_output_bytes: max_output,
         }),
         Arc::new(swage_tool::delegate::DelegateTool),
+        Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
         Arc::new(AgentMemoryTool),

@@ -172,6 +172,11 @@ impl SubscriptionState {
             | ServerEvent::TopologyNodeCompleted { .. }
             | ServerEvent::TopologyRunCompleted { .. } => true,
 
+            ServerEvent::WorkflowRunStarted { .. }
+            | ServerEvent::WorkflowEntryStarted { .. }
+            | ServerEvent::WorkflowEntryCompleted { .. }
+            | ServerEvent::WorkflowRunCompleted { .. } => true,
+
             // Baseline events are always delivered — subscription cannot suppress them.
             ServerEvent::Token { .. }
             | ServerEvent::Error { .. }
