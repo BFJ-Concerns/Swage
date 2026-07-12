@@ -34,22 +34,22 @@ pub(super) fn delegated_target_instructions(
     }
 }
 
-pub(crate) fn delegated_target_instructions_for_bench(
+pub(crate) fn delegated_target_instructions_for_space(
     target_instructions: &str,
-    bench_slug: &str,
+    space_slug: &str,
     target_agent_id: &str,
 ) -> String {
     resolve_swage_root()
         .map(|root| {
-            let bench_dir = root.join("benches").join(bench_slug);
-            let agent_dir = bench_dir.join("agents").join(target_agent_id);
+            let space_dir = root.join("spaces").join(space_slug);
+            let agent_dir = space_dir.join("agents").join(target_agent_id);
             let agent_dir_opt = if agent_dir.is_dir() {
                 Some(agent_dir.as_path())
             } else {
                 None
             };
             let (available, _warnings) =
-                SkillManager::discover_available(&root, &bench_dir, agent_dir_opt);
+                SkillManager::discover_available(&root, &space_dir, agent_dir_opt);
             delegated_target_instructions(target_instructions, &available)
         })
         .unwrap_or_else(|| target_instructions.to_string())
@@ -60,7 +60,7 @@ pub(crate) fn delegated_target_instructions_for_bench(
 /// Constructs typed elements from the resolved turn inputs:
 /// - `PromptsElement` — from the merged instruction string
 /// - `SkillsElement`  — from the active skill set
-/// - `MemoryElement`  — from pre-loaded bench memory content (may be empty)
+/// - `MemoryElement`  — from pre-loaded space memory content (may be empty)
 /// - `HistoryElement` — from the thread's message history
 ///
 /// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
@@ -73,7 +73,7 @@ pub(crate) fn build_assembly_elements(
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
     memory_content: String,
-    bench_name: String,
+    space_name: String,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -93,29 +93,29 @@ pub(crate) fn build_assembly_elements(
     vec![
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
-        Box::new(MemoryElement::new(memory_content, bench_name)),
+        Box::new(MemoryElement::new(memory_content, space_name)),
         Box::new(HistoryElement::new(history)),
     ]
 }
 
-/// Load bench memory content by reading all `.md` files from the bench's
-/// memory directory (`{swage_root}/benches/{bench_slug}/memory/`).
+/// Load space memory content by reading all `.md` files from the space's
+/// memory directory (`{swage_root}/spaces/{space_slug}/memory/`).
 ///
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) async fn load_bench_memory(swage_root: &Path, bench_slug: &str) -> String {
-    let memory_dir = swage_root.join("benches").join(bench_slug).join("memory");
+pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> String {
+    let memory_dir = swage_root.join("spaces").join(space_slug).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
         Ok(rd) => rd,
-        // Missing directory is the common case for new benches.
+        // Missing directory is the common case for new spaces.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
         Err(error) => {
             tracing::warn!(
                 path = %memory_dir.display(),
                 %error,
-                "failed to read bench memory directory"
+                "failed to read space memory directory"
             );
             return String::new();
         }
@@ -136,7 +136,7 @@ pub(crate) async fn load_bench_memory(swage_root: &Path, bench_slug: &str) -> St
                 tracing::warn!(
                     path = %memory_dir.display(),
                     %error,
-                    "failed to enumerate bench memory directory"
+                    "failed to enumerate space memory directory"
                 );
                 return String::new();
             }
@@ -153,7 +153,7 @@ pub(crate) async fn load_bench_memory(swage_root: &Path, bench_slug: &str) -> St
                 }
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "failed to read bench memory file");
+                tracing::warn!(path = %path.display(), %error, "failed to read space memory file");
             }
         }
     }
@@ -177,7 +177,7 @@ pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
 pub(crate) async fn load_active_skills_for_agent(
     state: &AppState,
     session_id: Uuid,
-    bench_slug: &str,
+    space_slug: &str,
     agent_id: &str,
     swage_root: Option<&Path>,
     include_user_activated: bool,
@@ -185,14 +185,14 @@ pub(crate) async fn load_active_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let bench_dir = root.join("benches").join(bench_slug);
-    let agent_dir = bench_dir.join("agents").join(agent_id);
+    let space_dir = root.join("spaces").join(space_slug);
+    let agent_dir = space_dir.join("agents").join(agent_id);
     let agent_dir_opt = if agent_dir.is_dir() {
         Some(agent_dir.as_path())
     } else {
         None
     };
-    let (available, _warnings) = SkillManager::discover_available(root, &bench_dir, agent_dir_opt);
+    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is

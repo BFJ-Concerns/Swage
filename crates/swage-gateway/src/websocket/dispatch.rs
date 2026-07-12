@@ -16,7 +16,7 @@ pub(super) static TEST_SKILL_ROOTS: std::sync::LazyLock<
 
 /// Discover skills available to a session.
 ///
-/// Resolves the Swage root, looks up the session's bench slug and agent id,
+/// Resolves the Swage root, looks up the session's space slug and agent id,
 /// builds the config hierarchy, and delegates to [`crate::skill::SkillManager`].
 /// Infrastructure failures are returned to the caller so slash-command and
 /// explicit activation flows can surface the real problem instead of treating
@@ -25,7 +25,7 @@ pub(super) async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {
-    // Fetch session to get bench_id and agent_id.
+    // Fetch session to get space_id and agent_id.
     let session = match state.storage.get_session(session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -40,19 +40,19 @@ pub(super) async fn discover_available_for_session(
         }
     };
 
-    // Fetch bench to get the slug used in path construction.
-    let bench = match state.bench_store.get(session.bench_id).await {
+    // Fetch space to get the slug used in path construction.
+    let space = match state.space_store.get(session.space_id).await {
         Ok(Some(p)) => p,
         Err(e) => {
             return Err(format!(
-                "skill discovery failed while loading bench {} for session {session_id}: {e}",
-                session.bench_id
+                "skill discovery failed while loading space {} for session {session_id}: {e}",
+                session.space_id
             ));
         }
         _ => {
             return Err(format!(
-                "skill discovery failed: bench {} for session {session_id} was not found",
-                session.bench_id
+                "skill discovery failed: space {} for session {session_id} was not found",
+                session.space_id
             ));
         }
     };
@@ -63,11 +63,11 @@ pub(super) async fn discover_available_for_session(
         .map_err(|e| format!("skill discovery failed for session {session_id}: {e}"))?;
 
     // Build hierarchy paths that mirror load_resolved_config_from.
-    let bench_dir = root.join("benches").join(&bench.slug);
-    let agent_dir = bench_dir.join("agents").join(&session.agent_id);
+    let space_dir = root.join("spaces").join(&space.slug);
+    let agent_dir = space_dir.join("agents").join(&session.agent_id);
 
     let (skills, _warnings) =
-        crate::skill::SkillManager::discover_available(&root, &bench_dir, Some(&agent_dir));
+        crate::skill::SkillManager::discover_available(&root, &space_dir, Some(&agent_dir));
     Ok(skills)
 }
 

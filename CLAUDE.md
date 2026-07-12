@@ -67,7 +67,7 @@ nothing toggles it from the UI today.
 ### The wire contract is one definition, projected
 
 Anything that crosses a process boundary — HTTP request/response bodies,
-WebSocket events, node commands — belongs in the `swage-protocol` crate as
+WebSocket events, device commands — belongs in the `swage-protocol` crate as
 plain serde types, defined once. Every consumer is a derived projection: Rust
 clients depend on the crate directly; the frontend's TypeScript is generated
 from it (ts-rs); the canonical published artifact is the JSON Schema
@@ -75,9 +75,9 @@ from it (ts-rs); the canonical published artifact is the JSON Schema
 and the schema ever disagree, the schema wins.
 
 The crate is organised by surface, each emitting its own schema document:
-client (conversation, streaming, approvals), hosting/operator, node (duplex
+client (conversation, streaming, approvals), hosting/operator, device (duplex
 and server-initiated — the server invokes operations on remote execution
-clients over a connection the node dialled in, with correlation IDs,
+clients over a connection the device dialled in, with correlation IDs,
 capability advertisement, cancellation, and heartbeats as first-class fields),
 and channel (the contract external integrators speak). Subset clients
 implement only their surfaces; external parties see only the surface

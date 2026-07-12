@@ -2,7 +2,7 @@
 //! displays.
 //!
 //! Holds the message history, streaming token buffer, active tool calls,
-//! scroll position, turn metadata, context assembly report, and bench info.
+//! scroll position, turn metadata, context assembly report, and space info.
 //! All state mutations flow through methods on `ConversationState` so the
 //! rendering layer can read a consistent snapshot.
 
@@ -48,9 +48,9 @@ pub struct ContextSection {
     pub token_count: u64,
 }
 
-/// Minimal bench info for display in the status bar.
+/// Minimal space info for display in the status bar.
 #[derive(Debug, Clone)]
-pub struct BenchInfo {
+pub struct SpaceInfo {
     pub id: Uuid,
     pub name: String,
 }
@@ -74,8 +74,8 @@ pub struct ConversationState {
     scroll_offset: usize,
     /// Latest context assembly report from the gateway, if any.
     pub context_report: Option<ContextReport>,
-    /// Bench this conversation belongs to.
-    pub active_bench: BenchInfo,
+    /// Space this conversation belongs to.
+    pub active_space: SpaceInfo,
     /// Model name from the most recently completed turn.
     pub model_name: Option<String>,
     /// Input token count from the most recently completed turn.
@@ -92,17 +92,17 @@ pub struct ConversationState {
 }
 
 impl ConversationState {
-    /// Creates a new state anchored to the given bench.
+    /// Creates a new state anchored to the given space.
     ///
     /// All conversational fields start empty; scroll is at the top.
-    pub fn new(bench: BenchInfo) -> Self {
+    pub fn new(space: SpaceInfo) -> Self {
         Self {
             messages: Vec::new(),
             streaming_buffer: String::new(),
             active_tools: Vec::new(),
             scroll_offset: 0,
             context_report: None,
-            active_bench: bench,
+            active_space: space,
             model_name: None,
             input_tokens: None,
             output_tokens: None,
@@ -227,9 +227,9 @@ impl ConversationState {
         self.context_report = Some(report);
     }
 
-    /// Switches the active bench.
-    pub fn set_bench(&mut self, bench: BenchInfo) {
-        self.active_bench = bench;
+    /// Switches the active space.
+    pub fn set_space(&mut self, space: SpaceInfo) {
+        self.active_space = space;
     }
 
     /// Replaces the message history with records loaded from storage.
@@ -260,12 +260,12 @@ impl ConversationState {
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
     }
 
-    /// Resets all conversational state while preserving bench affiliation and
+    /// Resets all conversational state while preserving space affiliation and
     /// conversation identity.
     ///
     /// Clears: messages, streaming buffer, active/completed tools, scroll
     /// position, token counts, model name, context report, and streaming flag.
-    /// Does NOT clear `active_bench` or `conversation_id`.
+    /// Does NOT clear `active_space` or `conversation_id`.
     pub fn clear(&mut self) {
         self.messages.clear();
         self.streaming_buffer.clear();
@@ -351,10 +351,10 @@ fn active_tool_text(tool: &ActiveTool) -> String {
 mod tests {
     use super::*;
 
-    fn default_bench() -> BenchInfo {
-        BenchInfo {
+    fn default_space() -> SpaceInfo {
+        SpaceInfo {
             id: Uuid::new_v4(),
-            name: "Test Bench".to_string(),
+            name: "Test Space".to_string(),
         }
     }
 
@@ -389,16 +389,16 @@ mod tests {
 
     #[test]
     fn new_initialises_empty_state() {
-        let bench = default_bench();
-        let bench_id = bench.id;
-        let state = ConversationState::new(bench);
+        let space = default_space();
+        let space_id = space.id;
+        let state = ConversationState::new(space);
 
         assert!(state.messages.is_empty());
         assert!(state.streaming_buffer.is_empty());
         assert!(state.active_tools.is_empty());
         assert_eq!(state.scroll_offset, 0);
         assert!(state.context_report.is_none());
-        assert_eq!(state.active_bench.id, bench_id);
+        assert_eq!(state.active_space.id, space_id);
         assert!(state.model_name.is_none());
         assert!(state.input_tokens.is_none());
         assert!(state.output_tokens.is_none());
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn append_token_adds_to_buffer_and_sets_streaming() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("Hello");
         assert_eq!(state.streaming_buffer, "Hello");
         assert!(state.is_streaming);
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn append_token_accumulates_across_calls() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("foo");
         state.append_token(" bar");
         assert_eq!(state.streaming_buffer, "foo bar");
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn start_tool_adds_to_active_tools() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.start_tool("call-1".to_string(), "read_file".to_string());
         assert_eq!(state.active_tools.len(), 1);
         assert_eq!(state.active_tools[0].call_id, "call-1");
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn end_tool_removes_from_active_tools() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.start_tool("call-1".to_string(), "read_file".to_string());
         state.end_tool("call-1", "success".to_string(), 42);
         assert!(state.active_tools.is_empty());
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn end_tool_ignores_unknown_call_id() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.start_tool("call-1".to_string(), "read_file".to_string());
         state.end_tool("call-99", "success".to_string(), 0);
         assert_eq!(state.active_tools.len(), 1);
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn cancel_streaming_clears_buffers_and_tool_state() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("partial");
         state.start_tool("call-1".to_string(), "shell".to_string());
         state.end_tool("call-1", "success".to_string(), 42);
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn complete_turn_flushes_buffer_into_message() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("Hello from the LLM.");
         state.complete_turn(Some("claude-3".to_string()), Some(10), Some(5));
         assert_eq!(state.messages.len(), 1);
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn complete_turn_records_token_counts_and_model() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("response");
         state.complete_turn(Some("sonnet-4".to_string()), Some(100), Some(50));
         assert_eq!(state.model_name.as_deref(), Some("sonnet-4"));
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn complete_turn_attaches_completed_tools_to_message() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.start_tool("call-1".to_string(), "shell".to_string());
         state.end_tool("call-1", "success".to_string(), 123);
         state.append_token("Done.");
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn complete_turn_flushes_still_active_tools_as_unknown() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.start_tool("call-1".to_string(), "slow_tool".to_string());
         // end_tool never called — turn completes while tool is still running.
         state.append_token("Partial.");
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn update_context_report_stores_report() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         let report = ContextReport {
             sections: vec![ContextSection {
                 name: "system".to_string(),
@@ -536,26 +536,26 @@ mod tests {
         assert_eq!(state.context_report.as_ref().unwrap().total_tokens, 200);
     }
 
-    // --- set_bench ---
+    // --- set_space ---
 
     #[test]
-    fn set_bench_updates_active_bench() {
-        let mut state = ConversationState::new(default_bench());
-        let new_bench = BenchInfo {
+    fn set_space_updates_active_space() {
+        let mut state = ConversationState::new(default_space());
+        let new_space = SpaceInfo {
             id: Uuid::new_v4(),
-            name: "New Bench".to_string(),
+            name: "New Space".to_string(),
         };
-        let new_id = new_bench.id;
-        state.set_bench(new_bench);
-        assert_eq!(state.active_bench.id, new_id);
-        assert_eq!(state.active_bench.name, "New Bench");
+        let new_id = new_space.id;
+        state.set_space(new_space);
+        assert_eq!(state.active_space.id, new_id);
+        assert_eq!(state.active_space.name, "New Space");
     }
 
     // --- load_history ---
 
     #[test]
     fn load_history_replaces_messages() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.append_token("existing token");
         let history = vec![DisplayMessage {
             role: "user".to_string(),
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn scroll_up_decrements_offset() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.scroll_offset = 10;
         state.scroll_up(3);
         assert_eq!(state.scroll_offset, 7);
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn scroll_up_clamps_at_zero() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.scroll_offset = 2;
         state.scroll_up(10);
         assert_eq!(state.scroll_offset, 0);
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn scroll_down_increments_offset() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         for i in 0..20 {
             state.messages.push(DisplayMessage {
                 role: "user".to_string(),
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn scroll_down_clamps_at_content_end() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         // 10 short messages at width 80 render as 3 lines each
         // (role label + content + separator), so 30 total lines.
         // Viewport height 5 → max_offset = 25.
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn scroll_down_accounts_for_wrapped_message_height() {
-        let mut state = ConversationState::new(default_bench());
+        let mut state = ConversationState::new(default_space());
         state.messages.push(DisplayMessage {
             role: "assistant".to_string(),
             content: "abcdefghij".to_string(),
@@ -637,10 +637,10 @@ mod tests {
     // --- clear ---
 
     #[test]
-    fn clear_resets_conversational_state_but_preserves_bench() {
-        let bench = default_bench();
-        let bench_id = bench.id;
-        let mut state = ConversationState::new(bench);
+    fn clear_resets_conversational_state_but_preserves_space() {
+        let space = default_space();
+        let space_id = space.id;
+        let mut state = ConversationState::new(space);
         state.append_token("some text");
         state.start_tool("call-1".to_string(), "shell".to_string());
         state.scroll_offset = 5;
@@ -661,8 +661,8 @@ mod tests {
         assert_eq!(state.scroll_offset, 0);
         assert!(state.context_report.is_none());
         assert!(!state.is_streaming);
-        // Bench and conversation identity are structural — preserved by clear.
-        assert_eq!(state.active_bench.id, bench_id);
+        // Space and conversation identity are structural — preserved by clear.
+        assert_eq!(state.active_space.id, space_id);
         assert_eq!(state.conversation_id, Some(conv_id));
     }
 }

@@ -398,17 +398,17 @@ async fn validate_session_policy(
     policy: &SessionPolicy,
 ) -> Result<(), GatewayError> {
     match policy {
-        SessionPolicy::Fresh { bench_id, agent_id } => {
+        SessionPolicy::Fresh { space_id, agent_id } => {
             if agent_id.trim().is_empty() {
                 return Err(GatewayError::ValidationError(
                     "fresh session policy needs a target agent".into(),
                 ));
             }
             state
-                .bench_store
-                .get(*bench_id)
+                .space_store
+                .get(*space_id)
                 .await?
-                .ok_or(GatewayError::BenchNotFound { id: *bench_id })?;
+                .ok_or(GatewayError::SpaceNotFound { id: *space_id })?;
         }
         SessionPolicy::Continuation { session_id } => {
             state
@@ -691,11 +691,11 @@ async fn run_body(
     // agent, continuation picks up the named session's agent as it stands
     // right now.
     let (session_id, agent_id, input) = match &schedule.session_policy {
-        SessionPolicy::Fresh { bench_id, agent_id } => {
+        SessionPolicy::Fresh { space_id, agent_id } => {
             let service =
-                ConversationService::new(state.storage.clone(), state.bench_store.clone());
+                ConversationService::new(state.storage.clone(), state.space_store.clone());
             let conversation = service
-                .create_session_in_bench_for_agent(*bench_id, agent_id, None)
+                .create_session_in_space_for_agent(*space_id, agent_id, None)
                 .await?;
             let input = compose_fresh_opening(&schedule.message, previous_outcome.as_deref());
             (conversation.id, agent_id.clone(), input)

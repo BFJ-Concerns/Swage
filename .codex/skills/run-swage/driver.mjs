@@ -106,7 +106,7 @@ async function screenshot(flags) {
 
   await withPage(target, async (page, consoleErrors) => {
     await waitForApp(page, flags.wait);
-    // Give async loads (bench list, lens runtime) a beat to paint.
+    // Give async loads (space list, lens runtime) a beat to paint.
     await page.waitForTimeout(flags.settle ?? 600);
     await page.screenshot({ path: out, fullPage: Boolean(flags.fullPage) });
     console.log(`screenshot -> ${out}`);
@@ -143,10 +143,9 @@ async function probe(flags) {
   });
 }
 
-// Drive the first-run flow end to end: the SPA opens on the bench picker, so
-// click the default bench card, open it, and screenshot the workspace that
-// loads. This proves the app is genuinely interactive, not just rendering a
-// static landing page. Extend with form fills / message sends as PRs demand.
+// Drive the first-run flow end to end: create a space, enter it, and run one
+// turn. This proves the renamed space surface and the actual gateway turn path
+// are interactive rather than merely rendering a static landing page.
 async function flow(flags) {
   const base = flags._[0];
   if (!base) throw new Error("flow: missing <url>");
@@ -155,15 +154,19 @@ async function flow(flags) {
     await waitForApp(page, flags.wait);
     await page.waitForTimeout(600);
 
-    // Two-stage bench select: click the card to preview, then "Open".
-    await page.getByRole("button", { name: /preview bench default/i }).click();
-    await page.getByRole("button", { name: "Open", exact: true }).click();
+    await page.getByRole("button", { name: /new space/i }).click();
+    await page.getByLabel("New space name").fill("Rename journey");
+    await page.getByRole("button", { name: "Create", exact: true }).click();
 
     // Wait for the workspace shell to replace the picker.
     await page.waitForFunction(
       () => !document.body.textContent.includes("Choose where to work"),
       { timeout: 15_000 },
     );
+    await page.getByRole("button", { name: /new conversation/i }).click();
+    await page.getByPlaceholder(/send a message/i).fill("Confirm this space is ready.");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByText("Space journey complete.", { exact: true }).waitFor({ timeout: 15_000 });
     await page.waitForTimeout(flags.settle ?? 800);
     await page.screenshot({ path: out, fullPage: true });
 

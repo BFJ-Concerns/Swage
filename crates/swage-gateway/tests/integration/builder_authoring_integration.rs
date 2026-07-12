@@ -19,7 +19,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 use crate::support::ProcessEnvGuard;
@@ -60,7 +60,7 @@ fn test_state(db_path: &Path) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -140,20 +140,20 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
     let state = test_state(&db_path);
     let router = build_router(state);
 
-    let (bench_status, bench_body) = post_json(
+    let (space_status, space_body) = post_json(
         &router,
-        "/api/benches",
+        "/api/spaces",
         json!({
-            "name": "Builder Bench"
+            "name": "Builder Space"
         }),
     )
     .await;
-    assert_eq!(bench_status, StatusCode::CREATED);
-    let bench_id = bench_body["id"].as_str().unwrap();
-    let bench_slug = bench_body["slug"].as_str().unwrap();
+    assert_eq!(space_status, StatusCode::CREATED);
+    let space_id = space_body["id"].as_str().unwrap();
+    let space_slug = space_body["slug"].as_str().unwrap();
     let (workspace_status, _) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/workspaces"),
+        &format!("/api/spaces/{space_id}/workspaces"),
         json!({
             "path": workspace.to_string_lossy(),
             "label": "Workspace",
@@ -165,7 +165,7 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (lens_status, lens_body) = put_json(
         &router,
-        &format!("/api/benches/{bench_id}/lens-runtime"),
+        &format!("/api/spaces/{space_id}/lens-runtime"),
         json!({ "lens": "builder" }),
     )
     .await;
@@ -174,7 +174,7 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (team_status, team_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/teams"),
+        &format!("/api/spaces/{space_id}/teams"),
         json!({
             "name": "workspace-core",
             "description": "Owns the builder workflow.",
@@ -283,11 +283,11 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (extension_status, extension_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/extensions"),
+        &format!("/api/spaces/{space_id}/extensions"),
         json!({
             "name": "builder-guardrails",
             "display_name": "Builder Guardrails",
-            "description": "Adds builder-focused bench guidance.",
+            "description": "Adds builder-focused space guidance.",
             "requested_tools": ["shell"],
             "instructions": "Prefer the builder lens and keep authoring state explicit."
         }),
@@ -298,10 +298,10 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (extension_update_status, extension_update_body) = put_json(
         &router,
-        &format!("/api/benches/{bench_id}/extensions/builder-guardrails"),
+        &format!("/api/spaces/{space_id}/extensions/builder-guardrails"),
         json!({
             "display_name": "Builder Guardrails",
-            "description": "Adds durable builder-focused bench guidance.",
+            "description": "Adds durable builder-focused space guidance.",
             "requested_tools": ["shell", "file_read"],
             "instructions": "Prefer the builder lens, keep authoring state explicit, and audit extension changes."
         }),
@@ -310,12 +310,12 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
     assert_eq!(extension_update_status, StatusCode::OK);
     assert_eq!(
         extension_update_body["description"],
-        "Adds durable builder-focused bench guidance."
+        "Adds durable builder-focused space guidance."
     );
 
     let skill_path = swage_home
-        .join("benches")
-        .join(bench_slug)
+        .join("spaces")
+        .join(space_slug)
         .join("skills")
         .join("builder-guardrails")
         .join("SKILL.md");
@@ -328,7 +328,7 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (restarted_lens_status, restarted_lens_body) = get_json(
         &restarted_router,
-        &format!("/api/benches/{bench_id}/lens-runtime"),
+        &format!("/api/spaces/{space_id}/lens-runtime"),
     )
     .await;
     assert_eq!(restarted_lens_status, StatusCode::OK);
@@ -347,7 +347,7 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
 
     let (skills_status, skills_body) = get_json(
         &restarted_router,
-        &format!("/api/skills?bench_id={bench_id}"),
+        &format!("/api/skills?space_id={space_id}"),
     )
     .await;
     assert_eq!(skills_status, StatusCode::OK);
@@ -355,10 +355,10 @@ async fn builder_authoring_persists_lens_team_and_extension_across_restart() {
     let authored_skill = skills
         .iter()
         .find(|skill| skill["name"] == "builder-guardrails")
-        .expect("managed extension should load as a bench skill after restart");
+        .expect("managed extension should load as a space skill after restart");
     assert_eq!(
         authored_skill["description"],
-        "Adds durable builder-focused bench guidance."
+        "Adds durable builder-focused space guidance."
     );
     assert_eq!(authored_skill["tools"], json!(["shell", "file_read"]));
 }
@@ -427,19 +427,19 @@ Stay local until a builder approves import.
     }
 
     let router = build_router(test_state(&db_path));
-    let (bench_status, bench_body) = post_json(
+    let (space_status, space_body) = post_json(
         &router,
-        "/api/benches",
+        "/api/spaces",
         json!({
-            "name": "Governed Builder Bench"
+            "name": "Governed Builder Space"
         }),
     )
     .await;
-    assert_eq!(bench_status, StatusCode::CREATED);
-    let bench_id = bench_body["id"].as_str().unwrap();
+    assert_eq!(space_status, StatusCode::CREATED);
+    let space_id = space_body["id"].as_str().unwrap();
     let (workspace_status, _) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/workspaces"),
+        &format!("/api/spaces/{space_id}/workspaces"),
         json!({
             "path": workspace.to_string_lossy(),
             "label": "Workspace",
@@ -450,7 +450,7 @@ Stay local until a builder approves import.
     assert_eq!(workspace_status, StatusCode::CREATED);
 
     let (extensions_status, extensions_body) =
-        get_json(&router, &format!("/api/benches/{bench_id}/extensions")).await;
+        get_json(&router, &format!("/api/spaces/{space_id}/extensions")).await;
     assert_eq!(extensions_status, StatusCode::OK);
     let workspace_extension = extensions_body["extensions"]
         .as_array()
@@ -471,7 +471,7 @@ Stay local until a builder approves import.
     assert_eq!(workspace_extension["tool"]["name"], "workspace_brief");
 
     let (pre_approval_skills_status, pre_approval_skills_body) =
-        get_json(&router, &format!("/api/skills?bench_id={bench_id}")).await;
+        get_json(&router, &format!("/api/skills?space_id={space_id}")).await;
     assert_eq!(pre_approval_skills_status, StatusCode::OK);
     assert!(
         pre_approval_skills_body["skills"]
@@ -484,7 +484,7 @@ Stay local until a builder approves import.
 
     let (approve_status, approve_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/extensions/workspace-skill/approve-workspace"),
+        &format!("/api/spaces/{space_id}/extensions/workspace-skill/approve-workspace"),
         json!({}),
     )
     .await;
@@ -498,7 +498,7 @@ Stay local until a builder approves import.
     assert_eq!(approve_body["tool"]["name"], "workspace_brief");
 
     let (post_approval_skills_status, post_approval_skills_body) =
-        get_json(&router, &format!("/api/skills?bench_id={bench_id}")).await;
+        get_json(&router, &format!("/api/skills?space_id={space_id}")).await;
     assert_eq!(post_approval_skills_status, StatusCode::OK);
     assert!(
         post_approval_skills_body["skills"]
@@ -520,20 +520,20 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
     env_guard.set_swage_home(&swage_home);
 
     let router = build_router(test_state(&db_path));
-    let (bench_status, bench_body) = post_json(
+    let (space_status, space_body) = post_json(
         &router,
-        "/api/benches",
+        "/api/spaces",
         json!({
-            "name": "Runtime Authoring Bench"
+            "name": "Runtime Authoring Space"
         }),
     )
     .await;
-    assert_eq!(bench_status, StatusCode::CREATED);
-    let bench_id = bench_body["id"].as_str().unwrap();
+    assert_eq!(space_status, StatusCode::CREATED);
+    let space_id = space_body["id"].as_str().unwrap();
 
     let (flow_status, flow_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/topology-flows"),
+        &format!("/api/spaces/{space_id}/topology-flows"),
         json!({
             "name": "triage",
             "description": "Run the default triage graph.",
@@ -557,7 +557,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (flow_update_status, flow_update_body) = put_json(
         &router,
-        &format!("/api/benches/{bench_id}/topology-flows/triage"),
+        &format!("/api/spaces/{space_id}/topology-flows/triage"),
         json!({
             "description": "Run the persisted triage graph.",
             "graph": {
@@ -583,7 +583,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (context_status, context_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/context-definitions"),
+        &format!("/api/spaces/{space_id}/context-definitions"),
         json!({
             "name": "triage-context",
             "description": "Default assembly for triage sessions.",
@@ -600,7 +600,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (context_update_status, context_update_body) = put_json(
         &router,
-        &format!("/api/benches/{bench_id}/context-definitions/triage-context"),
+        &format!("/api/spaces/{space_id}/context-definitions/triage-context"),
         json!({
             "description": "Default assembly for durable triage sessions.",
             "config": {
@@ -616,7 +616,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (team_status, team_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/teams"),
+        &format!("/api/spaces/{space_id}/teams"),
         json!({
             "name": "triage-team",
             "description": "Runs durable triage flows.",
@@ -655,13 +655,13 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (preview_status, preview_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/context-definitions/triage-context/preview"),
+        &format!("/api/spaces/{space_id}/context-definitions/triage-context/preview"),
         json!({
             "instructions": "Keep the response concise.",
             "history": [
                 { "role": "user", "content": "Summarise the work." }
             ],
-            "bench_name": "Runtime Authoring Bench"
+            "space_name": "Runtime Authoring Space"
         }),
     )
     .await;
@@ -673,7 +673,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (flows_after_status, flows_after_body) = get_json(
         &restarted_router,
-        &format!("/api/benches/{bench_id}/topology-flows"),
+        &format!("/api/spaces/{space_id}/topology-flows"),
     )
     .await;
     assert_eq!(flows_after_status, StatusCode::OK);
@@ -688,7 +688,7 @@ async fn durable_topology_flows_and_context_definitions_persist_and_drive_runtim
 
     let (definitions_after_status, definitions_after_body) = get_json(
         &restarted_router,
-        &format!("/api/benches/{bench_id}/context-definitions"),
+        &format!("/api/spaces/{space_id}/context-definitions"),
     )
     .await;
     assert_eq!(definitions_after_status, StatusCode::OK);

@@ -4,9 +4,9 @@ use rusqlite::params;
 
 use swage_core::StorageError;
 
-use crate::model::{ExecutionHostRegistration, NewExecutionHostRegistration};
+use crate::model::{DeviceRegistration, NewDeviceRegistration};
 use crate::sqlite::SqliteStorage;
-use crate::store::ExecutionHostStore;
+use crate::store::DeviceStore;
 
 fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
@@ -28,12 +28,12 @@ fn parse_workspace_roots(json: &str) -> rusqlite::Result<Vec<String>> {
     })
 }
 
-fn row_to_execution_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionHostRegistration> {
+fn row_to_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRegistration> {
     let registered_at: String = row.get(8)?;
     let capabilities_json: String = row.get(7)?;
     let workspace_roots_json: String = row.get(6)?;
-    Ok(ExecutionHostRegistration {
-        host_id: row.get(0)?,
+    Ok(DeviceRegistration {
+        device_id: row.get(0)?,
         label: row.get(1)?,
         kind: row.get(2)?,
         base_url: row.get(3)?,
@@ -46,24 +46,24 @@ fn row_to_execution_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionH
 }
 
 #[async_trait]
-impl ExecutionHostStore for SqliteStorage {
-    async fn upsert_execution_host(
+impl DeviceStore for SqliteStorage {
+    async fn upsert_device(
         &self,
-        host: NewExecutionHostRegistration,
-    ) -> Result<ExecutionHostRegistration, StorageError> {
+        device: NewDeviceRegistration,
+    ) -> Result<DeviceRegistration, StorageError> {
         self.with_conn(|conn| {
             let registered_at = Utc::now();
             let registered_at_str = registered_at.to_rfc3339();
-            let capabilities_json = serde_json::to_string(&host.capabilities)
+            let capabilities_json = serde_json::to_string(&device.capabilities)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let workspace_roots_json = serde_json::to_string(&host.workspace_roots)
+            let workspace_roots_json = serde_json::to_string(&device.workspace_roots)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
             conn.execute(
-                "INSERT INTO execution_hosts
-                 (host_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at)
+                "INSERT INTO devices
+                 (device_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(host_id) DO UPDATE SET
+                 ON CONFLICT(device_id) DO UPDATE SET
                      label = excluded.label,
                      kind = excluded.kind,
                      base_url = excluded.base_url,
@@ -73,51 +73,51 @@ impl ExecutionHostStore for SqliteStorage {
                      capabilities_json = excluded.capabilities_json,
                      registered_at = excluded.registered_at",
                 params![
-                    &host.host_id,
-                    &host.label,
-                    &host.kind,
-                    &host.base_url,
-                    &host.shared_token,
-                    &host.workspace_root,
+                    &device.device_id,
+                    &device.label,
+                    &device.kind,
+                    &device.base_url,
+                    &device.shared_token,
+                    &device.workspace_root,
                     &workspace_roots_json,
                     &capabilities_json,
                     &registered_at_str,
                 ],
             )?;
 
-            Ok(ExecutionHostRegistration {
-                host_id: host.host_id,
-                label: host.label,
-                kind: host.kind,
-                base_url: host.base_url,
-                shared_token: host.shared_token,
-                workspace_root: host.workspace_root,
-                workspace_roots: host.workspace_roots,
-                capabilities: host.capabilities,
+            Ok(DeviceRegistration {
+                device_id: device.device_id,
+                label: device.label,
+                kind: device.kind,
+                base_url: device.base_url,
+                shared_token: device.shared_token,
+                workspace_root: device.workspace_root,
+                workspace_roots: device.workspace_roots,
+                capabilities: device.capabilities,
                 registered_at,
             })
         })
         .await
     }
 
-    async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+    async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT host_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at
-                 FROM execution_hosts ORDER BY registered_at ASC, host_id ASC",
+                "SELECT device_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at
+                 FROM devices ORDER BY registered_at ASC, device_id ASC",
             )?;
-            let rows = stmt.query_map([], row_to_execution_host)?;
+            let rows = stmt.query_map([], row_to_device)?;
             rows.collect()
         })
         .await
     }
 
-    async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError> {
-        let host_id = host_id.to_string();
+    async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError> {
+        let device_id = device_id.to_string();
         self.with_conn(move |conn| {
             let affected = conn.execute(
-                "DELETE FROM execution_hosts WHERE host_id = ?1",
-                params![host_id],
+                "DELETE FROM devices WHERE device_id = ?1",
+                params![device_id],
             )?;
             Ok(affected > 0)
         })
@@ -127,20 +127,20 @@ impl ExecutionHostStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewBench, NewExecutionHostRegistration, NewSession};
-    use crate::store::{BenchStore, ExecutionHostStore, SessionStore};
+    use crate::model::{NewDeviceRegistration, NewSession, NewSpace};
+    use crate::store::{DeviceStore, SessionStore, SpaceStore};
 
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execution_host_round_trips_and_replaces_registration() {
+    async fn device_round_trips_and_replaces_registration() {
         let storage = SqliteStorage::in_memory().unwrap();
 
         let first = storage
-            .upsert_execution_host(NewExecutionHostRegistration {
-                host_id: "node-a".into(),
-                label: Some("Node A".into()),
-                kind: "attached_node".into(),
+            .upsert_device(NewDeviceRegistration {
+                device_id: "device-a".into(),
+                label: Some("Device A".into()),
+                kind: "attached_device".into(),
                 base_url: "http://127.0.0.1:4000".into(),
                 shared_token: "secret-a".into(),
                 workspace_root: "/tmp/a".into(),
@@ -149,36 +149,36 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(first.host_id, "node-a");
+        assert_eq!(first.device_id, "device-a");
 
         let replaced = storage
-            .upsert_execution_host(NewExecutionHostRegistration {
-                host_id: "node-a".into(),
-                label: Some("Node A2".into()),
+            .upsert_device(NewDeviceRegistration {
+                device_id: "device-a".into(),
+                label: Some("Device A2".into()),
                 kind: "docker".into(),
                 base_url: "http://127.0.0.1:5000".into(),
                 shared_token: "secret-b".into(),
                 workspace_root: "/tmp/b".into(),
                 workspace_roots: vec!["/tmp/b".into()],
-                capabilities: vec!["host_identity".into()],
+                capabilities: vec!["device_identity".into()],
             })
             .await
             .unwrap();
         assert_eq!(replaced.kind, "docker");
 
-        let hosts = storage.list_execution_hosts().await.unwrap();
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].label.as_deref(), Some("Node A2"));
-        assert_eq!(hosts[0].workspace_root, "/tmp/b");
-        assert_eq!(hosts[0].workspace_roots, vec!["/tmp/b"]);
-        assert_eq!(hosts[0].capabilities, vec!["host_identity"]);
+        let devices = storage.list_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].label.as_deref(), Some("Device A2"));
+        assert_eq!(devices[0].workspace_root, "/tmp/b");
+        assert_eq!(devices[0].workspace_roots, vec!["/tmp/b"]);
+        assert_eq!(devices[0].capabilities, vec!["device_identity"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn find_session_by_channel_origin_returns_matching_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage
-            .create(NewBench {
+        let space = storage
+            .create(NewSpace {
                 name: "test".into(),
                 slug: "test".into(),
             })
@@ -187,7 +187,7 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {

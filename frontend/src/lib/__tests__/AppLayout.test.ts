@@ -3,12 +3,12 @@
  * Tests for the AppLayout riso/cyanotype shell.
  *
  * Verifies the new shell structure:
- *   - top bar (lens tabs) is present when a bench is selected
- *   - left nav (.nav) holds bench head + ConversationList
+ *   - top bar (lens tabs) is present when a space is selected
+ *   - left nav (.nav) holds space head + ConversationList
  *   - body holds a .conversation-pane (always) and an optional .stage-pane
  *
- * The right-hand WorkbenchRail was dropped per Surfaces.md — these tests no
- * longer assert on `.workbench-rail`.
+ * The right-hand SpaceRail was dropped per Surfaces.md — these tests no
+ * longer assert on `.space-rail`.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
@@ -16,7 +16,7 @@ import AppLayout from "../components/AppLayout.svelte";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
 import type { StreamingStore } from "../stores/streaming";
-import type { BenchStore } from "../stores/benches";
+import type { SpaceStore } from "../stores/spaces";
 
 import * as operatorApi from "../api/operator";
 import * as builderApi from "../api/builder";
@@ -36,9 +36,9 @@ vi.mock("../api/builder", () => ({
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
-  listBenchExtensions: vi.fn(),
-  createBenchExtension: vi.fn(),
-  updateBenchExtension: vi.fn(),
+  listSpaceExtensions: vi.fn(),
+  createSpaceExtension: vi.fn(),
+  updateSpaceExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
   listSharedReferences: vi.fn(),
   getSharedReference: vi.fn(),
@@ -116,11 +116,11 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-// AppLayout collapses the top bar and shows a "pick a bench" placeholder when
-// no bench is selected, so the shell tests need a bench in scope.
-function mockBenchStore(): BenchStore {
+// AppLayout collapses the top bar and shows a "pick a space" placeholder when
+// no space is selected, so the shell tests need a space in scope.
+function mockSpaceStore(): SpaceStore {
   return {
-    get benches() {
+    get spaces() {
       return [{
         id: "default",
         name: "default",
@@ -130,7 +130,7 @@ function mockBenchStore(): BenchStore {
         created_at: "",
       }];
     },
-    get currentBench() {
+    get currentSpace() {
       return {
         id: "default",
         name: "default",
@@ -140,13 +140,13 @@ function mockBenchStore(): BenchStore {
         created_at: "",
       };
     },
-    get recentBenches() { return []; },
+    get recentSpaces() { return []; },
     get isLoading() { return false; },
-    loadBenches: async () => {},
-    selectBench: async () => {},
-    closeBench: () => {},
-    createBench: async () => {},
-    deleteBench: async () => {},
+    loadSpaces: async () => {},
+    selectSpace: async () => {},
+    closeSpace: () => {},
+    createSpace: async () => {},
+    deleteSpace: async () => {},
   };
 }
 
@@ -157,7 +157,7 @@ function mountLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
-      benchStore: mockBenchStore(),
+      spaceStore: mockSpaceStore(),
       onRetry: () => {},
       activeLens: "assistant",
       availableLenses: [
@@ -186,7 +186,7 @@ function mountBuilderLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
-      benchStore: mockBenchStore(),
+      spaceStore: mockSpaceStore(),
       onRetry: () => {},
       activeLens: "builder",
       availableLenses: [
@@ -215,7 +215,7 @@ function mountResearchLayout(): MountedComponent {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
-      benchStore: mockBenchStore(),
+      spaceStore: mockSpaceStore(),
       onRetry: () => {},
       activeLens: "research",
       availableLenses: [
@@ -241,7 +241,7 @@ function mountResearchLayout(): MountedComponent {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("AppLayout: workbench shell", () => {
+describe("AppLayout: space shell", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
@@ -259,12 +259,12 @@ describe("AppLayout: workbench shell", () => {
       approvals: [],
       schedules: { schedules: [] },
       channels: { channels: [] },
-      nodes: [],
+      devices: [],
     });
     vi.mocked(builderApi.listTeams).mockResolvedValue([
       {
         id: "research-lead",
-        bench_id: "default",
+        space_id: "default",
         name: "research-lead",
         description: "Research coordination team",
         entry_agent_id: "lead",
@@ -284,7 +284,7 @@ describe("AppLayout: workbench shell", () => {
       },
     ]);
     vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
-    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([]);
+    vi.mocked(builderApi.listSpaceExtensions).mockResolvedValue([]);
     vi.mocked(builderApi.createBuilderProposal).mockResolvedValue({
       summary: "No changes proposed.",
       operations: [],
@@ -319,7 +319,7 @@ describe("AppLayout: workbench shell", () => {
     expect(document.querySelector(".conversation-pane")).not.toBeNull();
   });
 
-  it("renders the top bar with lens tabs when a bench is selected", () => {
+  it("renders the top bar with lens tabs when a space is selected", () => {
     component = mountLayout();
 
     const topbar = document.querySelector(".topbar");
@@ -327,12 +327,12 @@ describe("AppLayout: workbench shell", () => {
     expect(topbar!.querySelector(".lens")).not.toBeNull();
   });
 
-  it("renders BenchSelector inside the nav", () => {
+  it("renders SpaceSelector inside the nav", () => {
     component = mountLayout();
 
     const nav = document.querySelector(".nav");
     expect(nav).not.toBeNull();
-    expect(nav!.querySelector(".bench-selector")).not.toBeNull();
+    expect(nav!.querySelector(".space-selector")).not.toBeNull();
   });
 
   it("renders ConversationList inside the nav", () => {
@@ -425,7 +425,7 @@ describe("AppLayout: workbench shell", () => {
         conversationStore: mockConversationStore(),
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         onRetry: () => {},
         activeLens: "research",
         availableLenses: [
@@ -470,18 +470,18 @@ describe("AppLayout: workbench shell", () => {
     expect(builderApi.listSharedReferences).toHaveBeenCalledWith("default");
   });
 
-  it("collapses the top bar when no bench is selected", () => {
-    // Replace the bench-store mock with one that has no current bench.
-    const noBenchStore: BenchStore = {
-      get benches() { return []; },
-      get currentBench() { return null; },
-      get recentBenches() { return []; },
+  it("collapses the top bar when no space is selected", () => {
+    // Replace the space-store mock with one that has no current space.
+    const noSpaceStore: SpaceStore = {
+      get spaces() { return []; },
+      get currentSpace() { return null; },
+      get recentSpaces() { return []; },
       get isLoading() { return false; },
-      loadBenches: async () => {},
-      selectBench: async () => {},
-      closeBench: () => {},
-      createBench: async () => {},
-      deleteBench: async () => {},
+      loadSpaces: async () => {},
+      selectSpace: async () => {},
+      closeSpace: () => {},
+      createSpace: async () => {},
+      deleteSpace: async () => {},
     };
     component = mount(AppLayout, {
       target: document.body,
@@ -489,7 +489,7 @@ describe("AppLayout: workbench shell", () => {
         conversationStore: mockConversationStore(),
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
-        benchStore: noBenchStore,
+        spaceStore: noSpaceStore,
         onRetry: () => {},
         activeLens: "assistant",
         availableLenses: [],
@@ -500,22 +500,22 @@ describe("AppLayout: workbench shell", () => {
       },
     });
 
-    // The window flips into no-topbar mode and the body shows the BenchPicker.
+    // The window flips into no-topbar mode and the body shows the SpacePicker.
     expect(document.querySelector(".window.no-topbar")).not.toBeNull();
-    expect(document.querySelector(".bench-grid")).not.toBeNull();
+    expect(document.querySelector(".space-grid")).not.toBeNull();
   });
 
-  it("keeps global settings reachable when no bench is selected", () => {
-    const noBenchStore: BenchStore = {
-      get benches() { return []; },
-      get currentBench() { return null; },
-      get recentBenches() { return []; },
+  it("keeps global settings reachable when no space is selected", () => {
+    const noSpaceStore: SpaceStore = {
+      get spaces() { return []; },
+      get currentSpace() { return null; },
+      get recentSpaces() { return []; },
       get isLoading() { return false; },
-      loadBenches: async () => {},
-      selectBench: async () => {},
-      closeBench: () => {},
-      createBench: async () => {},
-      deleteBench: async () => {},
+      loadSpaces: async () => {},
+      selectSpace: async () => {},
+      closeSpace: () => {},
+      createSpace: async () => {},
+      deleteSpace: async () => {},
     };
     const onNavigate = vi.fn();
     component = mount(AppLayout, {
@@ -524,7 +524,7 @@ describe("AppLayout: workbench shell", () => {
         conversationStore: mockConversationStore(),
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
-        benchStore: noBenchStore,
+        spaceStore: noSpaceStore,
         onRetry: () => {},
         activeLens: "assistant",
         availableLenses: [],

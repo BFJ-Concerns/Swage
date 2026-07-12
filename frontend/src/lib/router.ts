@@ -13,20 +13,20 @@ export type SettingsTab =
   | "automation"
   | "plugins"
   | "channels"
-  | "nodes"
+  | "devices"
   | "voice"
   | "recovery"
   | "display"
   | "account";
 
-export type BenchSettingsTab = "overview" | "workspaces" | "sessions";
+export type SpaceSettingsTab = "overview" | "workspaces" | "sessions";
 
 export interface Route {
   path: string;
   conversationId: string | null;
   settingsTab: SettingsTab | null;
-  settingsBenchSlug: string | null;
-  settingsBenchTab: BenchSettingsTab | null;
+  settingsSpaceSlug: string | null;
+  settingsSpaceTab: SpaceSettingsTab | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -68,34 +68,34 @@ export function parseRoute(pathname: string): Route {
       path: pathname,
       conversationId: match[1],
       settingsTab: null,
-      settingsBenchSlug: null,
-      settingsBenchTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
       notFound: false,
     };
   }
-  const benchSettingsMatch = pathname.match(
-    /^\/settings\/bench\/([^/]+)(?:\/(overview|workspaces|sessions))?$/,
+  const spaceSettingsMatch = pathname.match(
+    /^\/settings\/space\/([^/]+)(?:\/(overview|workspaces|sessions))?$/,
   );
-  if (benchSettingsMatch) {
+  if (spaceSettingsMatch) {
     return {
       path: pathname,
       conversationId: null,
       settingsTab: null,
-      settingsBenchSlug: decodeURIComponent(benchSettingsMatch[1]),
-      settingsBenchTab: (benchSettingsMatch[2] as BenchSettingsTab | undefined) ?? "overview",
+      settingsSpaceSlug: decodeURIComponent(spaceSettingsMatch[1]),
+      settingsSpaceTab: (spaceSettingsMatch[2] as SpaceSettingsTab | undefined) ?? "overview",
       notFound: false,
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|generation|automation|plugins|channels|nodes|voice|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     return {
       path: pathname,
       conversationId: null,
       settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
-      settingsBenchSlug: null,
-      settingsBenchTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
       notFound: false,
     };
   }
@@ -103,8 +103,8 @@ export function parseRoute(pathname: string): Route {
     path: "/",
     conversationId: null,
     settingsTab: null,
-    settingsBenchSlug: null,
-    settingsBenchTab: null,
+    settingsSpaceSlug: null,
+    settingsSpaceTab: null,
     notFound: false,
   };
 }
@@ -134,8 +134,8 @@ export function createRouter(options?: RouterOptions): Router {
             path: "/",
             conversationId: null,
             settingsTab: null,
-            settingsBenchSlug: null,
-            settingsBenchTab: null,
+            settingsSpaceSlug: null,
+            settingsSpaceTab: null,
             notFound: true,
           };
           window.history.replaceState(null, "", "/");

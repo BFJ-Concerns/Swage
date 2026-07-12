@@ -40,7 +40,7 @@ impl Tool for ToolResultReadTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -143,7 +143,7 @@ mod tests {
     };
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::store::{
-        BenchStore, MessageStore, SessionStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+        MessageStore, SessionStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
     };
     use swage_tool::context::MockToolContext;
     use tokio::sync::mpsc;
@@ -154,10 +154,10 @@ mod tests {
 
     async fn test_turns() -> (Arc<SqliteStorage>, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -308,10 +308,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_branch_local_copied_tool_result_reference() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

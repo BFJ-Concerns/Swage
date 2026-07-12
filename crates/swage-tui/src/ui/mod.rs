@@ -5,10 +5,10 @@
 //! conversation area horizontally when toggled on.
 
 pub mod approval_panel;
-pub mod bench_selector;
 pub mod conversation;
 pub mod input;
 pub mod inspector;
+pub mod space_selector;
 pub mod status_bar;
 
 use ratatui::{
@@ -20,8 +20,8 @@ use ratatui::{
 
 use crate::gateway::ConnectionState;
 use crate::state::ConversationState;
-use crate::ui::bench_selector::BenchSelectorState;
 use crate::ui::input::InputState;
+use crate::ui::space_selector::SpaceSelectorState;
 
 /// Minimum terminal width required for the full TUI layout.
 const MIN_WIDTH: u16 = 80;
@@ -34,7 +34,7 @@ const MIN_HEIGHT: u16 = 24;
 /// testable without a live terminal backend.
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutRegions {
-    /// Top row: connection indicator, bench name, model, tokens.
+    /// Top row: connection indicator, space name, model, tokens.
     pub status_area: Rect,
     /// Middle region: message history and streaming output.
     pub conversation_area: Rect,
@@ -51,7 +51,7 @@ pub struct LayoutRegions {
 pub struct RenderParams<'a> {
     pub state: &'a ConversationState,
     pub input_state: &'a InputState,
-    pub selector_state: &'a BenchSelectorState,
+    pub selector_state: &'a SpaceSelectorState,
     pub connection_state: ConnectionState,
     /// True when the context inspector panel should be shown on the right.
     pub is_inspector_open: bool,
@@ -87,7 +87,7 @@ pub fn render(frame: &mut Frame, params: &RenderParams<'_>) {
         frame,
         regions.status_area,
         params.connection_state,
-        &state.active_bench.name,
+        &state.active_space.name,
         state.model_name.as_deref(),
         state.input_tokens,
         state.output_tokens,
@@ -113,9 +113,9 @@ pub fn render(frame: &mut Frame, params: &RenderParams<'_>) {
     let is_disabled = params.connection_state != ConnectionState::Connected;
     input::render_input(frame, regions.input_area, params.input_state, is_disabled);
 
-    // Bench selector overlay — renders last so it sits on top of everything.
-    // render_bench_selector is a no-op when selector_state.is_visible == false.
-    bench_selector::render_bench_selector(frame, area, params.selector_state);
+    // Space selector overlay — renders last so it sits on top of everything.
+    // render_space_selector is a no-op when selector_state.is_visible == false.
+    space_selector::render_space_selector(frame, area, params.selector_state);
 }
 
 // ---- Layout helpers (pub(crate) for unit testing) -----------------------
@@ -187,15 +187,15 @@ pub(crate) fn calculate_layout(
 mod tests {
     use super::*;
     use crate::gateway::ConnectionState;
-    use crate::state::{BenchInfo, ConversationState};
-    use crate::ui::bench_selector::BenchSelectorState;
+    use crate::state::{ConversationState, SpaceInfo};
     use crate::ui::input::InputState;
+    use crate::ui::space_selector::SpaceSelectorState;
     use uuid::Uuid;
 
-    fn default_bench() -> BenchInfo {
-        BenchInfo {
+    fn default_space() -> SpaceInfo {
+        SpaceInfo {
             id: Uuid::new_v4(),
-            name: "TestBench".to_string(),
+            name: "TestSpace".to_string(),
         }
     }
 
@@ -332,9 +332,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let input_state = InputState::new();
-        let selector_state = BenchSelectorState::new();
+        let selector_state = SpaceSelectorState::new();
         let params = RenderParams {
             state: &conv_state,
             input_state: &input_state,
@@ -350,9 +350,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let input_state = InputState::new();
-        let selector_state = BenchSelectorState::new();
+        let selector_state = SpaceSelectorState::new();
         let params = RenderParams {
             state: &conv_state,
             input_state: &input_state,
@@ -368,9 +368,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(60, 20); // below 80×24
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let input_state = InputState::new();
-        let selector_state = BenchSelectorState::new();
+        let selector_state = SpaceSelectorState::new();
         let params = RenderParams {
             state: &conv_state,
             input_state: &input_state,
@@ -393,13 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn render_does_not_panic_with_bench_selector_open() {
+    fn render_does_not_panic_with_space_selector_open() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let input_state = InputState::new();
-        let mut selector_state = BenchSelectorState::new();
+        let mut selector_state = SpaceSelectorState::new();
         selector_state.show();
         let params = RenderParams {
             state: &conv_state,
@@ -416,11 +416,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let mut input_state = InputState::new();
         input_state.text = "draft message".to_string();
         input_state.cursor_position = 5;
-        let selector_state = BenchSelectorState::new();
+        let selector_state = SpaceSelectorState::new();
         let params = RenderParams {
             state: &conv_state,
             input_state: &input_state,
@@ -436,12 +436,12 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let conv_state = ConversationState::new(default_bench());
+        let conv_state = ConversationState::new(default_space());
         let mut input_state = InputState::new();
         input_state.is_multi_line = true;
         input_state.text = "line 1\nline 2\nline 3".to_string();
         input_state.cursor_position = 14;
-        let selector_state = BenchSelectorState::new();
+        let selector_state = SpaceSelectorState::new();
         let params = RenderParams {
             state: &conv_state,
             input_state: &input_state,

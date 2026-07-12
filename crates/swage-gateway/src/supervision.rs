@@ -32,7 +32,7 @@ pub struct RunSummary {
     pub status: String,
     pub title: String,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -77,14 +77,14 @@ pub async fn get_run_detail(
 
 async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> {
     let now = Utc::now();
-    let mut bench_names = HashMap::new();
-    let mut session_benches = HashMap::new();
+    let mut space_names = HashMap::new();
+    let mut session_spaces = HashMap::new();
     let mut runs = Vec::new();
 
-    for bench in state.bench_store.list_all().await? {
-        bench_names.insert(bench.id, bench.name.clone());
-        for session in state.storage.list_by_bench(bench.id).await? {
-            session_benches.insert(session.id, bench.id);
+    for space in state.space_store.list_all().await? {
+        space_names.insert(space.id, space.name.clone());
+        for session in state.storage.list_by_space(space.id).await? {
+            session_spaces.insert(session.id, space.id);
 
             for thread in state.storage.list_by_session(session.id).await? {
                 for turn in state.storage.list_turns_by_thread(thread.id).await? {
@@ -103,7 +103,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                             .or_else(|| turn.assistant_response.clone())
                             .unwrap_or_else(|| "turn".to_string()),
                         session_id: Some(session.id),
-                        bench_id: Some(bench.id),
+                        space_id: Some(space.id),
                         started_at: turn.created_at,
                         updated_at: turn.completed_at.unwrap_or(turn.created_at),
                         completed_at: turn.completed_at,
@@ -122,10 +122,10 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 SessionPolicy::Continuation { session_id } => Some(*session_id),
                 SessionPolicy::Fresh { .. } => None,
             });
-            let bench_id = match &schedule.session_policy {
-                SessionPolicy::Fresh { bench_id, .. } => Some(*bench_id),
+            let space_id = match &schedule.session_policy {
+                SessionPolicy::Fresh { space_id, .. } => Some(*space_id),
                 SessionPolicy::Continuation { .. } => {
-                    session_id.and_then(|id| session_benches.get(&id).copied())
+                    session_id.and_then(|id| session_spaces.get(&id).copied())
                 }
             };
             runs.push(RunSummary {
@@ -134,7 +134,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 status: classify_schedule_run_status(run.state, run.created_at, now),
                 title: schedule.message.clone(),
                 session_id,
-                bench_id,
+                space_id,
                 started_at: run.created_at,
                 updated_at: run
                     .completed_at
@@ -145,7 +145,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
         }
     }
 
-    for session_id in session_benches.keys().copied() {
+    for session_id in session_spaces.keys().copied() {
         for run in state
             .storage
             .list_topology_runs_by_session(session_id)
@@ -155,12 +155,12 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 kind: "topology_run".to_string(),
                 id: run.id,
                 status: classify_topology_run_status(run.state.clone(), run.created_at, now),
-                title: bench_names
-                    .get(&session_benches[&session_id])
+                title: space_names
+                    .get(&session_spaces[&session_id])
                     .map(|name| format!("topology for {name}"))
                     .unwrap_or_else(|| "topology run".to_string()),
                 session_id: Some(run.session_id),
-                bench_id: session_benches.get(&run.session_id).copied(),
+                space_id: session_spaces.get(&run.session_id).copied(),
                 started_at: run.created_at,
                 updated_at: run.completed_at.unwrap_or(run.created_at),
                 completed_at: run.completed_at,
@@ -180,7 +180,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                         .clone()
                         .unwrap_or_else(|| node.node_id.clone()),
                     session_id: Some(run.session_id),
-                    bench_id: session_benches.get(&run.session_id).copied(),
+                    space_id: session_spaces.get(&run.session_id).copied(),
                     started_at: node.created_at,
                     updated_at: node.completed_at.unwrap_or(node.created_at),
                     completed_at: node.completed_at,
@@ -222,7 +222,7 @@ async fn get_turn_detail(state: &AppState, id: Uuid) -> Result<RunDetailResponse
             .or_else(|| turn.assistant_response.clone())
             .unwrap_or_else(|| "turn".to_string()),
         session_id: Some(session.id),
-        bench_id: Some(session.bench_id),
+        space_id: Some(session.space_id),
         started_at: turn.created_at,
         updated_at: turn.completed_at.unwrap_or(turn.created_at),
         completed_at: turn.completed_at,
@@ -262,15 +262,15 @@ async fn get_schedule_run_detail(
         SessionPolicy::Continuation { session_id } => Some(*session_id),
         SessionPolicy::Fresh { .. } => None,
     });
-    let bench_id = match &schedule.session_policy {
-        SessionPolicy::Fresh { bench_id, .. } => Some(*bench_id),
+    let space_id = match &schedule.session_policy {
+        SessionPolicy::Fresh { space_id, .. } => Some(*space_id),
         SessionPolicy::Continuation { session_id } => Some(
             state
                 .storage
                 .get_session(*session_id)
                 .await?
                 .ok_or_else(|| not_found("session", *session_id))?
-                .bench_id,
+                .space_id,
         ),
     };
     let summary = RunSummary {
@@ -279,7 +279,7 @@ async fn get_schedule_run_detail(
         status: classify_schedule_run_status(run.state, run.created_at, Utc::now()),
         title: schedule.message.clone(),
         session_id,
-        bench_id,
+        space_id,
         started_at: run.created_at,
         updated_at: run
             .completed_at
@@ -326,13 +326,13 @@ async fn get_topology_run_detail(
         status: classify_topology_run_status(run.state.clone(), run.created_at, Utc::now()),
         title: "topology run".to_string(),
         session_id: Some(run.session_id),
-        bench_id: Some(
+        space_id: Some(
             state
                 .storage
                 .get_session(run.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", run.session_id))?
-                .bench_id,
+                .space_id,
         ),
         started_at: run.created_at,
         updated_at: run.completed_at.unwrap_or(run.created_at),
@@ -376,13 +376,13 @@ async fn get_node_execution_detail(
             .clone()
             .unwrap_or_else(|| node.node_id.clone()),
         session_id: Some(run.session_id),
-        bench_id: Some(
+        space_id: Some(
             state
                 .storage
                 .get_session(run.session_id)
                 .await?
                 .ok_or_else(|| not_found("session", run.session_id))?
-                .bench_id,
+                .space_id,
         ),
         started_at: node.created_at,
         updated_at: node.completed_at.unwrap_or(node.created_at),

@@ -36,20 +36,20 @@ pub(crate) fn build_agent_config_with_workspace(
     agent_config
 }
 
-pub(crate) async fn build_agent_config_for_bench_workspace(
+pub(crate) async fn build_agent_config_for_space_workspace(
     state: &AppState,
     agent_id: String,
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
-    bench_id: Uuid,
+    space_id: Uuid,
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> AgentConfig {
     let workspace_policy =
-        load_trusted_workspace_policy(&state.storage, bench_id, active_workspace_attachment_id)
+        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
             .await;
     let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, bench_id, session_id);
+        agent_workspace_from_policy(&workspace_policy, space_id, session_id);
     build_agent_config_with_workspace(
         agent_id,
         config,
@@ -59,26 +59,26 @@ pub(crate) async fn build_agent_config_for_bench_workspace(
     )
 }
 
-pub(super) fn managed_scratch_workspace(bench_id: Uuid, session_id: Uuid) -> PathBuf {
+pub(super) fn managed_scratch_workspace(space_id: Uuid, session_id: Uuid) -> PathBuf {
     let base = swage_config::discovery::resolve_root()
         .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
     base.join("scratch")
-        .join("benches")
-        .join(bench_id.to_string())
+        .join("spaces")
+        .join(space_id.to_string())
         .join("sessions")
         .join(session_id.to_string())
 }
 
 pub(super) fn agent_workspace_from_policy(
     policy: &TrustedWorkspacePolicy,
-    bench_id: Uuid,
+    space_id: Uuid,
     session_id: Uuid,
 ) -> (PathBuf, Vec<PathBuf>) {
     let workspace_root = policy
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(bench_id, session_id));
+        .unwrap_or_else(|| managed_scratch_workspace(space_id, session_id));
     if let Err(error) = std::fs::create_dir_all(&workspace_root) {
         tracing::warn!(
             path = %workspace_root.display(),
@@ -99,12 +99,12 @@ pub(super) fn agent_workspace_from_policy(
 pub(super) fn append_approved_location_paths(
     allowed_paths: &mut Vec<PathBuf>,
     grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-    bench_id: Uuid,
+    space_id: Uuid,
 ) {
     for grant in grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
-        .filter(|grant| grant.bench_id.is_none() || grant.bench_id == Some(bench_id))
+        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
     {
         let path = PathBuf::from(&grant.name);
         if !allowed_paths.contains(&path) {
@@ -115,7 +115,7 @@ pub(super) fn append_approved_location_paths(
 
 pub(crate) fn load_session_config(
     state: &AppState,
-    bench_slug: &str,
+    space_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let root = match swage_config::discovery::resolve_root() {
@@ -123,7 +123,7 @@ pub(crate) fn load_session_config(
         Err(error) => {
             tracing::warn!(
                 error = %error.kind,
-                bench_slug,
+                space_slug,
                 agent_id,
                 "failed to resolve swage root; using active runtime configuration"
             );
@@ -131,19 +131,19 @@ pub(crate) fn load_session_config(
         }
     };
 
-    let bench_dir = root.join("benches").join(bench_slug);
-    let bench_config_exists = bench_dir.join("config.toml").exists();
-    let agent_config_exists = bench_dir
+    let space_dir = root.join("spaces").join(space_slug);
+    let space_config_exists = space_dir.join("config.toml").exists();
+    let agent_config_exists = space_dir
         .join("agents")
         .join(agent_id)
         .join("config.toml")
         .exists();
 
-    if !bench_config_exists && !agent_config_exists {
+    if !space_config_exists && !agent_config_exists {
         return Ok(state.active_config());
     }
 
-    swage_config::load_resolved_config_from(&root, bench_slug, agent_id)
+    swage_config::load_resolved_config_from(&root, space_slug, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 

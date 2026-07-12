@@ -20,7 +20,7 @@ use swage_storage::model::{
     NewAgentMessage, NewSession, NewThread, NewTurn, ThreadState, TurnState,
 };
 use swage_storage::store::{
-    AgentMessageStore, BenchStore, SessionStore, Storage, ThreadStore, TurnStore,
+    AgentMessageStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,12 +30,12 @@ use swage_storage::store::{
 /// Create a minimal storage with a session, thread, and turn for an agent.
 async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let bench = BenchStore::get_or_create_default(storage.as_ref())
+    let space = SpaceStore::get_or_create_default(storage.as_ref())
         .await
         .unwrap();
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: agent_id.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -146,12 +146,12 @@ async fn delegation_creates_child_turn_with_parent() {
     assert!(root_turn.parent_turn_id.is_none());
 
     // Create a child turn for agent-b with parent_turn_id = sender's turn.
-    let bench = BenchStore::get_or_create_default(storage.as_ref())
+    let space = SpaceStore::get_or_create_default(storage.as_ref())
         .await
         .unwrap();
     let child_session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "agent-b".into(),
             metadata: None,
             active_workspace_attachment_id: None,

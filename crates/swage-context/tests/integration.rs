@@ -65,9 +65,9 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     // Set up: create prompt rules at two hierarchy levels with different priorities
     let root = TempDir::new().unwrap();
     let global_prompts = root.path().join("prompts");
-    let bench_prompts = root.path().join("benches/test/prompts");
+    let space_prompts = root.path().join("spaces/test/prompts");
     fs::create_dir_all(&global_prompts).unwrap();
-    fs::create_dir_all(&bench_prompts).unwrap();
+    fs::create_dir_all(&space_prompts).unwrap();
 
     // Global rule with lower priority
     fs::write(
@@ -76,18 +76,18 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     )
     .unwrap();
 
-    // Bench rule with higher priority (appears first)
+    // Space rule with higher priority (appears first)
     fs::write(
-        bench_prompts.join("bench.md"),
-        "---\npriority: 100\n---\n\nYou are working on bench test.",
+        space_prompts.join("space.md"),
+        "---\npriority: 100\n---\n\nYou are working on space test.",
     )
     .unwrap();
 
     // Load prompt rules from hierarchy
-    let bench_path = root.path().join("benches/test");
+    let space_path = root.path().join("spaces/test");
     let levels = vec![
         (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Bench, bench_path.as_path()),
+        (swage_config::HierarchyLevel::Space, space_path.as_path()),
     ];
 
     // Load prompt rules (sorted by priority)
@@ -95,10 +95,10 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     assert!(warnings.is_empty(), "no warnings expected for valid rules");
     assert_eq!(rules.len(), 2, "should find rules at both levels");
 
-    // The higher-priority bench rule should come first
+    // The higher-priority space rule should come first
     assert_eq!(
         rules[0].priority, 100,
-        "bench rule (priority 100) should be first"
+        "space rule (priority 100) should be first"
     );
     assert_eq!(
         rules[1].priority, 10,
@@ -138,19 +138,19 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     match system_text {
         swage_core::ContentPart::Text { text } => {
             assert!(
-                text.contains("You are working on bench test."),
-                "higher-priority bench rule should appear in system message"
+                text.contains("You are working on space test."),
+                "higher-priority space rule should appear in system message"
             );
             assert!(
                 text.contains("You are a helpful assistant."),
                 "lower-priority global rule should appear in system message"
             );
-            // Priority order: bench rule content should appear before global
-            let bench_pos = text.find("You are working on bench test.").unwrap();
+            // Priority order: space rule content should appear before global
+            let space_pos = text.find("You are working on space test.").unwrap();
             let global_pos = text.find("You are a helpful assistant.").unwrap();
             assert!(
-                bench_pos < global_pos,
-                "bench rule (priority 100) should appear before global rule (priority 10)"
+                space_pos < global_pos,
+                "space rule (priority 100) should appear before global rule (priority 10)"
             );
         }
         _ => panic!("expected text content in system message"),
@@ -332,7 +332,7 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     .unwrap();
 
     // Agent: one rule with no frontmatter (default priority 0)
-    let agent_prompts = root.path().join("benches/test/agents/default/prompts");
+    let agent_prompts = root.path().join("spaces/test/agents/default/prompts");
     fs::create_dir_all(&agent_prompts).unwrap();
     fs::write(
         agent_prompts.join("persona.md"),
@@ -340,12 +340,12 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     )
     .unwrap();
 
-    // Load rules from three levels (bench has no prompts — silently skipped)
-    let bench_path = root.path().join("benches/test");
-    let agent_path = root.path().join("benches/test/agents/default");
+    // Load rules from three levels (space has no prompts — silently skipped)
+    let space_path = root.path().join("spaces/test");
+    let agent_path = root.path().join("spaces/test/agents/default");
     let levels = vec![
         (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Bench, bench_path.as_path()),
+        (swage_config::HierarchyLevel::Space, space_path.as_path()),
         (swage_config::HierarchyLevel::Agent, agent_path.as_path()),
     ];
 
@@ -414,12 +414,12 @@ timeout = 10
     )
     .unwrap();
 
-    // Bench config overrides the budget
-    let bench_dir = root.path().join("benches/test");
-    fs::create_dir_all(bench_dir.join("agents/default")).unwrap();
+    // Space config overrides the budget
+    let space_dir = root.path().join("spaces/test");
+    fs::create_dir_all(space_dir.join("agents/default")).unwrap();
     fs::create_dir_all(root.path().join("lenses/default")).unwrap();
     fs::write(
-        bench_dir.join("config.toml"),
+        space_dir.join("config.toml"),
         r#"
 [context]
 budget = 20000
@@ -430,13 +430,13 @@ budget = 20000
     let config = swage_config::load_resolved_config_from(root.path(), "test", "default")
         .expect("config should load successfully");
 
-    // Bench budget should override global
+    // Space budget should override global
     assert_eq!(
         config.context.budget,
         Some(20000),
-        "bench budget should override global"
+        "space budget should override global"
     );
-    // Timeout should inherit from global (not overridden by bench)
+    // Timeout should inherit from global (not overridden by space)
     assert_eq!(
         config.context.timeout, 10,
         "timeout should inherit from global level"

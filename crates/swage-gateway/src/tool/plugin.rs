@@ -46,7 +46,7 @@ impl Tool for PluginTool {
         self.manifest.parameters.clone()
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 

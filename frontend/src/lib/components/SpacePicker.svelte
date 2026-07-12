@@ -1,40 +1,40 @@
 <!--
-  Two-stage bench picker:
-    1. Card grid of bench names. Single click on a bench name selects it and reveals
+  Two-stage space picker:
+    1. Card grid of space names. Single click on a space name selects it and reveals
        a details panel below the grid (about, last opened, conversation count,
        attached folders — though the data is still thin server-side).
-    2. A deliberate second action — the bench card's "Open" button —
-       enters the bench, which is what calls benchStore.selectBench().
+    2. A deliberate second action — the space card's "Open" button —
+       enters the space, which is what calls spaceStore.selectSpace().
 
-  This component renders as the body content when no bench is selected. The
+  This component renders as the body content when no space is selected. The
   parent (AppLayout) collapses the top bar in that mode.
 
-  Per the same doc, bench cards show only the name — storage paths, attached
+  Per the same doc, space cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
 -->
 <script lang="ts">
   import {
-    attachBenchWorkspace,
-    detachBenchWorkspace,
-    listBenchSessions,
-    listBenchWorkspaces,
-    updateBench,
-  } from "../api/benches";
-  import type { BenchStore } from "../stores/benches";
-  import type { Bench, ConversationSummary, WorkspaceAttachment } from "../types";
+    attachSpaceWorkspace,
+    detachSpaceWorkspace,
+    listSpaceSessions,
+    listSpaceWorkspaces,
+    updateSpace,
+  } from "../api/spaces";
+  import type { SpaceStore } from "../stores/spaces";
+  import type { Space, ConversationSummary, WorkspaceAttachment } from "../types";
 
   interface Props {
-    benchStore?: BenchStore;
-    onBenchChange?: () => void;
-    onOpenBenchSettings?: (bench: Bench) => void;
+    spaceStore?: SpaceStore;
+    onSpaceChange?: () => void;
+    onOpenSpaceSettings?: (space: Space) => void;
   }
 
-  let { benchStore, onBenchChange, onOpenBenchSettings }: Props = $props();
+  let { spaceStore, onSpaceChange, onOpenSpaceSettings }: Props = $props();
 
-  // The picker tracks its own selection separately from benchStore.currentBench
+  // The picker tracks its own selection separately from spaceStore.currentSpace
   // — picking a card is a preview, not a switch. Switching only happens when
-  // the user explicitly opens the bench.
+  // the user explicitly opens the space.
   let selectedId = $state<string | null>(null);
 
   // Inline create form state.
@@ -57,22 +57,22 @@
   let relinkDrafts = $state<Record<string, string>>({});
   let relinkingWorkspaceId = $state<string | null>(null);
 
-  const benches = $derived(benchStore?.benches ?? []);
+  const spaces = $derived(spaceStore?.spaces ?? []);
   const selected = $derived(
-    selectedId ? benches.find((b) => b.id === selectedId) ?? null : null,
+    selectedId ? spaces.find((b) => b.id === selectedId) ?? null : null,
   );
   const selectedLastOpened = $derived(selected?.last_opened_at ?? null);
 
-  function selectCard(bench: Bench): void {
-    selectedId = bench.id;
-    aboutDraft = bench.description ?? "";
+  function selectCard(space: Space): void {
+    selectedId = space.id;
+    aboutDraft = space.description ?? "";
     aboutNotice = null;
     workspaceNotice = null;
   }
 
   $effect(() => {
-    const benchId = selected?.id;
-    if (!benchId) {
+    const spaceId = selected?.id;
+    if (!spaceId) {
       selectedWorkspaces = [];
       selectedConversations = [];
       detailError = null;
@@ -86,17 +86,17 @@
       return;
     }
     aboutDraft = selected.description ?? "";
-    void loadBenchDetail(benchId);
+    void loadSpaceDetail(spaceId);
   });
 
-  async function loadBenchDetail(benchId: string): Promise<void> {
+  async function loadSpaceDetail(spaceId: string): Promise<void> {
     detailError = null;
     try {
       const [workspaces, conversations] = await Promise.all([
-        listBenchWorkspaces(benchId),
-        listBenchSessions(benchId),
+        listSpaceWorkspaces(spaceId),
+        listSpaceSessions(spaceId),
       ]);
-      if (selected?.id !== benchId) return;
+      if (selected?.id !== spaceId) return;
       selectedWorkspaces = workspaces;
       selectedConversations = conversations;
       relinkDrafts = Object.fromEntries(
@@ -105,47 +105,47 @@
     } catch (error) {
       selectedWorkspaces = [];
       selectedConversations = [];
-      detailError = error instanceof Error ? error.message : "Failed to load bench detail.";
+      detailError = error instanceof Error ? error.message : "Failed to load space detail.";
     }
   }
 
-  async function openBench(id: string): Promise<void> {
-    if (!benchStore) return;
-    await benchStore.selectBench(id);
-    onBenchChange?.();
+  async function openSpace(id: string): Promise<void> {
+    if (!spaceStore) return;
+    await spaceStore.selectSpace(id);
+    onSpaceChange?.();
   }
 
   async function submitCreate(event: Event): Promise<void> {
     event.preventDefault();
-    if (!benchStore || !newName.trim()) return;
+    if (!spaceStore || !newName.trim()) return;
 
     isCreating = true;
     createError = null;
     try {
-      await benchStore.createBench(newName.trim());
+      await spaceStore.createSpace(newName.trim());
       showCreateForm = false;
       newName = "";
-      onBenchChange?.();
+      onSpaceChange?.();
     } catch (err) {
-      createError = err instanceof Error ? err.message : "Failed to create bench";
+      createError = err instanceof Error ? err.message : "Failed to create space";
     } finally {
       isCreating = false;
     }
   }
 
-  async function saveBenchAbout(): Promise<void> {
-    if (!selected || !benchStore) return;
+  async function saveSpaceAbout(): Promise<void> {
+    if (!selected || !spaceStore) return;
     isSavingAbout = true;
     detailError = null;
     aboutNotice = null;
     try {
-      const updated = await updateBench(selected.id, { description: aboutDraft.trim() });
-      await benchStore.loadBenches();
+      const updated = await updateSpace(selected.id, { description: aboutDraft.trim() });
+      await spaceStore.loadSpaces();
       selectedId = updated.id;
       aboutDraft = updated.description;
       aboutNotice = "Saved.";
     } catch (error) {
-      detailError = error instanceof Error ? error.message : "Failed to save bench about text.";
+      detailError = error instanceof Error ? error.message : "Failed to save space about text.";
     } finally {
       isSavingAbout = false;
     }
@@ -169,7 +169,7 @@
     detailError = null;
     workspaceNotice = null;
     try {
-      await attachBenchWorkspace(selected.id, {
+      await attachSpaceWorkspace(selected.id, {
         path: workspacePathDraft.trim(),
         label: workspaceLabelDraft.trim() || undefined,
         permissions: workspacePermissions(),
@@ -178,7 +178,7 @@
       });
       workspacePathDraft = "";
       workspaceLabelDraft = "";
-      await loadBenchDetail(selected.id);
+      await loadSpaceDetail(selected.id);
       workspaceNotice = "Workspace attached.";
     } catch (error) {
       detailError = error instanceof Error ? error.message : "Failed to attach workspace.";
@@ -200,8 +200,8 @@
     detailError = null;
     workspaceNotice = null;
     try {
-      await detachBenchWorkspace(selected.id, workspace.id);
-      await attachBenchWorkspace(selected.id, {
+      await detachSpaceWorkspace(selected.id, workspace.id);
+      await attachSpaceWorkspace(selected.id, {
         path: replacementPath,
         label: workspace.label,
         permissions: workspace.permissions,
@@ -209,7 +209,7 @@
         set_as_default: workspace.is_default,
       });
       setRelinkDraft(workspace.id, "");
-      await loadBenchDetail(selected.id);
+      await loadSpaceDetail(selected.id);
       workspaceNotice = "Workspace relinked.";
     } catch (error) {
       detailError = error instanceof Error ? error.message : "Failed to relink workspace.";
@@ -221,55 +221,55 @@
 
 <div class="picker">
   <header class="picker-head">
-    <p class="eyebrow">Pick a bench</p>
+    <p class="eyebrow">Pick a space</p>
     <h1 class="display">Choose where to work.</h1>
     <p class="lede">
-      Each bench is a separate workspace — its own conversations, memory, and
+      Each space is a separate workspace — its own conversations, memory, and
       attached files. Click a card to preview, then open it.
     </p>
   </header>
 
-  <div class="bench-grid">
-    {#each benches as bench (bench.id)}
-      {@const isSelected = selectedId === bench.id}
+  <div class="space-grid">
+    {#each spaces as space (space.id)}
+      {@const isSelected = selectedId === space.id}
       <!--
         Card is a non-interactive container; every interactive target inside is
         a real sibling <button>. The previous markup nested <span role="button">
         for Open and Settings inside a card <button>, which is invalid HTML and
         produces unpredictable accessibility-tree behaviour (UI audit f-2).
-        Preview (select) is the bench-name button; Open and Settings are its
+        Preview (select) is the space-name button; Open and Settings are its
         siblings. Double-click as a skip-preview shortcut is gone — it doesn't
         translate to touch and was only discoverable after first selecting a
         card (UI audit f-11). Open is always visible, so preview is optional.
       -->
-      <article class="bench-card" class:selected={isSelected} aria-label={`Bench ${bench.name}`}>
+      <article class="space-card" class:selected={isSelected} aria-label={`Space ${space.name}`}>
         <div class="card-top">
           <button
             type="button"
-            class="bench-name-btn"
-            onclick={() => selectCard(bench)}
+            class="space-name-btn"
+            onclick={() => selectCard(space)}
             aria-pressed={isSelected}
-            aria-label={isSelected ? `Previewing bench ${bench.name}` : `Preview bench ${bench.name}`}
+            aria-label={isSelected ? `Previewing space ${space.name}` : `Preview space ${space.name}`}
           >
-            <h2 class="bench-name">{bench.name}</h2>
+            <h2 class="space-name">{space.name}</h2>
           </button>
-          {#if onOpenBenchSettings}
+          {#if onOpenSpaceSettings}
             <button
               type="button"
-              class="bench-settings"
-              aria-label={`Bench settings for ${bench.name}`}
-              title="Bench settings"
-              onclick={() => onOpenBenchSettings?.(bench)}
+              class="space-settings"
+              aria-label={`Space settings for ${space.name}`}
+              title="Space settings"
+              onclick={() => onOpenSpaceSettings?.(space)}
             >
               ⚙
             </button>
           {/if}
         </div>
-        {#if bench.is_default}
+        {#if space.is_default}
           <span class="default-mark">Default</span>
         {/if}
         <div class="card-actions">
-          <button type="button" class="open-btn" onclick={() => openBench(bench.id)}>
+          <button type="button" class="open-btn" onclick={() => openSpace(space.id)}>
             Open
           </button>
           <span class="hint">Enter to open</span>
@@ -277,12 +277,12 @@
       </article>
     {/each}
 
-    <!-- New bench: dashed-border card that flips into an inline form. -->
+    <!-- New space: dashed-border card that flips into an inline form. -->
     {#if showCreateForm}
-      <form class="bench-card new-form" onsubmit={submitCreate}>
-        <label class="eyebrow" for="new-bench-name">New bench name</label>
+      <form class="space-card new-form" onsubmit={submitCreate}>
+        <label class="eyebrow" for="new-space-name">New space name</label>
         <input
-          id="new-bench-name"
+          id="new-space-name"
           type="text"
           bind:value={newName}
           placeholder="e.g. research"
@@ -312,21 +312,21 @@
     {:else}
       <button
         type="button"
-        class="bench-card new-card"
+        class="space-card new-card"
         onclick={() => {
           showCreateForm = true;
         }}
       >
         <span class="plus">＋</span>
-        <span class="new-label">New bench</span>
+        <span class="new-label">New space</span>
       </button>
     {/if}
   </div>
 
   {#if selected}
-    <aside class="bench-detail" aria-label="Bench detail">
+    <aside class="space-detail" aria-label="Space detail">
       <header class="detail-head">
-        <p class="eyebrow">Bench detail</p>
+        <p class="eyebrow">Space detail</p>
         <h2 class="detail-name">{selected.name}</h2>
       </header>
       <dl class="detail-grid">
@@ -342,14 +342,14 @@
             class="about-input"
             bind:value={aboutDraft}
             rows="3"
-            aria-label="Bench about text"
-            placeholder="What is this bench for?"
+            aria-label="Space about text"
+            placeholder="What is this space for?"
           ></textarea>
           <div class="about-actions">
             <button
               type="button"
               class="save-about"
-              onclick={saveBenchAbout}
+              onclick={saveSpaceAbout}
               disabled={isSavingAbout || aboutDraft.trim() === (selected.description ?? "")}
             >
               {isSavingAbout ? "Saving..." : "Save about"}
@@ -464,7 +464,7 @@
 
 <style>
   /*
-    Riso bench picker. Card grid, two-stage selection, dashed-border "new" card.
+    Riso space picker. Card grid, two-stage selection, dashed-border "new" card.
     Inherits palette from <body> so it switches with the theme toggle.
   */
 
@@ -517,7 +517,7 @@
     max-width: 50ch;
   }
 
-  .bench-grid {
+  .space-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 14px;
@@ -526,7 +526,7 @@
   /* Cards — flat ink frame. The offset orange shadow is reserved for the
      single active selection only, not hover, so it keeps meaning "selected"
      (UI audit f-18). Hovered cards signal state through border/fill alone. */
-  .bench-card {
+  .space-card {
     position: relative;
     background: var(--paper);
     color: var(--ink);
@@ -540,7 +540,7 @@
     isolation: isolate;
   }
 
-  .bench-card::after {
+  .space-card::after {
     content: "";
     position: absolute;
     inset: 0;
@@ -555,11 +555,11 @@
 
   /* Shadow on selected only — the single active selection. Hover no longer
      paints the offset so it stops competing for emphasis (UI audit f-18). */
-  .bench-card.selected::after {
+  .space-card.selected::after {
     opacity: var(--shadow-opacity);
   }
 
-  .bench-card.selected {
+  .space-card.selected {
     background: var(--ink);
     color: var(--paper);
   }
@@ -571,10 +571,10 @@
     gap: 12px;
   }
 
-  /* The bench name is the preview/select trigger — a real button so keyboard
+  /* The space name is the preview/select trigger — a real button so keyboard
      and SR are clean (UI audit f-2, f-12). It carries the display type; the
      <h2> inside keeps the heading semantics. */
-  .bench-name-btn {
+  .space-name-btn {
     background: none;
     border: none;
     padding: 0;
@@ -586,18 +586,18 @@
     max-width: 100%;
   }
 
-  .bench-name-btn:hover {
+  .space-name-btn:hover {
     text-decoration: underline;
     text-decoration-thickness: 2px;
     text-underline-offset: 4px;
   }
 
-  .bench-name-btn:focus-visible {
+  .space-name-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 3px;
   }
 
-  .bench-name {
+  .space-name {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
@@ -608,7 +608,7 @@
     color: inherit;
   }
 
-  .bench-settings {
+  .space-settings {
     flex-shrink: 0;
     background: none;
     border: 1px solid var(--rule-soft);
@@ -625,13 +625,13 @@
     padding: 0;
   }
 
-  .bench-settings:hover,
-  .bench-settings:focus-visible {
+  .space-settings:hover,
+  .space-settings:focus-visible {
     opacity: 1;
     border-color: var(--ink);
   }
 
-  .bench-settings:focus-visible {
+  .space-settings:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -650,7 +650,7 @@
     color: var(--ink-orange);
   }
 
-  .bench-card.selected .default-mark {
+  .space-card.selected .default-mark {
     color: var(--accent);
   }
 
@@ -701,7 +701,7 @@
     color: rgba(255, 248, 238, 0.7);
   }
 
-  /* New-bench card and inline form. */
+  /* New-space card and inline form. */
   .new-card,
   .new-form {
     border-style: dashed;
@@ -791,7 +791,7 @@
   }
 
   /* Detail panel below the grid — same visual weight as a card. */
-  .bench-detail {
+  .space-detail {
     border: 2px solid var(--ink);
     background: var(--paper);
     padding: 18px 22px;
@@ -1034,7 +1034,7 @@
       padding: 24px 22px;
     }
 
-    .bench-grid {
+    .space-grid {
       grid-template-columns: 1fr;
     }
   }

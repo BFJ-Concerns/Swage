@@ -1,19 +1,19 @@
-<!-- Bench selector — interactive dropdown with bench management. -->
+<!-- Space selector — interactive dropdown with space management. -->
 <script lang="ts">
-  import type { BenchStore } from "../stores/benches";
+  import type { SpaceStore } from "../stores/spaces";
   import { onMount, onDestroy } from "svelte";
 
   interface Props {
     // Injected by App.svelte once all stores are wired. Optional so AppLayout
     // can render without crashing before the wiring is complete (same pattern
     // as ConversationList).
-    benchStore?: BenchStore;
-    // Callback invoked after the active bench changes, so App.svelte can
-    // reload conversations for the newly selected bench.
-    onBenchChange?: () => void;
+    spaceStore?: SpaceStore;
+    // Callback invoked after the active space changes, so App.svelte can
+    // reload conversations for the newly selected space.
+    onSpaceChange?: () => void;
   }
 
-  let { benchStore, onBenchChange }: Props = $props();
+  let { spaceStore, onSpaceChange }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Local state
@@ -27,7 +27,7 @@
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
 
-  // Track which bench is awaiting inline delete confirmation.
+  // Track which space is awaiting inline delete confirmation.
   let pendingDelete = $state<string | null>(null);
 
   // ---------------------------------------------------------------------------
@@ -69,54 +69,54 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Bench selection
+  // Space selection
   // ---------------------------------------------------------------------------
 
-  async function selectBench(id: string) {
-    if (!benchStore) return;
+  async function selectSpace(id: string) {
+    if (!spaceStore) return;
     closeDropdown();
-    await benchStore.selectBench(id);
-    onBenchChange?.();
+    await spaceStore.selectSpace(id);
+    onSpaceChange?.();
   }
 
   // ---------------------------------------------------------------------------
-  // Bench creation
+  // Space creation
   // ---------------------------------------------------------------------------
 
   async function submitCreate(event: Event) {
     event.preventDefault();
-    if (!benchStore || !newName.trim()) return;
+    if (!spaceStore || !newName.trim()) return;
 
     isCreating = true;
     createError = null;
 
     try {
-      await benchStore.createBench(newName.trim());
-      onBenchChange?.();
+      await spaceStore.createSpace(newName.trim());
+      onSpaceChange?.();
       closeDropdown();
     } catch (err) {
       // Surface API error messages, such as duplicate names.
-      createError = err instanceof Error ? err.message : "Failed to create bench";
+      createError = err instanceof Error ? err.message : "Failed to create space";
     } finally {
       isCreating = false;
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Bench deletion
+  // Space deletion
   // ---------------------------------------------------------------------------
 
   function requestDelete(id: string, event: MouseEvent) {
-    // Prevent the click from bubbling up to the bench-item and selecting it.
+    // Prevent the click from bubbling up to the space-item and selecting it.
     event.stopPropagation();
     pendingDelete = id;
   }
 
   async function confirmDelete(id: string, event: MouseEvent) {
     event.stopPropagation();
-    if (!benchStore) return;
-    await benchStore.deleteBench(id);
-    onBenchChange?.();
+    if (!spaceStore) return;
+    await spaceStore.deleteSpace(id);
+    onSpaceChange?.();
     pendingDelete = null;
   }
 
@@ -130,43 +130,43 @@
   // ---------------------------------------------------------------------------
 
   // The label to show on the selector button.
-  const currentName = $derived(benchStore?.currentBench?.name ?? "default");
+  const currentName = $derived(spaceStore?.currentSpace?.name ?? "default");
 </script>
 
 <!--
   Restyled for the riso shell. In the new design this control sits in the
-  navy ink-coloured bench-head (cream typography). The bench *name* is shown
+  navy ink-coloured space-head (cream typography). The space *name* is shown
   by the parent (AppLayout's <h2 class="name">), so this control becomes a
   small "switch / new" affordance underneath.
 
-  TODO(debt): replace with a back-arrow that returns to a dedicated bench
-  picker route, plus a ▾ menu for bench-scoped settings.
-  Blocked by: bench picker route not yet implemented.
+  TODO(debt): replace with a back-arrow that returns to a dedicated space
+  picker route, plus a ▾ menu for space-scoped settings.
+  Blocked by: space picker route not yet implemented.
 -->
-<div class="bench-selector">
-  <button class="toggle-btn" onclick={toggleDropdown} title="Switch bench">
+<div class="space-selector">
+  <button class="toggle-btn" onclick={toggleDropdown} title="Switch space">
     <span class="value">Switch — {currentName}</span>
     <span class="caret" class:open={isOpen}>▾</span>
   </button>
 
-  {#if isOpen && benchStore}
-    <div class="bench-dropdown">
-      <!-- Bench list -->
-      <ul class="bench-list">
-        {#each benchStore.benches as bench (bench.id)}
-          {@const isActive = benchStore.currentBench?.id === bench.id}
-          {@const isDefault = bench.name === "default"}
-          {@const isPendingDelete = pendingDelete === bench.id}
+  {#if isOpen && spaceStore}
+    <div class="space-dropdown">
+      <!-- Space list -->
+      <ul class="space-list">
+        {#each spaceStore.spaces as space (space.id)}
+          {@const isActive = spaceStore.currentSpace?.id === space.id}
+          {@const isDefault = space.name === "default"}
+          {@const isPendingDelete = pendingDelete === space.id}
 
           <li
-            class="bench-item"
+            class="space-item"
             class:active={isActive}
           >
             <button
-              class="bench-select-btn"
-              onclick={() => selectBench(bench.id)}
+              class="space-select-btn"
+              onclick={() => selectSpace(space.id)}
             >
-              <span class="bench-name">{bench.name}</span>
+              <span class="space-name">{space.name}</span>
             </button>
 
             {#if isPendingDelete}
@@ -174,19 +174,19 @@
               <span class="delete-confirm">
                 <button
                   class="confirm-delete-btn"
-                  onclick={(e) => confirmDelete(bench.id, e)}
+                  onclick={(e) => confirmDelete(space.id, e)}
                 >Delete</button>
                 <button class="cancel-delete-btn" onclick={cancelDelete}>
                   Cancel
                 </button>
               </span>
             {:else if !isDefault}
-              <!-- Default bench cannot be deleted. -->
+              <!-- Default space cannot be deleted. -->
               <button
-                class="delete-bench-btn"
-                title="Delete bench"
-                aria-label={`Delete bench ${bench.name}`}
-                onclick={(e) => requestDelete(bench.id, e)}
+                class="delete-space-btn"
+                title="Delete space"
+                aria-label={`Delete space ${space.name}`}
+                onclick={(e) => requestDelete(space.id, e)}
               >
                 <span aria-hidden="true">×</span>
               </button>
@@ -201,13 +201,13 @@
       {#if showCreateForm}
         <!-- Inline create form -->
         <form
-          class="create-bench-form"
+          class="create-space-form"
           onsubmit={submitCreate}
         >
           <input
             type="text"
             name="name"
-            placeholder="Bench name"
+            placeholder="Space name"
             bind:value={newName}
             required
           />
@@ -229,10 +229,10 @@
         </form>
       {:else}
         <button
-          class="create-bench-btn"
+          class="create-space-btn"
           onclick={() => { showCreateForm = true; }}
         >
-          + New bench
+          + New space
         </button>
       {/if}
     </div>
@@ -242,11 +242,11 @@
 <style>
   /*
     The selector inherits its colour context from its parent: when in the
-    navy bench-head, "color: inherit" gives cream type; when in the picker
+    navy space-head, "color: inherit" gives cream type; when in the picker
     nav (paper background), it gives navy ink. The dropdown opens below the
-    bench-head and uses the riso-block treatment.
+    space-head and uses the riso-block treatment.
   */
-  .bench-selector {
+  .space-selector {
     margin-top: 12px;
     position: relative;
     font-family: var(--font-mono);
@@ -294,7 +294,7 @@
   }
 
   /* Dropdown: a riso-block panel that drops below the toggle. */
-  .bench-dropdown {
+  .space-dropdown {
     position: absolute;
     top: calc(100% + 6px);
     left: 0;
@@ -306,7 +306,7 @@
     isolation: isolate;
   }
 
-  .bench-dropdown::after {
+  .space-dropdown::after {
     content: "";
     position: absolute;
     inset: 0;
@@ -318,14 +318,14 @@
     pointer-events: none;
   }
 
-  /* Bench list rows. */
-  .bench-list {
+  /* Space list rows. */
+  .space-list {
     list-style: none;
     margin: 0;
     padding: 0;
   }
 
-  .bench-item {
+  .space-item {
     display: flex;
     align-items: center;
     padding: 9px 14px;
@@ -335,20 +335,20 @@
     color: var(--ink);
   }
 
-  .bench-item:last-child {
+  .space-item:last-child {
     border-bottom: none;
   }
 
-  .bench-item:hover {
+  .space-item:hover {
     background: rgba(14, 59, 102, 0.08);
   }
 
-  .bench-item.active {
+  .space-item.active {
     background: var(--ink);
     color: var(--paper);
   }
 
-  .bench-select-btn {
+  .space-select-btn {
     flex: 1;
     min-width: 0;
     background: none;
@@ -362,7 +362,7 @@
     letter-spacing: inherit;
   }
 
-  .bench-name {
+  .space-name {
     flex: 1;
     overflow: hidden;
     white-space: nowrap;
@@ -371,7 +371,7 @@
 
   /* Delete controls — always rendered so touch and keyboard can reach them,
      low-contrast until hover/focus. UI audit f-4. */
-  .delete-bench-btn {
+  .delete-space-btn {
     background: none;
     border: none;
     color: inherit;
@@ -385,13 +385,13 @@
     transition: opacity 120ms ease, color 120ms ease;
   }
 
-  .delete-bench-btn:hover,
-  .delete-bench-btn:focus-visible {
+  .delete-space-btn:hover,
+  .delete-space-btn:focus-visible {
     opacity: 1;
     color: var(--ink-orange);
   }
 
-  .delete-bench-btn:focus-visible {
+  .delete-space-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -438,7 +438,7 @@
     margin: 4px 0;
   }
 
-  .create-bench-btn {
+  .create-space-btn {
     width: 100%;
     padding: 9px 14px;
     background: none;
@@ -453,12 +453,12 @@
     cursor: pointer;
   }
 
-  .create-bench-btn:hover {
+  .create-space-btn:hover {
     background: rgba(240, 106, 58, 0.1);
   }
 
-  /* Create-bench form. */
-  .create-bench-form {
+  /* Create-space form. */
+  .create-space-form {
     padding: 12px 14px;
     display: flex;
     flex-direction: column;
@@ -466,7 +466,7 @@
     border-top: 1px dotted var(--rule-soft);
   }
 
-  .create-bench-form input {
+  .create-space-form input {
     width: 100%;
     padding: 8px 10px;
     border: 1px solid var(--ink);
@@ -476,7 +476,7 @@
     color: var(--ink);
   }
 
-  .create-bench-form input:focus {
+  .create-space-form input:focus {
     outline: none;
     background: rgba(240, 106, 58, 0.06);
   }

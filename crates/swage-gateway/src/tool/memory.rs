@@ -1,4 +1,4 @@
-//! MemoryTool — read and write persistent per-bench memory files.
+//! MemoryTool — read and write persistent per-space memory files.
 //!
 //! The memory directory is derived from the tool context's working directory:
 //! `{working_directory}/.swage/memory`. This keeps the tool stateless and
@@ -62,7 +62,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read and write persistent per-bench memory files."
+        "Read and write persistent per-space memory files."
     }
 
     fn parameters(&self) -> Value {

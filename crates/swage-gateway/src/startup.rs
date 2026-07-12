@@ -175,10 +175,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
-    let bench_store: Arc<dyn swage_storage::store::BenchStore> = raw_storage;
+    let space_store: Arc<dyn swage_storage::store::SpaceStore> = raw_storage;
     let mut state = crate::state::AppState::new(
         storage,
-        bench_store,
+        space_store,
         provider,
         config.clone(),
         tool_dispatcher,
@@ -187,9 +187,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     state.voice_provider = voice_provider;
     state.telegram = telegram;
     state.start_agent_message_expiry();
-    crate::execution_host::register_local_execution_host(&state).await;
-    if let Err(error) = crate::execution_host::restore_registered_execution_hosts(&state).await {
-        eprintln!("Failed to restore execution hosts: {error}");
+    crate::device::register_local_device(&state).await;
+    if let Err(error) = crate::device::restore_registered_devices(&state).await {
+        eprintln!("Failed to restore devices: {error}");
         std::process::exit(1);
     }
     let router = crate::server::build_router(state.clone());
@@ -574,7 +574,7 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
 /// Open the persistent SQLite storage backend.
 ///
 /// Returns `Arc<SqliteStorage>` rather than an erased trait object so the caller
-/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn BenchStore>`
+/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn SpaceStore>`
 /// from the same underlying connection pool.
 fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
     Arc::new(

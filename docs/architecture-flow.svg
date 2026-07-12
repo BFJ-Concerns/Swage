@@ -165,7 +165,7 @@
   <rect class="section ui" x="455" y="185" width="330" height="122"/>
   <text class="box-title" x="480" y="222">Browser web UI</text>
   <text class="box-subtitle" x="480" y="249">frontend/src/App.svelte</text>
-  <text class="small" x="480" y="276">Svelte 5 app for benches, conversations,</text>
+  <text class="small" x="480" y="276">Svelte 5 app for spaces, conversations,</text>
   <text class="small" x="480" y="294">builder, operator and reference studio views.</text>
 
   <rect class="section ui" x="840" y="185" width="330" height="122"/>
@@ -185,13 +185,13 @@
   <rect class="section front" x="70" y="384" width="420" height="150"/>
   <text class="box-title" x="95" y="421">Svelte app shell and router</text>
   <text class="box-subtitle" x="95" y="448">App.svelte + lib/router.ts</text>
-  <text class="small" x="95" y="475">Initialises benches, conversations and lenses;</text>
+  <text class="small" x="95" y="475">Initialises spaces, conversations and lenses;</text>
   <text class="small" x="95" y="493">syncs /conversations/:id with active selection;</text>
   <text class="small" x="95" y="511">disconnects WS when leaving conversation surface.</text>
 
   <rect class="section front" x="535" y="384" width="420" height="150"/>
   <text class="box-title" x="560" y="421">Client state stores</text>
-  <text class="box-subtitle" x="560" y="448">benches, conversations, connection, streaming</text>
+  <text class="box-subtitle" x="560" y="448">spaces, conversations, connection, streaming</text>
   <text class="small" x="560" y="475">Connection store relays server events.</text>
   <text class="small" x="560" y="493">Streaming store accumulates tokens and tool calls.</text>
   <text class="small" x="560" y="511">Conversation store refreshes durable history.</text>
@@ -199,7 +199,7 @@
   <rect class="section front" x="1000" y="384" width="420" height="150"/>
   <text class="box-title" x="1025" y="421">Typed API clients</text>
   <text class="box-subtitle" x="1025" y="448">lib/api/*.ts + WebSocket client</text>
-  <text class="small" x="1025" y="475">REST manages benches, workspaces and sessions.</text>
+  <text class="small" x="1025" y="475">REST manages spaces, workspaces and sessions.</text>
   <text class="small" x="1025" y="493">WS sends messages, cancellation, approvals and</text>
   <text class="small" x="1025" y="511">subscriptions; receives streaming ServerEvent frames.</text>
 
@@ -215,7 +215,7 @@
   <rect class="section gateway" x="445" y="613" width="330" height="180"/>
   <text class="box-title" x="470" y="650">REST handlers</text>
   <text class="box-subtitle" x="470" y="677">handlers.rs</text>
-  <text class="small" x="470" y="704">Bench/session CRUD, lenses, shared objects,</text>
+  <text class="small" x="470" y="704">Space/session CRUD, lenses, shared objects,</text>
   <text class="small" x="470" y="722">builder proposals, operator views, attachments,</text>
   <text class="small" x="470" y="740">materials, approvals and topology endpoints.</text>
 
@@ -229,23 +229,23 @@
   <rect class="section gateway" x="1195" y="613" width="330" height="180"/>
   <text class="box-title" x="1220" y="650">AppState</text>
   <text class="box-subtitle" x="1220" y="677">state.rs</text>
-  <text class="small" x="1220" y="704">Shared Arcs for storage, bench store, provider,</text>
+  <text class="small" x="1220" y="704">Shared Arcs for storage, space store, provider,</text>
   <text class="small" x="1220" y="722">tool dispatcher, sandbox, active turns, approvals,</text>
-  <text class="small" x="1220" y="740">presence, execution hosts and shutdown signal.</text>
+  <text class="small" x="1220" y="740">presence, devices and shutdown signal.</text>
 
   <!-- Turn execution layer -->
   <text class="layer-title" x="70" y="852">Turn execution path</text>
   <rect class="section runtime" x="70" y="871" width="330" height="200"/>
   <text class="box-title" x="95" y="908">Turn orchestration</text>
   <text class="box-subtitle" x="95" y="935">turn.rs</text>
-  <text class="small" x="95" y="962">Resolves session, bench, thread and config.</text>
+  <text class="small" x="95" y="962">Resolves session, space, thread and config.</text>
   <text class="small" x="95" y="980">Creates Pending turn, records user input,</text>
   <text class="small" x="95" y="998">runs inbound hooks and cancellation guard.</text>
 
   <rect class="section runtime" x="445" y="871" width="330" height="200"/>
   <text class="box-title" x="470" y="908">Context assembly</text>
   <text class="box-subtitle" x="470" y="935">swage-context + swage-python</text>
-  <text class="small" x="470" y="962">Builds prompts, active skills, bench memory</text>
+  <text class="small" x="470" y="962">Builds prompts, active skills, space memory</text>
   <text class="small" x="470" y="980">and thread history, then applies token budget.</text>
   <text class="small" x="470" y="998">Optional Python assemblies run in child workers.</text>
 
@@ -271,15 +271,15 @@
 
   <rect class="section tooling" x="445" y="1150" width="330" height="72"/>
   <text class="box-title" x="470" y="1182">Tool execution paths</text>
-  <text class="small" x="470" y="1206">Built-ins, plugins, python_execute, sandbox, hosts</text>
+  <text class="small" x="470" y="1206">Built-ins, plugins, python_execute, sandbox, devices</text>
 
   <rect class="section store" x="820" y="1150" width="330" height="72"/>
   <text class="box-title" x="845" y="1182">SQLite storage</text>
-  <text class="small" x="845" y="1206">Benches, sessions, threads, turns, messages, tools</text>
+  <text class="small" x="845" y="1206">Spaces, sessions, threads, turns, messages, tools</text>
 
   <rect class="section external" x="1195" y="1150" width="330" height="72"/>
   <text class="box-title" x="1220" y="1182">Outside world</text>
-  <text class="small" x="1220" y="1206">LLMs, web/search, files, remote hosts, channels</text>
+  <text class="small" x="1220" y="1206">LLMs, web/search, files, remote devices, channels</text>
 
   <!-- Main arrows -->
   <path class="arrow-blue" d="M235 307 C235 340, 235 352, 280 384"/>
@@ -316,7 +316,7 @@
   <text class="flow-title" x="1590" y="222">Message flow</text>
 
   <circle class="num-circle" cx="1595" cy="262" r="13"/><text class="num" x="1591" y="267">1</text>
-  <text class="flow-text" x="1620" y="258">UI selects a bench</text>
+  <text class="flow-text" x="1620" y="258">UI selects a space</text>
   <text class="flow-text" x="1620" y="276">and conversation via REST.</text>
 
   <circle class="num-circle" cx="1595" cy="328" r="13"/><text class="num" x="1591" y="333">2</text>

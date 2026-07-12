@@ -15,7 +15,7 @@ use crate::store::TeamStore;
 
 fn row_to_team(row: &rusqlite::Row<'_>) -> rusqlite::Result<Team> {
     let id: String = row.get(0)?;
-    let bench_id: String = row.get(1)?;
+    let space_id: String = row.get(1)?;
     let members_json: String = row.get(5)?;
     let agents_json: String = row.get(6)?;
     let tasks_json: String = row.get(7)?;
@@ -26,7 +26,7 @@ fn row_to_team(row: &rusqlite::Row<'_>) -> rusqlite::Result<Team> {
 
     Ok(Team {
         id: parse_uuid(&id)?,
-        bench_id: parse_uuid(&bench_id)?,
+        space_id: parse_uuid(&space_id)?,
         name: row.get(2)?,
         description: row.get(3)?,
         entry_agent_id: row.get(4)?,
@@ -170,11 +170,11 @@ impl TeamStore for SqliteStorage {
             })?;
 
             conn.execute(
-                "INSERT INTO teams (id, bench_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at)
+                "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
                 params![
                     id.to_string(),
-                    team.bench_id.to_string(),
+                    team.space_id.to_string(),
                     &team.name,
                     &team.description,
                     &team.entry_agent_id,
@@ -187,7 +187,7 @@ impl TeamStore for SqliteStorage {
 
             Ok(Team {
                 id,
-                bench_id: team.bench_id,
+                space_id: team.space_id,
                 name: team.name,
                 description: team.description,
                 entry_agent_id: team.entry_agent_id,
@@ -204,7 +204,7 @@ impl TeamStore for SqliteStorage {
     async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, bench_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
+                "SELECT id, space_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE id = ?1",
                 params![id.to_string()],
                 row_to_team,
@@ -216,15 +216,15 @@ impl TeamStore for SqliteStorage {
 
     async fn get_team_by_name(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         name: &str,
     ) -> Result<Option<Team>, StorageError> {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, bench_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
-                 FROM teams WHERE bench_id = ?1 AND name = ?2",
-                params![bench_id.to_string(), name],
+                "SELECT id, space_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
+                 FROM teams WHERE space_id = ?1 AND name = ?2",
+                params![space_id.to_string(), name],
                 row_to_team,
             )
             .optional()
@@ -232,13 +232,13 @@ impl TeamStore for SqliteStorage {
         .await
     }
 
-    async fn list_teams_by_bench(&self, bench_id: Uuid) -> Result<Vec<Team>, StorageError> {
+    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
-                 FROM teams WHERE bench_id = ?1 ORDER BY created_at ASC",
+                "SELECT id, space_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
+                 FROM teams WHERE space_id = ?1 ORDER BY created_at ASC",
             )?;
-            let rows = stmt.query_map(params![bench_id.to_string()], row_to_team)?;
+            let rows = stmt.query_map(params![space_id.to_string()], row_to_team)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
@@ -318,7 +318,7 @@ impl TeamStore for SqliteStorage {
             )?;
 
             conn.query_row(
-                "SELECT id, bench_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
+                "SELECT id, space_id, name, description, entry_agent_id, members, agents_json, tasks_json, created_at, updated_at
                  FROM teams WHERE id = ?1",
                 params![id.to_string()],
                 row_to_team,
@@ -341,7 +341,7 @@ impl TeamStore for SqliteStorage {
 mod tests {
     use super::*;
     use crate::sqlite::SqliteStorage;
-    use crate::store::BenchStore;
+    use crate::store::SpaceStore;
 
     fn agent(id: &str) -> crate::model::TeamAgentDefinition {
         crate::model::TeamAgentDefinition {
@@ -356,11 +356,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_team() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
 
         let created = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "research".into(),
                 description: "Research team".into(),
                 entry_agent_id: "planner".into(),
@@ -381,17 +381,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_team_by_name_scopes_to_bench() {
+    async fn get_team_by_name_scopes_to_space() {
         let storage = SqliteStorage::in_memory().unwrap();
         let a = storage
-            .create(crate::model::NewBench {
+            .create(crate::model::NewSpace {
                 name: "alpha".into(),
                 slug: "alpha".into(),
             })
             .await
             .unwrap();
         let b = storage
-            .create(crate::model::NewBench {
+            .create(crate::model::NewSpace {
                 name: "beta".into(),
                 slug: "beta".into(),
             })
@@ -400,7 +400,7 @@ mod tests {
 
         storage
             .create_team(NewTeam {
-                bench_id: a.id,
+                space_id: a.id,
                 name: "shared-name".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -411,7 +411,7 @@ mod tests {
             .unwrap();
         storage
             .create_team(NewTeam {
-                bench_id: b.id,
+                space_id: b.id,
                 name: "shared-name".into(),
                 description: String::new(),
                 entry_agent_id: "reviewer".into(),
@@ -426,18 +426,18 @@ mod tests {
             .await
             .unwrap()
             .expect("team exists");
-        assert_eq!(found.bench_id, b.id);
+        assert_eq!(found.space_id, b.id);
         assert_eq!(found.entry_agent_id, "reviewer");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_team_changes_members_and_entry_agent() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
 
         let created = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "review".into(),
                 description: "Initial".into(),
                 entry_agent_id: "planner".into(),
@@ -466,13 +466,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_teams_by_bench_orders_by_created_at() {
+    async fn list_teams_by_space_orders_by_created_at() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
 
         storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "first".into(),
                 description: String::new(),
                 entry_agent_id: "a".into(),
@@ -483,7 +483,7 @@ mod tests {
             .unwrap();
         storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "second".into(),
                 description: String::new(),
                 entry_agent_id: "b".into(),
@@ -493,7 +493,7 @@ mod tests {
             .await
             .unwrap();
 
-        let teams = storage.list_teams_by_bench(bench.id).await.unwrap();
+        let teams = storage.list_teams_by_space(space.id).await.unwrap();
         assert_eq!(
             teams
                 .iter()
@@ -506,11 +506,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_team_returns_true_once() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
 
         let created = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "temporary".into(),
                 description: String::new(),
                 entry_agent_id: "agent".into(),

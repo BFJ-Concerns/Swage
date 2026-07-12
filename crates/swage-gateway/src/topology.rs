@@ -22,9 +22,9 @@ use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKindT
 
 use crate::state::AppState;
 use crate::turn::{
-    GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config_for_bench_workspace,
+    GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config_for_space_workspace,
     build_assembly_elements, build_gateway_dispatcher_with_unsandboxed_degradation,
-    load_active_skills_for_agent, load_bench_memory, resolve_swage_root,
+    load_active_skills_for_agent, load_space_memory, resolve_swage_root,
 };
 use crate::websocket::ServerEvent;
 
@@ -40,12 +40,12 @@ pub enum TopologyEngineError {
     HookBlocked { event: String, reason: String },
     #[error("topology hook requested approval for {event}: {prompt}")]
     HookApprovalRequested { event: String, prompt: String },
-    #[error("bench {bench_id} for team {team_id} was not found")]
-    TeamBenchMissing { team_id: Uuid, bench_id: Uuid },
+    #[error("space {space_id} for team {team_id} was not found")]
+    TeamSpaceMissing { team_id: Uuid, space_id: Uuid },
     #[error("session {session_id} was not found")]
     SessionMissing { session_id: Uuid },
-    #[error("session {session_id} does not belong to team bench {bench_id}")]
-    SessionBenchMismatch { session_id: Uuid, bench_id: Uuid },
+    #[error("session {session_id} does not belong to team space {space_id}")]
+    SessionSpaceMismatch { session_id: Uuid, space_id: Uuid },
     #[error("topology graph is invalid at runtime: {0}")]
     InvalidGraph(String),
 }
@@ -96,14 +96,14 @@ impl TopologyExecutor {
         &self,
         request: TopologyExecutionRequest,
     ) -> Result<TopologyExecutionResult, TopologyEngineError> {
-        let bench = self
+        let space = self
             .state
-            .bench_store
-            .get(request.team.bench_id)
+            .space_store
+            .get(request.team.space_id)
             .await?
-            .ok_or(TopologyEngineError::TeamBenchMissing {
+            .ok_or(TopologyEngineError::TeamSpaceMissing {
                 team_id: request.team.id,
-                bench_id: request.team.bench_id,
+                space_id: request.team.space_id,
             })?;
 
         let session_id = self
@@ -212,14 +212,14 @@ impl TopologyExecutor {
 
                 let state = self.state.clone();
                 let team = request.team.clone();
-                let bench = bench.clone();
+                let space = space.clone();
                 let topology_run_id = topology_run.id;
                 let cancel_token = run_cancel_token.child_token();
                 let hook_registry = self.hook_registry.clone();
                 active.spawn(async move {
                     execute_node(
                         state,
-                        bench,
+                        space,
                         team,
                         session_id,
                         topology_run_id,
@@ -420,10 +420,10 @@ impl TopologyExecutor {
                     .get_session(session_id)
                     .await?
                     .ok_or(TopologyEngineError::SessionMissing { session_id })?;
-                if session.bench_id != team.bench_id {
-                    return Err(TopologyEngineError::SessionBenchMismatch {
+                if session.space_id != team.space_id {
+                    return Err(TopologyEngineError::SessionSpaceMismatch {
                         session_id,
-                        bench_id: team.bench_id,
+                        space_id: team.space_id,
                     });
                 }
                 Ok(session_id)
@@ -432,7 +432,7 @@ impl TopologyExecutor {
                 .state
                 .storage
                 .create_session(NewSession {
-                    bench_id: team.bench_id,
+                    space_id: team.space_id,
                     agent_id: team.entry_agent_id.clone(),
                     metadata: None,
                     active_workspace_attachment_id: None,
@@ -461,7 +461,7 @@ struct NodeCompletion {
 #[allow(clippy::too_many_arguments)]
 async fn execute_node(
     state: AppState,
-    bench: swage_storage::model::Bench,
+    space: swage_storage::model::Space,
     team: Team,
     session_id: Uuid,
     topology_run_id: Uuid,
@@ -518,7 +518,7 @@ async fn execute_node(
                 .unwrap_or_else(|| team.entry_agent_id.clone());
             execute_agent_node(
                 &state,
-                &bench,
+                &space,
                 &team,
                 session_id,
                 &node,
@@ -641,7 +641,7 @@ struct NodeRetryRecord {
 #[allow(clippy::too_many_arguments)]
 async fn execute_agent_node(
     state: &AppState,
-    bench: &swage_storage::model::Bench,
+    space: &swage_storage::model::Space,
     team: &Team,
     session_id: Uuid,
     node: &TopologyNode,
@@ -649,7 +649,7 @@ async fn execute_agent_node(
     input_json: &serde_json::Value,
     cancel_token: CancellationToken,
 ) -> Result<AgentNodeResult, TopologyEngineError> {
-    let config = resolve_node_config(state, bench, team, agent_id, node.task_name())?;
+    let config = resolve_node_config(state, space, team, agent_id, node.task_name())?;
     let rendered_input = render_node_input(node, input_json);
 
     let thread = ThreadStore::create(
@@ -679,18 +679,18 @@ async fn execute_agent_node(
 
     let swage_root_opt: Option<PathBuf> = swage_config::discovery::resolve_root().ok();
     let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_bench_memory(root, &bench.slug).await,
+        Some(root) => load_space_memory(root, &space.slug).await,
         None => String::new(),
     };
 
     let assembly_search_paths: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
         .as_ref()
         .map(|root| {
-            let bench_dir = root.join("benches").join(&bench.slug);
-            let agent_dir = bench_dir.join("agents").join(agent_id);
+            let space_dir = root.join("spaces").join(&space.slug);
+            let agent_dir = space_dir.join("agents").join(agent_id);
             let mut levels = vec![
                 (swage_config::HierarchyLevel::Global, root.clone()),
-                (swage_config::HierarchyLevel::Bench, bench_dir),
+                (swage_config::HierarchyLevel::Space, space_dir),
             ];
             if agent_dir.is_dir() {
                 levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
@@ -707,7 +707,7 @@ async fn execute_agent_node(
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
-        &bench.slug,
+        &space.slug,
         agent_id,
         swage_root_opt.as_deref(),
         false,
@@ -718,7 +718,7 @@ async fn execute_agent_node(
         active_skills,
         history_messages,
         memory_content,
-        bench.name.clone(),
+        space.name.clone(),
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
     let assembly_runner =
@@ -740,12 +740,12 @@ async fn execute_agent_node(
         .await?
         .and_then(|session| session.active_workspace_attachment_id);
     let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let agent_config = build_agent_config_for_bench_workspace(
+    let agent_config = build_agent_config_for_space_workspace(
         state,
         agent_id.to_string(),
         &config,
         node.output_schema.clone(),
-        bench.id,
+        space.id,
         session_id,
         active_workspace_attachment_id,
     )
@@ -756,7 +756,7 @@ async fn execute_agent_node(
             config: &config,
             agent_config: &agent_config,
             session_metadata: None,
-            bench_id: Some(bench.id),
+            space_id: Some(space.id),
             active_workspace_attachment_id,
             ws_tx: silent_ws_tx,
         },
@@ -802,7 +802,7 @@ async fn execute_agent_node(
                     session_id,
                     thread_id: thread.id,
                     turn_id: Uuid::new_v4(),
-                    bench_id: Some(bench.id),
+                    space_id: Some(space.id),
                 },
                 user_message: rendered_input,
                 assembled_context: output.messages,
@@ -927,12 +927,12 @@ fn execute_deterministic_node(
 
 fn resolve_node_config(
     state: &AppState,
-    bench: &swage_storage::model::Bench,
+    space: &swage_storage::model::Space,
     team: &Team,
     agent_id: &str,
     task_name: Option<&str>,
 ) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
-    let mut config = load_topology_node_config(state, bench, team, agent_id)?;
+    let mut config = load_topology_node_config(state, space, team, agent_id)?;
 
     if let Some(agent) = team
         .agents
@@ -955,7 +955,7 @@ fn resolve_node_config(
 
 fn load_topology_node_config(
     state: &AppState,
-    bench: &swage_storage::model::Bench,
+    space: &swage_storage::model::Space,
     team: &Team,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, TopologyEngineError> {
@@ -963,11 +963,11 @@ fn load_topology_node_config(
         return Ok(state.active_config());
     };
 
-    let bench_dir = root.join("benches").join(&bench.slug);
-    let team_dir = bench_dir.join("teams").join(&team.name);
-    let agent_dir = bench_dir.join("agents").join(agent_id);
+    let space_dir = root.join("spaces").join(&space.slug);
+    let team_dir = space_dir.join("teams").join(&team.name);
+    let agent_dir = space_dir.join("agents").join(agent_id);
 
-    let has_filesystem_config = bench_dir.join("config.toml").exists()
+    let has_filesystem_config = space_dir.join("config.toml").exists()
         || team_dir.join("config.toml").exists()
         || agent_dir.join("config.toml").exists();
 
@@ -977,7 +977,7 @@ fn load_topology_node_config(
 
     swage_config::load_resolved_config_from_with_team(
         &root,
-        &bench.slug,
+        &space.slug,
         Some(&team.name),
         agent_id,
     )
@@ -1217,8 +1217,8 @@ mod tests {
 
     use async_trait::async_trait;
     use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
-    use swage_storage::model::{NewBench, NewSession, NewTeam};
-    use swage_storage::store::{BenchStore, SessionStore, SkillActivationStore, TeamStore};
+    use swage_storage::model::{NewSession, NewSpace, NewTeam};
+    use swage_storage::store::{SessionStore, SkillActivationStore, SpaceStore, TeamStore};
     use swage_topology::TopologyNodeKind;
 
     use super::*;
@@ -1259,7 +1259,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -1365,18 +1365,18 @@ mod tests {
             ],
         ]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "topology-bench".into(),
-                slug: "topology-bench".into(),
+            NewSpace {
+                name: "topology-space".into(),
+                slug: "topology-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1471,7 +1471,7 @@ mod tests {
         let swage_home = SwageHomeGuard::new();
         let skill_dir = swage_home
             .path()
-            .join("benches/topology-skill-bench/agents/planner/skills/planning-style");
+            .join("spaces/topology-skill-space/agents/planner/skills/planning-style");
         std::fs::create_dir_all(&skill_dir).expect("create topology skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -1490,24 +1490,24 @@ mod tests {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             Arc::new(provider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "Topology Skill Bench".into(),
-                slug: "topology-skill-bench".into(),
+            NewSpace {
+                name: "Topology Skill Space".into(),
+                slug: "topology-skill-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "skill-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1561,15 +1561,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn topology_agent_node_does_not_inherit_user_activated_session_skills() {
         let swage_home = SwageHomeGuard::new();
-        let bench_dir = swage_home.path().join("benches/topology-skill-bench");
-        std::fs::create_dir_all(bench_dir.join("skills/foreground-only"))
-            .expect("create bench skill directory");
+        let space_dir = swage_home.path().join("spaces/topology-skill-space");
+        std::fs::create_dir_all(space_dir.join("skills/foreground-only"))
+            .expect("create space skill directory");
         std::fs::write(
-            bench_dir.join("skills/foreground-only/SKILL.md"),
+            space_dir.join("skills/foreground-only/SKILL.md"),
             "---\ndescription: Foreground only\n---\nUse the foreground-only skill.\n",
         )
-        .expect("write bench skill");
-        let agent_skill_dir = bench_dir.join("agents/planner/skills/planning-style");
+        .expect("write space skill");
+        let agent_skill_dir = space_dir.join("agents/planner/skills/planning-style");
         std::fs::create_dir_all(&agent_skill_dir).expect("create agent skill directory");
         std::fs::write(
             agent_skill_dir.join("SKILL.md"),
@@ -1588,24 +1588,24 @@ mod tests {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             Arc::new(provider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "Topology Skill Bench".into(),
-                slug: "topology-skill-bench".into(),
+            NewSpace {
+                name: "Topology Skill Space".into(),
+                slug: "topology-skill-space".into(),
             },
         )
         .await
         .unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -1618,7 +1618,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "skill-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1688,18 +1688,18 @@ mod tests {
             },
         ]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "fanout-bench".into(),
-                slug: "fanout-bench".into(),
+            NewSpace {
+                name: "fanout-space".into(),
+                slug: "fanout-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "fanout-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1777,18 +1777,18 @@ mod tests {
             finish_reason: Some(swage_core::FinishReason::Stop),
         }]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "iteration-limit-bench".into(),
-                slug: "iteration-limit-bench".into(),
+            NewSpace {
+                name: "iteration-limit-space".into(),
+                slug: "iteration-limit-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "iteration-limit-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -1911,18 +1911,18 @@ mod tests {
             ],
         ]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "token-budget-bench".into(),
-                slug: "token-budget-bench".into(),
+            NewSpace {
+                name: "token-budget-space".into(),
+                slug: "token-budget-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "token-budget-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -2034,18 +2034,18 @@ mod tests {
             },
         ]]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "hook-bench".into(),
-                slug: "hook-bench".into(),
+            NewSpace {
+                name: "hook-space".into(),
+                slug: "hook-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -2107,18 +2107,18 @@ mod tests {
             finish_reason: Some(swage_core::FinishReason::Stop),
         }]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "blocked-topology-bench".into(),
-                slug: "blocked-topology-bench".into(),
+            NewSpace {
+                name: "blocked-topology-space".into(),
+                slug: "blocked-topology-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -2191,18 +2191,18 @@ mod tests {
             },
         ]));
         let (state, storage) = make_state(provider);
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             storage.as_ref(),
-            NewBench {
-                name: "approval-topology-bench".into(),
-                slug: "approval-topology-bench".into(),
+            NewSpace {
+                name: "approval-topology-space".into(),
+                slug: "approval-topology-space".into(),
             },
         )
         .await
         .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "hook-team".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),

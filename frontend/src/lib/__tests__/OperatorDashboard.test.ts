@@ -30,8 +30,8 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
     sessions: [
       {
         id: "conv-1",
-        bench_id: "proj-1",
-        bench_name: "default",
+        space_id: "proj-1",
+        space_name: "default",
         created_at: "2026-04-07T12:00:00Z",
         last_activity: "2026-04-07T12:02:00Z",
         message_preview: "Busy session",
@@ -84,10 +84,10 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         },
       ],
     },
-    nodes: [
+    devices: [
       {
-        host_id: "docker-a",
-        label: "Build node",
+        device_id: "docker-a",
+        label: "Build device",
         kind: "docker",
         base_url: "http://127.0.0.1:4100",
         workspace_root: "/srv/work",
@@ -136,7 +136,7 @@ describe("OperatorDashboard", () => {
 
     expect(document.body.textContent).toContain("Daily digest");
     expect(document.body.textContent).toContain("Allow shell command");
-    expect(document.body.textContent).toContain("Build node");
+    expect(document.body.textContent).toContain("Build device");
     expect(document.body.textContent).toContain("dev_dm");
   });
 

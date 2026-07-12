@@ -31,7 +31,7 @@ use swage_gateway::secret::{CreateSecretRequest, SecretManager};
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
-use swage_storage::store::{AuditStore, BenchStore, ToolCallStore};
+use swage_storage::store::{AuditStore, SpaceStore, ToolCallStore};
 use swage_tool::permission::{PermissionConfig, check_permission};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -770,7 +770,7 @@ async fn start_browser_tool_server(
     config.workspace.path = workspace_root.to_string_lossy().to_string();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(provider),
         config,
         dispatcher,

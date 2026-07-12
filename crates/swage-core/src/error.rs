@@ -540,13 +540,13 @@ pub enum GatewayError {
     #[error("conversation {id} not found")]
     ConversationNotFound { id: Uuid },
 
-    /// Bench does not exist (permanent).
-    #[error("bench {id} not found")]
-    BenchNotFound { id: Uuid },
+    /// Space does not exist (permanent).
+    #[error("space {id} not found")]
+    SpaceNotFound { id: Uuid },
 
-    /// Bench name or slug conflicts with an existing bench (permanent).
-    #[error("bench conflict: {0}")]
-    BenchConflict(String),
+    /// Space name or slug conflicts with an existing space (permanent).
+    #[error("space conflict: {0}")]
+    SpaceConflict(String),
 
     /// Request body or parameters failed validation (permanent).
     #[error("validation error: {0}")]
@@ -565,8 +565,8 @@ impl GatewayError {
             | GatewayError::BindError(_)
             | GatewayError::ShutdownError(_)
             | GatewayError::ConversationNotFound { .. }
-            | GatewayError::BenchNotFound { .. }
-            | GatewayError::BenchConflict(_)
+            | GatewayError::SpaceNotFound { .. }
+            | GatewayError::SpaceConflict(_)
             | GatewayError::ValidationError(_) => false,
         }
     }

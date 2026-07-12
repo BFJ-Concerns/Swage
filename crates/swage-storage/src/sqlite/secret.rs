@@ -615,14 +615,14 @@ mod tests {
         let created = storage
             .create_secret(NewSecretRecord {
                 id: Uuid::new_v4(),
-                name: "Node token".into(),
-                material_kind: "node_credential".into(),
+                name: "Device token".into(),
+                material_kind: "device_credential".into(),
                 owner_kind: "service".into(),
                 backend_kind: "managed".into(),
                 scope_kind: "gateway".into(),
                 scope_id: None,
                 external_reference: None,
-                metadata: json!({"backend": "attached_node"}),
+                metadata: json!({"backend": "attached_device"}),
                 value: Some("secret-a".into()),
             })
             .await
@@ -638,7 +638,7 @@ mod tests {
                 created.id,
                 Some("secret-b".into()),
                 None,
-                json!({"backend": "attached_node", "rotated": true}),
+                json!({"backend": "attached_device", "rotated": true}),
             )
             .await
             .unwrap();

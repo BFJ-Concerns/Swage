@@ -5,15 +5,15 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{Bench, BenchSlug, NewBench};
+use crate::model::{NewSpace, Space, SpaceSlug};
 use crate::sqlite::SqliteStorage;
-use crate::store::BenchStore;
+use crate::store::SpaceStore;
 
 // ---------------------------------------------------------------------------
 // Row mapping
 // ---------------------------------------------------------------------------
 
-fn row_to_bench(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bench> {
+fn row_to_space(row: &rusqlite::Row<'_>) -> rusqlite::Result<Space> {
     let id: String = row.get(0)?;
     // Column order:
     // id(0), name(1), description(2), is_default(3), slug(4), created_at(5), updated_at(6)
@@ -21,7 +21,7 @@ fn row_to_bench(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bench> {
     let updated: String = row.get(6)?;
     let slug: String = row.get(4)?;
 
-    Ok(Bench {
+    Ok(Space {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
         description: row.get(2)?,
@@ -46,36 +46,36 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
-fn parse_slug(s: &str) -> rusqlite::Result<BenchSlug> {
-    BenchSlug::new(s).map_err(|e| {
+fn parse_slug(s: &str) -> rusqlite::Result<SpaceSlug> {
+    SpaceSlug::new(s).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into())
     })
 }
 
 // ---------------------------------------------------------------------------
-// BenchStore
+// SpaceStore
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl BenchStore for SqliteStorage {
-    async fn create(&self, bench: NewBench) -> Result<Bench, StorageError> {
+impl SpaceStore for SqliteStorage {
+    async fn create(&self, space: NewSpace) -> Result<Space, StorageError> {
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO benches (id, name, description, is_default, slug, created_at, updated_at)
+                "INSERT INTO spaces (id, name, description, is_default, slug, created_at, updated_at)
                  VALUES (?1, ?2, '', 0, ?3, ?4, ?4)",
-                params![id.to_string(), &bench.name, bench.slug.as_str(), &now_str],
+                params![id.to_string(), &space.name, space.slug.as_str(), &now_str],
             )?;
 
-            Ok(Bench {
+            Ok(Space {
                 id,
-                name: bench.name,
+                name: space.name,
                 description: String::new(),
                 is_default: false,
-                slug: bench.slug,
+                slug: space.slug,
                 created_at: now,
                 updated_at: now,
             })
@@ -83,49 +83,49 @@ impl BenchStore for SqliteStorage {
         .await
     }
 
-    async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError> {
+    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM benches WHERE id = ?1",
+                 FROM spaces WHERE id = ?1",
                 params![id.to_string()],
-                row_to_bench,
+                row_to_space,
             )
             .optional()
         })
         .await
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<Bench>, StorageError> {
+    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError> {
         // Capture as owned String to satisfy 'static bound on with_conn closure.
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM benches WHERE name = ?1",
+                 FROM spaces WHERE name = ?1",
                 params![&name],
-                row_to_bench,
+                row_to_space,
             )
             .optional()
         })
         .await
     }
 
-    async fn get_or_create_default(&self) -> Result<Bench, StorageError> {
-        if let Some(bench) = self
+    async fn get_or_create_default(&self) -> Result<Space, StorageError> {
+        if let Some(space) = self
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT id, name, description, is_default, slug, created_at, updated_at
-                     FROM benches
+                     FROM spaces
                      WHERE is_default = 1",
                     [],
-                    row_to_bench,
+                    row_to_space,
                 )
                 .optional()
             })
             .await?
         {
-            return Ok(bench);
+            return Ok(space);
         }
 
         self.with_conn(|conn| {
@@ -134,12 +134,12 @@ impl BenchStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO benches (id, name, description, is_default, slug, created_at, updated_at)
+                "INSERT INTO spaces (id, name, description, is_default, slug, created_at, updated_at)
                  VALUES (?1, 'default', '', 1, 'default', ?2, ?2)",
                 params![id.to_string(), &now_str],
             )?;
 
-            Ok(Bench {
+            Ok(Space {
                 id,
                 name: "default".into(),
                 description: String::new(),
@@ -152,26 +152,26 @@ impl BenchStore for SqliteStorage {
         .await
     }
 
-    async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
+    async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM benches ORDER BY created_at ASC",
+                 FROM spaces ORDER BY created_at ASC",
             )?;
-            let rows = stmt.query_map([], row_to_bench)?;
+            let rows = stmt.query_map([], row_to_space)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
     }
 
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Bench>, StorageError> {
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError> {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM benches WHERE slug = ?1",
+                 FROM spaces WHERE slug = ?1",
                 params![&slug],
-                row_to_bench,
+                row_to_space,
             )
             .optional()
         })
@@ -183,12 +183,12 @@ impl BenchStore for SqliteStorage {
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<BenchSlug>,
-    ) -> Result<Bench, StorageError> {
-        // Pre-flight: verify the bench exists.
+        slug: Option<SpaceSlug>,
+    ) -> Result<Space, StorageError> {
+        // Pre-flight: verify the space exists.
         if self.get(id).await?.is_none() {
             return Err(StorageError::NotFound {
-                entity: "Bench".into(),
+                entity: "Space".into(),
                 id: id.to_string(),
             });
         }
@@ -200,7 +200,7 @@ impl BenchStore for SqliteStorage {
             // COALESCE preserves the existing value when the parameter is NULL,
             // so None fields stay unchanged while Some fields are overwritten.
             conn.execute(
-                "UPDATE benches
+                "UPDATE spaces
                  SET name           = COALESCE(?2, name),
                      description    = COALESCE(?3, description),
                      slug           = COALESCE(?4, slug),
@@ -210,28 +210,28 @@ impl BenchStore for SqliteStorage {
                     id_str,
                     name,
                     description,
-                    slug.as_ref().map(BenchSlug::as_str),
+                    slug.as_ref().map(SpaceSlug::as_str),
                     now
                 ],
             )?;
 
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM benches WHERE id = ?1",
+                 FROM spaces WHERE id = ?1",
                 params![id_str],
-                row_to_bench,
+                row_to_space,
             )
         })
         .await
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
-        // Pre-flight: fetch the bench to check existence and guard the default.
+        // Pre-flight: fetch the space to check existence and guard the default.
         match self.get(id).await? {
             None => return Ok(false),
             Some(ref p) if p.is_default => {
                 return Err(StorageError::ConstraintViolation(
-                    "cannot delete the default bench".into(),
+                    "cannot delete the default space".into(),
                 ));
             }
             Some(_) => {}
@@ -240,7 +240,7 @@ impl BenchStore for SqliteStorage {
         // Sessions cascade via the FK ON DELETE CASCADE defined in the schema.
         self.with_conn(move |conn| {
             let affected =
-                conn.execute("DELETE FROM benches WHERE id = ?1", params![id.to_string()])?;
+                conn.execute("DELETE FROM spaces WHERE id = ?1", params![id.to_string()])?;
             Ok(affected > 0)
         })
         .await
@@ -253,16 +253,16 @@ mod tests {
     use crate::sqlite::SqliteStorage;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn create_and_get_bench() {
+    async fn create_and_get_space() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let new = NewBench {
-            name: "my-bench".into(),
-            slug: "my-bench".into(),
+        let new = NewSpace {
+            name: "my-space".into(),
+            slug: "my-space".into(),
         };
         let created = storage.create(new).await.unwrap();
 
-        assert_eq!(created.name, "my-bench");
-        assert_eq!(created.slug, "my-bench");
+        assert_eq!(created.name, "my-space");
+        assert_eq!(created.slug, "my-space");
 
         let fetched = storage
             .get(created.id)
@@ -270,14 +270,14 @@ mod tests {
             .unwrap()
             .expect("should exist");
         assert_eq!(fetched.id, created.id);
-        assert_eq!(fetched.name, "my-bench");
-        assert_eq!(fetched.slug, "my-bench");
+        assert_eq!(fetched.name, "my-space");
+        assert_eq!(fetched.slug, "my-space");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_by_name_returns_none_for_unknown() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let result = storage.get_by_name("no-such-bench").await.unwrap();
+        let result = storage.get_by_name("no-such-space").await.unwrap();
         assert!(result.is_none());
     }
 
@@ -285,7 +285,7 @@ mod tests {
     async fn get_by_name_finds_existing() {
         let storage = SqliteStorage::in_memory().unwrap();
         storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "find-me".into(),
                 slug: "find-me".into(),
             })
@@ -301,44 +301,44 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let p1 = storage.get_or_create_default().await.unwrap();
         let p2 = storage.get_or_create_default().await.unwrap();
-        // Same bench returned both times — not duplicated.
+        // Same space returned both times — not duplicated.
         assert_eq!(p1.id, p2.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn slug_is_stored_and_retrieved() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let new = NewBench {
-            name: "slugged-bench".into(),
-            slug: "slugged-bench".into(),
+        let new = NewSpace {
+            name: "slugged-space".into(),
+            slug: "slugged-space".into(),
         };
         let created = storage.create(new).await.unwrap();
-        assert_eq!(created.slug, "slugged-bench");
+        assert_eq!(created.slug, "slugged-space");
 
         let fetched = storage
             .get(created.id)
             .await
             .unwrap()
             .expect("should exist");
-        assert_eq!(fetched.slug, "slugged-bench");
+        assert_eq!(fetched.slug, "slugged-space");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_or_create_default_returns_default_slug() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
-        assert!(bench.is_default);
-        assert_eq!(bench.slug, "default");
+        let space = storage.get_or_create_default().await.unwrap();
+        assert!(space.is_default);
+        assert_eq!(space.slug, "default");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn renamed_default_bench_remains_structurally_default() {
+    async fn renamed_default_space_remains_structurally_default() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_bench = storage.get_or_create_default().await.unwrap();
+        let default_space = storage.get_or_create_default().await.unwrap();
 
         let renamed = storage
             .update(
-                default_bench.id,
+                default_space.id,
                 Some("Operations".into()),
                 None,
                 Some("operations".into()),
@@ -350,12 +350,12 @@ mod tests {
         assert_eq!(renamed.name, "Operations");
 
         let fetched_default = storage.get_or_create_default().await.unwrap();
-        assert_eq!(fetched_default.id, default_bench.id);
+        assert_eq!(fetched_default.id, default_space.id);
 
-        let delete_error = storage.delete(default_bench.id).await.unwrap_err();
+        let delete_error = storage.delete(default_space.id).await.unwrap_err();
         assert!(
             matches!(delete_error, StorageError::ConstraintViolation(_)),
-            "renamed default bench should still be protected"
+            "renamed default space should still be protected"
         );
     }
 
@@ -364,18 +364,18 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_all_returns_benches_ordered_by_created_at() {
+    async fn list_all_returns_spaces_ordered_by_created_at() {
         let storage = SqliteStorage::in_memory().unwrap();
-        // The seeded default bench already exists; add two more.
+        // The seeded default space already exists; add two more.
         storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "alpha".into(),
                 slug: "alpha".into(),
             })
             .await
             .unwrap();
         storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "beta".into(),
                 slug: "beta".into(),
             })
@@ -384,16 +384,16 @@ mod tests {
 
         let all = storage.list_all().await.unwrap();
 
-        // At least 3 benches (default + alpha + beta).
+        // At least 3 spaces (default + alpha + beta).
         assert!(
             all.len() >= 3,
-            "expected at least 3 benches, got {}",
+            "expected at least 3 spaces, got {}",
             all.len()
         );
 
         // Must be ordered by created_at ASC.
         let is_sorted = all.windows(2).all(|w| w[0].created_at <= w[1].created_at);
-        assert!(is_sorted, "benches should be ordered by created_at ASC");
+        assert!(is_sorted, "spaces should be ordered by created_at ASC");
     }
 
     // ---------------------------------------------------------------------------
@@ -401,10 +401,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_by_slug_returns_matching_bench() {
+    async fn get_by_slug_returns_matching_space() {
         let storage = SqliteStorage::in_memory().unwrap();
         storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "Slug Test".into(),
                 slug: "slug-test".into(),
             })
@@ -412,7 +412,7 @@ mod tests {
             .unwrap();
 
         let found = storage.get_by_slug("slug-test").await.unwrap();
-        assert!(found.is_some(), "get_by_slug should find the bench");
+        assert!(found.is_some(), "get_by_slug should find the space");
         assert_eq!(found.unwrap().slug, "slug-test");
     }
 
@@ -431,7 +431,7 @@ mod tests {
     async fn update_changes_provided_fields() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "Old Name".into(),
                 slug: "old-name".into(),
             })
@@ -456,7 +456,7 @@ mod tests {
     async fn update_changes_description() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "Documented".into(),
                 slug: "documented".into(),
             })
@@ -464,20 +464,20 @@ mod tests {
             .unwrap();
 
         let updated = storage
-            .update(created.id, None, Some("Operations bench".into()), None)
+            .update(created.id, None, Some("Operations space".into()), None)
             .await
             .unwrap();
 
-        assert_eq!(updated.description, "Operations bench");
-        let fetched = storage.get(created.id).await.unwrap().expect("bench");
-        assert_eq!(fetched.description, "Operations bench");
+        assert_eq!(updated.description, "Operations space");
+        let fetched = storage.get(created.id).await.unwrap().expect("space");
+        assert_eq!(fetched.description, "Operations space");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_partial_leaves_unspecified_fields_unchanged() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "Stable".into(),
                 slug: "stable".into(),
             })
@@ -508,10 +508,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_removes_bench_and_returns_true() {
+    async fn delete_removes_space_and_returns_true() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewBench {
+            .create(NewSpace {
                 name: "Gone".into(),
                 slug: "gone".into(),
             })
@@ -519,12 +519,12 @@ mod tests {
             .unwrap();
 
         let deleted = storage.delete(created.id).await.unwrap();
-        assert!(deleted, "delete should return true for an existing bench");
+        assert!(deleted, "delete should return true for an existing space");
 
         let fetched = storage.get(created.id).await.unwrap();
         assert!(
             fetched.is_none(),
-            "bench should no longer exist after delete"
+            "space should no longer exist after delete"
         );
     }
 
@@ -537,14 +537,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_refuses_default_bench() {
+    async fn delete_refuses_default_space() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_bench = storage.get_or_create_default().await.unwrap();
+        let default_space = storage.get_or_create_default().await.unwrap();
 
-        let result = storage.delete(default_bench.id).await;
+        let result = storage.delete(default_space.id).await;
         assert!(
             result.is_err(),
-            "deleting the default bench should return an error"
+            "deleting the default space should return an error"
         );
     }
 }
