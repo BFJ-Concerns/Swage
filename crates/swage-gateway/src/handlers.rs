@@ -1830,6 +1830,7 @@ pub async fn submit_turn(
             subscription,
             output_schema,
             Some(turn_id),
+            crate::turn::TurnAttendance::Unattended,
         )
         .await;
 
@@ -2021,7 +2022,7 @@ async fn execute_external_delegate_message(
 
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
-    let dispatcher_build = crate::turn::build_gateway_dispatcher_with_unsandboxed_degradation(
+    let dispatcher_build = crate::turn::build_gateway_dispatcher_for_unattended_execution(
         &state,
         crate::turn::GatewayDispatcherRequest {
             config: &target_resolved,
@@ -2030,6 +2031,8 @@ async fn execute_external_delegate_message(
             space_id: Some(space_id),
             active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
+            session_id: None,
+            turn_id: sender_turn_id,
         },
         "external delegated turn",
     )
