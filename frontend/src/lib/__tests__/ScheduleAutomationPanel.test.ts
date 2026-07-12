@@ -141,6 +141,29 @@ describe("ScheduleAutomationPanel", () => {
     expect(document.body.textContent).toContain("by agent researcher");
   });
 
+  it("distinguishes the target agent from the creator when they differ", async () => {
+    // Agent `gateway` creates a schedule that runs as a different agent.
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({
+      schedules: [
+        {
+          ...SCHEDULE,
+          session: { policy: "fresh", space_id: "space-1", agent_id: "researcher" },
+          creator: { kind: "agent", agent_id: "gateway" },
+        },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { spaceId: "space-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    // The target reads "runs as researcher"; the creator reads "by agent
+    // gateway" — the two agent names are labelled, not adjacent bare text.
+    expect(document.body.textContent).toContain("runs as researcher");
+    expect(document.body.textContent).toContain("by agent gateway");
+  });
+
   it("shows empty successful runs as a visible non-outcome", async () => {
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [EMPTY_RUN] });
     component = mount(ScheduleAutomationPanel, {

@@ -180,7 +180,7 @@
 
   function describeSession(session: SessionPolicy): string {
     return session.policy === "fresh"
-      ? `fresh · ${session.agent_id}`
+      ? `fresh · runs as ${session.agent_id}`
       : "continues a conversation";
   }
 
