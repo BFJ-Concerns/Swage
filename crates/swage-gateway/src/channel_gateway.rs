@@ -231,7 +231,7 @@ async fn handle_inbound(
     routing: DeliveryRoutingRequest,
 ) -> Result<ChannelInboundResponse, GatewayError> {
     let session_id =
-        ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultBench)
+        ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultSpace)
             .await?;
     let response = run_channel_turn(state, session_id, text).await?;
     let targets = deliver_channel_response(state, session_id, &origin, routing, &response).await?;
@@ -245,7 +245,7 @@ async fn handle_inbound(
 
 #[derive(Debug, Clone, Copy)]
 enum SessionResolutionPolicy {
-    AllowDefaultBench,
+    AllowDefaultSpace,
     LinkedOnly,
 }
 
@@ -300,7 +300,7 @@ async fn ensure_session_for_origin(
         let session = state
             .storage
             .create_session(NewSession {
-                bench_id: link.bench_id,
+                space_id: link.space_id,
                 agent_id: link.agent_id.clone(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
@@ -325,7 +325,7 @@ async fn ensure_session_for_origin(
                 integration: origin.integration.as_metadata_value().to_string(),
                 account: origin.account.clone(),
                 conversation: origin.conversation.clone(),
-                bench_id: link.bench_id,
+                space_id: link.space_id,
                 agent_id: link.agent_id,
                 session_id: Some(session.id),
                 home_target: link.home_target,
@@ -348,11 +348,11 @@ async fn ensure_session_for_origin(
         )));
     }
 
-    let bench = state.bench_store.get_or_create_default().await?;
+    let space = state.space_store.get_or_create_default().await?;
     let session = state
         .storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: Some(serde_json::json!({
                 "channel_origin": {

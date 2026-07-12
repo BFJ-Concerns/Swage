@@ -65,7 +65,7 @@ fn is_valid_lens_id(value: &str) -> bool {
 /// Persisted runtime preference for the active product lens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensPreference {
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub active_lens: AppLens,
     pub updated_at: DateTime<Utc>,
 }
@@ -184,12 +184,12 @@ pub struct NewSharedReferenceEvent {
     pub payload: serde_json::Value,
 }
 
-/// Persisted context snapshot metadata for bench-scoped listing.
+/// Persisted context snapshot metadata for space-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {
     pub turn_id: Uuid,
     pub session_id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub report_json: String,
 }
@@ -273,12 +273,12 @@ impl FromStr for TurnState {
     }
 }
 
-/// Filesystem-safe identifier for a bench directory.
+/// Filesystem-safe identifier for a space directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct BenchSlug(String);
+pub struct SpaceSlug(String);
 
-impl BenchSlug {
+impl SpaceSlug {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
         if value.is_empty()
@@ -286,7 +286,7 @@ impl BenchSlug {
             || !value.chars().any(|c| c.is_ascii_alphanumeric())
         {
             return Err(
-                "bench slug must contain ASCII letters or digits and may only use hyphens"
+                "space slug must contain ASCII letters or digits and may only use hyphens"
                     .to_string(),
             );
         }
@@ -298,13 +298,13 @@ impl BenchSlug {
     }
 }
 
-impl std::fmt::Display for BenchSlug {
+impl std::fmt::Display for SpaceSlug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::ops::Deref for BenchSlug {
+impl std::ops::Deref for SpaceSlug {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -312,19 +312,19 @@ impl std::ops::Deref for BenchSlug {
     }
 }
 
-impl AsRef<str> for BenchSlug {
+impl AsRef<str> for SpaceSlug {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl AsRef<std::path::Path> for BenchSlug {
+impl AsRef<std::path::Path> for SpaceSlug {
     fn as_ref(&self) -> &std::path::Path {
         std::path::Path::new(self.as_str())
     }
 }
 
-impl FromStr for BenchSlug {
+impl FromStr for SpaceSlug {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -332,48 +332,48 @@ impl FromStr for BenchSlug {
     }
 }
 
-impl From<&str> for BenchSlug {
+impl From<&str> for SpaceSlug {
     fn from(value: &str) -> Self {
-        Self::new(value).expect("bench slug literals must be valid")
+        Self::new(value).expect("space slug literals must be valid")
     }
 }
 
-impl From<String> for BenchSlug {
+impl From<String> for SpaceSlug {
     fn from(value: String) -> Self {
-        Self::new(value).expect("bench slug strings must be valid")
+        Self::new(value).expect("space slug strings must be valid")
     }
 }
 
-impl PartialEq<&str> for BenchSlug {
+impl PartialEq<&str> for SpaceSlug {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
     }
 }
 
-/// A bench groups conversations and provides configuration scope.
+/// A space groups conversations and provides configuration scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bench {
+pub struct Space {
     pub id: Uuid,
     pub name: String,
-    /// Short operator-authored summary shown in bench pickers and previews.
+    /// Short operator-authored summary shown in space pickers and previews.
     pub description: String,
-    /// True for the single built-in fallback bench.
+    /// True for the single built-in fallback space.
     ///
-    /// This is structural identity, not presentation. The bench may be
-    /// renamed without ceasing to be the default bench.
+    /// This is structural identity, not presentation. The space may be
+    /// renamed without ceasing to be the default space.
     pub is_default: bool,
-    /// Filesystem-safe identifier used for the bench's directory under
-    /// `~/.swage/benches/{slug}/`.
-    pub slug: BenchSlug,
+    /// Filesystem-safe identifier used for the space's directory under
+    /// `~/.swage/spaces/{slug}/`.
+    pub slug: SpaceSlug,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// External resource attached to a bench.
+/// External resource attached to a space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceAttachment {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub label: String,
     pub path: String,
     pub canonical_path: String,
@@ -385,11 +385,11 @@ pub struct WorkspaceAttachment {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A session (conversation) within a bench, scoped to a single agent.
+/// A session (conversation) within a space, scoped to a single agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     /// The agent that owns this session. Used to scope queries in multi-agent
     /// deployments so each agent sees only its own sessions.
     pub agent_id: String,
@@ -405,10 +405,10 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A persisted non-local execution host registration.
+/// A persisted non-local device registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionHostRegistration {
-    pub host_id: String,
+pub struct DeviceRegistration {
+    pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
     pub base_url: String,
@@ -425,7 +425,7 @@ pub struct ChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -529,7 +529,7 @@ pub struct AuditEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMemoryRecord {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub topology_run_id: Option<Uuid>,
@@ -550,7 +550,7 @@ pub struct AgentMemoryRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAgentMemoryRecord {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub topology_run_id: Option<Uuid>,
@@ -569,7 +569,7 @@ pub struct NewAgentMemoryRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationVersion {
     pub id: Uuid,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub entity_kind: String,
     pub entity_id: String,
@@ -588,7 +588,7 @@ pub struct ConfigurationVersion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConfigurationVersion {
     pub id: Uuid,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub entity_kind: String,
     pub entity_id: String,
@@ -641,14 +641,14 @@ pub struct NewSecretRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentScopeKind {
     Session,
-    Bench,
+    Space,
 }
 
 impl std::fmt::Display for AttachmentScopeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             AttachmentScopeKind::Session => "session",
-            AttachmentScopeKind::Bench => "bench",
+            AttachmentScopeKind::Space => "space",
         };
         write!(f, "{s}")
     }
@@ -660,7 +660,7 @@ impl FromStr for AttachmentScopeKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "session" => Ok(AttachmentScopeKind::Session),
-            "bench" => Ok(AttachmentScopeKind::Bench),
+            "space" => Ok(AttachmentScopeKind::Space),
             other => Err(format!("unknown attachment scope: {other}")),
         }
     }
@@ -729,13 +729,13 @@ impl FromStr for AttachmentStatus {
     }
 }
 
-/// A durable attachment for session or bench context.
+/// A durable attachment for session or space context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub status: AttachmentStatus,
     pub filename: String,
@@ -751,7 +751,7 @@ pub struct NewAttachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub filename: String,
     pub mime_type: String,
@@ -915,7 +915,7 @@ pub struct Material {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub status: MaterialStatus,
@@ -933,7 +933,7 @@ pub struct NewMaterial {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub title: String,
@@ -1252,7 +1252,7 @@ impl FromStr for ScheduleKind {
 /// A durable schedule definition.
 ///
 /// The session policy is first-class: fresh-policy schedules carry their
-/// target bench and agent, continuation-policy schedules the session they
+/// target space and agent, continuation-policy schedules the session they
 /// keep returning to. No agent id is copied off a session at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
@@ -1552,7 +1552,7 @@ impl NewAgentMessage {
 
 /// A team — the organisational unit for multi-agent orchestration.
 ///
-/// Teams belong to a bench and define durable agent and task definitions plus
+/// Teams belong to a space and define durable agent and task definitions plus
 /// an entry agent (the agent that receives user messages). The legacy
 /// `members` list remains as a derived convenience surface backed by `agents`
 /// so older runtime paths can keep using stable agent IDs while the canonical
@@ -1592,8 +1592,8 @@ pub struct TeamTaskDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Team {
     pub id: Uuid,
-    pub bench_id: Uuid,
-    /// Unique name within the bench.
+    pub space_id: Uuid,
+    /// Unique name within the space.
     pub name: String,
     pub description: String,
     /// The agent that receives user messages for this team.
@@ -1623,7 +1623,7 @@ impl Team {
 /// Input for creating a new team.
 #[derive(Debug, Clone)]
 pub struct NewTeam {
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub name: String,
     pub description: String,
     pub entry_agent_id: String,
@@ -1850,18 +1850,18 @@ pub struct NewNodeRetry {
     pub recovery_guidance: Option<String>,
 }
 
-/// Input for creating a new bench.
+/// Input for creating a new space.
 #[derive(Debug, Clone)]
-pub struct NewBench {
+pub struct NewSpace {
     pub name: String,
-    /// Filesystem-safe identifier for the bench directory.
-    pub slug: BenchSlug,
+    /// Filesystem-safe identifier for the space directory.
+    pub slug: SpaceSlug,
 }
 
-/// Input for attaching a workspace to a bench.
+/// Input for attaching a workspace to a space.
 #[derive(Debug, Clone)]
 pub struct NewWorkspaceAttachment {
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub label: String,
     pub path: String,
     pub permissions: Vec<String>,
@@ -1871,7 +1871,7 @@ pub struct NewWorkspaceAttachment {
 /// Input for creating a new session.
 #[derive(Debug, Clone)]
 pub struct NewSession {
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     /// The agent that owns this session.
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
@@ -1879,10 +1879,10 @@ pub struct NewSession {
     pub active_workspace_attachment_id: Option<Uuid>,
 }
 
-/// Input for persisting or replacing an execution host registration.
+/// Input for persisting or replacing an device registration.
 #[derive(Debug, Clone)]
-pub struct NewExecutionHostRegistration {
-    pub host_id: String,
+pub struct NewDeviceRegistration {
+    pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
     pub base_url: String,
@@ -1898,7 +1898,7 @@ pub struct NewChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -2245,31 +2245,31 @@ mod tests {
         assert!(top.parent_call_id.is_none());
     }
 
-    // --- Bench slug field ---
+    // --- Space slug field ---
 
     #[test]
-    fn bench_slug_field_present_and_serialises() {
+    fn space_slug_field_present_and_serialises() {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let bench = Bench {
+        let space = Space {
             id,
-            name: "my-bench".to_string(),
+            name: "my-space".to_string(),
             description: String::new(),
             is_default: false,
-            slug: "my-bench".into(),
+            slug: "my-space".into(),
             created_at: now,
             updated_at: now,
         };
-        let json = serde_json::to_string(&bench).expect("serialisation should succeed");
+        let json = serde_json::to_string(&space).expect("serialisation should succeed");
         assert!(
-            json.contains("\"slug\":\"my-bench\""),
+            json.contains("\"slug\":\"my-space\""),
             "slug should appear in JSON"
         );
     }
 
     #[test]
-    fn new_bench_slug_field_present() {
-        let np = NewBench {
+    fn new_space_slug_field_present() {
+        let np = NewSpace {
             name: "test".to_string(),
             slug: "test".into(),
         };
@@ -2277,11 +2277,11 @@ mod tests {
     }
 
     #[test]
-    fn bench_slug_rejects_values_without_ascii_alphanumerics() {
-        assert!(BenchSlug::new("").is_err());
-        assert!(BenchSlug::new("!!! --- ___").is_err());
-        assert!(BenchSlug::new("bench/escape").is_err());
-        assert!(BenchSlug::new("bench-01").is_ok());
+    fn space_slug_rejects_values_without_ascii_alphanumerics() {
+        assert!(SpaceSlug::new("").is_err());
+        assert!(SpaceSlug::new("!!! --- ___").is_err());
+        assert!(SpaceSlug::new("space/escape").is_err());
+        assert!(SpaceSlug::new("space-01").is_ok());
     }
 
     // --- Topology trace models ---
@@ -2726,11 +2726,11 @@ mod tests {
     #[test]
     fn session_includes_agent_id() {
         let id = Uuid::new_v4();
-        let bench_id = Uuid::new_v4();
+        let space_id = Uuid::new_v4();
         let now = Utc::now();
         let session = Session {
             id,
-            bench_id,
+            space_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
             selected_model_id: None,
@@ -2749,7 +2749,7 @@ mod tests {
     #[test]
     fn new_session_includes_agent_id() {
         let ns = NewSession {
-            bench_id: Uuid::new_v4(),
+            space_id: Uuid::new_v4(),
             agent_id: "builder-agent".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,

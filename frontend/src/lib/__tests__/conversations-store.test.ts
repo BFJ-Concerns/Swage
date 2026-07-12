@@ -37,7 +37,7 @@ function makeSummary(id: string, last_activity = "2026-01-01T00:00:00Z") {
 function makeDetail(id: string) {
   return {
     id,
-    bench_id: "default",
+    space_id: "default",
     created_at: "2026-01-01T00:00:00Z",
     last_activity: "2026-01-01T00:00:00Z",
     messages: [] as import("../types").MessageView[],
@@ -162,7 +162,7 @@ describe("createConversation", () => {
     const store = createConversationStore();
     const resp = {
       id: "new-conv",
-      bench_id: "default",
+      space_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
     };
@@ -185,7 +185,7 @@ describe("createConversation", () => {
 
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
-      bench_id: "default",
+      space_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
     });
@@ -389,11 +389,11 @@ describe("refreshActiveConversation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadConversations — bench-scoped
+// loadConversations — space-scoped
 // ---------------------------------------------------------------------------
 
-describe("loadConversations (bench-scoped)", () => {
-  it("passes the benchId through to the API", async () => {
+describe("loadConversations (space-scoped)", () => {
+  it("passes the spaceId through to the API", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([]);
 
@@ -402,17 +402,17 @@ describe("loadConversations (bench-scoped)", () => {
     expect(api.listConversations).toHaveBeenCalledWith("proj-1");
   });
 
-  it("replaces the conversation list when switching benches", async () => {
+  it("replaces the conversation list when switching spaces", async () => {
     const store = createConversationStore();
 
-    // Load bench A — one conversation.
+    // Load space A — one conversation.
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-a1", "2026-01-01T00:00:00Z"),
     ]);
     await store.loadConversations("proj-a");
     expect(store.conversations.map((c) => c.id)).toEqual(["conv-a1"]);
 
-    // Switch to bench B — result should replace bench A's list entirely.
+    // Switch to space B — result should replace space A's list entirely.
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-b1", "2026-01-02T00:00:00Z"),
     ]);
@@ -423,15 +423,15 @@ describe("loadConversations (bench-scoped)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createConversation — bench-scoped
+// createConversation — space-scoped
 // ---------------------------------------------------------------------------
 
-describe("createConversation (bench-scoped)", () => {
-  it("passes the benchId through to the API", async () => {
+describe("createConversation (space-scoped)", () => {
+  it("passes the spaceId through to the API", async () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
-      bench_id: "proj-1",
+      space_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     });

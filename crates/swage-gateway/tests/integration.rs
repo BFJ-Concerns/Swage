@@ -5,8 +5,6 @@ mod support;
 mod agent_task_authoring_integration;
 #[path = "integration/attachment_ingestion_integration.rs"]
 mod attachment_ingestion_integration;
-#[path = "integration/bench_integration.rs"]
-mod bench_integration;
 #[path = "integration/browser_journey_integration.rs"]
 mod browser_journey_integration;
 #[path = "integration/builder_authoring_integration.rs"]
@@ -17,8 +15,8 @@ mod builder_runtime_integration;
 mod cli_run_integration;
 #[path = "integration/credential_governance_integration.rs"]
 mod credential_governance_integration;
-#[path = "integration/execution_host_integration.rs"]
-mod execution_host_integration;
+#[path = "integration/device_integration.rs"]
+mod device_integration;
 #[path = "integration/external_channel_gateway_integration.rs"]
 mod external_channel_gateway_integration;
 #[path = "integration/gateway_cli_integration.rs"]
@@ -59,6 +57,8 @@ mod shared_reference_integration;
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
 mod skills_integration;
+#[path = "integration/space_integration.rs"]
+mod space_integration;
 #[path = "integration/tool_approval_integration.rs"]
 mod tool_approval_integration;
 #[path = "integration/tui_cli_integration.rs"]

@@ -215,7 +215,7 @@ mod tests {
     use swage_storage::SqliteStorage;
     use swage_storage::model::{NewAgentMessage, NewSession, NewThread, NewTurn};
     use swage_storage::store::{
-        AgentMessageStore, BenchStore, SessionStore, ThreadStore, TurnStore,
+        AgentMessageStore, SessionStore, SpaceStore, ThreadStore, TurnStore,
     };
     use uuid::Uuid;
 
@@ -450,12 +450,12 @@ mod tests {
 
     async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = BenchStore::get_or_create_default(storage.as_ref())
+        let space = SpaceStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: agent_id.to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -554,13 +554,13 @@ mod tests {
         // Set up two threads for agent-b — the annotation should scope
         // interruption to only the annotated thread.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = BenchStore::get_or_create_default(storage.as_ref())
+        let space = SpaceStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
 
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -695,14 +695,14 @@ mod tests {
         // Set up TWO agents with the same ID in different sessions/threads
         // to verify that scoped cancel only interrupts the targeted delegation.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = BenchStore::get_or_create_default(storage.as_ref())
+        let space = SpaceStore::get_or_create_default(storage.as_ref())
             .await
             .unwrap();
 
         // First delegation — the one we'll cancel.
         let session_a = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -715,7 +715,7 @@ mod tests {
         // Second delegation — should NOT be interrupted.
         let session_b = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-b".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

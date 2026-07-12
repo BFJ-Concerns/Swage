@@ -1,13 +1,13 @@
-// HTTP API client for bench CRUD and bench-scoped session operations.
+// HTTP API client for space CRUD and space-scoped session operations.
 //
 // Wraps the gateway's REST endpoints with typed request/response handling.
 // All functions throw on HTTP errors so callers can handle failures uniformly.
 
 import type {
-  Bench,
-  CreateBenchRequest,
+  Space,
+  CreateSpaceRequest,
   CreateWorkspaceAttachmentRequest,
-  UpdateBenchRequest,
+  UpdateSpaceRequest,
   UpdateWorkspaceTrustRequest,
   WorkspaceAttachment,
   ConversationSummary,
@@ -16,10 +16,10 @@ import type {
 
 // Base URL prepended to every request. Defaults to "" so requests resolve to
 // the same origin — the Vite dev proxy then forwards /api/* to the gateway.
-// Override with setBenchesBaseUrl() for testing or alternative deployments.
+// Override with setSpacesBaseUrl() for testing or alternative deployments.
 let baseUrl = "";
 
-export function setBenchesBaseUrl(url: string): void {
+export function setSpacesBaseUrl(url: string): void {
   baseUrl = url;
 }
 
@@ -55,96 +55,96 @@ async function request(
 }
 
 // ---------------------------------------------------------------------------
-// Bench CRUD
+// Space CRUD
 // ---------------------------------------------------------------------------
 
-/** Fetch all benches. */
-export async function listBenches(): Promise<Bench[]> {
-  const response = await request("/api/benches", "GET");
-  // Gateway wraps the array in { benches: [...] }.
-  const body = (await response.json()) as { benches: Bench[] };
-  return body.benches;
+/** Fetch all spaces. */
+export async function listSpaces(): Promise<Space[]> {
+  const response = await request("/api/spaces", "GET");
+  // Gateway wraps the array in { spaces: [...] }.
+  const body = (await response.json()) as { spaces: Space[] };
+  return body.spaces;
 }
 
-/** Create a new bench and return its metadata. */
-export async function createBench(
-  req: CreateBenchRequest,
-): Promise<Bench> {
-  const response = await request("/api/benches", "POST", req);
-  return response.json() as Promise<Bench>;
+/** Create a new space and return its metadata. */
+export async function createSpace(
+  req: CreateSpaceRequest,
+): Promise<Space> {
+  const response = await request("/api/spaces", "POST", req);
+  return response.json() as Promise<Space>;
 }
 
-/** Fetch a single bench by ID. */
-export async function getBench(id: string): Promise<Bench> {
-  const response = await request(`/api/benches/${id}`, "GET");
-  return response.json() as Promise<Bench>;
+/** Fetch a single space by ID. */
+export async function getSpace(id: string): Promise<Space> {
+  const response = await request(`/api/spaces/${id}`, "GET");
+  return response.json() as Promise<Space>;
 }
 
-/** Update a bench's metadata and return the updated record. */
-export async function updateBench(
+/** Update a space's metadata and return the updated record. */
+export async function updateSpace(
   id: string,
-  req: UpdateBenchRequest,
-): Promise<Bench> {
-  const response = await request(`/api/benches/${id}`, "PUT", req);
-  return response.json() as Promise<Bench>;
+  req: UpdateSpaceRequest,
+): Promise<Space> {
+  const response = await request(`/api/spaces/${id}`, "PUT", req);
+  return response.json() as Promise<Space>;
 }
 
 /**
- * Delete a bench by ID.
+ * Delete a space by ID.
  *
  * The gateway returns 204 No Content on success — there is no response body
  * to parse.
  */
-export async function deleteBench(id: string): Promise<void> {
-  await request(`/api/benches/${id}`, "DELETE");
+export async function deleteSpace(id: string): Promise<void> {
+  await request(`/api/spaces/${id}`, "DELETE");
 }
 
-export async function listBenchWorkspaces(
-  benchId: string,
+export async function listSpaceWorkspaces(
+  spaceId: string,
 ): Promise<WorkspaceAttachment[]> {
-  const response = await request(`/api/benches/${benchId}/workspaces`, "GET");
+  const response = await request(`/api/spaces/${spaceId}/workspaces`, "GET");
   const body = (await response.json()) as { workspaces: WorkspaceAttachment[] };
   return body.workspaces;
 }
 
-export async function attachBenchWorkspace(
-  benchId: string,
+export async function attachSpaceWorkspace(
+  spaceId: string,
   req: CreateWorkspaceAttachmentRequest,
 ): Promise<WorkspaceAttachment> {
-  const response = await request(`/api/benches/${benchId}/workspaces`, "POST", req);
+  const response = await request(`/api/spaces/${spaceId}/workspaces`, "POST", req);
   return response.json() as Promise<WorkspaceAttachment>;
 }
 
-export async function updateBenchWorkspaceTrust(
-  benchId: string,
+export async function updateSpaceWorkspaceTrust(
+  spaceId: string,
   workspaceId: string,
   req: UpdateWorkspaceTrustRequest,
 ): Promise<WorkspaceAttachment> {
   const response = await request(
-    `/api/benches/${benchId}/workspaces/${workspaceId}/trust`,
+    `/api/spaces/${spaceId}/workspaces/${workspaceId}/trust`,
     "PUT",
     req,
   );
   return response.json() as Promise<WorkspaceAttachment>;
 }
 
-export async function detachBenchWorkspace(
-  benchId: string,
+export async function detachSpaceWorkspace(
+  spaceId: string,
   workspaceId: string,
 ): Promise<void> {
-  await request(`/api/benches/${benchId}/workspaces/${workspaceId}`, "DELETE");
+  await request(`/api/spaces/${spaceId}/workspaces/${workspaceId}`, "DELETE");
 }
 
 // ---------------------------------------------------------------------------
-// Bench-scoped session operations
+// Space-scoped session operations
 // ---------------------------------------------------------------------------
 
-/** Fetch all sessions belonging to a bench. */
-export async function listBenchSessions(
-  benchId: string,
+/** Fetch all sessions belonging to a space. */
+export async function listSpaceSessions(
+  spaceId: string,
 ): Promise<ConversationSummary[]> {
   const response = await request(
-    `/api/benches/${benchId}/sessions`,
+    `/api/spaces/${spaceId}/sessions`,
     "GET",
   );
   // Gateway wraps the array in { conversations: [...] }.
@@ -154,12 +154,12 @@ export async function listBenchSessions(
   return body.conversations;
 }
 
-/** Create a new session within a bench and return its metadata. */
-export async function createBenchSession(
-  benchId: string,
+/** Create a new session within a space and return its metadata. */
+export async function createSpaceSession(
+  spaceId: string,
 ): Promise<ConversationResponse> {
   const response = await request(
-    `/api/benches/${benchId}/sessions`,
+    `/api/spaces/${spaceId}/sessions`,
     "POST",
   );
   return response.json() as Promise<ConversationResponse>;

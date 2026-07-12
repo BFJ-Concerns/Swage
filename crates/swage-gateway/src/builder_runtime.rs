@@ -6,11 +6,6 @@ use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role};
 use swage_storage::{ConfigurationVersion, NewAuditEvent, NewConfigurationVersion};
 
 use crate::{
-    bench_extension as bench_extension_api,
-    bench_extension::{
-        BenchExtensionResponse, CreateBenchExtensionRequest, UpdateBenchExtensionRequest,
-        validate_extension_body, validate_extension_name,
-    },
     lens::{
         CreateLensRequest, InstallLensRequest, LensDescriptor, UpdateLensRequest,
         validate_lens_payload,
@@ -18,6 +13,11 @@ use crate::{
     service::{
         CreateTeamRequest, TeamAgentPayload, TeamResponse, TeamService, TeamTaskPayload,
         UpdateTeamRequest,
+    },
+    space_extension as space_extension_api,
+    space_extension::{
+        CreateSpaceExtensionRequest, SpaceExtensionResponse, UpdateSpaceExtensionRequest,
+        validate_extension_body, validate_extension_name,
     },
     state::AppState,
 };
@@ -75,7 +75,7 @@ pub struct ConfigurationVersionQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigurationVersionResponse {
     pub id: Uuid,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub entity_kind: String,
     pub entity_id: String,
@@ -163,7 +163,7 @@ pub enum BuilderConfigOperation {
         #[serde(default)]
         members: Option<Vec<String>>,
     },
-    CreateBenchExtension {
+    CreateSpaceExtension {
         name: String,
         #[serde(default)]
         display_name: Option<String>,
@@ -178,7 +178,7 @@ pub enum BuilderConfigOperation {
         tool: Option<crate::capability_bundle::CapabilityToolDefinition>,
         instructions: String,
     },
-    UpdateBenchExtension {
+    UpdateSpaceExtension {
         extension_name: String,
         #[serde(default)]
         display_name: Option<String>,
@@ -271,7 +271,7 @@ impl BuilderConfigurationService {
 
     pub async fn propose_changes(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         request: BuilderProposalRequest,
     ) -> Result<BuilderProposalResponse, GatewayError> {
         if request.prompt.trim().is_empty() {
@@ -280,32 +280,32 @@ impl BuilderConfigurationService {
             ));
         }
 
-        let bench = self
+        let space = self
             .state
-            .bench_store
-            .get(bench_id)
+            .space_store
+            .get(space_id)
             .await?
-            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
 
         let lenses = self.state.storage.list_lenses().await?;
-        let teams = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
-            .list_teams(bench_id)
+        let teams = TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
+            .list_teams(space_id)
             .await?
             .teams;
-        let extensions = bench_extension_api::list_bench_extensions(&self.state, bench_id)
+        let extensions = space_extension_api::list_space_extensions(&self.state, space_id)
             .await?
             .extensions;
         let workspaces = self
             .state
             .storage
-            .list_workspace_attachments_by_bench(bench_id)
+            .list_workspace_attachments_by_space(space_id)
             .await?;
 
         let prompt_context = json!({
-            "bench": {
-                "id": bench.id,
-                "name": bench.name,
-                "slug": bench.slug,
+            "space": {
+                "id": space.id,
+                "name": space.name,
+                "slug": space.slug,
                 "workspaces": workspaces,
             },
             "lenses": lenses,
@@ -324,13 +324,13 @@ impl BuilderConfigurationService {
             "Translate the user's natural-language request into a JSON change proposal.",
             "Use this exact shape:",
             r#"{"summary":"string","operations":[{"kind":"create_lens"}],"diagnostics":["string"]}"#,
-            "Valid operation kinds are: create_lens, update_lens, install_lens_preset, create_team, update_team, create_bench_extension, update_bench_extension, approve_workspace_extension, create_agent, update_agent.",
+            "Valid operation kinds are: create_lens, update_lens, install_lens_preset, create_team, update_team, create_space_extension, update_space_extension, approve_workspace_extension, create_agent, update_agent.",
             "Do not include commentary outside JSON.",
         ]
         .join("\n");
 
         let user_prompt = format!(
-            "Bench context:\n{}\n\nUser request:\n{}",
+            "Space context:\n{}\n\nUser request:\n{}",
             serde_json::to_string_pretty(&prompt_context)
                 .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             request.prompt.trim()
@@ -360,7 +360,7 @@ impl BuilderConfigurationService {
 
         let planner_output = parse_builder_output(&completion.content)?;
         let reviewed = self
-            .review_operations(bench_id, &planner_output.operations)
+            .review_operations(space_id, &planner_output.operations)
             .await?;
         let can_apply = !reviewed.is_empty() && reviewed.iter().all(|operation| operation.ready);
 
@@ -374,11 +374,11 @@ impl BuilderConfigurationService {
 
     pub async fn apply_operations(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         request: BuilderApplyRequest,
     ) -> Result<BuilderApplyResponse, GatewayError> {
         let reviewed = self
-            .review_operations(bench_id, &request.operations)
+            .review_operations(space_id, &request.operations)
             .await?;
         let diagnostics: Vec<String> = reviewed
             .iter()
@@ -407,7 +407,7 @@ impl BuilderConfigurationService {
         for operation in request.operations {
             applied.push(
                 self.apply_operation(
-                    bench_id,
+                    space_id,
                     operation,
                     request.session_id,
                     "conversational_builder",
@@ -428,7 +428,7 @@ impl BuilderConfigurationService {
     pub async fn create_lens(
         &self,
         request: CreateLensRequest,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
@@ -439,7 +439,7 @@ impl BuilderConfigurationService {
             saved.id.to_string(),
             "create_lens",
             source,
-            bench_id,
+            space_id,
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -454,7 +454,7 @@ impl BuilderConfigurationService {
         &self,
         lens_id: &str,
         request: UpdateLensRequest,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
@@ -465,7 +465,7 @@ impl BuilderConfigurationService {
             saved.id.to_string(),
             "update_lens",
             source,
-            bench_id,
+            space_id,
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -479,7 +479,7 @@ impl BuilderConfigurationService {
     pub async fn install_lens_preset(
         &self,
         request: InstallLensRequest,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<LensDescriptor, GatewayError> {
@@ -490,7 +490,7 @@ impl BuilderConfigurationService {
             saved.id.to_string(),
             "install_lens_preset",
             source,
-            bench_id,
+            space_id,
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -503,21 +503,21 @@ impl BuilderConfigurationService {
 
     pub async fn create_team(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         request: CreateTeamRequest,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<TeamResponse, GatewayError> {
         let before = None;
-        let saved = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
-            .create_team(bench_id, request)
+        let saved = TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
+            .create_team(space_id, request)
             .await?;
         self.record_configuration_change(
             "team",
             saved.id.to_string(),
             "create_team",
             source,
-            Some(bench_id),
+            Some(space_id),
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -536,7 +536,7 @@ impl BuilderConfigurationService {
         source: &str,
     ) -> Result<TeamResponse, GatewayError> {
         let before = self.capture_team_snapshot(team_id).await?;
-        let saved = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+        let saved = TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
             .update_team(team_id, request)
             .await?;
         self.record_configuration_change(
@@ -544,7 +544,7 @@ impl BuilderConfigurationService {
             saved.id.to_string(),
             "update_team",
             source,
-            Some(saved.bench_id),
+            Some(saved.space_id),
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -555,24 +555,24 @@ impl BuilderConfigurationService {
         Ok(saved)
     }
 
-    pub async fn create_bench_extension(
+    pub async fn create_space_extension(
         &self,
-        bench_id: Uuid,
-        request: CreateBenchExtensionRequest,
+        space_id: Uuid,
+        request: CreateSpaceExtensionRequest,
         session_id: Option<Uuid>,
         source: &str,
-    ) -> Result<BenchExtensionResponse, GatewayError> {
+    ) -> Result<SpaceExtensionResponse, GatewayError> {
         let before = self
-            .capture_bench_extension_snapshot(bench_id, &request.name)
+            .capture_space_extension_snapshot(space_id, &request.name)
             .await?;
         let saved =
-            bench_extension_api::create_bench_extension(&self.state, bench_id, request).await?;
+            space_extension_api::create_space_extension(&self.state, space_id, request).await?;
         self.record_configuration_change(
-            "bench_extension",
+            "space_extension",
             saved.name.clone(),
-            "create_bench_extension",
+            "create_space_extension",
             source,
-            Some(bench_id),
+            Some(space_id),
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -583,30 +583,30 @@ impl BuilderConfigurationService {
         Ok(saved)
     }
 
-    pub async fn update_bench_extension(
+    pub async fn update_space_extension(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         extension_name: &str,
-        request: UpdateBenchExtensionRequest,
+        request: UpdateSpaceExtensionRequest,
         session_id: Option<Uuid>,
         source: &str,
-    ) -> Result<BenchExtensionResponse, GatewayError> {
+    ) -> Result<SpaceExtensionResponse, GatewayError> {
         let before = self
-            .capture_bench_extension_snapshot(bench_id, extension_name)
+            .capture_space_extension_snapshot(space_id, extension_name)
             .await?;
-        let saved = bench_extension_api::update_bench_extension(
+        let saved = space_extension_api::update_space_extension(
             &self.state,
-            bench_id,
+            space_id,
             extension_name,
             request,
         )
         .await?;
         self.record_configuration_change(
-            "bench_extension",
+            "space_extension",
             saved.name.clone(),
-            "update_bench_extension",
+            "update_space_extension",
             source,
-            Some(bench_id),
+            Some(space_id),
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -619,23 +619,23 @@ impl BuilderConfigurationService {
 
     pub async fn approve_workspace_extension(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         extension_name: &str,
         session_id: Option<Uuid>,
         source: &str,
-    ) -> Result<BenchExtensionResponse, GatewayError> {
+    ) -> Result<SpaceExtensionResponse, GatewayError> {
         let before = self
-            .capture_bench_extension_snapshot(bench_id, extension_name)
+            .capture_space_extension_snapshot(space_id, extension_name)
             .await?;
         let saved =
-            bench_extension_api::approve_workspace_extension(&self.state, bench_id, extension_name)
+            space_extension_api::approve_workspace_extension(&self.state, space_id, extension_name)
                 .await?;
         self.record_configuration_change(
-            "bench_extension",
+            "space_extension",
             saved.name.clone(),
             "approve_workspace_extension",
             source,
-            Some(bench_id),
+            Some(space_id),
             session_id,
             before,
             serde_json::to_value(&saved)
@@ -648,7 +648,7 @@ impl BuilderConfigurationService {
 
     pub async fn list_configuration_versions(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         query: ConfigurationVersionQuery,
     ) -> Result<ConfigurationVersionListResponse, GatewayError> {
         let versions = match (query.entity_kind.as_deref(), query.entity_id.as_deref()) {
@@ -661,7 +661,7 @@ impl BuilderConfigurationService {
             (None, None) => {
                 self.state
                     .storage
-                    .list_configuration_versions(Some(bench_id))
+                    .list_configuration_versions(Some(space_id))
                     .await?
             }
             _ => {
@@ -681,7 +681,7 @@ impl BuilderConfigurationService {
         Ok(ConfigurationVersionListResponse {
             versions: versions
                 .into_iter()
-                .filter(|version| version.bench_id == Some(bench_id))
+                .filter(|version| version.space_id == Some(space_id))
                 .map(|version| {
                     configuration_version_to_response(
                         version.clone(),
@@ -729,8 +729,8 @@ impl BuilderConfigurationService {
                 self.rollback_team_task_version(&version, session_id, source)
                     .await?
             }
-            "bench_extension" => {
-                self.rollback_bench_extension_version(&version, session_id, source)
+            "space_extension" => {
+                self.rollback_space_extension_version(&version, session_id, source)
                     .await?
             }
             other => {
@@ -747,19 +747,19 @@ impl BuilderConfigurationService {
 
     async fn review_operations(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         operations: &[BuilderConfigOperation],
     ) -> Result<Vec<BuilderReviewedOperation>, GatewayError> {
         let mut reviewed = Vec::with_capacity(operations.len());
         for operation in operations {
-            reviewed.push(self.review_operation(bench_id, operation.clone()).await?);
+            reviewed.push(self.review_operation(space_id, operation.clone()).await?);
         }
         Ok(reviewed)
     }
 
     async fn review_operation(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         operation: BuilderConfigOperation,
     ) -> Result<BuilderReviewedOperation, GatewayError> {
         let mut diagnostics = Vec::new();
@@ -831,7 +831,7 @@ impl BuilderConfigurationService {
                 if self
                     .state
                     .storage
-                    .get_team_by_name(bench_id, name)
+                    .get_team_by_name(space_id, name)
                     .await?
                     .is_some()
                 {
@@ -859,14 +859,14 @@ impl BuilderConfigurationService {
                     diagnostics.push("members must not contain empty agent IDs.".into());
                 }
                 if self
-                    .resolve_team(bench_id, *team_id, team_name.as_deref())
+                    .resolve_team(space_id, *team_id, team_name.as_deref())
                     .await?
                     .is_none()
                 {
-                    diagnostics.push("The referenced team does not exist in this bench.".into());
+                    diagnostics.push("The referenced team does not exist in this space.".into());
                 }
             }
-            BuilderConfigOperation::CreateBenchExtension {
+            BuilderConfigOperation::CreateSpaceExtension {
                 name,
                 description,
                 requested_tools,
@@ -886,7 +886,7 @@ impl BuilderConfigurationService {
                     tool.as_ref(),
                 )?;
                 let extensions =
-                    bench_extension_api::list_bench_extensions(&self.state, bench_id).await?;
+                    space_extension_api::list_space_extensions(&self.state, space_id).await?;
                 if extensions
                     .extensions
                     .iter()
@@ -895,7 +895,7 @@ impl BuilderConfigurationService {
                     diagnostics.push(format!("Managed extension {name} already exists."));
                 }
             }
-            BuilderConfigOperation::UpdateBenchExtension {
+            BuilderConfigOperation::UpdateSpaceExtension {
                 extension_name,
                 description,
                 requested_tools,
@@ -915,7 +915,7 @@ impl BuilderConfigurationService {
                     tool.as_ref(),
                 )?;
                 let extensions =
-                    bench_extension_api::list_bench_extensions(&self.state, bench_id).await?;
+                    space_extension_api::list_space_extensions(&self.state, space_id).await?;
                 if !extensions.extensions.iter().any(|extension| {
                     extension.name == *extension_name && extension.source_kind == "managed"
                 }) {
@@ -927,7 +927,7 @@ impl BuilderConfigurationService {
             BuilderConfigOperation::ApproveWorkspaceExtension { extension_name } => {
                 validate_extension_name(extension_name)?;
                 let extensions =
-                    bench_extension_api::list_bench_extensions(&self.state, bench_id).await?;
+                    space_extension_api::list_space_extensions(&self.state, space_id).await?;
                 if !extensions.extensions.iter().any(|extension| {
                     extension.name == *extension_name && extension.status == "approval_required"
                 }) {
@@ -945,7 +945,7 @@ impl BuilderConfigurationService {
                     diagnostics.push("agent_id must not be empty.".into());
                 }
                 let Some(team) = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                 else {
                     diagnostics.push("create_agent needs a target team.".into());
@@ -967,7 +967,7 @@ impl BuilderConfigurationService {
                     diagnostics.push("agent_id must not be empty.".into());
                 }
                 let Some(team) = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                 else {
                     diagnostics.push("update_agent needs a target team.".into());
@@ -989,7 +989,7 @@ impl BuilderConfigurationService {
                     diagnostics.push("task_name must not be empty.".into());
                 }
                 let Some(team) = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                 else {
                     diagnostics.push("create_task needs a target team.".into());
@@ -1011,7 +1011,7 @@ impl BuilderConfigurationService {
                     diagnostics.push("task_name must not be empty.".into());
                 }
                 let Some(team) = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                 else {
                     diagnostics.push("update_task needs a target team.".into());
@@ -1031,7 +1031,7 @@ impl BuilderConfigurationService {
 
     async fn apply_operation(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         operation: BuilderConfigOperation,
         session_id: Option<Uuid>,
         source: &str,
@@ -1056,7 +1056,7 @@ impl BuilderConfigurationService {
                             ui_modules,
                             prominent_team_ids,
                         },
-                        Some(bench_id),
+                        Some(space_id),
                         session_id,
                         source,
                     )
@@ -1088,7 +1088,7 @@ impl BuilderConfigurationService {
                             ui_modules,
                             prominent_team_ids,
                         },
-                        Some(bench_id),
+                        Some(space_id),
                         session_id,
                         source,
                     )
@@ -1106,7 +1106,7 @@ impl BuilderConfigurationService {
                 let saved = self
                     .install_lens_preset(
                         InstallLensRequest { preset_id },
-                        Some(bench_id),
+                        Some(space_id),
                         session_id,
                         source,
                     )
@@ -1128,7 +1128,7 @@ impl BuilderConfigurationService {
             } => {
                 let saved = self
                     .create_team(
-                        bench_id,
+                        space_id,
                         CreateTeamRequest {
                             name,
                             description,
@@ -1158,11 +1158,11 @@ impl BuilderConfigurationService {
                 members,
             } => {
                 let team = self
-                    .resolve_team(bench_id, team_id, team_name.as_deref())
+                    .resolve_team(space_id, team_id, team_name.as_deref())
                     .await?
                     .ok_or_else(|| {
                         GatewayError::ValidationError(
-                            "The referenced team does not exist in this bench.".into(),
+                            "The referenced team does not exist in this space.".into(),
                         )
                     })?;
                 let saved = self
@@ -1189,7 +1189,7 @@ impl BuilderConfigurationService {
                     entity_id: saved.id.to_string(),
                 })
             }
-            BuilderConfigOperation::CreateBenchExtension {
+            BuilderConfigOperation::CreateSpaceExtension {
                 name,
                 display_name,
                 description,
@@ -1200,9 +1200,9 @@ impl BuilderConfigurationService {
                 instructions,
             } => {
                 let saved = self
-                    .create_bench_extension(
-                        bench_id,
-                        CreateBenchExtensionRequest {
+                    .create_space_extension(
+                        space_id,
+                        CreateSpaceExtensionRequest {
                             name,
                             display_name,
                             description,
@@ -1218,19 +1218,19 @@ impl BuilderConfigurationService {
                     .await?;
                 self.record_request_text(
                     request_text,
-                    "bench_extension",
+                    "space_extension",
                     saved.name.clone(),
                     session_id,
                 )
                 .await?;
                 Ok(BuilderAppliedOperation {
-                    kind: "create_bench_extension".into(),
+                    kind: "create_space_extension".into(),
                     summary: format!("Created extension {}.", saved.name),
-                    entity_kind: "bench_extension".into(),
+                    entity_kind: "space_extension".into(),
                     entity_id: saved.name,
                 })
             }
-            BuilderConfigOperation::UpdateBenchExtension {
+            BuilderConfigOperation::UpdateSpaceExtension {
                 extension_name,
                 display_name,
                 description,
@@ -1241,10 +1241,10 @@ impl BuilderConfigurationService {
                 instructions,
             } => {
                 let saved = self
-                    .update_bench_extension(
-                        bench_id,
+                    .update_space_extension(
+                        space_id,
                         &extension_name,
-                        UpdateBenchExtensionRequest {
+                        UpdateSpaceExtensionRequest {
                             display_name,
                             description,
                             requested_tools,
@@ -1259,25 +1259,25 @@ impl BuilderConfigurationService {
                     .await?;
                 self.record_request_text(
                     request_text,
-                    "bench_extension",
+                    "space_extension",
                     saved.name.clone(),
                     session_id,
                 )
                 .await?;
                 Ok(BuilderAppliedOperation {
-                    kind: "update_bench_extension".into(),
+                    kind: "update_space_extension".into(),
                     summary: format!("Updated extension {}.", saved.name),
-                    entity_kind: "bench_extension".into(),
+                    entity_kind: "space_extension".into(),
                     entity_id: saved.name,
                 })
             }
             BuilderConfigOperation::ApproveWorkspaceExtension { extension_name } => {
                 let saved = self
-                    .approve_workspace_extension(bench_id, &extension_name, session_id, source)
+                    .approve_workspace_extension(space_id, &extension_name, session_id, source)
                     .await?;
                 self.record_request_text(
                     request_text,
-                    "bench_extension",
+                    "space_extension",
                     saved.name.clone(),
                     session_id,
                 )
@@ -1285,7 +1285,7 @@ impl BuilderConfigurationService {
                 Ok(BuilderAppliedOperation {
                     kind: "approve_workspace_extension".into(),
                     summary: format!("Approved workspace extension {}.", saved.name),
-                    entity_kind: "bench_extension".into(),
+                    entity_kind: "space_extension".into(),
                     entity_id: saved.name,
                 })
             }
@@ -1298,7 +1298,7 @@ impl BuilderConfigurationService {
                 model,
             } => {
                 let team = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                     .ok_or_else(|| {
                         GatewayError::ValidationError("create_agent needs a target team.".into())
@@ -1345,7 +1345,7 @@ impl BuilderConfigurationService {
                     format!("{}:{agent_id}", saved.id),
                     "create_agent",
                     source,
-                    Some(saved.bench_id),
+                    Some(saved.space_id),
                     session_id,
                     before,
                     serde_json::to_value(agent_snapshot)
@@ -1371,7 +1371,7 @@ impl BuilderConfigurationService {
                 model,
             } => {
                 let team = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                     .ok_or_else(|| {
                         GatewayError::ValidationError("update_agent needs a target team.".into())
@@ -1429,7 +1429,7 @@ impl BuilderConfigurationService {
                     format!("{}:{agent_id}", saved.id),
                     "update_agent",
                     source,
-                    Some(saved.bench_id),
+                    Some(saved.space_id),
                     session_id,
                     before,
                     serde_json::to_value(agent_snapshot)
@@ -1455,7 +1455,7 @@ impl BuilderConfigurationService {
                 output_schema,
             } => {
                 let team = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                     .ok_or_else(|| {
                         GatewayError::ValidationError("create_task needs a target team.".into())
@@ -1505,7 +1505,7 @@ impl BuilderConfigurationService {
                     format!("{}:{task_name}", saved.id),
                     "create_task",
                     source,
-                    Some(saved.bench_id),
+                    Some(saved.space_id),
                     session_id,
                     before,
                     serde_json::to_value(task_snapshot)
@@ -1531,7 +1531,7 @@ impl BuilderConfigurationService {
                 output_schema,
             } => {
                 let team = self
-                    .resolve_target_team(bench_id, team_name.as_deref())
+                    .resolve_target_team(space_id, team_name.as_deref())
                     .await?
                     .ok_or_else(|| {
                         GatewayError::ValidationError("update_task needs a target team.".into())
@@ -1592,7 +1592,7 @@ impl BuilderConfigurationService {
                     format!("{}:{task_name}", saved.id),
                     "update_task",
                     source,
-                    Some(saved.bench_id),
+                    Some(saved.space_id),
                     session_id,
                     before,
                     serde_json::to_value(task_snapshot)
@@ -1614,20 +1614,20 @@ impl BuilderConfigurationService {
 
     async fn resolve_team(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         team_id: Option<Uuid>,
         team_name: Option<&str>,
     ) -> Result<Option<swage_storage::Team>, GatewayError> {
         if let Some(team_id) = team_id {
             let team = self.state.storage.get_team(team_id).await?;
-            return Ok(team.filter(|team| team.bench_id == bench_id));
+            return Ok(team.filter(|team| team.space_id == space_id));
         }
 
         if let Some(team_name) = team_name {
             return Ok(self
                 .state
                 .storage
-                .get_team_by_name(bench_id, team_name)
+                .get_team_by_name(space_id, team_name)
                 .await?);
         }
 
@@ -1636,17 +1636,17 @@ impl BuilderConfigurationService {
 
     async fn resolve_target_team(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         team_name: Option<&str>,
     ) -> Result<Option<swage_storage::Team>, GatewayError> {
-        if let Some(team) = self.resolve_team(bench_id, None, team_name).await? {
+        if let Some(team) = self.resolve_team(space_id, None, team_name).await? {
             return Ok(Some(team));
         }
 
         Ok(self
             .state
             .storage
-            .list_teams_by_bench(bench_id)
+            .list_teams_by_space(space_id)
             .await?
             .into_iter()
             .next())
@@ -1694,12 +1694,12 @@ impl BuilderConfigurationService {
         .transpose()
     }
 
-    async fn capture_bench_extension_snapshot(
+    async fn capture_space_extension_snapshot(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         extension_name: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        let extensions = bench_extension_api::list_bench_extensions(&self.state, bench_id)
+        let extensions = space_extension_api::list_space_extensions(&self.state, space_id)
             .await?
             .extensions;
         extensions
@@ -1721,7 +1721,7 @@ impl BuilderConfigurationService {
         entity_id: String,
         operation_kind: &str,
         source: &str,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         session_id: Option<Uuid>,
         before_snapshot: Option<serde_json::Value>,
         snapshot: serde_json::Value,
@@ -1738,7 +1738,7 @@ impl BuilderConfigurationService {
             .storage
             .create_configuration_version(NewConfigurationVersion {
                 id: Uuid::new_v4(),
-                bench_id,
+                space_id,
                 session_id,
                 entity_kind: entity_kind.to_string(),
                 entity_id: entity_id.clone(),
@@ -1761,7 +1761,7 @@ impl BuilderConfigurationService {
             operation_kind,
             source,
             session_id,
-            bench_id,
+            space_id,
             Some(version.id),
             rollback_to_version_id,
         )
@@ -1806,7 +1806,7 @@ impl BuilderConfigurationService {
             restored.id.to_string(),
             "rollback_configuration_version",
             source,
-            version.bench_id,
+            version.space_id,
             session_id,
             before,
             serde_json::to_value(&restored)
@@ -1826,7 +1826,7 @@ impl BuilderConfigurationService {
             .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
         let before = self.capture_team_snapshot(snapshot.id).await?;
         let restored = if before.is_some() {
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .update_team(
                     snapshot.id,
                     UpdateTeamRequest {
@@ -1840,9 +1840,9 @@ impl BuilderConfigurationService {
                 )
                 .await?
         } else {
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .create_team(
-                    snapshot.bench_id,
+                    snapshot.space_id,
                     CreateTeamRequest {
                         name: snapshot.name.clone(),
                         description: snapshot.description.clone(),
@@ -1858,7 +1858,7 @@ impl BuilderConfigurationService {
             restored.id.to_string(),
             "rollback_configuration_version",
             source,
-            Some(restored.bench_id),
+            Some(restored.space_id),
             session_id,
             before,
             serde_json::to_value(&restored)
@@ -1881,7 +1881,7 @@ impl BuilderConfigurationService {
             .capture_team_agent_snapshot(snapshot.team_id, &snapshot.agent.id)
             .await?;
         let current_team =
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .get_team(snapshot.team_id)
                 .await?;
         let mut agents = current_team.agents.clone();
@@ -1894,7 +1894,7 @@ impl BuilderConfigurationService {
             agents.push(snapshot.agent.clone());
         }
         let restored_team =
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .update_team(
                     snapshot.team_id,
                     UpdateTeamRequest {
@@ -1916,7 +1916,7 @@ impl BuilderConfigurationService {
             format!("{}:{}", snapshot.team_id, snapshot.agent.id),
             "rollback_configuration_version",
             source,
-            Some(restored_team.bench_id),
+            Some(restored_team.space_id),
             session_id,
             before,
             serde_json::to_value(after)
@@ -1938,7 +1938,7 @@ impl BuilderConfigurationService {
             .capture_team_task_snapshot(snapshot.team_id, &snapshot.task.name)
             .await?;
         let current_team =
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .get_team(snapshot.team_id)
                 .await?;
         let mut tasks = current_team.tasks.clone();
@@ -1951,7 +1951,7 @@ impl BuilderConfigurationService {
             tasks.push(snapshot.task.clone());
         }
         let restored_team =
-            TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+            TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
                 .update_team(
                     snapshot.team_id,
                     UpdateTeamRequest {
@@ -1973,7 +1973,7 @@ impl BuilderConfigurationService {
             format!("{}:{}", snapshot.team_id, snapshot.task.name),
             "rollback_configuration_version",
             source,
-            Some(restored_team.bench_id),
+            Some(restored_team.space_id),
             session_id,
             before,
             serde_json::to_value(after)
@@ -1983,26 +1983,26 @@ impl BuilderConfigurationService {
         .await
     }
 
-    async fn rollback_bench_extension_version(
+    async fn rollback_space_extension_version(
         &self,
         version: &ConfigurationVersion,
         session_id: Option<Uuid>,
         source: &str,
     ) -> Result<ConfigurationVersion, GatewayError> {
-        let bench_id = version.bench_id.ok_or_else(|| {
-            GatewayError::ValidationError("bench extension version is missing bench_id".into())
+        let space_id = version.space_id.ok_or_else(|| {
+            GatewayError::ValidationError("space extension version is missing space_id".into())
         })?;
-        let snapshot: BenchExtensionResponse = serde_json::from_value(version.snapshot.clone())
+        let snapshot: SpaceExtensionResponse = serde_json::from_value(version.snapshot.clone())
             .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
         let before = self
-            .capture_bench_extension_snapshot(bench_id, &snapshot.name)
+            .capture_space_extension_snapshot(space_id, &snapshot.name)
             .await?;
         let restored = if before.is_some() {
-            bench_extension_api::update_bench_extension(
+            space_extension_api::update_space_extension(
                 &self.state,
-                bench_id,
+                space_id,
                 &snapshot.name,
-                UpdateBenchExtensionRequest {
+                UpdateSpaceExtensionRequest {
                     display_name: snapshot.display_name.clone(),
                     description: snapshot.description.clone(),
                     requested_tools: snapshot.requested_tools.clone(),
@@ -2014,10 +2014,10 @@ impl BuilderConfigurationService {
             )
             .await?
         } else {
-            bench_extension_api::create_bench_extension(
+            space_extension_api::create_space_extension(
                 &self.state,
-                bench_id,
-                CreateBenchExtensionRequest {
+                space_id,
+                CreateSpaceExtensionRequest {
                     name: snapshot.name.clone(),
                     display_name: snapshot.display_name.clone(),
                     description: snapshot.description.clone(),
@@ -2031,11 +2031,11 @@ impl BuilderConfigurationService {
             .await?
         };
         self.record_configuration_change(
-            "bench_extension",
+            "space_extension",
             restored.name.clone(),
             "rollback_configuration_version",
             source,
-            Some(bench_id),
+            Some(space_id),
             session_id,
             before,
             serde_json::to_value(&restored)
@@ -2050,7 +2050,7 @@ impl BuilderConfigurationService {
         team_id: Uuid,
         agent_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        let team = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+        let team = TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
             .get_team(team_id)
             .await?;
         capture_team_agent_from_response(&team, agent_id)
@@ -2066,7 +2066,7 @@ impl BuilderConfigurationService {
         team_id: Uuid,
         task_name: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        let team = TeamService::new(self.state.storage.clone(), self.state.bench_store.clone())
+        let team = TeamService::new(self.state.storage.clone(), self.state.space_store.clone())
             .get_team(team_id)
             .await?;
         capture_team_task_from_response(&team, task_name)
@@ -2085,7 +2085,7 @@ impl BuilderConfigurationService {
         operation_kind: &str,
         source: &str,
         session_id: Option<Uuid>,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         configuration_version_id: Option<Uuid>,
         rollback_to_version_id: Option<Uuid>,
     ) -> Result<(), GatewayError> {
@@ -2102,7 +2102,7 @@ impl BuilderConfigurationService {
                     "service": BUILDER_CONFIG_SERVICE_NAME,
                     "operation_kind": operation_kind,
                     "source": source,
-                    "bench_id": bench_id,
+                    "space_id": space_id,
                     "configuration_version_id": configuration_version_id,
                     "rollback_to_version_id": rollback_to_version_id,
                 }),
@@ -2204,7 +2204,7 @@ fn configuration_version_to_response(
 ) -> ConfigurationVersionResponse {
     ConfigurationVersionResponse {
         id: version.id,
-        bench_id: version.bench_id,
+        space_id: version.space_id,
         session_id: version.session_id,
         entity_kind: version.entity_kind,
         entity_id: version.entity_id,
@@ -2224,7 +2224,7 @@ fn configuration_version_to_response(
 fn team_to_version_response(team: swage_storage::Team) -> TeamResponse {
     TeamResponse {
         id: team.id,
-        bench_id: team.bench_id,
+        space_id: team.space_id,
         name: team.name,
         description: team.description,
         entry_agent_id: team.entry_agent_id,
@@ -2383,8 +2383,8 @@ impl BuilderConfigOperation {
             Self::InstallLensPreset { .. } => "install_lens_preset",
             Self::CreateTeam { .. } => "create_team",
             Self::UpdateTeam { .. } => "update_team",
-            Self::CreateBenchExtension { .. } => "create_bench_extension",
-            Self::UpdateBenchExtension { .. } => "update_bench_extension",
+            Self::CreateSpaceExtension { .. } => "create_space_extension",
+            Self::UpdateSpaceExtension { .. } => "update_space_extension",
             Self::ApproveWorkspaceExtension { .. } => "approve_workspace_extension",
             Self::CreateAgent { .. } => "create_agent",
             Self::UpdateAgent { .. } => "update_agent",
@@ -2409,11 +2409,11 @@ impl BuilderConfigOperation {
                     .clone()
                     .unwrap_or_else(|| team_id.map(|value| value.to_string()).unwrap_or_default())
             ),
-            Self::CreateBenchExtension { name, .. } => {
-                format!("Create bench extension {name}.")
+            Self::CreateSpaceExtension { name, .. } => {
+                format!("Create space extension {name}.")
             }
-            Self::UpdateBenchExtension { extension_name, .. } => {
-                format!("Update bench extension {extension_name}.")
+            Self::UpdateSpaceExtension { extension_name, .. } => {
+                format!("Update space extension {extension_name}.")
             }
             Self::ApproveWorkspaceExtension { extension_name } => {
                 format!("Approve workspace extension {extension_name}.")

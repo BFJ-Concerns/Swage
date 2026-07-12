@@ -323,12 +323,12 @@ pub async fn save_settings(
     Ok(load_settings(state).await)
 }
 
-pub(crate) async fn persist_permanent_tool_approval_for_bench(
+pub(crate) async fn persist_permanent_tool_approval_for_space(
     config: &swage_config::ResolvedConfig,
-    bench: &swage_storage::model::Bench,
+    space: &swage_storage::model::Space,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = bench_config_path(&bench.slug)?;
+    let path = space_config_path(&space.slug)?;
     persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
@@ -364,10 +364,10 @@ async fn persist_permanent_tool_approval_to_path(
     Ok(())
 }
 
-fn bench_config_path(bench_slug: &str) -> Result<PathBuf, ApiError> {
+fn space_config_path(space_slug: &str) -> Result<PathBuf, ApiError> {
     let root = swage_config::discovery::resolve_root()
         .map_err(|problem| ApiError::validation(problem.to_string()))?;
-    Ok(root.join("benches").join(bench_slug).join("config.toml"))
+    Ok(root.join("spaces").join(space_slug).join("config.toml"))
 }
 
 fn require_approval_entries_without_tool(
@@ -1095,7 +1095,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
@@ -1144,7 +1144,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
@@ -1268,7 +1268,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
@@ -1367,7 +1367,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::BenchStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),

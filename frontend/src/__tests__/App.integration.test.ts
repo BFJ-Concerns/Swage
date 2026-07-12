@@ -20,7 +20,7 @@ import * as conversationsApi from "../lib/api/conversations";
 import * as lensApi from "../lib/api/lens";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
-import * as benchesApi from "../lib/api/benches";
+import * as spacesApi from "../lib/api/spaces";
 import type {
   AppLens,
   ClientEvent,
@@ -30,7 +30,7 @@ import type {
   ConversationSummary,
   LensRuntimeResponse,
   OperatorOverview,
-  Bench,
+  Space,
   ServerEvent,
   WorkspaceAttachment,
 } from "../lib/types";
@@ -75,15 +75,15 @@ const websocketHarness = vi.hoisted(() => {
   };
 });
 
-vi.mock("../lib/api/benches", () => ({
-  listBenches: vi.fn(),
-  createBench: vi.fn(),
-  updateBench: vi.fn(),
-  deleteBench: vi.fn(),
-  listBenchWorkspaces: vi.fn(),
-  attachBenchWorkspace: vi.fn(),
-  detachBenchWorkspace: vi.fn(),
-  listBenchSessions: vi.fn(),
+vi.mock("../lib/api/spaces", () => ({
+  listSpaces: vi.fn(),
+  createSpace: vi.fn(),
+  updateSpace: vi.fn(),
+  deleteSpace: vi.fn(),
+  listSpaceWorkspaces: vi.fn(),
+  attachSpaceWorkspace: vi.fn(),
+  detachSpaceWorkspace: vi.fn(),
+  listSpaceSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/conversations", () => ({
@@ -102,15 +102,15 @@ vi.mock("../lib/api/builder", () => ({
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
-  listBenchExtensions: vi.fn(),
-  createBenchExtension: vi.fn(),
-  updateBenchExtension: vi.fn(),
+  listSpaceExtensions: vi.fn(),
+  createSpaceExtension: vi.fn(),
+  updateSpaceExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
   listSharedReferences: vi.fn(),
 }));
 
 vi.mock("../lib/api/materials", () => ({
-  listBenchMaterials: vi.fn(),
+  listSpaceMaterials: vi.fn(),
   listSessionMaterials: vi.fn(),
   createMaterial: vi.fn(),
 }));
@@ -128,7 +128,7 @@ vi.mock("../lib/api/websocket", () => ({
   createWebSocketClient: websocketHarness.factory,
 }));
 
-function makeBench(overrides: Partial<Bench> = {}): Bench {
+function makeSpace(overrides: Partial<Space> = {}): Space {
   return {
     id: "proj-default",
     name: "default",
@@ -145,7 +145,7 @@ function makeWorkspaceAttachment(
 ): WorkspaceAttachment {
   return {
     id: "workspace-1",
-    bench_id: "proj-default",
+    space_id: "proj-default",
     label: "Codebase",
     path: "/missing/codebase",
     canonical_path: "/missing/codebase",
@@ -176,7 +176,7 @@ function makeConversationDetail(
 ): ConversationDetail {
   return {
     id: "conv-1",
-    bench_id: "proj-default",
+    space_id: "proj-default",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],
@@ -199,8 +199,8 @@ function makeOperatorOverview(
     sessions: [
       {
         id: "conv-ops",
-        bench_id: "proj-default",
-        bench_name: "default",
+        space_id: "proj-default",
+        space_name: "default",
         created_at: "2026-04-07T12:00:00Z",
         last_activity: "2026-04-07T12:04:00Z",
         message_preview: "Operator view",
@@ -222,9 +222,9 @@ function makeOperatorOverview(
         },
       ],
     },
-    nodes: [
+    devices: [
       {
-        host_id: "local",
+        device_id: "local",
         label: "Local machine",
         kind: "local",
         base_url: null,
@@ -244,7 +244,7 @@ function makeLensRuntime(
   activeLens: AppLens = "assistant",
 ): LensRuntimeResponse {
   return {
-    bench_id: "proj-default",
+    space_id: "proj-default",
     active_lens: activeLens,
     updated_at: "2026-04-07T12:00:00Z",
     stage_modules: [],
@@ -307,22 +307,22 @@ function setPath(path: string): void {
 }
 
 /**
- * Open a bench from the picker. Swage lands on the bench picker on entry, so
- * tests that need a bench open must go through it. Clicking a card's Open
- * button triggers `openBench` in BenchPicker.
+ * Open a space from the picker. Swage lands on the space picker on entry, so
+ * tests that need a space open must go through it. Clicking a card's Open
+ * button triggers `openSpace` in SpacePicker.
  */
-async function openBenchFromPicker(name: string): Promise<void> {
+async function openSpaceFromPicker(name: string): Promise<void> {
   const card = Array.from(
-    document.querySelectorAll<HTMLElement>(".bench-card"),
+    document.querySelectorAll<HTMLElement>(".space-card"),
   ).find((el) => el.textContent?.includes(name));
 
   if (!card) {
-    throw new Error(`Bench card with name "${name}" not found in picker`);
+    throw new Error(`Space card with name "${name}" not found in picker`);
   }
 
   const openBtn = card.querySelector<HTMLButtonElement>(".open-btn");
   if (!openBtn) {
-    throw new Error(`Open button missing on bench card "${name}"`);
+    throw new Error(`Open button missing on space card "${name}"`);
   }
 
   flushSync(() => openBtn.click());
@@ -340,16 +340,16 @@ describe("App", () => {
     vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
     vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
     vi.mocked(builderApi.listTeams).mockResolvedValue([]);
-    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([]);
+    vi.mocked(builderApi.listSpaceExtensions).mockResolvedValue([]);
     vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
-    vi.mocked(materialsApi.listBenchMaterials).mockResolvedValue([]);
+    vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
-    // BenchPicker fetches workspace/session detail on card selection — return
+    // SpacePicker fetches workspace/session detail on card selection — return
     // empty arrays by default so the picker renders without errors. Individual
     // tests can override these mocks if they exercise the detail panel.
-    vi.mocked(benchesApi.listBenchWorkspaces).mockResolvedValue([]);
-    vi.mocked(benchesApi.listBenchSessions).mockResolvedValue([]);
+    vi.mocked(spacesApi.listSpaceWorkspaces).mockResolvedValue([]);
+    vi.mocked(spacesApi.listSpaceSessions).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -366,13 +366,13 @@ describe("App", () => {
   });
 
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
-    const defaultBench = makeBench();
+    const defaultSpace = makeSpace();
     const linkedConversation = makeConversationSummary({
       id: "conv-linked",
       message_preview: "Deep-linked conversation",
     });
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
@@ -395,9 +395,9 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(benchesApi.listBenches).toHaveBeenCalledTimes(1);
+    expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
     expect(lensApi.fetchLensRuntime).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultBench.id);
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
@@ -420,14 +420,14 @@ describe("App", () => {
       },
     };
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([makeBench()]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // The app lands on the bench picker — open the default bench so the
+    // The app lands on the space picker — open the default space so the
     // top bar (which holds the desktop shell stamp) renders.
-    await openBenchFromPicker("default");
+    await openSpaceFromPicker("default");
 
     // The riso shell condenses runtime context into a top-bar "stamp": the
     // managed/remote token replaces the older verbose "Desktop shell" panel.
@@ -437,22 +437,22 @@ describe("App", () => {
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
-    const defaultBench = makeBench();
+    const defaultSpace = makeSpace();
     const created: ConversationResponse = {
       id: "conv-new",
-      bench_id: defaultBench.id,
+      space_id: defaultSpace.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the bench so ConversationList (and its "New" button) renders.
-    await openBenchFromPicker(defaultBench.name);
+    // Open the space so ConversationList (and its "New" button) renders.
+    await openSpaceFromPicker(defaultSpace.name);
 
     const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
@@ -460,7 +460,7 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultBench.id, undefined);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultSpace.id, undefined);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
@@ -469,9 +469,9 @@ describe("App", () => {
   });
 
   it("sends a message and finalises a streamed reply through the full app stack", async () => {
-    const defaultBench = makeBench();
+    const defaultSpace = makeSpace();
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({
         id: "conv-stream",
@@ -526,9 +526,9 @@ describe("App", () => {
   });
 
   it("switches to the operator deck and renders the overview", async () => {
-    const defaultBench = makeBench();
+    const defaultSpace = makeSpace();
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
@@ -541,8 +541,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the bench so the lens tabs render in the top bar.
-    await openBenchFromPicker(defaultBench.name);
+    // Open the space so the lens tabs render in the top bar.
+    await openSpaceFromPicker(defaultSpace.name);
 
     // Lens tabs sit in the top bar with class .lens. We look for the lens
     // whose title resolves to "Operator" (after stripping the trailing "lens"
@@ -567,9 +567,9 @@ describe("App", () => {
   });
 
   it("loads the builder lens and renders the builder deck by default", async () => {
-    const defaultBench = makeBench({ name: "Workbench" });
+    const defaultSpace = makeSpace({ name: "Space" });
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
       makeOperatorOverview(),
@@ -580,47 +580,47 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the bench so the builder lens runtime is fetched and the deck
+    // Open the space so the builder lens runtime is fetched and the deck
     // gets placed on the stage.
-    await openBenchFromPicker(defaultBench.name);
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await openSpaceFromPicker(defaultSpace.name);
+    await waitForText("Author the space, then let the agent live in it.");
 
     expect(document.body.textContent).toContain(
-      "Author the workspace, then let the agent live in it.",
+      "Author the space, then let the agent live in it.",
     );
-    // Bench name still surfaces in the bench head.
-    expect(document.body.textContent).toContain("Workbench");
+    // Space name still surfaces in the space head.
+    expect(document.body.textContent).toContain("Space");
     // Operator overview is no longer pre-fetched on mount — the rail that
     // displayed it was dropped. The operator lens loads its own data.
   });
 
-  it("shows missing bench workspaces and relinks them before opening", async () => {
-    const defaultBench = makeBench({ name: "Workbench" });
+  it("shows missing space workspaces and relinks them before opening", async () => {
+    const defaultSpace = makeSpace({ name: "Space" });
     const missingWorkspace = makeWorkspaceAttachment({ is_missing: true });
     const relinkedWorkspace = makeWorkspaceAttachment({
-      path: "/srv/workbench",
-      canonical_path: "/srv/workbench",
+      path: "/srv/space",
+      canonical_path: "/srv/space",
       is_missing: false,
     });
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(benchesApi.listBenchWorkspaces)
+    vi.mocked(spacesApi.listSpaceWorkspaces)
       .mockResolvedValueOnce([missingWorkspace])
       .mockResolvedValueOnce([relinkedWorkspace]);
-    vi.mocked(benchesApi.detachBenchWorkspace).mockResolvedValueOnce(undefined);
-    vi.mocked(benchesApi.attachBenchWorkspace).mockResolvedValueOnce(relinkedWorkspace);
+    vi.mocked(spacesApi.detachSpaceWorkspace).mockResolvedValueOnce(undefined);
+    vi.mocked(spacesApi.attachSpaceWorkspace).mockResolvedValueOnce(relinkedWorkspace);
 
     component = mount(App, { target: document.body });
     await settleUi();
 
     const card = Array.from(
-      document.querySelectorAll<HTMLElement>(".bench-card"),
-    ).find((el) => el.textContent?.includes(defaultBench.name));
+      document.querySelectorAll<HTMLElement>(".space-card"),
+    ).find((el) => el.textContent?.includes(defaultSpace.name));
     expect(card).toBeDefined();
-    // Preview/selection is triggered by the bench-name button, not the card
+    // Preview/selection is triggered by the space-name button, not the card
     // container (UI audit f-2 — card is no longer a single interactive widget).
-    const nameBtn = card!.querySelector<HTMLButtonElement>(".bench-name-btn");
+    const nameBtn = card!.querySelector<HTMLButtonElement>(".space-name-btn");
     expect(nameBtn).toBeDefined();
     flushSync(() => nameBtn!.click());
     await waitForText("Missing folder");
@@ -630,7 +630,7 @@ describe("App", () => {
     );
     expect(relinkInput).toBeDefined();
     flushSync(() => {
-      relinkInput!.value = "/srv/workbench";
+      relinkInput!.value = "/srv/space";
       relinkInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
@@ -641,12 +641,12 @@ describe("App", () => {
     flushSync(() => relinkButton!.click());
     await waitForText("Workspace relinked.");
 
-    expect(benchesApi.detachBenchWorkspace).toHaveBeenCalledWith(
-      defaultBench.id,
+    expect(spacesApi.detachSpaceWorkspace).toHaveBeenCalledWith(
+      defaultSpace.id,
       missingWorkspace.id,
     );
-    expect(benchesApi.attachBenchWorkspace).toHaveBeenCalledWith(defaultBench.id, {
-      path: "/srv/workbench",
+    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith(defaultSpace.id, {
+      path: "/srv/space",
       label: "Codebase",
       permissions: ["read", "write"],
       is_trusted: true,
@@ -654,7 +654,7 @@ describe("App", () => {
     });
   });
 
-  // The right-hand WorkbenchRail (materials / shared references / operator
+  // The right-hand SpaceRail (materials / shared references / operator
   // pulse) was dropped per Surfaces.md ("Reference rail dropped; shared
   // reference objects sit in the module stage"). The test that exercised the
   // rail's contents is no longer applicable to the riso shell. When stage
@@ -662,15 +662,15 @@ describe("App", () => {
   // there.
 
   it("persists a lens switch and changes the available primary surface", async () => {
-    const defaultBench = makeBench();
+    const defaultSpace = makeSpace();
 
-    vi.mocked(benchesApi.listBenches).mockResolvedValueOnce([defaultBench]);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the bench so the lens tabs render in the top bar.
-    await openBenchFromPicker(defaultBench.name);
+    // Open the space so the lens tabs render in the top bar.
+    await openSpaceFromPicker(defaultSpace.name);
 
     const builderLens = Array.from(
       document.querySelectorAll(".topbar .lens"),
@@ -681,11 +681,11 @@ describe("App", () => {
     expect(builderLens).toBeDefined();
 
     flushSync(() => builderLens!.click());
-    await waitForText("Author the workspace, then let the agent live in it.");
+    await waitForText("Author the space, then let the agent live in it.");
 
     expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
     expect(document.body.textContent).toContain(
-      "Author the workspace, then let the agent live in it.",
+      "Author the space, then let the agent live in it.",
     );
   });
 });

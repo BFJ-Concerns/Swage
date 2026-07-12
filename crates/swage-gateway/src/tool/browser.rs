@@ -55,7 +55,7 @@ impl Tool for BrowserNavigateTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -90,7 +90,7 @@ impl Tool for BrowserSnapshotTool {
         json!({"type": "object", "properties": {}})
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -124,7 +124,7 @@ impl Tool for BrowserClickTool {
         ref_schema()
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -172,11 +172,11 @@ impl Tool for BrowserTypeTool {
         TEXT_SECRET_KEYS
     }
 
-    fn host_secret_keys(&self) -> &[&str] {
+    fn device_secret_keys(&self) -> &[&str] {
         TEXT_SECRET_KEYS
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -230,7 +230,7 @@ impl Tool for BrowserSelectTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -272,7 +272,7 @@ impl Tool for BrowserScrollTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 

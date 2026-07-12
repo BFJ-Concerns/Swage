@@ -46,26 +46,26 @@ fn try_load_file(path: &Path, problems: &mut Vec<ConfigProblem>) -> Option<Parti
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Fully resolve configuration for a given bench and agent.
+/// Fully resolve configuration for a given space and agent.
 ///
 /// Resolves the Swage root via `$SWAGE_HOME` / `~/.swage/`, then delegates
 /// to [`load_resolved_config_from`].
-pub fn load_resolved_config(bench: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
+pub fn load_resolved_config(space: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from(&root, bench, agent)
+    load_resolved_config_from(&root, space, agent)
 }
 
-/// Fully resolve configuration for a given bench, team, and agent.
+/// Fully resolve configuration for a given space, team, and agent.
 ///
 /// Same as [`load_resolved_config`] but inserts the team level between
-/// bench and agent in the merge chain: Global → Bench → Team → Agent.
+/// space and agent in the merge chain: Global → Space → Team → Agent.
 pub fn load_resolved_config_for_team(
-    bench: &str,
+    space: &str,
     team: &str,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from_with_team(&root, bench, Some(team), agent)
+    load_resolved_config_from_with_team(&root, space, Some(team), agent)
 }
 
 /// Fully resolve configuration given an explicit root directory.
@@ -73,17 +73,17 @@ pub fn load_resolved_config_for_team(
 /// Shorthand for [`load_resolved_config_from_with_team`] with no team level.
 pub fn load_resolved_config_from(
     root: &Path,
-    bench: &str,
+    space: &str,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
-    load_resolved_config_from_with_team(root, bench, None, agent)
+    load_resolved_config_from_with_team(root, space, None, agent)
 }
 
 /// Fully resolve configuration given an explicit root directory, with an
 /// optional team level in the cascade.
 ///
 /// Pipeline:
-/// 1. Build hierarchy paths (Global → Bench → [Team] → Agent).
+/// 1. Build hierarchy paths (Global → Space → [Team] → Agent).
 /// 2. Load and validate each config.toml that exists.
 /// 3. If any validation errors were found, return them all as `ConfigError`.
 /// 4. Merge the active levels via `merge_chain` + `resolve` to produce the
@@ -95,33 +95,33 @@ pub fn load_resolved_config_from(
 /// simply inherits values from above.
 pub fn load_resolved_config_from_with_team(
     root: &Path,
-    bench: &str,
+    space: &str,
     team: Option<&str>,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Build paths for each hierarchy level.
     let global_config = root.join("config.toml");
-    let bench_dir = root.join("benches").join(bench);
-    let bench_config = bench_dir.join("config.toml");
-    let agent_dir = bench_dir.join("agents").join(agent);
+    let space_dir = root.join("spaces").join(space);
+    let space_config = space_dir.join("config.toml");
+    let agent_dir = space_dir.join("agents").join(agent);
     let agent_config = agent_dir.join("config.toml");
 
     let global_instrs = root.join("instructions");
-    let bench_instrs = bench_dir.join("instructions");
+    let space_instrs = space_dir.join("instructions");
     let agent_instrs = agent_dir.join("instructions");
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
-    // Active merge levels: Global → Bench → [Team] → Agent.
+    // Active merge levels: Global → Space → [Team] → Agent.
     let mut config_chain: Vec<PartialConfig> = Vec::new();
-    for path in &[&global_config, &bench_config] {
+    for path in &[&global_config, &space_config] {
         if let Some(partial) = try_load_file(path, &mut all_problems) {
             config_chain.push(partial);
         }
     }
 
-    // Team level sits between bench and agent — only present when specified.
-    let team_dir = team.map(|t| bench_dir.join("teams").join(t));
+    // Team level sits between space and agent — only present when specified.
+    let team_dir = team.map(|t| space_dir.join("teams").join(t));
     if let Some(ref td) = team_dir {
         let team_config = td.join("config.toml");
         if let Some(partial) = try_load_file(&team_config, &mut all_problems) {
@@ -151,7 +151,7 @@ pub fn load_resolved_config_from_with_team(
     let team_instrs = team_dir.as_ref().map(|td| td.join("instructions"));
     let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
         (HierarchyLevel::Global, global_instrs.as_path()),
-        (HierarchyLevel::Bench, bench_instrs.as_path()),
+        (HierarchyLevel::Space, space_instrs.as_path()),
     ];
     if let Some(ref ti) = team_instrs {
         levels.push((HierarchyLevel::Team, ti.as_path()));
@@ -260,8 +260,8 @@ mod tests {
     fn build_fixture(
         root: &Path,
         global_toml: Option<&str>,
-        bench: &str,
-        bench_toml: Option<&str>,
+        space: &str,
+        space_toml: Option<&str>,
         agent: &str,
         agent_toml: Option<&str>,
     ) {
@@ -269,12 +269,12 @@ mod tests {
             fs::write(root.join("config.toml"), content).unwrap();
         }
         fs::create_dir_all(root.join("lenses/default")).unwrap();
-        let bench_dir = root.join("benches").join(bench);
-        let agent_dir = bench_dir.join("agents").join(agent);
+        let space_dir = root.join("spaces").join(space);
+        let agent_dir = space_dir.join("agents").join(agent);
         fs::create_dir_all(&agent_dir).unwrap();
-        fs::create_dir_all(bench_dir.join("teams")).unwrap();
-        if let Some(content) = bench_toml {
-            fs::write(bench_dir.join("config.toml"), content).unwrap();
+        fs::create_dir_all(space_dir.join("teams")).unwrap();
+        if let Some(content) = space_toml {
+            fs::write(space_dir.join("config.toml"), content).unwrap();
         }
         if let Some(content) = agent_toml {
             fs::write(agent_dir.join("config.toml"), content).unwrap();
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(
             cfg.default_model_id(),
             "claude-opus",
-            "bench model should apply"
+            "space model should apply"
         );
     }
 
@@ -309,13 +309,13 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 5000\n"),
-            "bare-bench",
+            "bare-space",
             None,
             "default",
             None,
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "bare-bench", "default")
+        let cfg = load_resolved_config_from(tmp.path(), "bare-space", "default")
             .expect("should succeed even with missing intermediate configs");
         assert_eq!(cfg.server.port, 5000);
     }
@@ -327,14 +327,14 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 5042\n"),
-            "env-bench",
+            "env-space",
             Some("[models]\ndefault_model_id = \"env-model\"\n"),
             "env-agent",
             Some("[server]\nhost = \"127.0.0.42\"\n"),
         );
         let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
 
-        let cfg = load_resolved_config("env-bench", "env-agent")
+        let cfg = load_resolved_config("env-space", "env-agent")
             .expect("env-derived root should resolve config");
 
         assert_eq!(cfg.server.host, "127.0.0.42");
@@ -349,21 +349,21 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 3000\n"),
-            "env-bench",
-            Some("[models]\ndefault_model_id = \"bench-model\"\n"),
+            "env-space",
+            Some("[models]\ndefault_model_id = \"space-model\"\n"),
             "env-agent",
             Some("[server]\nhost = \"127.0.0.43\"\n"),
         );
-        fs::create_dir_all(tmp.path().join("benches/env-bench/teams/env-team")).unwrap();
+        fs::create_dir_all(tmp.path().join("spaces/env-space/teams/env-team")).unwrap();
         fs::write(
             tmp.path()
-                .join("benches/env-bench/teams/env-team/config.toml"),
+                .join("spaces/env-space/teams/env-team/config.toml"),
             "[models]\ndefault_model_id = \"team-model\"\n",
         )
         .unwrap();
         let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
 
-        let cfg = load_resolved_config_for_team("env-bench", "env-team", "env-agent")
+        let cfg = load_resolved_config_for_team("env-space", "env-team", "env-agent")
             .expect("env-derived root should resolve team config");
 
         assert_eq!(cfg.server.host, "127.0.0.43");
@@ -429,7 +429,7 @@ mod tests {
     // --- Team config cascade ---
 
     #[test]
-    fn team_config_merges_between_bench_and_agent() {
+    fn team_config_merges_between_space_and_agent() {
         let tmp = TempDir::new().unwrap();
         build_fixture(
             tmp.path(),
@@ -440,7 +440,7 @@ mod tests {
             Some("[server]\nport = 4000\n"),
         );
         // Add team config that overrides provider model.
-        let team_dir = tmp.path().join("benches/proj/teams/review-team");
+        let team_dir = tmp.path().join("spaces/proj/teams/review-team");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
@@ -452,13 +452,13 @@ mod tests {
             load_resolved_config_from_with_team(tmp.path(), "proj", Some("review-team"), "bot")
                 .expect("should succeed");
 
-        // Agent overrides port (agent > team > bench > global)
+        // Agent overrides port (agent > team > space > global)
         assert_eq!(cfg.server.port, 4000, "agent should win on port");
-        // Team overrides bench model, agent doesn't set model so team wins
+        // Team overrides space model, agent doesn't set model so team wins
         assert_eq!(
             cfg.default_model_id(),
             "claude-haiku",
-            "team should override bench model"
+            "team should override space model"
         );
         // Global host survives (no override)
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
@@ -475,7 +475,7 @@ mod tests {
             "bot",
             Some("[models]\ndefault_model_id = \"agent-model\"\n"),
         );
-        let team_dir = tmp.path().join("benches/proj/teams/myteam");
+        let team_dir = tmp.path().join("spaces/proj/teams/myteam");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("config.toml"),
@@ -506,7 +506,7 @@ mod tests {
         );
 
         // Team directory exists but has no config.toml.
-        let team_dir = tmp.path().join("benches/proj/teams/empty-team");
+        let team_dir = tmp.path().join("spaces/proj/teams/empty-team");
         fs::create_dir_all(&team_dir).unwrap();
 
         let cfg =

@@ -7,7 +7,7 @@ use swage_storage::ApprovalState;
 
 use crate::{
     channel_gateway::{ChannelStatusListResponse, list_channel_statuses},
-    execution_host::list_execution_hosts,
+    device::list_devices,
     handlers::{ApprovalListResponse, ApprovalSummary},
     presence::snapshot_presence,
     schedule::list_schedules,
@@ -27,8 +27,8 @@ pub struct OperatorGatewaySummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorSessionSummary {
     pub id: Uuid,
-    pub bench_id: Uuid,
-    pub bench_name: String,
+    pub space_id: Uuid,
+    pub space_name: String,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
@@ -38,8 +38,8 @@ pub struct OperatorSessionSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct OperatorNodeSummary {
-    pub host_id: String,
+pub struct OperatorDeviceSummary {
+    pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
     pub base_url: Option<String>,
@@ -58,7 +58,7 @@ pub struct OperatorOverviewResponse {
     pub approvals: Vec<ApprovalSummary>,
     pub schedules: swage_protocol::client::schedule::ScheduleListResponse,
     pub channels: ChannelStatusListResponse,
-    pub nodes: Vec<OperatorNodeSummary>,
+    pub devices: Vec<OperatorDeviceSummary>,
 }
 
 pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewResponse, GatewayError> {
@@ -66,7 +66,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     let channels = list_channel_statuses(state).await;
     let approvals = list_pending_approvals(state).await?;
     let schedules = list_schedules(state).await?;
-    let execution_hosts = list_execution_hosts(state).await;
+    let devices = list_devices(state).await;
     let sessions = list_operator_sessions(state).await?;
 
     let gateway = OperatorGatewaySummary {
@@ -78,24 +78,24 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
         active_connection_count: presence.gateway.active_connection_count,
     };
 
-    let nodes = execution_hosts
-        .hosts
+    let devices = devices
+        .devices
         .into_iter()
-        .map(|host| {
+        .map(|device| {
             let machine_presence = presence
                 .machines
                 .iter()
-                .find(|machine| machine.machine_id == host.host_id);
-            OperatorNodeSummary {
-                host_id: host.host_id,
-                label: host
+                .find(|machine| machine.machine_id == device.device_id);
+            OperatorDeviceSummary {
+                device_id: device.device_id,
+                label: device
                     .label
                     .or_else(|| machine_presence.and_then(|machine| machine.label.clone())),
-                kind: host.kind,
-                base_url: host.base_url,
-                workspace_root: host.workspace_root,
-                capabilities: host.capabilities,
-                registered_at: host.registered_at,
+                kind: device.kind,
+                base_url: device.base_url,
+                workspace_root: device.workspace_root,
+                capabilities: device.capabilities,
+                registered_at: device.registered_at,
                 state: machine_presence
                     .map(|machine| machine.state.clone())
                     .unwrap_or_else(|| "connected".to_string()),
@@ -111,7 +111,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
         approvals: approvals.approvals,
         schedules,
         channels,
-        nodes,
+        devices,
     })
 }
 
@@ -140,13 +140,13 @@ fn classify_gateway_health(
 async fn list_operator_sessions(
     state: &AppState,
 ) -> Result<Vec<OperatorSessionSummary>, GatewayError> {
-    let benches = state.bench_store.list_all().await?;
+    let spaces = state.space_store.list_all().await?;
     let active_connections = state.active_connections.lock().await.clone();
     let active_turns = state.active_turns.lock().await.clone();
     let mut sessions = Vec::new();
 
-    for bench in benches {
-        for session in state.storage.list_by_bench(bench.id).await? {
+    for space in spaces {
+        for session in state.storage.list_by_space(space.id).await? {
             let preview = state
                 .storage
                 .get_latest_for_session(session.id)
@@ -156,8 +156,8 @@ async fn list_operator_sessions(
 
             sessions.push(OperatorSessionSummary {
                 id: session.id,
-                bench_id: session.bench_id,
-                bench_name: bench.name.clone(),
+                space_id: session.space_id,
+                space_name: space.name.clone(),
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,

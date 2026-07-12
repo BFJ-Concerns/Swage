@@ -13,11 +13,11 @@ const repoRoot = path.resolve(desktopRoot, "..");
 const frontendDist = path.resolve(repoRoot, "frontend", "dist");
 const desktopMain = path.resolve(desktopRoot, "src", "main.mjs");
 
-function createConversationState(id, benchId) {
+function createConversationState(id, spaceId) {
   const now = new Date().toISOString();
   return {
     id,
-    bench_id: benchId,
+    space_id: spaceId,
     created_at: now,
     last_activity: now,
     messages: [],
@@ -25,10 +25,10 @@ function createConversationState(id, benchId) {
 }
 
 function createMockGateway() {
-  const bench = {
-    id: "bench-default",
+  const space = {
+    id: "space-default",
     name: "Default",
-    description: "Smoke-test bench",
+    description: "Smoke-test space",
     slug: "default",
     is_default: true,
     created_at: "2026-04-17T12:00:00Z",
@@ -79,7 +79,7 @@ function createMockGateway() {
 
   function buildLensRuntime() {
     return {
-      bench_id: bench.id,
+      space_id: space.id,
       active_lens: activeLens,
       updated_at: new Date().toISOString(),
       available_lenses: availableLenses,
@@ -126,17 +126,17 @@ function createMockGateway() {
       return;
     }
 
-    if (request.method === "GET" && pathname === "/api/benches") {
-      writeJson(response, 200, { benches: [bench] });
+    if (request.method === "GET" && pathname === "/api/spaces") {
+      writeJson(response, 200, { spaces: [space] });
       return;
     }
 
-    if (request.method === "GET" && pathname === `/api/benches/${bench.id}/lens-runtime`) {
+    if (request.method === "GET" && pathname === `/api/spaces/${space.id}/lens-runtime`) {
       writeJson(response, 200, buildLensRuntime());
       return;
     }
 
-    if (request.method === "GET" && pathname === `/api/benches/${bench.id}/materials`) {
+    if (request.method === "GET" && pathname === `/api/spaces/${space.id}/materials`) {
       writeJson(response, 200, { materials: [] });
       return;
     }
@@ -158,8 +158,8 @@ function createMockGateway() {
         },
         sessions: listConversationSummaries().map((conversation) => ({
           ...conversation,
-          bench_id: bench.id,
-          bench_name: bench.name,
+          space_id: space.id,
+          space_name: space.name,
           has_active_connection: false,
           has_running_turn: false,
         })),
@@ -185,19 +185,19 @@ function createMockGateway() {
     if (request.method === "GET" && pathname === "/api/recovery/export") {
       writeJson(response, 200, {
         version: 1,
-        benches: [bench],
+        spaces: [space],
         workspaces: [],
         sessions: [],
         secrets: [],
         channel_links: [],
-        execution_hosts: [],
+        devices: [],
         scheduled_jobs: [],
         heartbeats: [],
       });
       return;
     }
 
-    if (request.method === "PUT" && pathname === `/api/benches/${bench.id}/lens-runtime`) {
+    if (request.method === "PUT" && pathname === `/api/spaces/${space.id}/lens-runtime`) {
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => {
@@ -218,7 +218,7 @@ function createMockGateway() {
 
     if (
       request.method === "GET"
-      && pathname === `/api/benches/${bench.id}/sessions`
+      && pathname === `/api/spaces/${space.id}/sessions`
     ) {
       writeJson(response, 200, { conversations: listConversationSummaries() });
       return;
@@ -226,15 +226,15 @@ function createMockGateway() {
 
     if (
       request.method === "POST"
-      && pathname === `/api/benches/${bench.id}/sessions`
+      && pathname === `/api/spaces/${space.id}/sessions`
     ) {
       conversationCounter += 1;
       const id = `conv-${conversationCounter}`;
-      const conversation = createConversationState(id, bench.id);
+      const conversation = createConversationState(id, space.id);
       conversations.set(id, conversation);
       writeJson(response, 200, {
         id,
-        bench_id: bench.id,
+        space_id: space.id,
         created_at: conversation.created_at,
         last_activity: conversation.last_activity,
       });
@@ -388,11 +388,11 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  const defaultBench = page.getByRole("article", { name: "Bench Default" });
-  await defaultBench
-    .getByRole("button", { name: "Preview bench Default", exact: true })
+  const defaultSpace = page.getByRole("article", { name: "Space Default" });
+  await defaultSpace
+    .getByRole("button", { name: "Preview space Default", exact: true })
     .click();
-  await defaultBench.getByRole("button", { name: "Open", exact: true }).click();
+  await defaultSpace.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page

@@ -15,12 +15,12 @@
   import type { SessionPolicy } from "../protocol/SessionPolicy";
 
   interface Props {
-    benchId: string | null;
+    spaceId: string | null;
     sessionId: string | null;
     onChanged?: () => void | Promise<void>;
   }
 
-  let { benchId, sessionId, onChanged }: Props = $props();
+  let { spaceId, sessionId, onChanged }: Props = $props();
 
   let noteTitle = $state("");
   let noteContent = $state("");
@@ -44,10 +44,10 @@
   let busyAction = $state<string | null>(null);
 
   const effectiveNoteScope = $derived(
-    noteScope === "session" && sessionId ? "session" : "bench",
+    noteScope === "session" && sessionId ? "session" : "space",
   );
   const effectiveAttachmentScope = $derived(
-    attachmentScope === "session" && sessionId ? "session" : "bench",
+    attachmentScope === "session" && sessionId ? "session" : "space",
   );
   const canUseSessionWorkflow = $derived(Boolean(sessionId));
 
@@ -79,7 +79,7 @@
       notice = await task();
       await onChanged?.();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : "Workbench operation failed.";
+      errorMessage = error instanceof Error ? error.message : "Space operation failed.";
     } finally {
       busyAction = null;
     }
@@ -95,7 +95,7 @@
 
   async function saveMaterialNote(): Promise<void> {
     await runAction("material", async () => {
-      if (!benchId) throw new Error("Select a bench before saving material.");
+      if (!spaceId) throw new Error("Select a space before saving material.");
       const title = noteTitle.trim();
       const content = noteContent.trim();
       if (!title || !content) {
@@ -105,7 +105,7 @@
       await createMaterial({
         scope_kind: effectiveNoteScope,
         session_id: effectiveNoteScope === "session" && sessionId ? sessionId : undefined,
-        bench_id: effectiveNoteScope === "bench" ? benchId : undefined,
+        space_id: effectiveNoteScope === "space" ? spaceId : undefined,
         title,
         relative_path: buildRelativePath(title, effectiveNoteScope),
         mime_type: "text/markdown",
@@ -116,13 +116,13 @@
       noteContent = "";
       return effectiveNoteScope === "session"
         ? "Saved material beside the active conversation."
-        : "Saved material for the bench workspace.";
+        : "Saved material for the space workspace.";
     });
   }
 
   async function queueAttachment(): Promise<void> {
     await runAction("attachment", async () => {
-      if (!benchId) throw new Error("Select a bench before attaching material.");
+      if (!spaceId) throw new Error("Select a space before attaching material.");
       if (!selectedFile) throw new Error("Choose a file before queueing ingestion.");
 
       const bytes = new Uint8Array(await selectedFile.arrayBuffer());
@@ -130,7 +130,7 @@
         scope_kind: effectiveAttachmentScope,
         session_id:
           effectiveAttachmentScope === "session" && sessionId ? sessionId : undefined,
-        bench_id: effectiveAttachmentScope === "bench" ? benchId : undefined,
+        space_id: effectiveAttachmentScope === "space" ? spaceId : undefined,
         filename: selectedFile.name,
         mime_type: selectedFile.type || "application/octet-stream",
         content_base64: bytesToBase64(bytes),
@@ -165,10 +165,10 @@
       }
       return { policy: "continuation", session_id: sessionId };
     }
-    if (!benchId) throw new Error("Select a bench before scheduling work.");
+    if (!spaceId) throw new Error("Select a space before scheduling work.");
     const agentId = scheduleAgentId.trim();
     if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return { policy: "fresh", bench_id: benchId, agent_id: agentId };
+    return { policy: "fresh", space_id: spaceId, agent_id: agentId };
   }
 
   async function scheduleWork(): Promise<void> {
@@ -220,8 +220,8 @@
 
 <section class="rail-panel operations-panel">
   <div class="panel-heading">
-    <h3>Workbench operations</h3>
-    <span>{canUseSessionWorkflow ? "live" : "bench only"}</span>
+    <h3>Space operations</h3>
+    <span>{canUseSessionWorkflow ? "live" : "space only"}</span>
   </div>
 
   {#if errorMessage}
@@ -235,7 +235,7 @@
     <section class="operation-card">
       <div>
         <strong>Capture material</strong>
-        <p>Write directly into session or bench-managed material.</p>
+        <p>Write directly into session or space-managed material.</p>
       </div>
       <div class="scope-toggle" role="tablist" aria-label="Material scope">
         <button
@@ -246,10 +246,10 @@
           Session
         </button>
         <button
-          class:active={effectiveNoteScope === "bench"}
-          onclick={() => (noteScope = "bench")}
+          class:active={effectiveNoteScope === "space"}
+          onclick={() => (noteScope = "space")}
         >
-          Bench
+          Space
         </button>
       </div>
       <label>
@@ -261,10 +261,10 @@
         <textarea
           bind:value={noteContent}
           rows="5"
-          placeholder="Capture a constraint, checklist, or bench note."
+          placeholder="Capture a constraint, checklist, or space note."
         ></textarea>
       </label>
-      <button class="primary" onclick={saveMaterialNote} disabled={busyAction === "material" || !benchId}>
+      <button class="primary" onclick={saveMaterialNote} disabled={busyAction === "material" || !spaceId}>
         {busyAction === "material" ? "Saving..." : "Save material"}
       </button>
     </section>
@@ -283,17 +283,17 @@
           Session
         </button>
         <button
-          class:active={effectiveAttachmentScope === "bench"}
-          onclick={() => (attachmentScope = "bench")}
+          class:active={effectiveAttachmentScope === "space"}
+          onclick={() => (attachmentScope = "space")}
         >
-          Bench
+          Space
         </button>
       </div>
       <label>
         <span>File</span>
         <input type="file" onchange={handleFileChange} />
       </label>
-      <button class="primary" onclick={queueAttachment} disabled={busyAction === "attachment" || !benchId}>
+      <button class="primary" onclick={queueAttachment} disabled={busyAction === "attachment" || !spaceId}>
         {busyAction === "attachment" ? "Queueing..." : "Queue ingestion"}
       </button>
     </section>
@@ -370,7 +370,7 @@
           ></textarea>
         </label>
       {/if}
-      <button class="primary" onclick={scheduleWork} disabled={busyAction === "schedule" || !benchId}>
+      <button class="primary" onclick={scheduleWork} disabled={busyAction === "schedule" || !spaceId}>
         {busyAction === "schedule" ? "Scheduling..." : "Schedule"}
       </button>
     </section>

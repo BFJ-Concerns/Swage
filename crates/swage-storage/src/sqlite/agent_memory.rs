@@ -41,7 +41,7 @@ fn row_to_agent_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMemoryR
 
     Ok(AgentMemoryRecord {
         id: parse_uuid(&row.get::<_, String>(0)?)?,
-        bench_id: parse_uuid(&row.get::<_, String>(1)?)?,
+        space_id: parse_uuid(&row.get::<_, String>(1)?)?,
         session_id: parse_uuid(&row.get::<_, String>(2)?)?,
         turn_id: parse_uuid(&row.get::<_, String>(3)?)?,
         topology_run_id: parse_optional_uuid(topology_run_id)?,
@@ -86,13 +86,13 @@ impl AgentMemoryStore for SqliteStorage {
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             conn.execute(
                 "INSERT INTO agent_memories (
-                    id, bench_id, session_id, turn_id, topology_run_id, node_execution_id,
+                    id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
                     agent_id, memory_kind, title, content, tags_json, outcome_status,
                     source_summary, metadata_json, created_at, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     record.id.to_string(),
-                    record.bench_id.to_string(),
+                    record.space_id.to_string(),
                     record.session_id.to_string(),
                     record.turn_id.to_string(),
                     record.topology_run_id.map(|id| id.to_string()),
@@ -111,7 +111,7 @@ impl AgentMemoryStore for SqliteStorage {
             )?;
             Ok(AgentMemoryRecord {
                 id: record.id,
-                bench_id: record.bench_id,
+                space_id: record.space_id,
                 session_id: record.session_id,
                 turn_id: record.turn_id,
                 topology_run_id: record.topology_run_id,
@@ -134,7 +134,7 @@ impl AgentMemoryStore for SqliteStorage {
     async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, session_id, turn_id, topology_run_id, node_execution_id,
+                "SELECT id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
                         agent_id, memory_kind, title, content, tags_json, outcome_status,
                         source_summary, metadata_json, created_at, updated_at
                  FROM agent_memories
@@ -148,13 +148,13 @@ impl AgentMemoryStore for SqliteStorage {
 
     async fn list_agent_memories(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AgentMemoryRecord>, StorageError> {
-        let bench_id = bench_id.to_string();
+        let space_id = space_id.to_string();
         let agent_id = agent_id.map(ToOwned::to_owned);
         let session_id = session_id.map(|id| id.to_string());
         let query = query.map(|value| format!("%{}%", value.to_lowercase()));
@@ -162,11 +162,11 @@ impl AgentMemoryStore for SqliteStorage {
 
         self.with_conn(move |conn| {
             let sql = "
-                SELECT id, bench_id, session_id, turn_id, topology_run_id, node_execution_id,
+                SELECT id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
                        agent_id, memory_kind, title, content, tags_json, outcome_status,
                        source_summary, metadata_json, created_at, updated_at
                 FROM agent_memories
-                WHERE bench_id = ?1
+                WHERE space_id = ?1
                   AND (?2 IS NULL OR agent_id = ?2)
                   AND (?3 IS NULL OR session_id = ?3)
                   AND (
@@ -180,7 +180,7 @@ impl AgentMemoryStore for SqliteStorage {
                 LIMIT ?5";
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map(
-                params![bench_id, agent_id, session_id, query, limit],
+                params![space_id, agent_id, session_id, query, limit],
                 row_to_agent_memory,
             )?;
             rows.collect()
@@ -195,16 +195,16 @@ mod tests {
     use uuid::Uuid;
 
     use crate::sqlite::SqliteStorage;
-    use crate::store::{AgentMemoryStore, BenchStore, SessionStore, ThreadStore, TurnStore};
+    use crate::store::{AgentMemoryStore, SessionStore, SpaceStore, ThreadStore, TurnStore};
     use crate::{NewAgentMemoryRecord, NewSession, NewThread, NewTurn, TurnState};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_memory_round_trips_and_filters_by_agent_and_query() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -234,7 +234,7 @@ mod tests {
         let first = storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                bench_id: bench.id,
+                space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 topology_run_id: None,
@@ -253,7 +253,7 @@ mod tests {
         storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                bench_id: bench.id,
+                space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 topology_run_id: None,
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(fetched.tags, vec!["builder", "preview"]);
 
         let only_agent_a = storage
-            .list_agent_memories(bench.id, Some("agent-a"), None, Some("preview"), 10)
+            .list_agent_memories(space.id, Some("agent-a"), None, Some("preview"), 10)
             .await
             .unwrap();
         assert_eq!(only_agent_a.len(), 1);

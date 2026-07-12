@@ -23,31 +23,31 @@ pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) attachments: Vec<TrustedWorkspacePath>,
 }
 
-/// Inspect the bench's workspace attachments and derive which permission
+/// Inspect the space's workspace attachments and derive which permission
 /// grants are in force. Storage failures degrade to "no grants" so that a
 /// transient lookup error never silently widens the policy.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn summarise_trusted_workspace_permissions(
     storage: &Arc<dyn swage_storage::store::Storage>,
-    bench_id: Uuid,
+    space_id: Uuid,
 ) -> WorkspacePermissionSummary {
-    load_trusted_workspace_policy(storage, bench_id, None)
+    load_trusted_workspace_policy(storage, space_id, None)
         .await
         .permissions
 }
 
 pub(crate) async fn load_trusted_workspace_policy(
     storage: &Arc<dyn swage_storage::store::Storage>,
-    bench_id: Uuid,
+    space_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> TrustedWorkspacePolicy {
-    let attachments = match storage.list_workspace_attachments_by_bench(bench_id).await {
+    let attachments = match storage.list_workspace_attachments_by_space(space_id).await {
         Ok(list) => list,
         Err(error) => {
             tracing::warn!(
-                bench_id = %bench_id,
+                space_id = %space_id,
                 %error,
-                "failed to load workspace attachments; treating bench as having no granted permissions"
+                "failed to load workspace attachments; treating space as having no granted permissions"
             );
             return TrustedWorkspacePolicy::default();
         }
@@ -108,7 +108,7 @@ pub(crate) async fn load_trusted_workspace_policy(
 pub(super) fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
-    bench_id: Option<Uuid>,
+    space_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> PermissionConfig {
     // Top-level escape hatch: when permissions are disabled at the gateway,
@@ -138,13 +138,13 @@ pub(super) fn build_permission_config(
             .into_iter()
             .filter(|entry| {
                 !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
-                    bench_id: None,
+                    space_id: None,
                     kind: swage_storage::model::ApprovalKind::Tool,
                     name: entry.tool_name.clone(),
                     access: None,
-                }) && !bench_id.is_some_and(|bench_id| {
+                }) && !space_id.is_some_and(|space_id| {
                     session_approval_grants.contains(&crate::state::ApprovalGrantKey {
-                        bench_id: Some(bench_id),
+                        space_id: Some(space_id),
                         kind: swage_storage::model::ApprovalKind::Tool,
                         name: entry.tool_name.clone(),
                         access: None,
@@ -156,18 +156,18 @@ pub(super) fn build_permission_config(
 }
 
 pub(super) fn build_gateway_advertisement_filter(
-    execution_host: Option<&crate::execution_host::RegisteredExecutionHost>,
+    device: Option<&crate::device::RegisteredDevice>,
     agent_config: &AgentConfig,
 ) -> Option<Arc<GatewayToolAdvertisementFilter>> {
-    let host = execution_host?;
-    if host.kind == crate::execution_host::ExecutionHostKind::Local {
+    let host = device?;
+    if host.kind == crate::device::DeviceKind::Local {
         return None;
     }
 
     let capabilities = host.capabilities.clone();
     let has_shared_token = host.shared_token_secret_ref.is_some();
     let context_in_host_workspace =
-        agent_config_within_execution_host_workspaces(agent_config, &host.workspace_roots);
+        agent_config_within_device_workspaces(agent_config, &host.workspace_roots);
 
     Some(Arc::new(move |tool: &dyn Tool| {
         has_shared_token
@@ -178,7 +178,7 @@ pub(super) fn build_gateway_advertisement_filter(
     }))
 }
 
-pub(super) fn agent_config_within_execution_host_workspaces(
+pub(super) fn agent_config_within_device_workspaces(
     agent_config: &AgentConfig,
     workspace_roots: &[PathBuf],
 ) -> bool {
@@ -187,17 +187,14 @@ pub(super) fn agent_config_within_execution_host_workspaces(
         .map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
         .collect::<Vec<_>>();
 
-    path_within_execution_host_workspace(&agent_config.working_directory, &canonical_roots)
+    path_within_device_workspace(&agent_config.working_directory, &canonical_roots)
         && agent_config
             .allowed_paths
             .iter()
-            .all(|path| path_within_execution_host_workspace(path, &canonical_roots))
+            .all(|path| path_within_device_workspace(path, &canonical_roots))
 }
 
-pub(super) fn path_within_execution_host_workspace(
-    path: &Path,
-    workspace_roots: &[PathBuf],
-) -> bool {
+pub(super) fn path_within_device_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
     let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     workspace_roots
         .iter()

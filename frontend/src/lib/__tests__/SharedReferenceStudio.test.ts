@@ -51,7 +51,7 @@ describe("SharedReferenceStudio", () => {
             subtitle: "Shapes the builder graph.",
             payload: {
               team_id: "team-1",
-              bench_id: "bench-1",
+              space_id: "space-1",
               entry_agent_id: "builder",
               members: ["builder", "reviewer", "qa"],
               nodes: [
@@ -123,7 +123,7 @@ describe("SharedReferenceStudio", () => {
         subtitle: "Shapes the builder graph.",
         payload: {
           team_id: "team-1",
-          bench_id: "bench-1",
+          space_id: "space-1",
           entry_agent_id: "reviewer",
           members: ["builder", "reviewer", "qa"],
           nodes: [
@@ -156,7 +156,7 @@ describe("SharedReferenceStudio", () => {
     component = mount(SharedReferenceStudio, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
       },
     });
 
@@ -188,7 +188,7 @@ describe("SharedReferenceStudio", () => {
     component = mount(SharedReferenceStudio, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         onTeamTopologyUpdated,
       },
     });
@@ -213,7 +213,7 @@ describe("SharedReferenceStudio", () => {
     component = mount(SharedReferenceStudio, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
       },
     });
 

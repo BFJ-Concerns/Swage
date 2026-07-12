@@ -186,9 +186,9 @@ mod tests {
         MockToolContext {
             agent_id: "agent-1".to_string(),
             session_id: "sess-abc".to_string(),
-            working_directory: PathBuf::from("/home/user/bench"),
+            working_directory: PathBuf::from("/home/user/space"),
             allowed_paths: vec![
-                PathBuf::from("/home/user/bench"),
+                PathBuf::from("/home/user/space"),
                 PathBuf::from("/tmp/scratch"),
             ],
             user_info: Some(UserInfo {
@@ -207,7 +207,7 @@ mod tests {
 
         assert_eq!(ctx.agent_id(), "agent-1");
         assert_eq!(ctx.session_id(), "sess-abc");
-        assert_eq!(ctx.working_directory(), Path::new("/home/user/bench"));
+        assert_eq!(ctx.working_directory(), Path::new("/home/user/space"));
         assert_eq!(ctx.allowed_paths().len(), 2);
 
         let user = ctx.user_info().expect("user_info should be Some");
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(restored.session_id, "sess-abc");
         assert_eq!(
             restored.working_directory,
-            PathBuf::from("/home/user/bench")
+            PathBuf::from("/home/user/space")
         );
         assert_eq!(restored.allowed_paths.len(), 2);
         assert_eq!(restored.call_id.as_deref(), Some("call-123"));

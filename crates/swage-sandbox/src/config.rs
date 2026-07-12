@@ -30,7 +30,7 @@ pub enum SandboxConfigError {
 pub struct SandboxConfig {
     /// The agent's working directory — read-write inside the sandbox.
     pub working_directory: PathBuf,
-    /// Additional read-only bind mounts (e.g., bench source, shared libraries).
+    /// Additional read-only bind mounts (e.g., space source, shared libraries).
     pub read_only_mounts: Vec<PathBuf>,
     /// Additional read-write bind mounts (e.g., output directory).
     pub read_write_mounts: Vec<PathBuf>,
@@ -273,7 +273,7 @@ mod tests {
     fn add_landlock_paths() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
-            .landlock_read_path("/home/user/bench")
+            .landlock_read_path("/home/user/space")
             .landlock_write_path("/tmp/output")
             .build()
             .unwrap();
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(config.landlock_read_paths.len(), 1);
         assert_eq!(
             config.landlock_read_paths[0],
-            PathBuf::from("/home/user/bench")
+            PathBuf::from("/home/user/space")
         );
         assert_eq!(config.landlock_write_paths.len(), 1);
         assert_eq!(config.landlock_write_paths[0], PathBuf::from("/tmp/output"));

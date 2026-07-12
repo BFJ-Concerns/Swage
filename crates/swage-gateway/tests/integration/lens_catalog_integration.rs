@@ -19,7 +19,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 struct MockProvider;
@@ -58,7 +58,7 @@ fn test_state(db_path: &Path) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -128,11 +128,11 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
     let db_path = temp.path().join("lens-catalog.db");
 
     let router = build_router(test_state(&db_path));
-    let (benches_status, benches_body) = get_json(&router, "/api/benches").await;
-    assert_eq!(benches_status, StatusCode::OK);
-    let bench_id = benches_body["benches"][0]["id"]
+    let (spaces_status, spaces_body) = get_json(&router, "/api/spaces").await;
+    assert_eq!(spaces_status, StatusCode::OK);
+    let space_id = spaces_body["spaces"][0]["id"]
         .as_str()
-        .expect("default bench id");
+        .expect("default space id");
 
     let (before_status, before_caps) = get_json(&router, "/api/capabilities").await;
     assert_eq!(before_status, StatusCode::OK);
@@ -188,7 +188,7 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
 
     let (activate_status, runtime_body) = put_json(
         &router,
-        &format!("/api/benches/{bench_id}/lens-runtime"),
+        &format!("/api/spaces/{space_id}/lens-runtime"),
         json!({ "lens": "focus" }),
     )
     .await;
@@ -211,7 +211,7 @@ async fn authored_and_installed_lenses_survive_restart_and_shape_runtime_data() 
     let restarted_router = build_router(test_state(&db_path));
     let (restart_status, restart_runtime) = get_json(
         &restarted_router,
-        &format!("/api/benches/{bench_id}/lens-runtime"),
+        &format!("/api/spaces/{space_id}/lens-runtime"),
     )
     .await;
     assert_eq!(restart_status, StatusCode::OK);

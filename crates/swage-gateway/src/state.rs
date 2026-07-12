@@ -19,14 +19,14 @@ use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_storage::{
     model::{ApprovalKind, ApprovalRequest},
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
 use crate::{
-    capabilities::WorkflowCapabilities, execution_host::ExecutionHostRuntime,
-    lifecycle::ActivityTracker, onboarding::RecoveryExportSnapshot, presence::PresenceRuntime,
-    secret::SecretManager, telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
+    capabilities::WorkflowCapabilities, device::DeviceRuntime, lifecycle::ActivityTracker,
+    onboarding::RecoveryExportSnapshot, presence::PresenceRuntime, secret::SecretManager,
+    telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
 };
 
 /// Shared application state available to all route handlers via axum's `State` extractor.
@@ -38,10 +38,10 @@ use crate::{
 pub struct AppState {
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
-    /// Bench storage backend. Separate from `storage` because `BenchStore` is
-    /// not included in the `Storage` supertrait — consumers that need bench
+    /// Space storage backend. Separate from `storage` because `SpaceStore` is
+    /// not included in the `Storage` supertrait — consumers that need space
     /// operations import it independently.
-    pub bench_store: Arc<dyn BenchStore>,
+    pub space_store: Arc<dyn SpaceStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
     /// Voice provider for speech-to-text and text-to-speech.
@@ -97,9 +97,9 @@ pub struct AppState {
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
     /// Runtime presence for recent clients and registered machines.
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
-    /// Registered local and attached execution hosts.
-    pub execution_hosts: Arc<AsyncMutex<ExecutionHostRuntime>>,
-    /// One-time node pairing codes awaiting redemption by a remote host.
+    /// Registered local and attached devices.
+    pub devices: Arc<AsyncMutex<DeviceRuntime>>,
+    /// One-time device pairing codes awaiting redemption by a remote device.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
     /// One-time external-channel link codes awaiting redemption by a chat sender.
     pub channel_link_codes: Arc<AsyncMutex<HashMap<String, ChannelLinkCodeRecord>>>,
@@ -143,7 +143,7 @@ pub struct PairingCodeRecord {
 #[derive(Debug, Clone)]
 pub struct ChannelLinkCodeRecord {
     pub integration: ExternalChannelIntegration,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
@@ -152,7 +152,7 @@ pub struct ChannelLinkCodeRecord {
 impl AppState {
     pub fn new(
         storage: Arc<dyn Storage>,
-        bench_store: Arc<dyn BenchStore>,
+        space_store: Arc<dyn SpaceStore>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
@@ -164,7 +164,7 @@ impl AppState {
         let tool_dispatcher = Arc::new(tool_dispatcher);
         Self {
             storage: storage.clone(),
-            bench_store,
+            space_store,
             provider: provider.clone(),
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
@@ -181,7 +181,7 @@ impl AppState {
             hook_registry,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
-            execution_hosts: Arc::new(AsyncMutex::new(ExecutionHostRuntime::default())),
+            devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             channel_link_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
@@ -322,7 +322,7 @@ impl AppState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApprovalGrantKey {
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub kind: ApprovalKind,
     pub name: String,
     pub access: Option<String>,
@@ -337,7 +337,7 @@ impl ApprovalGrantKey {
         }?;
 
         Some(Self {
-            bench_id: None,
+            space_id: None,
             kind: approval.kind.clone(),
             name,
             access: None,
@@ -347,12 +347,12 @@ impl ApprovalGrantKey {
 
 impl ApprovalGrantKey {
     pub fn location(
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         path: impl Into<String>,
         access: impl Into<String>,
     ) -> Self {
         Self {
-            bench_id,
+            space_id,
             kind: ApprovalKind::Location,
             name: path.into(),
             access: Some(access.into()),
@@ -377,7 +377,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -435,7 +435,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

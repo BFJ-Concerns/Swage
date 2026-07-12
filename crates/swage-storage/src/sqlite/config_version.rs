@@ -32,7 +32,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn row_to_configuration_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConfigurationVersion> {
-    let bench_id: Option<String> = row.get(1)?;
+    let space_id: Option<String> = row.get(1)?;
     let session_id: Option<String> = row.get(2)?;
     let snapshot_json: String = row.get(9)?;
     let diff_json: String = row.get(10)?;
@@ -42,7 +42,7 @@ fn row_to_configuration_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<Con
 
     Ok(ConfigurationVersion {
         id: parse_uuid(&row.get::<_, String>(0)?)?,
-        bench_id: parse_optional_uuid(bench_id)?,
+        space_id: parse_optional_uuid(space_id)?,
         session_id: parse_optional_uuid(session_id)?,
         entity_kind: row.get(3)?,
         entity_id: row.get(4)?,
@@ -85,13 +85,13 @@ impl ConfigurationVersionStore for SqliteStorage {
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             conn.execute(
                 "INSERT INTO configuration_versions (
-                    id, bench_id, session_id, entity_kind, entity_id, version_number,
+                    id, space_id, session_id, entity_kind, entity_id, version_number,
                     operation_kind, source, summary, snapshot_json, diff_json,
                     previous_version_id, rollback_to_version_id, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     version.id.to_string(),
-                    version.bench_id.map(|id| id.to_string()),
+                    version.space_id.map(|id| id.to_string()),
                     version.session_id.map(|id| id.to_string()),
                     version.entity_kind,
                     version.entity_id,
@@ -108,7 +108,7 @@ impl ConfigurationVersionStore for SqliteStorage {
             )?;
             Ok(ConfigurationVersion {
                 id: version.id,
-                bench_id: version.bench_id,
+                space_id: version.space_id,
                 session_id: version.session_id,
                 entity_kind: version.entity_kind,
                 entity_id: version.entity_id,
@@ -132,7 +132,7 @@ impl ConfigurationVersionStore for SqliteStorage {
     ) -> Result<Option<ConfigurationVersion>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, session_id, entity_kind, entity_id, version_number,
+                "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
                         previous_version_id, rollback_to_version_id, created_at
                  FROM configuration_versions
@@ -146,26 +146,26 @@ impl ConfigurationVersionStore for SqliteStorage {
 
     async fn list_configuration_versions(
         &self,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
     ) -> Result<Vec<ConfigurationVersion>, StorageError> {
         self.with_conn(move |conn| {
-            let sql = if bench_id.is_some() {
-                "SELECT id, bench_id, session_id, entity_kind, entity_id, version_number,
+            let sql = if space_id.is_some() {
+                "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
                         previous_version_id, rollback_to_version_id, created_at
                  FROM configuration_versions
-                 WHERE bench_id = ?1
+                 WHERE space_id = ?1
                  ORDER BY created_at DESC"
             } else {
-                "SELECT id, bench_id, session_id, entity_kind, entity_id, version_number,
+                "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
                         previous_version_id, rollback_to_version_id, created_at
                  FROM configuration_versions
                  ORDER BY created_at DESC"
             };
             let mut stmt = conn.prepare(sql)?;
-            let rows = if let Some(bench_id) = bench_id {
-                stmt.query_map(params![bench_id.to_string()], row_to_configuration_version)?
+            let rows = if let Some(space_id) = space_id {
+                stmt.query_map(params![space_id.to_string()], row_to_configuration_version)?
             } else {
                 stmt.query_map([], row_to_configuration_version)?
             };
@@ -183,7 +183,7 @@ impl ConfigurationVersionStore for SqliteStorage {
         let entity_id = entity_id.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, session_id, entity_kind, entity_id, version_number,
+                "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
                         previous_version_id, rollback_to_version_id, created_at
                  FROM configuration_versions
@@ -208,7 +208,7 @@ impl ConfigurationVersionStore for SqliteStorage {
         let entity_id = entity_id.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, bench_id, session_id, entity_kind, entity_id, version_number,
+                "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
                         previous_version_id, rollback_to_version_id, created_at
                  FROM configuration_versions
@@ -230,15 +230,15 @@ mod tests {
 
     use crate::sqlite::SqliteStorage;
     use crate::store::ConfigurationVersionStore;
-    use crate::{BenchStore, NewConfigurationVersion, SessionStore};
+    use crate::{NewConfigurationVersion, SessionStore, SpaceStore};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn configuration_version_round_trips_and_lists_by_entity() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(crate::NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "builder".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -248,7 +248,7 @@ mod tests {
         let first = storage
             .create_configuration_version(NewConfigurationVersion {
                 id: Uuid::new_v4(),
-                bench_id: Some(bench.id),
+                space_id: Some(space.id),
                 session_id: Some(session.id),
                 entity_kind: "team".into(),
                 entity_id: "team-1".into(),
@@ -266,7 +266,7 @@ mod tests {
         let second = storage
             .create_configuration_version(NewConfigurationVersion {
                 id: Uuid::new_v4(),
-                bench_id: Some(bench.id),
+                space_id: Some(space.id),
                 session_id: Some(session.id),
                 entity_kind: "team".into(),
                 entity_id: "team-1".into(),
@@ -283,7 +283,7 @@ mod tests {
             .unwrap();
 
         let listed = storage
-            .list_configuration_versions(Some(bench.id))
+            .list_configuration_versions(Some(space.id))
             .await
             .unwrap();
         assert_eq!(listed.len(), 2);

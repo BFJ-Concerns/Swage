@@ -46,7 +46,7 @@ const SCHEDULE: Schedule = {
   message: "Review the queue.",
   status: "active",
   spec: { kind: "interval", every: "every 1 hours" },
-  session: { policy: "fresh", bench_id: "bench-1", agent_id: "gateway" },
+  session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
   routing: {
     deliver_to_origin: false,
     home_target: null,
@@ -109,7 +109,7 @@ describe("ScheduleAutomationPanel", () => {
   it("lists schedules with their status and run history", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { benchId: "bench-1", sessionId: "session-1" },
+      props: { spaceId: "space-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -122,7 +122,7 @@ describe("ScheduleAutomationPanel", () => {
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [EMPTY_RUN] });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { benchId: "bench-1", sessionId: "session-1" },
+      props: { spaceId: "space-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -133,7 +133,7 @@ describe("ScheduleAutomationPanel", () => {
   it("runs a schedule now through the trigger endpoint", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { benchId: "bench-1", sessionId: "session-1" },
+      props: { spaceId: "space-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -147,7 +147,7 @@ describe("ScheduleAutomationPanel", () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { benchId: "bench-1", sessionId: "session-1" },
+      props: { spaceId: "space-1", sessionId: "session-1" },
     });
     await flushUi();
 

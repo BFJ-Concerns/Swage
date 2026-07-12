@@ -8,11 +8,11 @@ use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{
     model::{NewTeam, Team, TeamAgentDefinition, TeamTaskDefinition},
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 // ---------------------------------------------------------------------------
-/// Request body for creating a team within a bench.
+/// Request body for creating a team within a space.
 #[derive(Debug, Deserialize)]
 pub struct CreateTeamRequest {
     pub name: String,
@@ -73,7 +73,7 @@ pub struct TeamTaskPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TeamResponse {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub name: String,
     pub description: String,
     pub entry_agent_id: String,
@@ -94,35 +94,35 @@ pub struct TeamListResponse {
 #[derive(Clone)]
 pub struct TeamService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) bench_store: Arc<dyn BenchStore>,
+    pub(crate) space_store: Arc<dyn SpaceStore>,
 }
 
 impl TeamService {
-    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, space_store: Arc<dyn SpaceStore>) -> Self {
         Self {
             storage,
-            bench_store,
+            space_store,
         }
     }
 
     pub async fn create_team(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         req: CreateTeamRequest,
     ) -> Result<TeamResponse, GatewayError> {
-        self.ensure_bench_exists(bench_id).await?;
+        self.ensure_space_exists(space_id).await?;
         validate_team_name(&req.name)?;
         validate_agent_id(&req.entry_agent_id, "entry_agent_id")?;
 
         if self
             .storage
-            .get_team_by_name(bench_id, &req.name)
+            .get_team_by_name(space_id, &req.name)
             .await?
             .is_some()
         {
             return Err(GatewayError::Storage(StorageError::ConstraintViolation(
                 format!(
-                    "a team named '{}' already exists in bench {bench_id}",
+                    "a team named '{}' already exists in space {space_id}",
                     req.name
                 ),
             )));
@@ -133,7 +133,7 @@ impl TeamService {
         let team = self
             .storage
             .create_team(NewTeam {
-                bench_id,
+                space_id,
                 name: req.name,
                 description: req.description,
                 entry_agent_id: req.entry_agent_id,
@@ -145,9 +145,9 @@ impl TeamService {
         Ok(team_to_response(team))
     }
 
-    pub async fn list_teams(&self, bench_id: Uuid) -> Result<TeamListResponse, GatewayError> {
-        self.ensure_bench_exists(bench_id).await?;
-        let teams = self.storage.list_teams_by_bench(bench_id).await?;
+    pub async fn list_teams(&self, space_id: Uuid) -> Result<TeamListResponse, GatewayError> {
+        self.ensure_space_exists(space_id).await?;
+        let teams = self.storage.list_teams_by_space(space_id).await?;
         Ok(TeamListResponse {
             teams: teams.into_iter().map(team_to_response).collect(),
         })
@@ -185,14 +185,14 @@ impl TeamService {
             validate_team_name(name)?;
             if let Some(conflict) = self
                 .storage
-                .get_team_by_name(existing.bench_id, name)
+                .get_team_by_name(existing.space_id, name)
                 .await?
                 && conflict.id != id
             {
                 return Err(GatewayError::Storage(StorageError::ConstraintViolation(
                     format!(
-                        "a team named '{}' already exists in bench {}",
-                        name, existing.bench_id
+                        "a team named '{}' already exists in space {}",
+                        name, existing.space_id
                     ),
                 )));
             }
@@ -240,11 +240,11 @@ impl TeamService {
         Ok(())
     }
 
-    async fn ensure_bench_exists(&self, bench_id: Uuid) -> Result<(), GatewayError> {
-        self.bench_store
-            .get(bench_id)
+    async fn ensure_space_exists(&self, space_id: Uuid) -> Result<(), GatewayError> {
+        self.space_store
+            .get(space_id)
             .await?
-            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
         Ok(())
     }
 }
@@ -415,7 +415,7 @@ fn team_not_found(id: Uuid) -> GatewayError {
 fn team_to_response(team: Team) -> TeamResponse {
     TeamResponse {
         id: team.id,
-        bench_id: team.bench_id,
+        space_id: team.space_id,
         name: team.name,
         description: team.description,
         entry_agent_id: team.entry_agent_id,

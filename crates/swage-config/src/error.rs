@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn unknown_field_includes_file_section_and_field() {
         let p = problem(
-            "bench/config.toml",
+            "space/config.toml",
             None,
             ConfigProblemKind::UnknownField {
                 section: "server".to_string(),
@@ -153,7 +153,7 @@ mod tests {
         );
         let s = p.to_string();
         assert!(
-            s.contains("bench/config.toml"),
+            s.contains("space/config.toml"),
             "should contain file path: {s}"
         );
         assert!(s.contains("protokol"), "should contain field name: {s}");
@@ -249,13 +249,13 @@ mod tests {
             "/workspace",
             None,
             ConfigProblemKind::DiscoveryError {
-                message: "benches directory not found".to_string(),
+                message: "spaces directory not found".to_string(),
             },
         );
         let s = p.to_string();
         assert!(s.contains("/workspace"), "should contain path: {s}");
         assert!(
-            s.contains("benches directory"),
+            s.contains("spaces directory"),
             "should contain message: {s}"
         );
     }

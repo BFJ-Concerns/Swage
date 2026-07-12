@@ -378,7 +378,7 @@ async fn request_sandbox_degradation_approval(
     Ok(outcome)
 }
 
-/// Distilled view of which permission grants the bench has actually accepted
+/// Distilled view of which permission grants the space has actually accepted
 /// across its trusted workspace attachments. Untrusted attachments contribute
 /// nothing.
 
@@ -438,7 +438,7 @@ pub(crate) async fn dispatch_before_inbound(
 /// # Flow
 /// 1. Look up the session's default thread (created alongside the session).
 /// 2. Guard: reject if a turn is already Processing for this thread.
-/// 3. Resolve the bench for the session; load per-bench config and build ToolContext.
+/// 3. Resolve the space for the session; load per-space config and build ToolContext.
 /// 4. Create a Turn record (state=Pending), immediately advance to Processing.
 /// 5. Store the user message with thread_id and position.
 /// 6. Build message history from the thread and send a streaming request to the provider.
@@ -490,7 +490,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     output_schema_override: Option<serde_json::Value>,
     existing_turn_id: Option<Uuid>,
 ) -> Result<(), GatewayError> {
-    // Step 1: Resolve the bench and target thread for this session.
+    // Step 1: Resolve the space and target thread for this session.
     let session = state
         .storage
         .get_session(session_id)
@@ -523,21 +523,21 @@ pub(crate) async fn process_turn_with_existing_turn(
         return Err(GatewayError::TurnInProgress { session_id });
     }
 
-    // Step 3: Resolve the bench for this session so we can load per-bench config
+    // Step 3: Resolve the space for this session so we can load per-space config
     // and build the ToolContext passed to each tool invocation.
-    let bench_id = session.bench_id;
+    let space_id = session.space_id;
 
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    let space = state
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
-    let bench_slug = bench.slug.clone();
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+    let space_slug = space.slug.clone();
 
-    // Load bench-specific config. Missing bench config falls back to the
+    // Load space-specific config. Missing space config falls back to the
     // startup config, but present invalid config fails the turn before any
     // user message is written.
-    let config = load_session_config(state, &bench_slug, &session.agent_id)?;
+    let config = load_session_config(state, &space_slug, &session.agent_id)?;
     ensure_selected_model_available(
         state,
         &config,
@@ -546,7 +546,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     )?;
     let config = effective_session_config(config, session.selected_model_id.as_deref());
 
-    // Resolve the swage root once — skill discovery, bench memory loading,
+    // Resolve the swage root once — skill discovery, space memory loading,
     // and assembly search-path construction all depend on it.
     //
     // Fail-open: a warning is logged and each consumer falls back gracefully.
@@ -555,7 +555,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
-        &bench_slug,
+        &space_slug,
         &session.agent_id,
         swage_root_opt.as_deref(),
         true,
@@ -629,16 +629,16 @@ pub(crate) async fn process_turn_with_existing_turn(
         .await?;
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
-    // Loads thread history, bench memory, and constructs typed elements.
+    // Loads thread history, space memory, and constructs typed elements.
     // Runs fail-open assembly: custom Python configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    // Load bench memory from the filesystem. Returns an empty string when
+    // Load space memory from the filesystem. Returns an empty string when
     // no memory directory or files exist — MemoryElement handles empty content.
     let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_bench_memory(root, &bench_slug).await,
+        Some(root) => load_space_memory(root, &space_slug).await,
         None => String::new(),
     };
 
@@ -648,11 +648,11 @@ pub(crate) async fn process_turn_with_existing_turn(
     let assembly_search_paths: Vec<(HierarchyLevel, PathBuf)> = swage_root_opt
         .as_ref()
         .map(|root| {
-            let bench_dir = root.join("benches").join(&bench_slug);
-            let agent_dir = bench_dir.join("agents").join(&session.agent_id);
+            let space_dir = root.join("spaces").join(&space_slug);
+            let agent_dir = space_dir.join("agents").join(&session.agent_id);
             let mut levels = vec![
                 (HierarchyLevel::Global, root.clone()),
-                (HierarchyLevel::Bench, bench_dir),
+                (HierarchyLevel::Space, space_dir),
             ];
             // Only include the agent level when the directory exists;
             // a missing agent dir means no agent-specific assemblies.
@@ -672,7 +672,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         active_skills,
         history_messages,
         memory_content,
-        bench.name.clone(),
+        space.name.clone(),
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -712,18 +712,18 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     let workspace_policy = load_trusted_workspace_policy(
         &state.storage,
-        bench_id,
+        space_id,
         session.active_workspace_attachment_id,
     )
     .await;
     let (workspace_root, mut allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, bench_id, session.id);
+        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
     let session_approval_grants = state
         .session_approval_grants
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    append_approved_location_paths(&mut allowed_paths, &session_approval_grants, bench_id);
+    append_approved_location_paths(&mut allowed_paths, &session_approval_grants, space_id);
     let agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
@@ -741,7 +741,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &config,
         &agent_config,
         session.metadata.as_ref(),
-        Some(bench_id),
+        Some(space_id),
         session.active_workspace_attachment_id,
         ws_tx.clone(),
     )
@@ -799,7 +799,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 &unsandboxed_config,
                 &agent_config,
                 session.metadata.as_ref(),
-                Some(bench_id),
+                Some(space_id),
                 session.active_workspace_attachment_id,
                 ws_tx.clone(),
             )
@@ -862,7 +862,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             session_id,
             thread_id,
             turn_id: prepared_turn_id,
-            bench_id: Some(bench_id),
+            space_id: Some(space_id),
         },
         user_message: before_inbound.canonical_content.clone(),
         assembled_context: assembled_messages,

@@ -1,4 +1,4 @@
-//! Shell execution tool — runs commands in the bench's workspace directory.
+//! Shell execution tool — runs commands in the space's workspace directory.
 
 use std::io;
 use std::time::Duration;

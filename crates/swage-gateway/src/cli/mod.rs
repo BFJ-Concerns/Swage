@@ -3,7 +3,7 @@
 //! Uses clap v4 derive macros to define a grouped subcommand architecture.
 //! The `gateway` group contains lifecycle management; the `completions` command
 //! generates shell autocompletion scripts. The structure accommodates future
-//! groups (e.g. `swage bench ...`, `swage config ...`).
+//! groups (e.g. `swage space ...`, `swage config ...`).
 
 pub mod completions;
 pub mod install;

@@ -2,13 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
-import BenchSettingsPage from "../components/BenchSettingsPage.svelte";
-import * as benchesApi from "../api/benches";
-import type { Bench } from "../types";
+import SpaceSettingsPage from "../components/SpaceSettingsPage.svelte";
+import * as spacesApi from "../api/spaces";
+import type { Space } from "../types";
 
-vi.mock("../api/benches", () => ({
-  listBenchSessions: vi.fn(),
-  listBenchWorkspaces: vi.fn(),
+vi.mock("../api/spaces", () => ({
+  listSpaceSessions: vi.fn(),
+  listSpaceWorkspaces: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -19,23 +19,23 @@ async function flushUi(): Promise<void> {
   }
 }
 
-const bench: Bench = {
-  id: "bench-1",
+const space: Space = {
+  id: "space-1",
   name: "Research",
   slug: "research",
-  description: "Research bench",
+  description: "Research space",
   is_default: false,
   created_at: "2026-05-26T10:00:00Z",
 };
 
-describe("BenchSettingsPage", () => {
+describe("SpaceSettingsPage", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
-    vi.mocked(benchesApi.listBenchWorkspaces).mockResolvedValue([
+    vi.mocked(spacesApi.listSpaceWorkspaces).mockResolvedValue([
       {
         id: "workspace-1",
-        bench_id: "bench-1",
+        space_id: "space-1",
         label: "Source",
         path: "/work/source",
         canonical_path: "/work/source",
@@ -46,7 +46,7 @@ describe("BenchSettingsPage", () => {
         created_at: "2026-05-26T10:00:00Z",
       },
     ]);
-    vi.mocked(benchesApi.listBenchSessions).mockResolvedValue([
+    vi.mocked(spacesApi.listSpaceSessions).mockResolvedValue([
       {
         id: "session-1",
         created_at: "2026-05-26T10:00:00Z",
@@ -64,24 +64,24 @@ describe("BenchSettingsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("loads bench-scoped data for the overview", async () => {
-    component = mount(BenchSettingsPage, {
+  it("loads space-scoped data for the overview", async () => {
+    component = mount(SpaceSettingsPage, {
       target: document.body,
-      props: { bench, tab: "overview" },
+      props: { space, tab: "overview" },
     });
     await flushUi();
 
-    expect(benchesApi.listBenchWorkspaces).toHaveBeenCalledWith("bench-1");
-    expect(benchesApi.listBenchSessions).toHaveBeenCalledWith("bench-1");
+    expect(spacesApi.listSpaceWorkspaces).toHaveBeenCalledWith("space-1");
+    expect(spacesApi.listSpaceSessions).toHaveBeenCalledWith("space-1");
     expect(document.body.textContent).toContain("Research");
     expect(document.body.textContent).toContain("Workspaces 1");
     expect(document.body.textContent).toContain("Sessions 1");
   });
 
-  it("renders bench workspaces without global settings controls", async () => {
-    component = mount(BenchSettingsPage, {
+  it("renders space workspaces without global settings controls", async () => {
+    component = mount(SpaceSettingsPage, {
       target: document.body,
-      props: { bench, tab: "workspaces" },
+      props: { space, tab: "workspaces" },
     });
     await flushUi();
 

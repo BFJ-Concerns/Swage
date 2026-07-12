@@ -120,7 +120,7 @@
       <p class="eyebrow">Operator Deck</p>
       <h1>Live control surface for the running gateway</h1>
       <p class="lede">
-        Sessions, approvals, automations, channels, and nodes in one place.
+        Sessions, approvals, automations, channels, and devices in one place.
       </p>
     </div>
     <button class="refresh-btn" onclick={loadOverview} disabled={isLoading}>
@@ -189,7 +189,7 @@
                   {/if}
                 </div>
                 <div class="secondary-line">
-                  {session.bench_name} ·
+                  {session.space_name} ·
                   {session.message_preview ?? "No messages yet"}
                 </div>
               </div>
@@ -383,29 +383,29 @@
       <article class="panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Nodes</p>
-            <h2>Attached execution hosts</h2>
+            <p class="panel-kicker">Devices</p>
+            <h2>Attached devices</h2>
           </div>
-          <span class="panel-count">{overview.nodes.length}</span>
+          <span class="panel-count">{overview.devices.length}</span>
         </div>
         <div class="ledger">
-          {#each overview.nodes as node (node.host_id)}
+          {#each overview.devices as device (device.device_id)}
             <div class="ledger-row">
               <div>
                 <div class="primary-line">
-                  <span>{node.label ?? node.host_id}</span>
+                  <span>{device.label ?? device.device_id}</span>
                   <StatusBadge
-                    register={node.state === "connected" ? "calm" : "wants-a-human"}
-                    label={node.state}
+                    register={device.state === "connected" ? "calm" : "wants-a-human"}
+                    label={device.state}
                   />
                 </div>
                 <div class="secondary-line">
-                  {node.kind} · {node.base_url ?? node.workspace_root}
+                  {device.kind} · {device.base_url ?? device.workspace_root}
                 </div>
               </div>
               <span class="timestamp">
-                {node.last_seen_at
-                  ? new Date(node.last_seen_at).toLocaleString()
+                {device.last_seen_at
+                  ? new Date(device.last_seen_at).toLocaleString()
                   : "local host"}
               </span>
             </div>
