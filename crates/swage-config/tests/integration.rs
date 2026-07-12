@@ -511,6 +511,7 @@ path = "/home/user/spaces/test"
 
 [sandbox]
 enabled = true
+allow_degraded_execution = true
 
 [logging]
 level = "info"
@@ -524,6 +525,27 @@ level = "info"
     assert_eq!(config.server.port, 3000);
     assert_eq!(config.default_model_id(), "claude-sonnet-4-20250514");
     assert!(config.sandbox.enabled);
+    assert!(config.sandbox.allow_degraded_execution);
+}
+
+#[test]
+fn sandbox_degradation_opt_in_cascades_by_field() {
+    let global = r#"
+[sandbox]
+enabled = true
+allow_degraded_execution = true
+"#;
+    let agent = r#"
+[sandbox]
+enabled = false
+"#;
+
+    let tmp = build_skeleton(Some(global), "mybench", None, "assistant", Some(agent));
+    let config = load_resolved_config_from(tmp.path(), "mybench", "assistant")
+        .expect("sandbox settings should resolve across the config cascade");
+
+    assert!(!config.sandbox.enabled);
+    assert!(config.sandbox.allow_degraded_execution);
 }
 
 // ---------------------------------------------------------------------------

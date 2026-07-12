@@ -704,6 +704,7 @@ fn apply_runtime_settings_to_partial(
     if let Some(sandbox) = sandbox {
         partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
             enabled: Some(sandbox.enabled),
+            allow_degraded_execution: Some(sandbox.allow_degraded_execution),
         });
     }
     if let Some(context) = context {
@@ -1201,7 +1202,10 @@ mod tests {
                 require_approval: vec![],
             }),
             hitl: Some(swage_config::HitlConfig::default()),
-            sandbox: Some(swage_config::SandboxConfig { enabled: false }),
+            sandbox: Some(swage_config::SandboxConfig {
+                enabled: false,
+                allow_degraded_execution: true,
+            }),
             context: Some(swage_config::ContextConfig {
                 assembly: "default".to_string(),
                 timeout: 7,
@@ -1564,7 +1568,10 @@ mod tests {
                 timeout: 600,
                 timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
             }),
-            Some(swage_config::SandboxConfig { enabled: false }),
+            Some(swage_config::SandboxConfig {
+                enabled: false,
+                allow_degraded_execution: true,
+            }),
             Some(swage_config::ContextConfig {
                 assembly: "compact".into(),
                 timeout: 10,

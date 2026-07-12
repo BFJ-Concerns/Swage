@@ -131,11 +131,20 @@ impl Default for WorkspaceConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SandboxConfig {
     pub enabled: bool,
+    /// Permit execution to continue when namespace isolation is unavailable.
+    ///
+    /// This is deliberately separate from `enabled`: disabling the preferred
+    /// sandbox or accepting a platform fallback both cross the same security
+    /// boundary and therefore require an explicit opt-in.
+    pub allow_degraded_execution: bool,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            allow_degraded_execution: false,
+        }
     }
 }
 
@@ -936,6 +945,7 @@ mod tests {
     fn sandbox_config_defaults() {
         let cfg = SandboxConfig::default();
         assert!(cfg.enabled);
+        assert!(!cfg.allow_degraded_execution);
     }
 
     #[test]
@@ -956,6 +966,7 @@ mod tests {
         assert_eq!(cfg.default_model_id(), "");
         assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
+        assert!(!cfg.sandbox.allow_degraded_execution);
         assert_eq!(cfg.logging.level, LogLevel::Info);
         assert_eq!(cfg.instructions, "");
     }

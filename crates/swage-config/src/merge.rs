@@ -49,6 +49,7 @@ pub struct PartialWorkspaceConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialSandboxConfig {
     pub enabled: Option<bool>,
+    pub allow_degraded_execution: Option<bool>,
 }
 
 /// Partial mirror of `LoggingConfig`.
@@ -292,6 +293,7 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(r.sandbox.enabled),
+                allow_degraded_execution: Some(r.sandbox.allow_degraded_execution),
             }),
             logging: Some(PartialLoggingConfig {
                 level: Some(r.logging.level),
@@ -509,6 +511,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         }),
         sandbox: merge_section(base.sandbox, overlay.sandbox, |b, o| PartialSandboxConfig {
             enabled: o.enabled.or(b.enabled),
+            allow_degraded_execution: o.allow_degraded_execution.or(b.allow_degraded_execution),
         }),
         logging: merge_section(base.logging, overlay.logging, |b, o| PartialLoggingConfig {
             level: o.level.or(b.level),
@@ -751,6 +754,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sandbox: SandboxConfig {
             enabled: sb.enabled.unwrap_or(dsb.enabled),
+            allow_degraded_execution: sb
+                .allow_degraded_execution
+                .unwrap_or(dsb.allow_degraded_execution),
         },
         logging: LoggingConfig {
             level: lg.level.unwrap_or(dlg.level),
