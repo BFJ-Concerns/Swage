@@ -256,6 +256,17 @@ pub enum PermissionDeniedReason {
     ExplicitlyDenied,
 }
 
+/// How a delegate tool call should complete from the parent turn's point of view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateCompletionMode {
+    /// Wait for the child to finish and return its result as the tool output.
+    #[default]
+    Wait,
+    /// Return once the child has been started; the child continues independently.
+    Detach,
+}
+
 /// Errors from tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -326,6 +337,8 @@ pub enum ToolError {
         task: String,
         /// Optional context to transfer to the delegate agent.
         context: Option<serde_json::Value>,
+        /// Whether the parent turn should wait for the child result.
+        completion_mode: DelegateCompletionMode,
     },
 }
 

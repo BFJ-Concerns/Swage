@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use swage_core::ToolError;
+use swage_core::{DelegateCompletionMode, ToolError};
 
 use crate::context::ToolContext;
 use crate::tool::Tool;
@@ -30,8 +30,10 @@ impl Tool for DelegateTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a task to another agent. The target agent executes the \
-         task and returns its result as this tool's output."
+        "Delegate a task to another agent. Use completion_mode=\"wait\" when \
+         the next parent step needs the delegate's answer. Use \
+         completion_mode=\"detach\" to start independent work and continue \
+         this turn with a durable reference to the delegated work."
     }
 
     fn parameters(&self) -> Value {
@@ -52,6 +54,12 @@ impl Tool for DelegateTool {
                     "items": {
                         "type": "object"
                     }
+                },
+                "completion_mode": {
+                    "type": "string",
+                    "enum": ["wait", "detach"],
+                    "default": "wait",
+                    "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
                 }
             },
             "required": ["target_agent", "task"]
@@ -84,6 +92,7 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
         Err(ToolError::RequiresDelegation {
@@ -91,7 +100,19 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
+            completion_mode,
         })
+    }
+}
+
+fn parse_completion_mode(value: Option<&Value>) -> Result<DelegateCompletionMode, ToolError> {
+    match value.and_then(Value::as_str).unwrap_or("wait") {
+        "wait" => Ok(DelegateCompletionMode::Wait),
+        "detach" => Ok(DelegateCompletionMode::Detach),
+        other => Err(ToolError::InvalidParameters {
+            name: DELEGATE_TOOL_NAME.to_string(),
+            message: format!("completion_mode must be \"wait\" or \"detach\", got {other:?}"),
+        }),
     }
 }
 
@@ -121,11 +142,35 @@ mod tests {
                 target_agent_id,
                 task,
                 context,
+                completion_mode,
                 ..
             } => {
                 assert_eq!(target_agent_id, "reviewer");
                 assert_eq!(task, "Review this code for correctness");
                 assert!(context.is_none());
+                assert_eq!(completion_mode, DelegateCompletionMode::Wait);
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_accepts_detached_completion_mode() {
+        let tool = DelegateTool;
+        let ctx = MockToolContext::new("test-agent", "session-1");
+        let params = json!({
+            "target_agent": "reviewer",
+            "task": "Review independently",
+            "completion_mode": "detach"
+        });
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation {
+                completion_mode, ..
+            } => {
+                assert_eq!(completion_mode, DelegateCompletionMode::Detach);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -185,6 +230,10 @@ mod tests {
         let params = tool.parameters();
         assert!(params["properties"]["target_agent"].is_object());
         assert!(params["properties"]["task"].is_object());
+        assert_eq!(
+            params["properties"]["completion_mode"]["enum"],
+            json!(["wait", "detach"])
+        );
         assert_eq!(params["required"], json!(["target_agent", "task"]));
     }
 }

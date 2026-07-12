@@ -831,6 +831,15 @@ pub trait ScheduleStore: Send + Sync {
         update: ScheduleRunUpdate,
     ) -> Result<(), StorageError>;
 
+    /// Reap terminal schedule-run rows outside the configured local history
+    /// window. Pending and running rows are always retained.
+    async fn prune_schedule_runs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_age: std::time::Duration,
+        max_per_schedule: u32,
+    ) -> Result<u64, StorageError>;
+
     /// Fail every pending/running run — startup repair after an unclean
     /// shutdown orphaned them.
     async fn recover_incomplete_schedule_runs(
@@ -1918,6 +1927,15 @@ mod tests {
             _: Uuid,
             _: ScheduleRunUpdate,
         ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn prune_schedule_runs(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+            _: std::time::Duration,
+            _: u32,
+        ) -> Result<u64, StorageError> {
             unimplemented!()
         }
 

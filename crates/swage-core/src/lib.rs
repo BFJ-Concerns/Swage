@@ -22,8 +22,9 @@ pub mod tool;
 // ---------------------------------------------------------------------------
 
 pub use error::{
-    ApprovalTimeoutPolicy, GatewayError, HookError, PermissionDeniedReason, ProviderError,
-    RuntimeError, SafetyError, SandboxError, SecretError, StorageError, SwageError, ToolError,
+    ApprovalTimeoutPolicy, DelegateCompletionMode, GatewayError, HookError, PermissionDeniedReason,
+    ProviderError, RuntimeError, SafetyError, SandboxError, SecretError, StorageError, SwageError,
+    ToolError,
 };
 pub use message::{ChatMessage, ContentPart, Role, ToolReplayPart};
 pub use message_rendering::{render_message_for_model_context, role_label_for_model_context};

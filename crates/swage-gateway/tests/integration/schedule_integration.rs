@@ -427,6 +427,82 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn tick_continues_after_a_due_schedule_run_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let due_at = Utc::now() - Duration::seconds(5);
+    let state = test_state(
+        &dir.path().join("tick-continues-after-failure.db"),
+        MockProvider::new(vec![
+            vec![StreamChunk::Error {
+                message: "provider down".into(),
+            }],
+            MockProvider::text_round("later schedule still ran"),
+        ]),
+    );
+    let router = build_router(state.clone());
+    let first_session = create_conversation(&router).await;
+    let second_session = create_conversation(&router).await;
+
+    let first = schedule::create_schedule(
+        &state,
+        create_request(
+            "this run will fail",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(first_session),
+        ),
+    )
+    .await
+    .unwrap();
+    let second = schedule::create_schedule(
+        &state,
+        create_request(
+            "this run must still happen",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(second_session),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let executed = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(
+        executed, 2,
+        "one failing due schedule must not abort the rest of the tick"
+    );
+
+    let first_runs = state.storage.list_schedule_runs(first.id).await.unwrap();
+    assert_eq!(first_runs.len(), 1);
+    assert_eq!(first_runs[0].trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(first_runs[0].state, ScheduleRunState::Failed);
+    assert!(first_runs[0].error_message.is_some());
+    assert!(first_runs[0].completed_at.is_some());
+
+    let second_runs = state.storage.list_schedule_runs(second.id).await.unwrap();
+    assert_eq!(second_runs.len(), 1);
+    assert_eq!(second_runs[0].trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(second_runs[0].state, ScheduleRunState::Completed);
+    assert_eq!(
+        second_runs[0].output_text.as_deref(),
+        Some("later schedule still ran")
+    );
+
+    for schedule_id in [first.id, second.id] {
+        let schedule = state
+            .storage
+            .get_schedule(schedule_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(schedule.status, ScheduleStatus::Completed);
+        assert!(schedule.next_run_at.is_none());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session policies
 // ---------------------------------------------------------------------------
@@ -953,6 +1029,45 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
             .iter()
             .all(|delivery| delivery["content"] == "scheduled reply")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_successful_run_records_a_distinct_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("empty-run.db"),
+        MockProvider::new(vec![MockProvider::text_round("")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "produce no visible text",
+            ScheduleSpec::Interval {
+                every: "every 5 seconds".into(),
+            },
+            continuation(session_id),
+        ),
+    )
+    .await
+    .unwrap();
+
+    schedule::tick_once(&state, created.next_run_at.unwrap())
+        .await
+        .unwrap();
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, ScheduleRunState::CompletedEmpty);
+    assert_eq!(runs[0].output_text.as_deref(), Some(""));
+    assert!(runs[0].completed_at.is_some());
+
+    let api = schedule::list_schedule_runs(&state, created.id)
+        .await
+        .unwrap();
+    assert_eq!(api.runs[0].state.to_string(), "completed_empty");
 }
 
 // ---------------------------------------------------------------------------

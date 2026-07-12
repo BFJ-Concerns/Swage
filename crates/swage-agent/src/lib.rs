@@ -28,7 +28,8 @@ pub use builder::AgentBuilder;
 pub use config::{AgentConfig, CompactionThreshold};
 pub use context_transfer::TransferredContext;
 pub use delegation::{
-    ActiveDelegation, ActiveDelegations, DelegationExecutor, DelegationHandler, active_delegations,
+    ActiveDelegation, ActiveDelegations, DelegationExecutor, DelegationHandler, DelegationOutcome,
+    DetachedDelegation, active_delegations,
 };
 pub use error::AgentError;
 pub use event::AgentEvent;
