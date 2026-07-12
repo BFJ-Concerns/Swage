@@ -561,9 +561,7 @@ pub fn spawn_schedule_loop_until_cancelled(
                 // carry over to the next tick. Awaiting happens outside the
                 // lock, and a finished handle resolves immediately.
                 let finished = {
-                    let mut tracked = in_flight
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
+                    let mut tracked = in_flight.lock().unwrap_or_else(|error| error.into_inner());
                     tracked.extend(spawned);
                     let (done, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut *tracked)
                         .into_iter()

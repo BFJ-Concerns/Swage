@@ -495,10 +495,7 @@ impl LlmProvider for HeadOfLineProvider {
 
 /// Poll a schedule's newest run until it reaches a terminal state, or panic
 /// on timeout. Used to observe one run finishing while another is stalled.
-async fn await_terminal_run(
-    state: &AppState,
-    schedule_id: Uuid,
-) -> swage_storage::ScheduleRun {
+async fn await_terminal_run(state: &AppState, schedule_id: Uuid) -> swage_storage::ScheduleRun {
     let deadline = std::time::Duration::from_secs(5);
     let started = std::time::Instant::now();
     loop {
@@ -1207,8 +1204,7 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
     .await
     .unwrap();
 
-    tick_to_completion(&state, created.next_run_at.unwrap())
-        .await;
+    tick_to_completion(&state, created.next_run_at.unwrap()).await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
@@ -1256,8 +1252,7 @@ async fn empty_successful_run_records_a_distinct_state() {
     .await
     .unwrap();
 
-    tick_to_completion(&state, created.next_run_at.unwrap())
-        .await;
+    tick_to_completion(&state, created.next_run_at.unwrap()).await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
