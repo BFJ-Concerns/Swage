@@ -86,7 +86,7 @@ The driver's commands:
 |---|---|
 | `screenshot <url> [--route PATH] [--out FILE] [--wait SEL] [--full-page] [--settle MS]` | Navigate, wait for the SPA to mount, screenshot. `--route` deep-links into a SPA path. |
 | `probe <url> [--route PATH]` | Print DOM landmarks (title, headings, button labels) and console errors as JSON — no screenshot. |
-| `flow <url> [--out FILE]` | End-to-end: opens the space picker → clicks the default space → "Open", screenshots the workspace, reports landmarks. The template for scripted UI flows. |
+| `flow <url> [--out FILE]` | End-to-end: creates a space → opens a conversation → screenshots the workspace and reports landmarks. The template for scripted UI flows. |
 
 The app opens on a **space picker** ("Choose where to work"). `flow` clicks
 through it to the assistant workspace; `screenshot` captures whatever route you

@@ -143,9 +143,11 @@ async function probe(flags) {
   });
 }
 
-// Drive the first-run flow end to end: create a space, enter it, and run one
-// turn. This proves the renamed space surface and the actual gateway turn path
-// are interactive rather than merely rendering a static landing page.
+// Drive the first-run flow end to end: create a space, enter it, and open a
+// conversation. This proves the renamed space surface and the actual gateway
+// persistence path are interactive rather than merely rendering a static
+// landing page. A fresh gateway deliberately has no model provider, so a
+// successful model turn does not belong in this credential-free smoke.
 async function flow(flags) {
   const base = flags._[0];
   if (!base) throw new Error("flow: missing <url>");
@@ -164,9 +166,7 @@ async function flow(flags) {
       { timeout: 15_000 },
     );
     await page.getByRole("button", { name: /new conversation/i }).click();
-    await page.getByPlaceholder(/send a message/i).fill("Confirm this space is ready.");
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-    await page.getByText("Space journey complete.", { exact: true }).waitFor({ timeout: 15_000 });
+    await page.getByPlaceholder(/send a message/i).waitFor({ timeout: 15_000 });
     await page.waitForTimeout(flags.settle ?? 800);
     await page.screenshot({ path: out, fullPage: true });
 
