@@ -23,7 +23,7 @@ use swage_topology::{EdgeRouting, TopologyGraph, TopologyNode, TopologyNodeKindT
 use crate::state::AppState;
 use crate::turn::{
     GatewayDelegationHandler, GatewayDispatcherRequest, build_agent_config_for_space_workspace,
-    build_assembly_elements, build_gateway_dispatcher_with_unsandboxed_degradation,
+    build_assembly_elements, build_gateway_dispatcher_for_unattended_execution,
     load_active_skills_for_agent, load_space_memory, resolve_swage_root,
 };
 use crate::websocket::ServerEvent;
@@ -750,7 +750,7 @@ async fn execute_agent_node(
         active_workspace_attachment_id,
     )
     .await;
-    let dispatcher_build = build_gateway_dispatcher_with_unsandboxed_degradation(
+    let dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
         state,
         GatewayDispatcherRequest {
             config: &config,
@@ -759,6 +759,8 @@ async fn execute_agent_node(
             space_id: Some(space.id),
             active_workspace_attachment_id,
             ws_tx: silent_ws_tx,
+            session_id: Some(session_id),
+            turn_id: None,
         },
         "topology agent node",
     )

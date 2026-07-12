@@ -547,7 +547,7 @@ async fn run_channel_turn(
 
     tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-    crate::turn::process_turn_with_existing_turn(
+    Box::pin(crate::turn::process_turn_with_existing_turn(
         state,
         session_id,
         Some(thread.id),
@@ -556,7 +556,8 @@ async fn run_channel_turn(
         subscription,
         None,
         None,
-    )
+        crate::turn::TurnAttendance::Unattended,
+    ))
     .await?;
 
     let messages = state.storage.list_messages_by_thread(thread.id).await?;

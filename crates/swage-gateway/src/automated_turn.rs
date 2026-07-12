@@ -82,6 +82,7 @@ pub async fn run_placeholder_turn(
         subscription,
         None,
         Some(turn_id),
+        crate::turn::TurnAttendance::Unattended,
     )
     .await?;
 
@@ -102,7 +103,7 @@ mod tests {
     use swage_core::{FinishReason, StreamChunk};
 
     use super::*;
-    use crate::turn::tests::make_state_with_session;
+    use crate::turn::tests::{make_state_with_config, make_state_with_session};
 
     #[test]
     fn placeholder_turn_constraint_maps_to_turn_in_progress() {
@@ -160,5 +161,60 @@ mod tests {
             provider_request["request"]["body"]["messages"].is_array(),
             "automated turn snapshot should include provider-visible messages"
         );
+    }
+
+    #[tokio::test]
+    async fn unattended_turn_fails_closed_and_records_sandbox_degradation() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        let (state, session_id) = make_state_with_config(Vec::new(), config).await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Do not run")
+            .await
+            .expect("create automated placeholder");
+
+        let error = run_placeholder_turn(&state, session_id, "Do not run", turn_id)
+            .await
+            .expect_err("unattended execution must fail closed without the opt-in");
+        assert!(error.to_string().contains("execution was blocked"));
+
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, swage_storage::TurnState::Failed);
+        let events = state.storage.list_audit_events().await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.entity_id == turn_id.to_string()
+                && event.event_kind == "execution_isolation_degraded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn unattended_turn_proceeds_and_records_with_explicit_opt_in() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sandbox.allow_degraded_execution = true;
+        let (state, session_id) = make_state_with_config(
+            vec![
+                StreamChunk::Delta {
+                    content: "Explicitly degraded".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::Stop),
+                },
+            ],
+            config,
+        )
+        .await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Opted in")
+            .await
+            .expect("create automated placeholder");
+
+        let response = run_placeholder_turn(&state, session_id, "Opted in", turn_id)
+            .await
+            .expect("explicit opt-in should permit degraded execution");
+        assert_eq!(response, "Explicitly degraded");
+        let events = state.storage.list_audit_events().await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.entity_id == turn_id.to_string()
+                && event.metadata["reason"] == "sandbox_disabled_by_configuration"
+        }));
     }
 }

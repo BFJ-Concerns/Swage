@@ -2,7 +2,7 @@ use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
     GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
     build_agent_config_for_space_workspace, build_approval_registrar,
-    build_gateway_dispatcher_with_unsandboxed_degradation, delegated_target_instructions_for_space,
+    build_gateway_dispatcher_for_unattended_execution, delegated_target_instructions_for_space,
     load_session_config, mpsc, shutdown_sandbox_guard,
 };
 use swage_agent::DelegationOutcome;
@@ -72,7 +72,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         // internal tool activity is not surfaced on the parent conversation's
         // WebSocket stream.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
-        let target_dispatcher_build = build_gateway_dispatcher_with_unsandboxed_degradation(
+        let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
             GatewayDispatcherRequest {
                 config: &target_resolved,
@@ -81,6 +81,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                 space_id: Some(space_id),
                 active_workspace_attachment_id,
                 ws_tx: silent_ws_tx,
+                session_id: None,
+                turn_id: Some(sender_turn_id),
             },
             "delegated turn",
         )
