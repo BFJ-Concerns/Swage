@@ -31,6 +31,11 @@ fn typescript_bindings_are_regenerated() {
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::provider_signin::StartProviderSignInRequest::export_all(&cfg)
+        .expect("export sign-in request");
+    client::provider_signin::StartProviderSignInResponse::export_all(&cfg)
+        .expect("export sign-in response");
+    client::provider_signin::ProviderSignInState::export_all(&cfg).expect("export sign-in state");
     client::schedule::CreateScheduleRequest::export_all(&cfg).expect("export create");
     client::schedule::UpdateScheduleRequest::export_all(&cfg).expect("export update");
     client::schedule::Schedule::export_all(&cfg).expect("export schedule");

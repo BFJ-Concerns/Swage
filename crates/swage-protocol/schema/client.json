@@ -13,6 +13,9 @@
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
+    "provider_sign_in_state": {
+      "$ref": "#/$defs/ProviderSignInState"
+    },
     "schedule": {
       "$ref": "#/$defs/Schedule"
     },
@@ -24,6 +27,12 @@
     },
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
+    },
+    "start_provider_sign_in_request": {
+      "$ref": "#/$defs/StartProviderSignInRequest"
+    },
+    "start_provider_sign_in_response": {
+      "$ref": "#/$defs/StartProviderSignInResponse"
     },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
@@ -41,7 +50,10 @@
     "schedule_list",
     "schedule_run",
     "schedule_run_list",
-    "trigger_schedule_response"
+    "trigger_schedule_response",
+    "start_provider_sign_in_request",
+    "start_provider_sign_in_response",
+    "provider_sign_in_state"
   ],
   "$defs": {
     "ChannelLinkCodeResponse": {
@@ -287,6 +299,53 @@
       "enum": [
         "run",
         "skip"
+      ]
+    },
+    "ProviderAccount": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ProviderSignInState": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderAccount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ProviderSignInStatus"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "ProviderSignInStatus": {
+      "type": "string",
+      "enum": [
+        "signed_out",
+        "signing_in",
+        "signed_in",
+        "expired"
       ]
     },
     "Schedule": {
@@ -667,6 +726,13 @@
         }
       ]
     },
+    "SignInMethod": {
+      "type": "string",
+      "enum": [
+        "browser",
+        "device_code"
+      ]
+    },
     "SkipReason": {
       "description": "Why a run was skipped rather than executed.",
       "oneOf": [
@@ -679,6 +745,63 @@
           "description": "A previous run of this schedule (or another turn in the target\nsession) was still executing when this run came due.",
           "type": "string",
           "const": "overlap"
+        }
+      ]
+    },
+    "StartProviderSignInRequest": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/SignInMethod",
+          "default": "browser"
+        }
+      }
+    },
+    "StartProviderSignInResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "auth_url": {
+              "type": "string"
+            },
+            "login_id": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string",
+              "const": "browser"
+            }
+          },
+          "required": [
+            "method",
+            "auth_url",
+            "login_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "login_id": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string",
+              "const": "device_code"
+            },
+            "user_code": {
+              "type": "string"
+            },
+            "verification_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "verification_url",
+            "user_code",
+            "login_id"
+          ]
         }
       ]
     },

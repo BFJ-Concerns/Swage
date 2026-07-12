@@ -157,6 +157,54 @@ pub async fn discover_draft_provider_models(
     ))
 }
 
+fn ensure_codex_provider(state: &AppState, provider_id: &str) -> Result<(), ApiError> {
+    let config = state.active_config();
+    let provider = config
+        .providers
+        .entries
+        .get(provider_id)
+        .ok_or_else(|| ApiError::not_found_str("provider", provider_id))?;
+    if provider.protocol != swage_config::Protocol::Codex {
+        return Err(ApiError(GatewayError::SignInUnsupported(
+            provider_id.to_string(),
+        )));
+    }
+    Ok(())
+}
+
+pub async fn provider_sign_in_state(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<swage_protocol::client::provider_signin::ProviderSignInState>, ApiError> {
+    ensure_codex_provider(&state, &provider_id)?;
+    Ok(Json(crate::codex::sign_in_state(&state).await.map_err(
+        |error| ApiError(GatewayError::ProviderRuntimeUnavailable(error)),
+    )?))
+}
+
+pub async fn start_provider_sign_in(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Json(request): Json<swage_protocol::client::provider_signin::StartProviderSignInRequest>,
+) -> Result<Json<swage_protocol::client::provider_signin::StartProviderSignInResponse>, ApiError> {
+    ensure_codex_provider(&state, &provider_id)?;
+    Ok(Json(
+        crate::codex::start_sign_in(&state, request)
+            .await
+            .map_err(|error| ApiError(GatewayError::SignInFailed(error)))?,
+    ))
+}
+
+pub async fn provider_sign_out(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<swage_protocol::client::provider_signin::ProviderSignInState>, ApiError> {
+    ensure_codex_provider(&state, &provider_id)?;
+    Ok(Json(crate::codex::sign_out(&state).await.map_err(
+        |error| ApiError(GatewayError::SignInFailed(error)),
+    )?))
+}
+
 pub async fn restart_status(
     State(state): State<AppState>,
 ) -> Json<crate::settings::RestartStatusResponse> {

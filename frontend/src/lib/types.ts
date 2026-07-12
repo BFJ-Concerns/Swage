@@ -67,7 +67,7 @@ export interface UpdateWorkspaceTrustRequest {
   is_trusted: boolean;
 }
 
-export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter";
+export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter" | "codex";
 
 export interface ProviderSettings {
   protocol: ProviderProtocol;
@@ -76,6 +76,8 @@ export interface ProviderSettings {
   api_key_env?: string | null;
   has_credential: boolean;
   api_key?: string;
+  command?: string | null;
+  state_dir?: string | null;
 }
 
 export interface ModelSettings {

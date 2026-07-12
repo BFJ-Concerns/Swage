@@ -385,6 +385,12 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::discover_provider_models).post(handlers::discover_draft_provider_models),
         )
         .route(
+            "/api/settings/providers/{id}/sign-in",
+            get(handlers::provider_sign_in_state)
+                .post(handlers::start_provider_sign_in)
+                .delete(handlers::provider_sign_out),
+        )
+        .route(
             "/api/settings/restart-required",
             get(handlers::restart_status),
         )

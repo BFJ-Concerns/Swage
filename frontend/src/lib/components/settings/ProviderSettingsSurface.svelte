@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { discoverModels } from "../../api/settings";
+  import { discoverModels, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, ProviderProtocol, SettingsResponse } from "../../types";
+  import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
 
   interface Props {
     settings: SettingsResponse;
@@ -30,6 +31,8 @@
   let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let collapsedProviderIds = $state<Set<string>>(new Set());
+  let signInByProvider = $state<Record<string, ProviderSignInState>>({});
+  let deviceCode = $state<string | null>(null);
 
   const PROVIDER_KINDS = [
     { id: "OpenAi", label: "OpenAI", protocol: "openai" },
@@ -37,6 +40,7 @@
     { id: "Google", label: "Google", protocol: "google" },
     { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
     { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
+    { id: "Codex", label: "Codex", protocol: "codex" },
   ] as const satisfies readonly ProviderKindDefinition[];
   const providerIds = $derived(Object.keys(settings.providers));
   const modelIds = $derived(Object.keys(settings.models));
@@ -57,6 +61,7 @@
   onMount(() => {
     selectedProvider = settings.default_provider || providerIds[0] || "";
     if (selectedProvider) void loadModels();
+    if (selectedProvider) void loadSignInState(selectedProvider);
   });
 
   async function loadModels(): Promise<void> {
@@ -70,6 +75,10 @@
           base_url: provider.base_url,
           api_key_secret_ref: provider.api_key_secret_ref,
           api_key_env: provider.api_key_env,
+          ...(provider.protocol === "codex" ? {
+            command: provider.command,
+            state_dir: provider.state_dir,
+          } : {}),
         };
     try {
       const response = await discoverModels(selectedProvider, modelQuery, discoveryDraft);
@@ -87,6 +96,40 @@
     selectedProvider = id;
     modelQuery = "";
     loadModels();
+    void loadSignInState(id);
+  }
+
+  async function loadSignInState(id: string): Promise<void> {
+    if (settings.providers[id]?.protocol !== "codex" || !savedProviderIds.has(id)) return;
+    try {
+      signInByProvider[id] = await fetchProviderSignIn(id);
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to read provider sign-in state.";
+    }
+  }
+
+  async function beginSignIn(id: string, method: "browser" | "device_code"): Promise<void> {
+    try {
+      const response = await startProviderSignIn(id, method);
+      if (response.method === "browser") {
+        window.open(response.auth_url, "_blank", "noopener,noreferrer");
+      } else {
+        deviceCode = `${response.user_code} — ${response.verification_url}`;
+        window.open(response.verification_url, "_blank", "noopener,noreferrer");
+      }
+      signInByProvider[id] = { status: "signing_in", account: null };
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to start provider sign-in.";
+    }
+  }
+
+  async function endSignIn(id: string): Promise<void> {
+    try {
+      signInByProvider[id] = await signOutProvider(id);
+      deviceCode = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to sign out provider.";
+    }
   }
 
   function addDiscoveredModel(model: DiscoveredModel): void {
@@ -129,7 +172,7 @@
     protocol: ProviderProtocol;
   };
 
-  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible";
+  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
 
   function slugifyProviderName(value: string): string {
     return value
@@ -185,6 +228,8 @@
       api_key_env: null,
       has_credential: false,
       api_key: "",
+      command: kind.id === "Codex" ? "codex" : null,
+      state_dir: null,
     };
     selectedProvider = id;
     discoveredModels = [];
@@ -416,8 +461,10 @@
                   <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
                 </p>
               </span>
-              <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "✓ Credential" : "No credential"}
+              <span class="credential-status" class:set={provider.has_credential || signInByProvider[id]?.status === "signed_in"}>
+                {provider.protocol === "codex"
+                  ? signInByProvider[id]?.status === "signed_in" ? "✓ Signed in" : "Signed out"
+                  : provider.has_credential ? "✓ Credential" : "No credential"}
               </span>
             </button>
             <button
@@ -433,6 +480,7 @@
 
           {#if !isCollapsed}
             <div class="provider-body">
+              {#if provider.protocol !== "codex"}
               <div class="field">
                 <div class="key">
                   Base URL
@@ -448,7 +496,6 @@
                   />
                 </div>
               </div>
-
               <div class="field">
                 <div class="key">
                   API key
@@ -467,6 +514,30 @@
                   </span>
                 </div>
               </div>
+              {:else}
+                <div class="field">
+                  <div class="key">
+                    ChatGPT account
+                    <small>Codex manages the browser or device-code sign-in and refreshes it automatically.</small>
+                  </div>
+                  <div class="val val-stack">
+                    {#if signInByProvider[id]?.status === "signed_in"}
+                      <span class="credential-status set">
+                        Signed in{signInByProvider[id]?.account?.email ? ` as ${signInByProvider[id].account.email}` : ""}
+                      </span>
+                      <button type="button" class="secondary" onclick={() => endSignIn(id)}>Sign out</button>
+                    {:else}
+                      <div class="opt-row">
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => beginSignIn(id, "browser")}>Sign in with browser</button>
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => beginSignIn(id, "device_code")}>Use device code</button>
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => loadSignInState(id)}>Refresh state</button>
+                      </div>
+                      {#if !savedProviderIds.has(id)}<small>Save settings before signing in.</small>{/if}
+                      {#if deviceCode}<code>{deviceCode}</code>{/if}
+                    {/if}
+                  </div>
+                </div>
+              {/if}
 
               <div class="field">
                 <div class="key">

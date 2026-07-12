@@ -593,6 +593,35 @@ pub trait ThreadStore: Send + Sync {
     /// `StorageError::NotFound` if `id` is unknown.
     async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError>;
 
+    /// Harness thread associated with this Swage thread, when one exists.
+    async fn get_codex_thread_id(&self, _id: Uuid) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
+    /// Replace the harness thread mapping. A changed permission envelope may
+    /// deliberately start a fresh Codex thread.
+    async fn set_codex_thread_id(
+        &self,
+        _id: Uuid,
+        _codex_thread_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::ConstraintViolation(
+            "Codex thread mapping is unsupported by this store".to_string(),
+        ))
+    }
+
+    async fn get_codex_tools_json(&self, _id: Uuid) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
+    async fn set_codex_tools_json(
+        &self,
+        _id: Uuid,
+        _tools_json: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Delete a thread. Returns `true` if it existed and was removed.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
 

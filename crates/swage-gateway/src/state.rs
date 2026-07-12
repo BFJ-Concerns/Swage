@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_agent::ApprovalDecision;
+use swage_codex::{AppServerConfig, AppServerSupervisor};
 use swage_config::{CommunicationConfig, ResolvedConfig};
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
@@ -125,6 +126,9 @@ pub struct AppState {
     pub runtime_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
     /// Hot-swapped base tool dispatcher used to build new turn dispatchers.
     pub runtime_tool_dispatcher: Arc<RwLock<Arc<ToolDispatcher>>>,
+    /// One long-lived Codex App Server, started lazily by sign-in, discovery,
+    /// or the first Codex-backed turn.
+    pub codex_supervisor: Arc<AppServerSupervisor>,
     /// Reschedulable inter-agent message expiry task.
     agent_message_expiry: Arc<Mutex<Option<AgentMessageExpiryRuntime>>>,
 }
@@ -162,6 +166,23 @@ impl AppState {
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
         let tool_dispatcher = Arc::new(tool_dispatcher);
+        let codex_endpoint = config
+            .providers
+            .entries
+            .values()
+            .find(|provider| provider.protocol == swage_config::Protocol::Codex);
+        let codex_state_dir = codex_endpoint
+            .and_then(|provider| provider.state_dir.clone())
+            .or_else(|| {
+                swage_config::discovery::resolve_root()
+                    .ok()
+                    .map(|root| root.join("codex"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(".swage/codex"));
+        let mut codex_config = AppServerConfig::codex(codex_state_dir);
+        if let Some(command) = codex_endpoint.and_then(|provider| provider.command.clone()) {
+            codex_config.command = command;
+        }
         Self {
             storage: storage.clone(),
             space_store,
@@ -195,6 +216,7 @@ impl AppState {
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
+            codex_supervisor: AppServerSupervisor::new(codex_config),
             agent_message_expiry: Arc::new(Mutex::new(None)),
         }
     }

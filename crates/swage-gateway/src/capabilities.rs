@@ -33,6 +33,9 @@ impl WorkflowCapabilities {
                 embeddings: false,
                 image_generation: false,
             },
+            // The first App Server integration contributes assembled text;
+            // attachment projection is a separate wire capability.
+            swage_config::Protocol::Codex => Self::default(),
         }
     }
 }
