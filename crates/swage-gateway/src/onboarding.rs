@@ -8,7 +8,7 @@ use swage_core::GatewayError;
 use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLinkCodeRequest};
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
-    NewWorkspaceAttachment, ScheduleKind, ScheduleStatus, SessionPolicy,
+    NewWorkspaceAttachment, ScheduleCreator, ScheduleKind, ScheduleStatus, SessionPolicy,
     model::{Space, SpaceSlug},
 };
 
@@ -189,6 +189,7 @@ pub struct RecoveryScheduleRecord {
     /// Space/session ids inside the policy refer to the exporting gateway;
     /// import remaps them onto the freshly created rows.
     pub session_policy: SessionPolicy,
+    pub creator: ScheduleCreator,
     pub delivery_routing: serde_json::Value,
     pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -501,6 +502,7 @@ pub async fn export_gateway_recovery_bundle(
                 kind: schedule.kind.to_string(),
                 expression: schedule.expression,
                 session_policy: schedule.session_policy,
+                creator: schedule.creator,
                 delivery_routing: schedule.delivery_routing,
                 gate: schedule.gate,
                 next_run_at: schedule.next_run_at,
@@ -716,6 +718,7 @@ pub async fn import_gateway_recovery_bundle(
                 kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
                 expression: schedule.expression,
                 session_policy,
+                creator: schedule.creator,
                 delivery_routing: schedule.delivery_routing,
                 gate: schedule.gate,
                 next_run_at: schedule.next_run_at,

@@ -21,7 +21,7 @@ pub use model::{
     NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
     NewTurn, NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry,
-    PendingChannelOrigin, Schedule, ScheduleKind, ScheduleRun, ScheduleRunState,
+    PendingChannelOrigin, Schedule, ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState,
     ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy,
     SharedReferenceEvent, SharedReferenceKind, SkipReason, Space, SpaceSlug, Team, Thread,
     ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
