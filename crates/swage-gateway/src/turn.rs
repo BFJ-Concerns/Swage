@@ -90,28 +90,26 @@ fn append_provider_visible_request(
     }));
 }
 
+fn append_provider_visible_capture_error(report_json: &mut serde_json::Value, round: usize) {
+    provider_visible_array(report_json, "capture_errors").push(serde_json::json!({
+        "round": round,
+        "kind": "secret_redaction_unavailable",
+    }));
+}
+
 async fn redact_provider_visible_request(
     state: &AppState,
     mut request: serde_json::Value,
-) -> serde_json::Value {
-    let secret_values = known_secret_values(state).await;
+) -> Result<serde_json::Value, swage_core::StorageError> {
+    let secret_values = known_secret_values(state).await?;
     if !secret_values.is_empty() {
         redact_secret_values(&mut request, &secret_values);
     }
-    request
+    Ok(request)
 }
 
-async fn known_secret_values(state: &AppState) -> Vec<String> {
-    let records = match state.storage.list_secrets().await {
-        Ok(records) => records,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to list secrets while redacting provider-visible snapshot"
-            );
-            return Vec::new();
-        }
-    };
+async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
+    let records = state.storage.list_secrets().await?;
 
     let mut values = Vec::new();
     for record in records
@@ -119,17 +117,18 @@ async fn known_secret_values(state: &AppState) -> Vec<String> {
         .filter(|record| record.status == "active")
     {
         let value = match record.backend_kind.as_str() {
-            "managed" => match state.storage.get_managed_secret_value(record.id).await {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(
-                        secret_id = %record.id,
-                        error = %error,
-                        "failed to load managed secret while redacting provider-visible snapshot"
-                    );
-                    None
-                }
-            },
+            "managed" => Some(
+                state
+                    .storage
+                    .get_managed_secret_value(record.id)
+                    .await?
+                    .ok_or_else(|| swage_core::StorageError::Corruption {
+                        message: format!(
+                            "active managed secret '{}' has no stored value",
+                            record.id
+                        ),
+                    })?,
+            ),
             "env" => record
                 .external_reference
                 .as_deref()
@@ -140,7 +139,7 @@ async fn known_secret_values(state: &AppState) -> Vec<String> {
             values.push(value);
         }
     }
-    values
+    Ok(values)
 }
 
 fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
@@ -928,8 +927,23 @@ pub(crate) async fn process_turn_with_existing_turn(
                 round,
                 request,
             } => {
-                let request = redact_provider_visible_request(state, request).await;
-                append_provider_visible_request(&mut report_json, round, request);
+                match redact_provider_visible_request(state, request).await {
+                    Ok(request) => {
+                        append_provider_visible_request(&mut report_json, round, request);
+                    }
+                    Err(error) => {
+                        // Never persist an unredacted provider request. The
+                        // turn may continue, but the snapshot must record why
+                        // this round's provider-visible capture is absent.
+                        tracing::error!(
+                            turn_id = %snapshot_turn_id,
+                            round,
+                            error = %error,
+                            "provider-visible request capture omitted because secret redaction was unavailable"
+                        );
+                        append_provider_visible_capture_error(&mut report_json, round);
+                    }
+                }
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
