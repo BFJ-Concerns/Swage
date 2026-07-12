@@ -1,63 +1,63 @@
-<!-- Bench-scoped settings pane. Global provider/runtime settings stay in
-     SettingsPage; this component only reads bench-owned data. -->
+<!-- Space-scoped settings pane. Global provider/runtime settings stay in
+     SettingsPage; this component only reads space-owned data. -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listBenchSessions, listBenchWorkspaces } from "../api/benches";
-  import type { BenchSettingsTab } from "../router";
-  import type { Bench, ConversationSummary, WorkspaceAttachment } from "../types";
+  import { listSpaceSessions, listSpaceWorkspaces } from "../api/spaces";
+  import type { SpaceSettingsTab } from "../router";
+  import type { Space, ConversationSummary, WorkspaceAttachment } from "../types";
 
   interface Props {
-    bench: Bench | null;
-    tab?: BenchSettingsTab;
+    space: Space | null;
+    tab?: SpaceSettingsTab;
   }
 
-  let { bench, tab = "overview" }: Props = $props();
+  let { space, tab = "overview" }: Props = $props();
 
   let workspaces = $state<WorkspaceAttachment[]>([]);
   let sessions = $state<ConversationSummary[]>([]);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
 
-  onMount(loadBenchSettings);
+  onMount(loadSpaceSettings);
 
-  async function loadBenchSettings(): Promise<void> {
-    if (!bench) return;
+  async function loadSpaceSettings(): Promise<void> {
+    if (!space) return;
     isLoading = true;
     try {
       const [workspaceList, sessionList] = await Promise.all([
-        listBenchWorkspaces(bench.id),
-        listBenchSessions(bench.id),
+        listSpaceWorkspaces(space.id),
+        listSpaceSessions(space.id),
       ]);
       workspaces = workspaceList;
       sessions = sessionList;
       error = null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Failed to load bench settings.";
+      error = err instanceof Error ? err.message : "Failed to load space settings.";
     } finally {
       isLoading = false;
     }
   }
 </script>
 
-<div class="bench-settings-pane" aria-label="Bench settings">
-  {#if !bench}
+<div class="space-settings-pane" aria-label="Space settings">
+  {#if !space}
     <section class="shell-section">
-      <h1 class="title">Bench not found</h1>
-      <p class="shell-empty">The requested bench settings route does not match a known bench.</p>
+      <h1 class="title">Space not found</h1>
+      <p class="shell-empty">The requested space settings route does not match a known space.</p>
     </section>
   {:else}
     <div class="head">
       <div class="head-text">
-        <p class="eyebrow">Bench settings</p>
-        <h1 class="title">{bench.name}</h1>
-        <p class="sub">Bench-scoped configuration and attached workspace state for {bench.slug}.</p>
+        <p class="eyebrow">Space settings</p>
+        <h1 class="title">{space.name}</h1>
+        <p class="sub">Space-scoped configuration and attached workspace state for {space.slug}.</p>
       </div>
     </div>
 
     {#if error}
       <div class="notice error" role="alert">{error}</div>
     {:else if isLoading}
-      <div class="notice">Loading bench settings…</div>
+      <div class="notice">Loading space settings…</div>
     {/if}
 
     {#if tab === "overview"}
@@ -66,11 +66,11 @@
         <div class="shell-grid">
           <div class="shell-row">
             <span class="shell-label">Slug</span>
-            <span class="shell-value">{bench.slug}</span>
+            <span class="shell-value">{space.slug}</span>
           </div>
           <div class="shell-row">
-            <span class="shell-label">Default bench</span>
-            <span class="shell-value">{bench.is_default ? "Yes" : "No"}</span>
+            <span class="shell-label">Default space</span>
+            <span class="shell-value">{space.is_default ? "Yes" : "No"}</span>
           </div>
           <div class="shell-row">
             <span class="shell-label">Workspaces</span>
@@ -93,7 +93,7 @@
               <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}</span>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this bench.</p>
+            <p class="shell-empty">No workspace folders are attached to this space.</p>
           {/each}
         </div>
       </section>
@@ -108,7 +108,7 @@
               <span>{new Date(session.last_activity).toLocaleString()}</span>
             </article>
           {:else}
-            <p class="shell-empty">No sessions have been created in this bench.</p>
+            <p class="shell-empty">No sessions have been created in this space.</p>
           {/each}
         </div>
       </section>
@@ -117,7 +117,7 @@
 </div>
 
 <style>
-  .bench-settings-pane {
+  .space-settings-pane {
     min-height: 100%;
     padding: 28px 32px;
     background: var(--paper);

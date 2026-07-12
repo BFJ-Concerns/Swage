@@ -131,7 +131,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -142,7 +142,7 @@ impl Tool for WebSearchTool {
             .as_ref()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: "Web search is not configured. Set [tools.search] in your bench config."
+                message: "Web search is not configured. Set [tools.search] in your space config."
                     .to_owned(),
             })?;
 

@@ -96,7 +96,7 @@
         class="btn split-main"
         onclick={() => decide("allow-permanent")}
         disabled={busy !== null}
-        title="Persist this tool as allowed for this bench"
+        title="Persist this tool as allowed for this space"
       >
         {busy === "allow-permanent" ? "Allowing…" : "Allow permanently"}
       </button>

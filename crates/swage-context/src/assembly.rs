@@ -980,7 +980,7 @@ mod tests {
         std::fs::create_dir_all(&assemblies_dir).expect("create assemblies dir");
         let assembly_path = assemblies_dir.join("agent_aware.py");
         std::fs::write(&assembly_path, "def assemble(ctx):\n    pass\n").expect("write assembly");
-        let search_levels = vec![(HierarchyLevel::Bench, dir.path())];
+        let search_levels = vec![(HierarchyLevel::Space, dir.path())];
         let elements: Vec<Box<dyn ContextElement>> = vec![history_element(&[("Hello", "Hi!")])];
         let config = ContextConfig {
             assembly: "agent_aware".to_string(),
@@ -1176,7 +1176,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             history_element(&[("Hello", "Hi!")]),
             skills_element(
-                "skills: code-review (bench, ~35 tokens)",
+                "skills: code-review (space, ~35 tokens)",
                 Some("Always review for correctness."),
             ),
             prompts_element("You are helpful."),
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn skills_element_report_preview_contains_skill_names() {
-        let source = "skills: code-review (bench, ~35 tokens), persona (agent, ~22 tokens)";
+        let source = "skills: code-review (space, ~35 tokens), persona (agent, ~22 tokens)";
         let elements: Vec<Box<dyn ContextElement>> = vec![
             history_element(&[("Hi", "Hello")]),
             skills_element(source, Some("Review code. Be a persona.")),
@@ -1272,7 +1272,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
             skills_element(
-                "skills: my-skill (bench, ~10 tokens)",
+                "skills: my-skill (space, ~10 tokens)",
                 Some("Skill instructions."),
             ),
             memory_element(),

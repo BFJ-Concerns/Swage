@@ -20,7 +20,7 @@ use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
-use crate::execution_host::RegisteredExecutionHost;
+use crate::device::RegisteredDevice;
 use crate::secret::SecretManager;
 use crate::websocket::ServerEvent;
 
@@ -148,8 +148,8 @@ pub struct GatewayExecutionStrategy {
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
     /// WebSocket sender for sub-tool lifecycle events inside Python.
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    /// Resolved execution host for the current turn.
-    execution_host: Option<RegisteredExecutionHost>,
+    /// Resolved device for the current turn.
+    device: Option<RegisteredDevice>,
     /// Canonical secret resolution surface.
     secret_manager: Arc<SecretManager>,
     /// Durable storage surfaced to authorised host-side tools.
@@ -160,14 +160,14 @@ impl GatewayExecutionStrategy {
     pub fn new(
         inner: Option<Arc<dyn ToolExecutionStrategy>>,
         ws_tx: mpsc::UnboundedSender<ServerEvent>,
-        execution_host: Option<RegisteredExecutionHost>,
+        device: Option<RegisteredDevice>,
         secret_manager: Arc<SecretManager>,
         storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
             inner,
             ws_tx,
-            execution_host,
+            device,
             secret_manager,
             storage,
         }
@@ -183,24 +183,22 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
-        let resolved_params = if tool.host_secret_keys().is_empty() {
+        let resolved_params = if tool.device_secret_keys().is_empty() {
             params.clone()
         } else {
-            resolve_secret_params(params, tool.host_secret_keys(), &self.secret_manager).await?
+            resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
         };
         let gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage));
 
         if self
-            .execution_host
+            .device
             .as_ref()
-            .is_some_and(|host| host.kind != crate::execution_host::ExecutionHostKind::Local)
+            .is_some_and(|host| host.kind != crate::device::DeviceKind::Local)
         {
-            return crate::execution_host::execute_on_remote_host(
+            return crate::device::execute_on_remote_device(
                 &self.secret_manager,
-                self.execution_host
-                    .as_ref()
-                    .expect("checked execution host"),
+                self.device.as_ref().expect("checked device"),
                 tool_name,
                 &resolved_params,
                 ctx,
@@ -208,11 +206,11 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             .await;
         }
 
-        if tool.requires_host_execution() {
+        if tool.requires_device_execution() {
             tool.execute(resolved_params, &gateway_ctx).await
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
-            if !tool.host_secret_keys().is_empty() {
+            if !tool.device_secret_keys().is_empty() {
                 return tool.execute(resolved_params, &gateway_ctx).await;
             }
             match &self.inner {
@@ -362,7 +360,7 @@ mod tests {
 
     struct ObservingTool {
         output: Value,
-        requires_host_execution: bool,
+        requires_device_execution: bool,
         last_execution: Mutex<Option<ObservedExecution>>,
     }
 
@@ -372,7 +370,7 @@ mod tests {
         fn new(output: Value) -> Self {
             Self {
                 output,
-                requires_host_execution: false,
+                requires_device_execution: false,
                 last_execution: Mutex::new(None),
             }
         }
@@ -380,7 +378,7 @@ mod tests {
         fn host_only(output: Value) -> Self {
             Self {
                 output,
-                requires_host_execution: true,
+                requires_device_execution: true,
                 last_execution: Mutex::new(None),
             }
         }
@@ -400,8 +398,8 @@ mod tests {
             json!({"type": "object"})
         }
 
-        fn requires_host_execution(&self) -> bool {
-            self.requires_host_execution
+        fn requires_device_execution(&self) -> bool {
+            self.requires_device_execution
         }
 
         async fn execute(&self, _params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
@@ -440,7 +438,7 @@ mod tests {
             &["secret"]
         }
 
-        fn host_secret_keys(&self) -> &[&str] {
+        fn device_secret_keys(&self) -> &[&str] {
             &["secret"]
         }
 
@@ -560,7 +558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_strategy_executes_host_required_tools_with_gateway_context() {
+    async fn gateway_strategy_executes_device_required_tools_with_gateway_context() {
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
         let storage: Arc<dyn swage_storage::store::Storage> =
@@ -583,7 +581,7 @@ mod tests {
         let result = executor
             .execute(
                 &tool,
-                "host_required",
+                "device_required",
                 &json!({"code": "print(1)"}),
                 &tool_ctx,
             )

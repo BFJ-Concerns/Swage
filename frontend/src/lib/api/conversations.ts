@@ -55,12 +55,12 @@ async function request(
 // API functions
 // ---------------------------------------------------------------------------
 
-/** Fetch all conversations belonging to the given bench. */
+/** Fetch all conversations belonging to the given space. */
 export async function listConversations(
-  benchId: string,
+  spaceId: string,
 ): Promise<ConversationSummary[]> {
   const response = await request(
-    `/api/benches/${benchId}/sessions`,
+    `/api/spaces/${spaceId}/sessions`,
     "GET",
   );
   // Gateway wraps the array in { conversations: [...] }.
@@ -70,13 +70,13 @@ export async function listConversations(
   return body.conversations;
 }
 
-/** Create a new conversation in the given bench and return its metadata. */
+/** Create a new conversation in the given space and return its metadata. */
 export async function createConversation(
-  benchId: string,
+  spaceId: string,
   selectedModelId?: string | null,
 ): Promise<ConversationResponse> {
   const response = await request(
-    `/api/benches/${benchId}/sessions`,
+    `/api/spaces/${spaceId}/sessions`,
     "POST",
     selectedModelId ? { selected_model_id: selectedModelId } : undefined,
   );

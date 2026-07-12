@@ -13,11 +13,11 @@
   import type { SessionPolicy } from "../protocol/SessionPolicy";
 
   interface Props {
-    benchId: string | null;
+    spaceId: string | null;
     sessionId: string | null;
   }
 
-  let { benchId, sessionId }: Props = $props();
+  let { spaceId, sessionId }: Props = $props();
 
   // Creation form.
   let scheduleMessage = $state("");
@@ -84,10 +84,10 @@
       }
       return { policy: "continuation", session_id: sessionId };
     }
-    if (!benchId) throw new Error("Select a bench before scheduling work.");
+    if (!spaceId) throw new Error("Select a space before scheduling work.");
     const agentId = scheduleAgentId.trim();
     if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return { policy: "fresh", bench_id: benchId, agent_id: agentId };
+    return { policy: "fresh", space_id: spaceId, agent_id: agentId };
   }
 
   async function createAutomationSchedule(): Promise<void> {

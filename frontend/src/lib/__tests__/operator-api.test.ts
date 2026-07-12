@@ -44,7 +44,7 @@ describe("fetchOperatorOverview", () => {
         approvals: [],
         schedules: { schedules: [] },
         channels: { channels: [] },
-        nodes: [],
+        devices: [],
       }),
     );
 

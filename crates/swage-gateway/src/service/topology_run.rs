@@ -130,7 +130,7 @@ impl TopologyRunService {
         let graph = if let Some(flow_name) = req.flow_name.as_deref() {
             crate::authoring_definition::load_topology_flow_graph(
                 &self.state,
-                team.bench_id,
+                team.space_id,
                 flow_name,
             )
             .await?
@@ -167,8 +167,8 @@ impl TopologyRunService {
                 crate::topology::TopologyEngineError::Storage(storage_error) => {
                     GatewayError::Storage(storage_error)
                 }
-                crate::topology::TopologyEngineError::TeamBenchMissing { bench_id, .. } => {
-                    GatewayError::BenchNotFound { id: bench_id }
+                crate::topology::TopologyEngineError::TeamSpaceMissing { space_id, .. } => {
+                    GatewayError::SpaceNotFound { id: space_id }
                 }
                 crate::topology::TopologyEngineError::SessionMissing { session_id } => {
                     GatewayError::ConversationNotFound { id: session_id }

@@ -3,11 +3,11 @@ use serde_json::json;
 use swage_client::websocket::ServerEvent;
 use swage_tui::app::{EventOutcome, handle_server_event};
 use swage_tui::keybindings::{AppAction, map_key_event};
-use swage_tui::state::{BenchInfo, ConversationState};
+use swage_tui::state::{ConversationState, SpaceInfo};
 use uuid::Uuid;
 
 fn make_state() -> ConversationState {
-    ConversationState::new(BenchInfo {
+    ConversationState::new(SpaceInfo {
         id: Uuid::new_v4(),
         name: "Alpha".to_string(),
     })
@@ -132,17 +132,17 @@ fn shutdown_event_disables_streaming_and_reports_shutdown() {
 }
 
 #[test]
-fn bench_switch_updates_active_bench_in_state() {
+fn space_switch_updates_active_space_in_state() {
     let mut state = make_state();
-    let next_bench = BenchInfo {
+    let next_space = SpaceInfo {
         id: Uuid::new_v4(),
         name: "Beta".to_string(),
     };
 
-    state.set_bench(next_bench.clone());
+    state.set_space(next_space.clone());
 
-    assert_eq!(state.active_bench.id, next_bench.id);
-    assert_eq!(state.active_bench.name, "Beta");
+    assert_eq!(state.active_space.id, next_space.id);
+    assert_eq!(state.active_space.name, "Beta");
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn keybinding_dispatch_maps_real_shortcuts() {
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             false
         ),
-        Some(AppAction::OpenBenchSelector)
+        Some(AppAction::OpenSpaceSelector)
     );
     assert_eq!(
         map_key_event(

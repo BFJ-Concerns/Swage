@@ -1,8 +1,8 @@
-//! Bench selector overlay — modal list of benches fetched from the gateway.
+//! Space selector overlay — modal list of spaces fetched from the gateway.
 //!
 //! Renders as a centred popup over the conversation area with keyboard
-//! navigation for selecting a bench. Selecting a bench updates the active
-//! bench context.
+//! navigation for selecting a space. Selecting a space updates the active
+//! space context.
 
 use ratatui::{
     Frame,
@@ -12,18 +12,18 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::state::BenchInfo;
+use crate::state::SpaceInfo;
 
-/// State for the bench selector modal overlay.
+/// State for the space selector modal overlay.
 ///
 /// Navigation wraps around at both ends — selecting past the last item
 /// returns to the first, and selecting before the first goes to the last.
 #[derive(Debug, Default)]
-pub struct BenchSelectorState {
-    pub benches: Vec<BenchInfo>,
-    /// Index of the currently highlighted bench.
+pub struct SpaceSelectorState {
+    pub spaces: Vec<SpaceInfo>,
+    /// Index of the currently highlighted space.
     pub selected_index: usize,
-    /// True while the bench list is being fetched from the gateway.
+    /// True while the space list is being fetched from the gateway.
     pub is_loading: bool,
     /// Error message to display instead of the list when a fetch fails.
     pub error: Option<String>,
@@ -31,40 +31,40 @@ pub struct BenchSelectorState {
     pub is_visible: bool,
 }
 
-impl BenchSelectorState {
-    /// Create a new, hidden `BenchSelectorState`.
+impl SpaceSelectorState {
+    /// Create a new, hidden `SpaceSelectorState`.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Move the selection one item down, wrapping to the first item after the last.
     pub fn select_next(&mut self) {
-        if self.benches.is_empty() {
+        if self.spaces.is_empty() {
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.benches.len();
+        self.selected_index = (self.selected_index + 1) % self.spaces.len();
     }
 
     /// Move the selection one item up, wrapping to the last item before the first.
     pub fn select_previous(&mut self) {
-        if self.benches.is_empty() {
+        if self.spaces.is_empty() {
             return;
         }
         self.selected_index = if self.selected_index == 0 {
-            self.benches.len() - 1
+            self.spaces.len() - 1
         } else {
             self.selected_index - 1
         };
     }
 
-    /// Return the currently selected `BenchInfo`, or `None` if the list is empty.
-    pub fn confirm(&self) -> Option<BenchInfo> {
-        self.benches.get(self.selected_index).cloned()
+    /// Return the currently selected `SpaceInfo`, or `None` if the list is empty.
+    pub fn confirm(&self) -> Option<SpaceInfo> {
+        self.spaces.get(self.selected_index).cloned()
     }
 
-    /// Replace the bench list and reset the selection to the first item.
-    pub fn set_benches(&mut self, benches: Vec<BenchInfo>) {
-        self.benches = benches;
+    /// Replace the space list and reset the selection to the first item.
+    pub fn set_spaces(&mut self, spaces: Vec<SpaceInfo>) {
+        self.spaces = spaces;
         self.selected_index = 0;
         self.is_loading = false;
         self.error = None;
@@ -95,14 +95,14 @@ impl BenchSelectorState {
 
 // ---- Rendering -----------------------------------------------------------
 
-/// Render the bench selector overlay centred within `area`.
+/// Render the space selector overlay centred within `area`.
 ///
 /// If `state.is_visible` is false the function returns without rendering
 /// anything, so callers can always invoke it unconditionally.
 ///
 /// The popup clears the background beneath it (via `Clear`) before drawing,
 /// so underlying widgets do not bleed through.
-pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelectorState) {
+pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelectorState) {
     if !state.is_visible {
         return;
     }
@@ -114,7 +114,7 @@ pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelecto
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Select Bench ");
+        .title(" Select Space ");
 
     let inner = block.inner(popup);
 
@@ -128,7 +128,7 @@ pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelecto
 
     // ---- Content ----
     if state.is_loading {
-        let loading = Paragraph::new("Loading benches...")
+        let loading = Paragraph::new("Loading spaces...")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(loading, content_area);
@@ -139,7 +139,7 @@ pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelecto
         frame.render_widget(error_text, content_area);
     } else {
         let items: Vec<ListItem> = state
-            .benches
+            .spaces
             .iter()
             .map(|p| ListItem::new(p.name.as_str()))
             .collect();
@@ -149,7 +149,7 @@ pub fn render_bench_selector(frame: &mut Frame, area: Rect, state: &BenchSelecto
 
         // Feed our tracked index into ratatui's ListState for rendering.
         let mut list_state = ListState::default();
-        if !state.benches.is_empty() {
+        if !state.spaces.is_empty() {
             list_state.select(Some(state.selected_index));
         }
 
@@ -183,31 +183,31 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn make_bench(name: &str) -> BenchInfo {
-        BenchInfo {
+    fn make_space(name: &str) -> SpaceInfo {
+        SpaceInfo {
             id: Uuid::new_v4(),
             name: name.to_string(),
         }
     }
 
-    fn three_benches() -> Vec<BenchInfo> {
-        vec![make_bench("Alpha"), make_bench("Beta"), make_bench("Gamma")]
+    fn three_spaces() -> Vec<SpaceInfo> {
+        vec![make_space("Alpha"), make_space("Beta"), make_space("Gamma")]
     }
 
     // ---- select_next ----------------------------------------------------
 
     #[test]
     fn select_next_advances_index() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.select_next();
         assert_eq!(state.selected_index, 1);
     }
 
     #[test]
     fn select_next_wraps_from_last_to_first() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.selected_index = 2; // last item
         state.select_next();
         assert_eq!(state.selected_index, 0, "should wrap to first");
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn select_next_on_empty_list_is_noop() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.select_next();
         assert_eq!(state.selected_index, 0);
     }
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn select_previous_decrements_index() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.selected_index = 2;
         state.select_previous();
         assert_eq!(state.selected_index, 1);
@@ -233,8 +233,8 @@ mod tests {
 
     #[test]
     fn select_previous_wraps_from_first_to_last() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.selected_index = 0; // first item
         state.select_previous();
         assert_eq!(state.selected_index, 2, "should wrap to last");
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn select_previous_on_empty_list_is_noop() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.select_previous();
         assert_eq!(state.selected_index, 0);
     }
@@ -250,9 +250,9 @@ mod tests {
     // ---- confirm --------------------------------------------------------
 
     #[test]
-    fn confirm_returns_selected_bench() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+    fn confirm_returns_selected_space() {
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.selected_index = 1;
         let confirmed = state.confirm().unwrap();
         assert_eq!(confirmed.name, "Beta");
@@ -260,36 +260,36 @@ mod tests {
 
     #[test]
     fn confirm_on_empty_list_returns_none() {
-        let state = BenchSelectorState::new();
+        let state = SpaceSelectorState::new();
         assert!(state.confirm().is_none());
     }
 
     #[test]
     fn confirm_does_not_mutate_state() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         let _ = state.confirm();
         assert_eq!(state.selected_index, 0, "confirm must not change selection");
     }
 
-    // ---- set_benches ---------------------------------------------------
+    // ---- set_spaces ---------------------------------------------------
 
     #[test]
-    fn set_benches_replaces_list_and_resets_selection() {
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+    fn set_spaces_replaces_list_and_resets_selection() {
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.selected_index = 2;
-        state.set_benches(vec![make_bench("New")]);
-        assert_eq!(state.benches.len(), 1);
+        state.set_spaces(vec![make_space("New")]);
+        assert_eq!(state.spaces.len(), 1);
         assert_eq!(state.selected_index, 0, "selection should reset to 0");
     }
 
     #[test]
-    fn set_benches_clears_loading_and_error() {
-        let mut state = BenchSelectorState::new();
+    fn set_spaces_clears_loading_and_error() {
+        let mut state = SpaceSelectorState::new();
         state.is_loading = true;
         state.error = Some("previous error".to_string());
-        state.set_benches(three_benches());
+        state.set_spaces(three_spaces());
         assert!(!state.is_loading);
         assert!(state.error.is_none());
     }
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn set_error_stores_message_and_clears_loading() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.is_loading = true;
         state.set_error("fetch failed".to_string());
         assert_eq!(state.error.as_deref(), Some("fetch failed"));
@@ -309,14 +309,14 @@ mod tests {
 
     #[test]
     fn show_makes_overlay_visible() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.show();
         assert!(state.is_visible());
     }
 
     #[test]
     fn hide_makes_overlay_invisible() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.show();
         state.hide();
         assert!(!state.is_visible());
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn show_clears_previous_error() {
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.set_error("old error".to_string());
         state.show();
         assert!(state.error.is_none());
@@ -368,9 +368,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = BenchSelectorState::new(); // is_visible = false
+        let state = SpaceSelectorState::new(); // is_visible = false
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         // Buffer should be entirely blank (no popup was rendered).
         let content: String = terminal
@@ -392,11 +392,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.show();
         state.is_loading = true;
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -416,11 +416,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = BenchSelectorState::new();
+        let mut state = SpaceSelectorState::new();
         state.show();
         state.set_error("gateway unreachable".to_string());
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -436,15 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_bench_list() {
+    fn render_shows_space_list() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.show();
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -455,15 +455,15 @@ mod tests {
             .collect();
         assert!(
             content.contains("Alpha"),
-            "bench list must show 'Alpha'; got: {content:?}"
+            "space list must show 'Alpha'; got: {content:?}"
         );
         assert!(
             content.contains("Beta"),
-            "bench list must show 'Beta'; got: {content:?}"
+            "space list must show 'Beta'; got: {content:?}"
         );
         assert!(
             content.contains("Gamma"),
-            "bench list must show 'Gamma'; got: {content:?}"
+            "space list must show 'Gamma'; got: {content:?}"
         );
     }
 
@@ -472,11 +472,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.show();
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -492,15 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_select_bench_title() {
+    fn render_shows_select_space_title() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = BenchSelectorState::new();
-        state.set_benches(three_benches());
+        let mut state = SpaceSelectorState::new();
+        state.set_spaces(three_spaces());
         state.show();
         terminal
-            .draw(|frame| render_bench_selector(frame, frame.area(), &state))
+            .draw(|frame| render_space_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -510,8 +510,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("Select Bench"),
-            "popup must show 'Select Bench' title; got: {content:?}"
+            content.contains("Select Space"),
+            "popup must show 'Select Space' title; got: {content:?}"
         );
     }
 }

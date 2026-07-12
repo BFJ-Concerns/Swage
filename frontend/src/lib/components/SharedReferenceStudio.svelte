@@ -14,11 +14,11 @@
   } from "../types";
 
   interface Props {
-    benchId: string | null;
+    spaceId: string | null;
     onTeamTopologyUpdated?: () => void | Promise<void>;
   }
 
-  let { benchId, onTeamTopologyUpdated }: Props = $props();
+  let { spaceId, onTeamTopologyUpdated }: Props = $props();
 
   let summaries = $state<SharedReferenceSummary[]>([]);
   let selectedKey = $state<string | null>(null);
@@ -30,7 +30,7 @@
   let notice = $state<string | null>(null);
 
   $effect(() => {
-    if (!benchId) {
+    if (!spaceId) {
       summaries = [];
       selectedKey = null;
       detail = null;
@@ -39,15 +39,15 @@
       notice = null;
       return;
     }
-    void refreshSummaries(benchId);
+    void refreshSummaries(spaceId);
   });
 
-  async function refreshSummaries(nextBenchId: string): Promise<void> {
+  async function refreshSummaries(nextSpaceId: string): Promise<void> {
     isLoading = true;
     loadError = null;
 
     try {
-      const objects = await listSharedReferences(nextBenchId);
+      const objects = await listSharedReferences(nextSpaceId);
       summaries = objects;
 
       const fallback = objects[0];
@@ -123,8 +123,8 @@
       });
       notice = `Promoted ${agentId} to the team lead.`;
       await onTeamTopologyUpdated?.();
-      if (benchId) {
-        await refreshSummaries(benchId);
+      if (spaceId) {
+        await refreshSummaries(spaceId);
       }
     } catch (error) {
       detailError =
@@ -163,8 +163,8 @@
         <span>{summaries.length}</span>
       </header>
 
-      {#if !benchId}
-        <p class="muted-note">Select a bench to inspect shared objects.</p>
+      {#if !spaceId}
+        <p class="muted-note">Select a space to inspect shared objects.</p>
       {:else if summaries.length === 0 && !isLoading}
         <p class="muted-note">No shared objects yet. Create a team or generate context first.</p>
       {:else}

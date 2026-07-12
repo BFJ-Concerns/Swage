@@ -58,7 +58,7 @@
   }
 
   function countSummary(item: RecoveryExportSummary): string {
-    return [["benches", item.benches], ["workspaces", item.workspaces], ["sessions", item.sessions], ["secrets", item.secrets], ["channels", item.channel_links], ["nodes", item.execution_hosts], ["schedules", item.schedules]].map(([label, value]) => `${label}: ${value}`).join(" · ");
+    return [["spaces", item.spaces], ["workspaces", item.workspaces], ["sessions", item.sessions], ["secrets", item.secrets], ["channels", item.channel_links], ["devices", item.devices], ["schedules", item.schedules]].map(([label, value]) => `${label}: ${value}`).join(" · ");
   }
 
   function formatSize(bytes: number): string {

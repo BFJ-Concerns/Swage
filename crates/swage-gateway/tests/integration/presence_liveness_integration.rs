@@ -21,7 +21,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, store::BenchStore};
+use swage_storage::{SqliteStorage, store::SpaceStore};
 
 struct MockProvider;
 
@@ -59,7 +59,7 @@ async fn start_test_server() -> (Router, SocketAddr) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -168,8 +168,8 @@ async fn presence_snapshot_marks_machine_stale_after_missed_heartbeat() {
     let response = http
         .post(format!("http://{addr}/api/presence/machines/heartbeat"))
         .json(&serde_json::json!({
-            "machine_id": "node-a",
-            "label": "Node A",
+            "machine_id": "device-a",
+            "label": "Device A",
             "stale_after_secs": 1
         }))
         .send()
@@ -181,7 +181,7 @@ async fn presence_snapshot_marks_machine_stale_after_missed_heartbeat() {
     let machine = connected
         .machines
         .iter()
-        .find(|machine| machine.machine_id == "node-a")
+        .find(|machine| machine.machine_id == "device-a")
         .expect("machine presence record");
     assert_eq!(machine.state, "connected");
 
@@ -191,7 +191,7 @@ async fn presence_snapshot_marks_machine_stale_after_missed_heartbeat() {
     let machine = stale
         .machines
         .iter()
-        .find(|machine| machine.machine_id == "node-a")
+        .find(|machine| machine.machine_id == "device-a")
         .expect("stale machine presence record");
     assert_eq!(machine.state, "stale");
 }

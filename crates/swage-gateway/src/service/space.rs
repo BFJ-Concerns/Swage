@@ -6,29 +6,29 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_storage::{
-    model::{BenchSlug, NewBench},
-    store::BenchStore,
+    model::{NewSpace, SpaceSlug},
+    store::SpaceStore,
 };
 
 // ---------------------------------------------------------------------------
-/// Request body for creating a bench.
+/// Request body for creating a space.
 #[derive(Debug, Deserialize)]
-pub struct CreateBenchRequest {
+pub struct CreateSpaceRequest {
     pub name: String,
     #[serde(default)]
     pub description: String,
 }
 
-/// Request body for partially updating a bench.
+/// Request body for partially updating a space.
 #[derive(Debug, Deserialize)]
-pub struct UpdateBenchRequest {
+pub struct UpdateSpaceRequest {
     pub name: Option<String>,
     pub description: Option<String>,
 }
 
-/// API response for a single bench.
+/// API response for a single space.
 #[derive(Debug, Serialize)]
-pub struct BenchResponse {
+pub struct SpaceResponse {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -37,13 +37,13 @@ pub struct BenchResponse {
     pub created_at: DateTime<Utc>,
 }
 
-/// API response for the list-benches endpoint.
+/// API response for the list-spaces endpoint.
 #[derive(Debug, Serialize)]
-pub struct BenchListResponse {
-    pub benches: Vec<BenchResponse>,
+pub struct SpaceListResponse {
+    pub spaces: Vec<SpaceResponse>,
 }
 
-/// Derives a URL-safe slug from a bench name.
+/// Derives a URL-safe slug from a space name.
 ///
 /// - Lowercases the name
 /// - Replaces spaces with hyphens
@@ -56,38 +56,38 @@ pub fn slugify(name: &str) -> String {
         .collect()
 }
 
-fn validate_bench_slug(slug: &str) -> Result<BenchSlug, GatewayError> {
-    BenchSlug::new(slug).map_err(|_| {
+fn validate_space_slug(slug: &str) -> Result<SpaceSlug, GatewayError> {
+    SpaceSlug::new(slug).map_err(|_| {
         GatewayError::ValidationError("name must contain at least one ASCII letter or digit".into())
     })
 }
 
-/// Returns the base directory for all bench data under the canonical Swage root.
-fn benches_base_dir() -> Result<PathBuf, GatewayError> {
+/// Returns the base directory for all space data under the canonical Swage root.
+fn spaces_base_dir() -> Result<PathBuf, GatewayError> {
     swage_config::discovery::resolve_root()
-        .map(|root| root.join("benches"))
+        .map(|root| root.join("spaces"))
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))
 }
 
-/// Mediates between HTTP bench handlers and storage.
+/// Mediates between HTTP space handlers and storage.
 #[derive(Clone)]
-pub struct BenchService {
-    pub(crate) bench_store: Arc<dyn BenchStore>,
+pub struct SpaceService {
+    pub(crate) space_store: Arc<dyn SpaceStore>,
 }
 
-impl BenchService {
-    pub fn new(bench_store: Arc<dyn BenchStore>) -> Self {
-        Self { bench_store }
+impl SpaceService {
+    pub fn new(space_store: Arc<dyn SpaceStore>) -> Self {
+        Self { space_store }
     }
 
-    /// Create a new bench.
+    /// Create a new space.
     ///
     /// Validates the name is non-empty, generates a slug, checks name
-    /// uniqueness, creates the bench directory structure, and stores the bench.
-    pub async fn create_bench(
+    /// uniqueness, creates the space directory structure, and stores the space.
+    pub async fn create_space(
         &self,
-        req: CreateBenchRequest,
-    ) -> Result<BenchResponse, GatewayError> {
+        req: CreateSpaceRequest,
+    ) -> Result<SpaceResponse, GatewayError> {
         // Validate non-empty name.
         if req.name.trim().is_empty() {
             return Err(GatewayError::ValidationError(
@@ -96,41 +96,41 @@ impl BenchService {
         }
 
         // Check name uniqueness.
-        if self.bench_store.get_by_name(&req.name).await?.is_some() {
-            return Err(GatewayError::BenchConflict(format!(
-                "a bench named '{}' already exists",
+        if self.space_store.get_by_name(&req.name).await?.is_some() {
+            return Err(GatewayError::SpaceConflict(format!(
+                "a space named '{}' already exists",
                 req.name
             )));
         }
 
-        let slug = validate_bench_slug(&slugify(&req.name))?;
+        let slug = validate_space_slug(&slugify(&req.name))?;
 
-        // Create the bench directory under the canonical Swage root.
-        let base = benches_base_dir()?;
-        let bench_dir = base.join(&slug);
-        let memory_dir = bench_dir.join("memory");
+        // Create the space directory under the canonical Swage root.
+        let base = spaces_base_dir()?;
+        let space_dir = base.join(&slug);
+        let memory_dir = space_dir.join("memory");
         // Non-fatal: best-effort directory creation.
         if let Err(error) = std::fs::create_dir_all(&memory_dir) {
             tracing::warn!(
             %slug,
                 path = %memory_dir.display(),
                 %error,
-                "failed to create bench memory directory"
+                "failed to create space memory directory"
             );
         }
 
-        let bench = self
-            .bench_store
-            .create(NewBench {
+        let space = self
+            .space_store
+            .create(NewSpace {
                 name: req.name,
                 slug,
             })
             .await?;
         if !req.description.trim().is_empty() {
-            return Ok(bench_to_response(
-                self.bench_store
+            return Ok(space_to_response(
+                self.space_store
                     .update(
-                        bench.id,
+                        space.id,
                         None,
                         Some(req.description.trim().to_string()),
                         None,
@@ -139,34 +139,34 @@ impl BenchService {
             ));
         }
 
-        Ok(bench_to_response(bench))
+        Ok(space_to_response(space))
     }
 
-    /// List all benches.
-    pub async fn list_benches(&self) -> Result<BenchListResponse, GatewayError> {
-        let benches = self.bench_store.list_all().await?;
-        Ok(BenchListResponse {
-            benches: benches.into_iter().map(bench_to_response).collect(),
+    /// List all spaces.
+    pub async fn list_spaces(&self) -> Result<SpaceListResponse, GatewayError> {
+        let spaces = self.space_store.list_all().await?;
+        Ok(SpaceListResponse {
+            spaces: spaces.into_iter().map(space_to_response).collect(),
         })
     }
 
-    /// Get a bench by ID.
-    pub async fn get_bench(&self, id: Uuid) -> Result<BenchResponse, GatewayError> {
-        self.bench_store
+    /// Get a space by ID.
+    pub async fn get_space(&self, id: Uuid) -> Result<SpaceResponse, GatewayError> {
+        self.space_store
             .get(id)
             .await?
-            .map(bench_to_response)
-            .ok_or(GatewayError::BenchNotFound { id })
+            .map(space_to_response)
+            .ok_or(GatewayError::SpaceNotFound { id })
     }
 
-    /// Partially update a bench.
+    /// Partially update a space.
     ///
     /// Regenerates slug when name changes.
-    pub async fn update_bench(
+    pub async fn update_space(
         &self,
         id: Uuid,
-        req: UpdateBenchRequest,
-    ) -> Result<BenchResponse, GatewayError> {
+        req: UpdateSpaceRequest,
+    ) -> Result<SpaceResponse, GatewayError> {
         // Validate name if provided.
         if let Some(ref name) = req.name
             && name.trim().is_empty()
@@ -180,46 +180,46 @@ impl BenchService {
         let new_slug = match req.name.as_deref() {
             Some(name) => {
                 let slug = slugify(name);
-                Some(validate_bench_slug(&slug)?)
+                Some(validate_space_slug(&slug)?)
             }
             None => None,
         };
 
-        let bench = self
-            .bench_store
+        let space = self
+            .space_store
             .update(id, req.name, req.description, new_slug)
             .await
             .map_err(|e| match e {
                 swage_core::StorageError::NotFound { id: ref eid, .. } => {
                     let parsed_id = eid.parse::<Uuid>().unwrap_or(id);
-                    GatewayError::BenchNotFound { id: parsed_id }
+                    GatewayError::SpaceNotFound { id: parsed_id }
                 }
                 other => GatewayError::Storage(other),
             })?;
 
-        Ok(bench_to_response(bench))
+        Ok(space_to_response(space))
     }
 
-    /// Delete a bench.
+    /// Delete a space.
     ///
     /// Returns 404 if not found. Returns a conflict error if called on the
-    /// default bench. The bench directory on disk is preserved.
-    pub async fn delete_bench(&self, id: Uuid) -> Result<(), GatewayError> {
-        let found = self.bench_store.delete(id).await.map_err(|e| match e {
-            swage_core::StorageError::ConstraintViolation(msg) => GatewayError::BenchConflict(msg),
+    /// default space. The space directory on disk is preserved.
+    pub async fn delete_space(&self, id: Uuid) -> Result<(), GatewayError> {
+        let found = self.space_store.delete(id).await.map_err(|e| match e {
+            swage_core::StorageError::ConstraintViolation(msg) => GatewayError::SpaceConflict(msg),
             other => GatewayError::Storage(other),
         })?;
 
         if !found {
-            return Err(GatewayError::BenchNotFound { id });
+            return Err(GatewayError::SpaceNotFound { id });
         }
 
         Ok(())
     }
 }
 
-fn bench_to_response(p: swage_storage::model::Bench) -> BenchResponse {
-    BenchResponse {
+fn space_to_response(p: swage_storage::model::Space) -> SpaceResponse {
+    SpaceResponse {
         id: p.id,
         name: p.name,
         description: p.description,
@@ -230,12 +230,12 @@ fn bench_to_response(p: swage_storage::model::Bench) -> BenchResponse {
 }
 
 #[cfg(test)]
-mod bench_slug_tests {
-    use super::{GatewayError, slugify, validate_bench_slug};
+mod space_slug_tests {
+    use super::{GatewayError, slugify, validate_space_slug};
 
     #[test]
     fn punctuation_only_name_is_rejected_after_slugify() {
-        let err = validate_bench_slug(&slugify("!!! /// ___"))
+        let err = validate_space_slug(&slugify("!!! /// ___"))
             .expect_err("punctuation-only names should be rejected");
         assert!(matches!(err, GatewayError::ValidationError(_)));
         assert!(

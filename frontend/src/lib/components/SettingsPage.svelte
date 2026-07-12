@@ -29,7 +29,7 @@
     | "automation"
     | "plugins"
     | "channels"
-    | "nodes"
+    | "devices"
     | "voice"
     | "recovery"
     | "display"
@@ -37,11 +37,11 @@
 
   interface Props {
     tab?: SettingsTabId;
-    benchId?: string | null;
+    spaceId?: string | null;
     sessionId?: string | null;
   }
 
-  let { tab = "providers", benchId = null, sessionId = null }: Props = $props();
+  let { tab = "providers", spaceId = null, sessionId = null }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
   // returns a fresh server snapshot which we replace it with. Null until the
@@ -184,9 +184,9 @@
       title: "Channels",
       sub: "External delivery integrations the gateway can route conversations through.",
     },
-    nodes: {
-      title: "Nodes",
-      sub: "Attached execution hosts that the gateway can dispatch sandboxed work to.",
+    devices: {
+      title: "Devices",
+      sub: "Attached devices that the gateway can dispatch sandboxed work to.",
     },
     voice: {
       title: "Voice",
@@ -194,11 +194,11 @@
     },
     recovery: {
       title: "Recovery",
-      sub: "Operator-managed export bundles capturing benches, conversations, and configuration for restore.",
+      sub: "Operator-managed export bundles capturing spaces, conversations, and configuration for restore.",
     },
     display: {
       title: "Display",
-      sub: "How Swage looks. Settings here are platform-level — they apply across all benches and lenses.",
+      sub: "How Swage looks. Settings here are platform-level — they apply across all spaces and lenses.",
     },
     account: {
       title: "Account",
@@ -211,7 +211,7 @@
   const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
     "channels",
-    "nodes",
+    "devices",
     "voice",
     "recovery",
     "display",
@@ -220,7 +220,7 @@
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
     "channels",
-    "nodes",
+    "devices",
     "voice",
     "account",
   ]);
@@ -289,7 +289,7 @@
         Swage has a platform plugin model.
 
         Wire the Plugins page to a real plugin/extension catalogue. Today the
-        gateway exposes per-bench extensions (`/api/benches/{id}/extensions`)
+        gateway exposes per-space extensions (`/api/spaces/{id}/extensions`)
         but no platform-level plugin registry. Surface installed plugins,
         their tools, and an enable/disable toggle.
         Why: users cannot see or manage anything plugin-shaped from settings.
@@ -313,15 +313,15 @@
         ---
       -->
       <InformationalSettingsSurface {tab} />
-    {:else if tab === "nodes"}
+    {:else if tab === "devices"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
-        Swage has execution-host registration and disconnect semantics.
+        Swage has device registration and disconnect semantics.
 
-        Show registered execution hosts (operator overview already returns
-        nodes). Add register/disconnect flows once the gateway exposes them.
-        Why: there is no settings-level view of attached hosts.
-        How to apply: bind to /api/operator/overview.nodes for a read-only
+        Show registered devices (operator overview already returns
+        devices). Add register/disconnect flows once the gateway exposes them.
+        Why: there is no settings-level view of attached devices.
+        How to apply: bind to /api/operator/overview.devices for a read-only
         view first; design a registration flow before building the form.
         ---
       -->
@@ -333,9 +333,9 @@
 
         Bind to /api/voice/capabilities for read-only state, then add voice
         provider configuration (transcription engine, synthesis voice,
-        per-bench overrides). The capabilities endpoint exists; the
+        per-space overrides). The capabilities endpoint exists; the
         configuration endpoint does not.
-        Why: the WorkbenchOperations capability strip is the only place voice
+        Why: the SpaceOperations capability strip is the only place voice
         surfaces today.
         How to apply: once a /api/voice/config endpoint exists, replace this
         shell with the real form.
@@ -418,7 +418,7 @@
     {:else if tab === "automation"}
       <AutomationSettingsSurface
         bind:settings
-        {benchId}
+        {spaceId}
         {sessionId}
         onValidation={(bundlesInvalid, approvalsInvalid, message) => {
           hasInvalidBundlesJson = bundlesInvalid;

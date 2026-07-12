@@ -44,7 +44,7 @@ impl ApiError {
 
     /// 409 Conflict.
     pub fn conflict(message: String) -> Self {
-        ApiError(GatewayError::BenchConflict(message))
+        ApiError(GatewayError::SpaceConflict(message))
     }
 
     /// 422 Validation Error.
@@ -69,9 +69,9 @@ impl IntoResponse for ApiError {
 fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
     match err {
         GatewayError::ConversationNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
-        GatewayError::BenchNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
+        GatewayError::SpaceNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
         GatewayError::TurnInProgress { .. } => (StatusCode::CONFLICT, "turn_in_progress"),
-        GatewayError::BenchConflict(_) => (StatusCode::CONFLICT, "conflict"),
+        GatewayError::SpaceConflict(_) => (StatusCode::CONFLICT, "conflict"),
         GatewayError::ValidationError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
         GatewayError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
         GatewayError::Storage(swage_core::StorageError::NotFound { .. }) => {

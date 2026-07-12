@@ -7,7 +7,7 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_storage::{
     model::{NewWorkspaceAttachment, WorkspaceAttachment},
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ pub struct UpdateWorkspaceTrustRequest {
 #[derive(Debug, Serialize)]
 pub struct WorkspaceAttachmentResponse {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub label: String,
     pub path: String,
     pub canonical_path: String,
@@ -53,32 +53,32 @@ fn default_workspace_permissions() -> Vec<String> {
     vec!["read".to_string()]
 }
 
-/// Derives a URL-safe slug from a bench name.
+/// Derives a URL-safe slug from a space name.
 ///
 /// - Lowercases the name
 /// - Replaces spaces with hyphens
 /// - Strips any character that is neither ASCII alphanumeric nor a hyphen
 pub struct WorkspaceAttachmentService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) bench_store: Arc<dyn BenchStore>,
+    pub(crate) space_store: Arc<dyn SpaceStore>,
 }
 
 impl WorkspaceAttachmentService {
-    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, space_store: Arc<dyn SpaceStore>) -> Self {
         Self {
             storage,
-            bench_store,
+            space_store,
         }
     }
 
     pub async fn list_workspaces(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<WorkspaceAttachmentListResponse, GatewayError> {
-        self.ensure_bench_exists(bench_id).await?;
+        self.ensure_space_exists(space_id).await?;
         let workspaces = self
             .storage
-            .list_workspace_attachments_by_bench(bench_id)
+            .list_workspace_attachments_by_space(space_id)
             .await?;
         let mut refreshed = Vec::with_capacity(workspaces.len());
         for workspace in workspaces {
@@ -91,10 +91,10 @@ impl WorkspaceAttachmentService {
 
     pub async fn attach_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         req: CreateWorkspaceAttachmentRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
-        self.ensure_bench_exists(bench_id).await?;
+        self.ensure_space_exists(space_id).await?;
         let path = req.path.trim();
         if path.is_empty() {
             return Err(GatewayError::ValidationError(
@@ -132,7 +132,7 @@ impl WorkspaceAttachmentService {
         let workspace = self
             .storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                bench_id,
+                space_id,
                 label,
                 path: canonical_path,
                 permissions,
@@ -141,11 +141,11 @@ impl WorkspaceAttachmentService {
             .await?;
         if req.set_as_default {
             self.storage
-                .set_bench_default_workspace(bench_id, Some(workspace.id))
+                .set_space_default_workspace(space_id, Some(workspace.id))
                 .await?;
         }
         if let Some(session_id) = req.active_session_id {
-            self.ensure_session_belongs_to_bench(bench_id, session_id)
+            self.ensure_session_belongs_to_space(space_id, session_id)
                 .await?;
             self.storage
                 .set_session_active_workspace(session_id, Some(workspace.id))
@@ -161,11 +161,11 @@ impl WorkspaceAttachmentService {
 
     pub async fn set_trust(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Uuid,
         req: UpdateWorkspaceTrustRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
-        self.ensure_workspace_belongs_to_bench(bench_id, workspace_id)
+        self.ensure_workspace_belongs_to_space(space_id, workspace_id)
             .await?;
         let workspace = self
             .storage
@@ -176,10 +176,10 @@ impl WorkspaceAttachmentService {
 
     pub async fn detach_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), GatewayError> {
-        self.ensure_workspace_belongs_to_bench(bench_id, workspace_id)
+        self.ensure_workspace_belongs_to_space(space_id, workspace_id)
             .await?;
         self.storage
             .delete_workspace_attachment(workspace_id)
@@ -187,17 +187,17 @@ impl WorkspaceAttachmentService {
         Ok(())
     }
 
-    async fn ensure_bench_exists(&self, bench_id: Uuid) -> Result<(), GatewayError> {
-        self.bench_store
-            .get(bench_id)
+    async fn ensure_space_exists(&self, space_id: Uuid) -> Result<(), GatewayError> {
+        self.space_store
+            .get(space_id)
             .await?
             .map(|_| ())
-            .ok_or(GatewayError::BenchNotFound { id: bench_id })
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })
     }
 
-    async fn ensure_workspace_belongs_to_bench(
+    async fn ensure_workspace_belongs_to_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), GatewayError> {
         let workspace = self
@@ -209,17 +209,17 @@ impl WorkspaceAttachmentService {
                     "workspace attachment {workspace_id} not found"
                 ))
             })?;
-        if workspace.bench_id != bench_id {
+        if workspace.space_id != space_id {
             return Err(GatewayError::ValidationError(format!(
-                "workspace attachment {workspace_id} does not belong to bench {bench_id}"
+                "workspace attachment {workspace_id} does not belong to space {space_id}"
             )));
         }
         Ok(())
     }
 
-    async fn ensure_session_belongs_to_bench(
+    async fn ensure_session_belongs_to_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         session_id: Uuid,
     ) -> Result<(), GatewayError> {
         let session = self
@@ -227,9 +227,9 @@ impl WorkspaceAttachmentService {
             .get_session(session_id)
             .await?
             .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
-        if session.bench_id != bench_id {
+        if session.space_id != space_id {
             return Err(GatewayError::ValidationError(format!(
-                "session {session_id} does not belong to bench {bench_id}"
+                "session {session_id} does not belong to space {space_id}"
             )));
         }
         Ok(())
@@ -258,7 +258,7 @@ impl WorkspaceAttachmentService {
 fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {
     WorkspaceAttachmentResponse {
         id: workspace.id,
-        bench_id: workspace.bench_id,
+        space_id: workspace.space_id,
         label: workspace.label,
         path: workspace.path,
         canonical_path: workspace.canonical_path,

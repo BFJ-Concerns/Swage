@@ -33,10 +33,6 @@ use crate::{
         TopologyFlowDefinitionRecord, UpdateContextDefinitionRequest,
         UpdateTopologyFlowDefinitionRequest,
     },
-    bench_extension::{
-        BenchExtensionListResponse, BenchExtensionResponse, CreateBenchExtensionRequest,
-        UpdateBenchExtensionRequest,
-    },
     builder_runtime::{
         BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
         BuilderProposalRequest, BuilderProposalResponse, ConfigurationVersionListResponse,
@@ -48,10 +44,8 @@ use crate::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
         DevDmInboundRequest, DevThreadInboundRequest,
     },
+    device::{DeviceListResponse, DeviceResponse, RegisterDeviceRequest},
     error::ApiError,
-    execution_host::{
-        ExecutionHostListResponse, ExecutionHostResponse, RegisterExecutionHostRequest,
-    },
     lens::{
         CreateLensRequest, InstallLensRequest, LensDescriptor, LensListResponse,
         LensRuntimeResponse, UpdateLensRequest, UpdateLensRuntimeRequest,
@@ -61,8 +55,8 @@ use crate::{
     },
     onboarding::{
         ChannelLinkListResponse, ChannelLinkResponse, CreateChannelLinkRequest,
-        CreateNodePairingCodeRequest, ImportGatewayRecoveryRequest, NodePairingCodeResponse,
-        RecoveryExportListResponse, RedeemNodePairingRequest,
+        CreateDevicePairingCodeRequest, DevicePairingCodeResponse, ImportGatewayRecoveryRequest,
+        RecoveryExportListResponse, RedeemDevicePairingRequest,
     },
     operator::OperatorOverviewResponse,
     presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
@@ -71,12 +65,12 @@ use crate::{
         SecretResponse, SecretValidationResponse,
     },
     service::{
-        BenchListResponse, BenchResponse, BenchService, ConversationBranchResponse,
-        ConversationDetail, ConversationResponse, ConversationService, ConversationSummary,
-        ConversationThreadDetail, CreateBenchRequest, CreateConversationBranchRequest,
-        CreateTeamRequest, CreateTopologyRunRequest, CreateWorkspaceAttachmentRequest,
+        ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
+        ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
+        CreateSpaceRequest, CreateTeamRequest, CreateTopologyRunRequest,
+        CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse, SpaceService,
         TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
-        TopologyRunResponse, TopologyRunService, UpdateBenchRequest, UpdateTeamRequest,
+        TopologyRunResponse, TopologyRunService, UpdateSpaceRequest, UpdateTeamRequest,
         UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
         WorkspaceAttachmentService,
     },
@@ -86,6 +80,10 @@ use crate::{
         SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
         UpdateContextDefinitionReferenceRequest, UpdateOrchestrationFlowReferenceRequest,
         UpdateTeamTopologyReferenceRequest,
+    },
+    space_extension::{
+        CreateSpaceExtensionRequest, SpaceExtensionListResponse, SpaceExtensionResponse,
+        UpdateSpaceExtensionRequest,
     },
     state::AppState,
     supervision::{RunDetailResponse, RunListQuery, RunListResponse},
@@ -272,12 +270,12 @@ pub async fn operator_usage(
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
 }
 
-/// `GET /api/benches/:id/lens-runtime` — inspect the active lens for a bench.
+/// `GET /api/spaces/:id/lens-runtime` — inspect the active lens for a space.
 pub async fn get_lens_runtime(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(crate::lens::get_lens_runtime(&state, bench_id).await?))
+    Ok(Json(crate::lens::get_lens_runtime(&state, space_id).await?))
 }
 
 /// `GET /api/lenses` — list durable lens records.
@@ -333,18 +331,18 @@ pub async fn install_lens(
     ))
 }
 
-/// `PUT /api/benches/:id/lens-runtime` — persist the active lens for a bench.
+/// `PUT /api/spaces/:id/lens-runtime` — persist the active lens for a space.
 pub async fn update_lens_runtime(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(request): Json<UpdateLensRuntimeRequest>,
 ) -> Result<Json<LensRuntimeResponse>, ApiError> {
     Ok(Json(
-        crate::lens::update_lens_runtime(&state, bench_id, request).await?,
+        crate::lens::update_lens_runtime(&state, space_id, request).await?,
     ))
 }
 
-/// `GET /api/shared-objects` — list shared reference objects for a bench.
+/// `GET /api/shared-objects` — list shared reference objects for a space.
 pub async fn list_shared_objects(
     State(state): State<AppState>,
     Query(query): Query<SharedReferenceListQuery>,
@@ -581,13 +579,13 @@ pub async fn list_session_attachments(
     ))
 }
 
-/// `GET /api/benches/:id/attachments` — list bench-scoped attachments.
-pub async fn list_bench_attachments(
+/// `GET /api/spaces/:id/attachments` — list space-scoped attachments.
+pub async fn list_space_attachments(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AttachmentListResponse>, ApiError> {
     Ok(Json(
-        crate::attachment::list_bench_attachments(&state, id).await?,
+        crate::attachment::list_space_attachments(&state, id).await?,
     ))
 }
 
@@ -640,13 +638,13 @@ pub async fn list_session_materials(
     ))
 }
 
-/// `GET /api/benches/:id/materials` — list bench-scoped managed materials.
-pub async fn list_bench_materials(
+/// `GET /api/spaces/:id/materials` — list space-scoped managed materials.
+pub async fn list_space_materials(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MaterialListResponse>, ApiError> {
     Ok(Json(
-        crate::material::list_bench_materials(&state, id).await?,
+        crate::material::list_space_materials(&state, id).await?,
     ))
 }
 
@@ -706,25 +704,25 @@ pub async fn create_channel_link_code(
     ))
 }
 
-/// `POST /api/onboarding/nodes/pairing-codes` — issue a one-time node pairing code.
-pub async fn create_node_pairing_code(
+/// `POST /api/onboarding/devices/pairing-codes` — issue a one-time device pairing code.
+pub async fn create_device_pairing_code(
     State(state): State<AppState>,
-    Json(req): Json<CreateNodePairingCodeRequest>,
-) -> Result<(StatusCode, Json<NodePairingCodeResponse>), ApiError> {
+    Json(req): Json<CreateDevicePairingCodeRequest>,
+) -> Result<(StatusCode, Json<DevicePairingCodeResponse>), ApiError> {
     Ok((
         StatusCode::CREATED,
-        Json(crate::onboarding::create_node_pairing_code(&state, req).await?),
+        Json(crate::onboarding::create_device_pairing_code(&state, req).await?),
     ))
 }
 
-/// `POST /api/onboarding/nodes/redeem` — redeem a pairing code and trust a remote node.
-pub async fn redeem_node_pairing_code(
+/// `POST /api/onboarding/devices/redeem` — redeem a pairing code and trust a remote device.
+pub async fn redeem_device_pairing_code(
     State(state): State<AppState>,
-    Json(req): Json<RedeemNodePairingRequest>,
-) -> Result<(StatusCode, Json<ExecutionHostResponse>), ApiError> {
+    Json(req): Json<RedeemDevicePairingRequest>,
+) -> Result<(StatusCode, Json<DeviceResponse>), ApiError> {
     Ok((
         StatusCode::CREATED,
-        Json(crate::onboarding::redeem_node_pairing_code(&state, req).await?),
+        Json(crate::onboarding::redeem_device_pairing_code(&state, req).await?),
     ))
 }
 
@@ -868,45 +866,43 @@ pub async fn disconnect_machine(
     }
 }
 
-/// `GET /api/execution-hosts` — list local and attached execution hosts.
-pub async fn list_execution_hosts(
-    State(state): State<AppState>,
-) -> Json<ExecutionHostListResponse> {
-    Json(crate::execution_host::list_execution_hosts(&state).await)
+/// `GET /api/devices` — list local and attached devices.
+pub async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
+    Json(crate::device::list_devices(&state).await)
 }
 
-/// `POST /api/execution-hosts/register` — attach a remote execution host.
-pub async fn register_execution_host(
+/// `POST /api/devices/register` — attach a remote device.
+pub async fn register_device(
     State(state): State<AppState>,
-    Json(request): Json<RegisterExecutionHostRequest>,
-) -> Result<(StatusCode, Json<ExecutionHostResponse>), ApiError> {
-    if request.host_id.trim().is_empty() {
+    Json(request): Json<RegisterDeviceRequest>,
+) -> Result<(StatusCode, Json<DeviceResponse>), ApiError> {
+    if request.device_id.trim().is_empty() {
         return Err(ApiError::validation(
-            "execution host id must not be empty".to_string(),
+            "device id must not be empty".to_string(),
         ));
     }
-    if crate::execution_host::ExecutionHostKind::from_str(request.kind.trim()).is_err() {
+    if crate::device::DeviceKind::from_str(request.kind.trim()).is_err() {
         return Err(ApiError::validation(format!(
-            "unknown execution host kind '{}'",
+            "unknown device kind '{}'",
             request.kind
         )));
     }
     if request.base_url.trim().is_empty() {
         return Err(ApiError::validation(
-            "execution host base_url must not be empty".to_string(),
+            "device base_url must not be empty".to_string(),
         ));
     }
     if request.shared_token_secret_ref.trim().is_empty() {
         return Err(ApiError::validation(
-            "execution host shared_token_secret_ref must not be empty".to_string(),
+            "device shared_token_secret_ref must not be empty".to_string(),
         ));
     }
 
-    let host = crate::execution_host::register_remote_execution_host(&state, request).await?;
+    let host = crate::device::register_remote_device(&state, request).await?;
     Ok((
         StatusCode::CREATED,
-        Json(ExecutionHostResponse {
-            host_id: host.host_id,
+        Json(DeviceResponse {
+            device_id: host.device_id,
             label: host.label,
             kind: host.kind.to_string(),
             base_url: host.base_url,
@@ -949,7 +945,7 @@ pub async fn create_conversation(
     State(state): State<AppState>,
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
     let resp: ConversationResponse = svc
         .create_conversation_with_model(selected_model_id)
@@ -963,7 +959,7 @@ pub async fn create_conversation(
 pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -975,35 +971,35 @@ pub async fn get_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let detail = svc.get_conversation(id).await?;
     Ok(Json(detail))
 }
 
-/// `GET /api/benches/:bench_id/sessions` — list sessions for a bench.
+/// `GET /api/spaces/:space_id/sessions` — list sessions for a space.
 ///
-/// Returns 200 with `{ conversations: [...] }`, or 404 if the bench is not found.
-pub async fn list_bench_sessions(
+/// Returns 200 with `{ conversations: [...] }`, or 404 if the space is not found.
+pub async fn list_space_sessions(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
-    let conversations = svc.list_sessions_by_bench(bench_id).await?;
+    let svc = ConversationService::new(state.storage, state.space_store);
+    let conversations = svc.list_sessions_by_space(space_id).await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
 
-/// `POST /api/benches/:bench_id/sessions` — create a session in a bench.
+/// `POST /api/spaces/:space_id/sessions` — create a session in a space.
 ///
-/// Returns 201 Created with the new session's metadata, or 404 if the bench is not found.
-pub async fn create_bench_session(
+/// Returns 201 Created with the new session's metadata, or 404 if the space is not found.
+pub async fn create_space_session(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
     let resp = svc
-        .create_session_in_bench_with_model(bench_id, selected_model_id)
+        .create_session_in_space_with_model(space_id, selected_model_id)
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1015,115 +1011,115 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     svc.delete_conversation(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
-// Bench handlers
+// Space handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /api/benches` — create a new bench.
+/// `POST /api/spaces` — create a new space.
 ///
-/// Returns 201 Created with the bench's metadata, or 409/422 on error.
-pub async fn create_bench(
+/// Returns 201 Created with the space's metadata, or 409/422 on error.
+pub async fn create_space(
     State(state): State<AppState>,
-    Json(req): Json<CreateBenchRequest>,
+    Json(req): Json<CreateSpaceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = BenchService::new(state.bench_store);
-    let resp = svc.create_bench(req).await?;
+    let svc = SpaceService::new(state.space_store);
+    let resp = svc.create_space(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// `GET /api/benches` — list all benches.
+/// `GET /api/spaces` — list all spaces.
 ///
-/// Returns 200 with `{ benches: [...] }`.
-pub async fn list_benches(
+/// Returns 200 with `{ spaces: [...] }`.
+pub async fn list_spaces(
     State(state): State<AppState>,
-) -> Result<Json<BenchListResponse>, ApiError> {
-    let svc = BenchService::new(state.bench_store);
-    let resp = svc.list_benches().await?;
+) -> Result<Json<SpaceListResponse>, ApiError> {
+    let svc = SpaceService::new(state.space_store);
+    let resp = svc.list_spaces().await?;
     Ok(Json(resp))
 }
 
-/// `GET /api/benches/:id` — get a bench by ID.
+/// `GET /api/spaces/:id` — get a space by ID.
 ///
-/// Returns 200 with the bench, or 404 if not found.
-pub async fn get_bench(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<BenchResponse>, ApiError> {
-    let svc = BenchService::new(state.bench_store);
-    let resp = svc.get_bench(id).await?;
-    Ok(Json(resp))
-}
-
-/// `PUT /api/benches/:id` — partially update a bench.
-///
-/// Returns 200 with the updated bench, 404 if not found, or 422/409 on error.
-pub async fn update_bench(
+/// Returns 200 with the space, or 404 if not found.
+pub async fn get_space(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateBenchRequest>,
-) -> Result<Json<BenchResponse>, ApiError> {
-    let svc = BenchService::new(state.bench_store);
-    let resp = svc.update_bench(id, req).await?;
+) -> Result<Json<SpaceResponse>, ApiError> {
+    let svc = SpaceService::new(state.space_store);
+    let resp = svc.get_space(id).await?;
     Ok(Json(resp))
 }
 
-/// `DELETE /api/benches/:id` — delete a bench.
+/// `PUT /api/spaces/:id` — partially update a space.
+///
+/// Returns 200 with the updated space, 404 if not found, or 422/409 on error.
+pub async fn update_space(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateSpaceRequest>,
+) -> Result<Json<SpaceResponse>, ApiError> {
+    let svc = SpaceService::new(state.space_store);
+    let resp = svc.update_space(id, req).await?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/spaces/:id` — delete a space.
 ///
 /// Returns 204 No Content on success, 404 if not found, or 409 if refusing
-/// to delete the default bench.
-pub async fn delete_bench(
+/// to delete the default space.
+pub async fn delete_space(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = BenchService::new(state.bench_store);
-    svc.delete_bench(id).await?;
+    let svc = SpaceService::new(state.space_store);
+    svc.delete_space(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/benches/:id/workspaces` — list workspaces attached to a bench.
-pub async fn list_bench_workspaces(
+/// `GET /api/spaces/:id/workspaces` — list workspaces attached to a space.
+pub async fn list_space_workspaces(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
-    Ok(Json(svc.list_workspaces(bench_id).await?))
+    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    Ok(Json(svc.list_workspaces(space_id).await?))
 }
 
-/// `POST /api/benches/:id/workspaces` — attach an external workspace.
-pub async fn attach_bench_workspace(
+/// `POST /api/spaces/:id/workspaces` — attach an external workspace.
+pub async fn attach_space_workspace(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(req): Json<CreateWorkspaceAttachmentRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
+    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
     Ok((
         StatusCode::CREATED,
-        Json(svc.attach_workspace(bench_id, req).await?),
+        Json(svc.attach_workspace(space_id, req).await?),
     ))
 }
 
-/// `PUT /api/benches/:bench_id/workspaces/:workspace_id/trust` — set workspace trust.
-pub async fn update_bench_workspace_trust(
+/// `PUT /api/spaces/:space_id/workspaces/:workspace_id/trust` — set workspace trust.
+pub async fn update_space_workspace_trust(
     State(state): State<AppState>,
-    Path((bench_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateWorkspaceTrustRequest>,
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
-    Ok(Json(svc.set_trust(bench_id, workspace_id, req).await?))
+    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    Ok(Json(svc.set_trust(space_id, workspace_id, req).await?))
 }
 
-/// `DELETE /api/benches/:bench_id/workspaces/:workspace_id` — detach a workspace.
-pub async fn detach_bench_workspace(
+/// `DELETE /api/spaces/:space_id/workspaces/:workspace_id` — detach a workspace.
+pub async fn detach_space_workspace(
     State(state): State<AppState>,
-    Path((bench_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.bench_store);
-    svc.detach_workspace(bench_id, workspace_id).await?;
+    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    svc.detach_workspace(space_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1131,79 +1127,79 @@ pub async fn detach_bench_workspace(
 // Team handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /api/benches/:bench_id/teams` — create a team in a bench.
+/// `POST /api/spaces/:space_id/teams` — create a team in a space.
 pub async fn create_team(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = BuilderConfigurationService::new(state.clone());
     let resp = svc
-        .create_team(bench_id, req, None, "visual_builder")
+        .create_team(space_id, req, None, "visual_builder")
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// `GET /api/benches/:bench_id/teams` — list teams in a bench.
+/// `GET /api/spaces/:space_id/teams` — list teams in a space.
 pub async fn list_teams(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<TeamListResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.bench_store);
-    let resp = svc.list_teams(bench_id).await?;
+    let svc = TeamService::new(state.storage, state.space_store);
+    let resp = svc.list_teams(space_id).await?;
     Ok(Json(resp))
 }
 
-/// `GET /api/benches/:id/extensions` — list managed and workspace extension candidates.
-pub async fn list_bench_extensions(
+/// `GET /api/spaces/:id/extensions` — list managed and workspace extension candidates.
+pub async fn list_space_extensions(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
-) -> Result<Json<BenchExtensionListResponse>, ApiError> {
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<SpaceExtensionListResponse>, ApiError> {
     Ok(Json(
-        crate::bench_extension::list_bench_extensions(&state, bench_id).await?,
+        crate::space_extension::list_space_extensions(&state, space_id).await?,
     ))
 }
 
-/// `POST /api/benches/:id/extensions` — create a managed bench extension.
-pub async fn create_bench_extension(
+/// `POST /api/spaces/:id/extensions` — create a managed space extension.
+pub async fn create_space_extension(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
-    Json(request): Json<CreateBenchExtensionRequest>,
-) -> Result<(StatusCode, Json<BenchExtensionResponse>), ApiError> {
+    Path(space_id): Path<Uuid>,
+    Json(request): Json<CreateSpaceExtensionRequest>,
+) -> Result<(StatusCode, Json<SpaceExtensionResponse>), ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok((
         StatusCode::CREATED,
         Json(
             service
-                .create_bench_extension(bench_id, request, None, "visual_builder")
+                .create_space_extension(space_id, request, None, "visual_builder")
                 .await?,
         ),
     ))
 }
 
-/// `PUT /api/benches/:id/extensions/:name` — update a managed bench extension.
-pub async fn update_bench_extension(
+/// `PUT /api/spaces/:id/extensions/:name` — update a managed space extension.
+pub async fn update_space_extension(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<UpdateBenchExtensionRequest>,
-) -> Result<Json<BenchExtensionResponse>, ApiError> {
+    Path((space_id, name)): Path<(Uuid, String)>,
+    Json(request): Json<UpdateSpaceExtensionRequest>,
+) -> Result<Json<SpaceExtensionResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
         service
-            .update_bench_extension(bench_id, &name, request, None, "visual_builder")
+            .update_space_extension(space_id, &name, request, None, "visual_builder")
             .await?,
     ))
 }
 
-/// `POST /api/benches/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
+/// `POST /api/spaces/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
 pub async fn approve_workspace_extension(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
-) -> Result<Json<BenchExtensionResponse>, ApiError> {
+    Path((space_id, name)): Path<(Uuid, String)>,
+) -> Result<Json<SpaceExtensionResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state.clone());
     Ok(Json(
         service
-            .approve_workspace_extension(bench_id, &name, None, "visual_builder")
+            .approve_workspace_extension(space_id, &name, None, "visual_builder")
             .await?,
     ))
 }
@@ -1213,7 +1209,7 @@ pub async fn get_team(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.bench_store);
+    let svc = TeamService::new(state.storage, state.space_store);
     let resp = svc.get_team(id).await?;
     Ok(Json(resp))
 }
@@ -1229,24 +1225,24 @@ pub async fn update_team(
     Ok(Json(resp))
 }
 
-/// `POST /api/benches/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
+/// `POST /api/spaces/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
 pub async fn create_builder_proposal(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(request): Json<BuilderProposalRequest>,
 ) -> Result<Json<BuilderProposalResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state);
-    Ok(Json(service.propose_changes(bench_id, request).await?))
+    Ok(Json(service.propose_changes(space_id, request).await?))
 }
 
-/// `POST /api/benches/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
+/// `POST /api/spaces/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
 pub async fn apply_builder_proposal(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(request): Json<BuilderApplyRequest>,
 ) -> Result<(StatusCode, Json<BuilderApplyResponse>), ApiError> {
     let service = BuilderConfigurationService::new(state);
-    let response = service.apply_operations(bench_id, request).await?;
+    let response = service.apply_operations(space_id, request).await?;
     let status = if response.success {
         StatusCode::OK
     } else {
@@ -1255,15 +1251,15 @@ pub async fn apply_builder_proposal(
     Ok((status, Json(response)))
 }
 
-/// `GET /api/benches/:id/config-versions` — inspect builder-managed configuration history.
+/// `GET /api/spaces/:id/config-versions` — inspect builder-managed configuration history.
 pub async fn list_configuration_versions(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Query(query): Query<ConfigurationVersionQuery>,
 ) -> Result<Json<ConfigurationVersionListResponse>, ApiError> {
     let service = BuilderConfigurationService::new(state);
     Ok(Json(
-        service.list_configuration_versions(bench_id, query).await?,
+        service.list_configuration_versions(space_id, query).await?,
     ))
 }
 
@@ -1286,7 +1282,7 @@ pub async fn delete_team(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = TeamService::new(state.storage, state.bench_store);
+    let svc = TeamService::new(state.storage, state.space_store);
     svc.delete_team(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1297,7 +1293,7 @@ pub async fn create_conversation_branch(
     Path(session_id): Path<Uuid>,
     Json(req): Json<CreateConversationBranchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let resp = svc.create_branch(session_id, req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1307,7 +1303,7 @@ pub async fn list_conversation_branches(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<Vec<ConversationBranchResponse>>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let resp = svc.list_branches(session_id).await?;
     Ok(Json(resp))
 }
@@ -1317,7 +1313,7 @@ pub async fn get_thread_detail(
     State(state): State<AppState>,
     Path(thread_id): Path<Uuid>,
 ) -> Result<Json<ConversationThreadDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.bench_store);
+    let svc = ConversationService::new(state.storage, state.space_store);
     let resp = svc.get_thread_detail(thread_id).await?;
     Ok(Json(resp))
 }
@@ -1353,104 +1349,104 @@ pub async fn get_topology_run(
     Ok(Json(resp))
 }
 
-/// `GET /api/benches/:id/topology-flows` — list durable topology flow definitions.
+/// `GET /api/spaces/:id/topology-flows` — list durable topology flow definitions.
 pub async fn list_topology_flows(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<TopologyFlowDefinitionListResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::list_topology_flows(&state, bench_id).await?,
+        crate::authoring_definition::list_topology_flows(&state, space_id).await?,
     ))
 }
 
-/// `POST /api/benches/:id/topology-flows` — create a durable topology flow definition.
+/// `POST /api/spaces/:id/topology-flows` — create a durable topology flow definition.
 pub async fn create_topology_flow(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(request): Json<CreateTopologyFlowDefinitionRequest>,
 ) -> Result<(StatusCode, Json<TopologyFlowDefinitionRecord>), ApiError> {
     Ok((
         StatusCode::CREATED,
-        Json(crate::authoring_definition::create_topology_flow(&state, bench_id, request).await?),
+        Json(crate::authoring_definition::create_topology_flow(&state, space_id, request).await?),
     ))
 }
 
-/// `GET /api/benches/:id/topology-flows/:name` — fetch one durable topology flow definition.
+/// `GET /api/spaces/:id/topology-flows/:name` — fetch one durable topology flow definition.
 pub async fn get_topology_flow(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
+    Path((space_id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::get_topology_flow(&state, bench_id, &name).await?,
+        crate::authoring_definition::get_topology_flow(&state, space_id, &name).await?,
     ))
 }
 
-/// `PUT /api/benches/:id/topology-flows/:name` — update a durable topology flow definition.
+/// `PUT /api/spaces/:id/topology-flows/:name` — update a durable topology flow definition.
 pub async fn update_topology_flow(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
+    Path((space_id, name)): Path<(Uuid, String)>,
     Json(request): Json<UpdateTopologyFlowDefinitionRequest>,
 ) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::update_topology_flow(&state, bench_id, &name, request).await?,
+        crate::authoring_definition::update_topology_flow(&state, space_id, &name, request).await?,
     ))
 }
 
-/// `GET /api/benches/:id/context-definitions` — list durable context definition records.
+/// `GET /api/spaces/:id/context-definitions` — list durable context definition records.
 pub async fn list_context_definitions(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
 ) -> Result<Json<ContextDefinitionListResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::list_context_definitions(&state, bench_id).await?,
+        crate::authoring_definition::list_context_definitions(&state, space_id).await?,
     ))
 }
 
-/// `POST /api/benches/:id/context-definitions` — create a durable context definition.
+/// `POST /api/spaces/:id/context-definitions` — create a durable context definition.
 pub async fn create_context_definition(
     State(state): State<AppState>,
-    Path(bench_id): Path<Uuid>,
+    Path(space_id): Path<Uuid>,
     Json(request): Json<CreateContextDefinitionRequest>,
 ) -> Result<(StatusCode, Json<ContextDefinitionRecord>), ApiError> {
     Ok((
         StatusCode::CREATED,
         Json(
-            crate::authoring_definition::create_context_definition(&state, bench_id, request)
+            crate::authoring_definition::create_context_definition(&state, space_id, request)
                 .await?,
         ),
     ))
 }
 
-/// `GET /api/benches/:id/context-definitions/:name` — fetch one durable context definition.
+/// `GET /api/spaces/:id/context-definitions/:name` — fetch one durable context definition.
 pub async fn get_context_definition(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
+    Path((space_id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<ContextDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::get_context_definition(&state, bench_id, &name).await?,
+        crate::authoring_definition::get_context_definition(&state, space_id, &name).await?,
     ))
 }
 
-/// `PUT /api/benches/:id/context-definitions/:name` — update a durable context definition.
+/// `PUT /api/spaces/:id/context-definitions/:name` — update a durable context definition.
 pub async fn update_context_definition(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
+    Path((space_id, name)): Path<(Uuid, String)>,
     Json(request): Json<UpdateContextDefinitionRequest>,
 ) -> Result<Json<ContextDefinitionRecord>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::update_context_definition(&state, bench_id, &name, request)
+        crate::authoring_definition::update_context_definition(&state, space_id, &name, request)
             .await?,
     ))
 }
 
-/// `POST /api/benches/:id/context-definitions/:name/preview` — render a stored context definition.
+/// `POST /api/spaces/:id/context-definitions/:name/preview` — render a stored context definition.
 pub async fn preview_context_definition(
     State(state): State<AppState>,
-    Path((bench_id, name)): Path<(Uuid, String)>,
+    Path((space_id, name)): Path<(Uuid, String)>,
     Json(request): Json<PreviewContextDefinitionRequest>,
 ) -> Result<Json<PreviewContextDefinitionResponse>, ApiError> {
     Ok(Json(
-        crate::authoring_definition::preview_context_definition(&state, bench_id, &name, request)
+        crate::authoring_definition::preview_context_definition(&state, space_id, &name, request)
             .await?,
     ))
 }
@@ -1462,8 +1458,8 @@ pub async fn preview_context_definition(
 /// Query parameters for `GET /api/skills`.
 #[derive(Debug, Deserialize)]
 pub struct SkillsQueryParams {
-    /// ID of the bench to list skills for (required).
-    pub bench_id: Uuid,
+    /// ID of the space to list skills for (required).
+    pub space_id: Uuid,
     /// Agent ID to include agent-level skills. When provided, the agent's
     /// directory is searched for a `skills/` folder.
     pub agent_id: Option<String>,
@@ -1475,7 +1471,7 @@ pub struct SkillItem {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
-    /// Hierarchy level where this skill was resolved: "agent", "bench",
+    /// Hierarchy level where this skill was resolved: "agent", "space",
     /// "team", "lens", or "global".
     pub level: String,
     /// Tool names the skill requests access to.
@@ -1491,14 +1487,14 @@ pub struct SkillListResponse {
     pub skills: Vec<SkillItem>,
 }
 
-/// `GET /api/skills` — list skills available for a bench/agent combination.
+/// `GET /api/skills` — list skills available for a space/agent combination.
 ///
-/// Resolves skills from the Swage config hierarchy (global → bench → agent),
+/// Resolves skills from the Swage config hierarchy (global → space → agent),
 /// applying override rules when the same skill name appears at multiple levels.
 /// Returns 200 with `{ skills: [...] }`, sorted agent-first then alphabetically.
 ///
-/// Returns 404 if `bench_id` does not correspond to a known bench.
-/// Returns 400 if `bench_id` is missing or not a valid UUID (axum `Query`
+/// Returns 404 if `space_id` does not correspond to a known space.
+/// Returns 400 if `space_id` is missing or not a valid UUID (axum `Query`
 /// extractor enforces this automatically).
 ///
 /// When the Swage config root directory does not exist (e.g. on a fresh
@@ -1511,15 +1507,15 @@ pub async fn list_skills(
     use swage_config::skill::discover_skills;
     use swage_config::{HierarchyLevel, resolve_root};
 
-    // Verify the bench exists — return 404 for unknown IDs.
-    let bench = state
-        .bench_store
-        .get(params.bench_id)
+    // Verify the space exists — return 404 for unknown IDs.
+    let space = state
+        .space_store
+        .get(params.space_id)
         .await
         .map_err(|e| ApiError(GatewayError::Storage(e)))?
         .ok_or({
-            ApiError(GatewayError::BenchNotFound {
-                id: params.bench_id,
+            ApiError(GatewayError::SpaceNotFound {
+                id: params.space_id,
             })
         })?;
 
@@ -1530,17 +1526,17 @@ pub async fn list_skills(
         Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
     };
 
-    // Build the hierarchy: global always included; bench and agent directories
+    // Build the hierarchy: global always included; space and agent directories
     // are included only when they exist on disk.
-    let bench_dir = root.join("benches").join(&bench.slug);
+    let space_dir = root.join("spaces").join(&space.slug);
     let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> =
         vec![(HierarchyLevel::Global, root)];
 
-    if bench_dir.is_dir() {
-        levels.push((HierarchyLevel::Bench, bench_dir.clone()));
+    if space_dir.is_dir() {
+        levels.push((HierarchyLevel::Space, space_dir.clone()));
 
         if let Some(ref agent_id) = params.agent_id {
-            let agent_dir = bench_dir.join("agents").join(agent_id);
+            let agent_dir = space_dir.join("agents").join(agent_id);
             if agent_dir.is_dir() {
                 levels.push((HierarchyLevel::Agent, agent_dir));
             }
@@ -1562,7 +1558,7 @@ pub async fn list_skills(
             let level = match s.level {
                 HierarchyLevel::Agent => "agent",
                 HierarchyLevel::Team => "team",
-                HierarchyLevel::Bench => "bench",
+                HierarchyLevel::Space => "space",
                 HierarchyLevel::Global => "global",
             };
             SkillItem {
@@ -1891,7 +1887,7 @@ pub struct SendMessageRequest {
     pub recipient_agent_id: String,
     pub kind: String,
     pub correlation_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub sender_turn_id: Option<Uuid>,
     pub payload: serde_json::Value,
 }
@@ -1919,11 +1915,11 @@ pub async fn send_agent_message(
         .kind
         .parse::<MessageKind>()
         .map_err(|e| ApiError::validation(e.to_string()))?;
-    let bench_id = req.bench_id;
+    let space_id = req.space_id;
 
-    if kind == MessageKind::Delegate && bench_id.is_none() {
+    if kind == MessageKind::Delegate && space_id.is_none() {
         return Err(ApiError::validation(
-            "delegate messages require bench_id so execution uses the correct bench configuration"
+            "delegate messages require space_id so execution uses the correct space configuration"
                 .to_string(),
         ));
     }
@@ -1948,7 +1944,7 @@ pub async fn send_agent_message(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if msg.kind == MessageKind::Delegate {
-        let execution_bench_id = bench_id.expect("delegate bench_id was validated before storage");
+        let execution_space_id = space_id.expect("delegate space_id was validated before storage");
         let state_for_task = state.clone();
         let msg_for_task = msg.clone();
         tokio::spawn(async move {
@@ -1956,7 +1952,7 @@ pub async fn send_agent_message(
             if let Err(error) = execute_external_delegate_message(
                 state_for_task.clone(),
                 msg_for_task,
-                execution_bench_id,
+                execution_space_id,
                 sender_turn_id,
             )
             .await
@@ -1987,39 +1983,39 @@ pub async fn send_agent_message(
 async fn execute_external_delegate_message(
     state: AppState,
     delegate_msg: swage_storage::model::AgentMessage,
-    bench_id: Uuid,
+    space_id: Uuid,
     sender_turn_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     use std::sync::Arc;
 
     use swage_agent::{DelegationExecutor, MessageRouter};
 
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    let space = state
+        .space_store
+        .get(space_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("bench", bench_id))?;
+        .ok_or_else(|| ApiError::not_found("space", space_id))?;
 
     let target_resolved =
-        crate::turn::load_session_config(&state, &bench.slug, &delegate_msg.recipient_agent_id)
+        crate::turn::load_session_config(&state, &space.slug, &delegate_msg.recipient_agent_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let target_agent_config = crate::turn::build_agent_config_for_bench_workspace(
+    let target_agent_config = crate::turn::build_agent_config_for_space_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-        bench_id,
+        space_id,
         sender_turn_id.unwrap_or_else(Uuid::new_v4),
         active_workspace_attachment_id,
     )
     .await;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
-    let target_instructions = crate::turn::delegated_target_instructions_for_bench(
+    let target_instructions = crate::turn::delegated_target_instructions_for_space(
         &target_resolved.instructions,
-        &bench.slug,
+        &space.slug,
         &delegate_msg.recipient_agent_id,
     );
 
@@ -2031,7 +2027,7 @@ async fn execute_external_delegate_message(
             config: &target_resolved,
             agent_config: &target_agent_config,
             session_metadata: None,
-            bench_id: Some(bench_id),
+            space_id: Some(space_id),
             active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx,
         },
@@ -2061,7 +2057,7 @@ async fn execute_external_delegate_message(
         .execute_delegation(
             &delegate_msg,
             sender_turn_id,
-            bench_id,
+            space_id,
             target_agent_config,
             target_instructions,
             target_context_transfer_config,
@@ -2528,7 +2524,7 @@ mod tests {
     use swage_provider::LlmProvider;
     use swage_storage::{
         AppLens,
-        store::{BenchStore, MessageStore, SessionStore, Storage, TeamStore},
+        store::{MessageStore, SessionStore, SpaceStore, Storage, TeamStore},
     };
 
     use super::*;
@@ -2588,7 +2584,7 @@ mod tests {
     ) -> (Router, Arc<MockStorage>) {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
             provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -2686,13 +2682,13 @@ mod tests {
         );
         assert_eq!(turn_rows[0]["turn_id"], turn_id.to_string());
 
-        let default_bench = storage
+        let default_space = storage
             .get_or_create_default()
             .await
-            .expect("get default bench");
+            .expect("get default space");
         let sent_message = client
-            .send_agent_message_in_bench(
-                default_bench.id,
+            .send_agent_message_in_space(
+                default_space.id,
                 "agent-a",
                 "agent-b",
                 "delegate",
@@ -2821,13 +2817,13 @@ mod tests {
             spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
 
         let client = GatewayClient::new(&base_url);
-        let default_bench = storage
+        let default_space = storage
             .get_or_create_default()
             .await
-            .expect("get default bench");
+            .expect("get default space");
         let sent_message = client
-            .send_agent_message_in_bench(
-                default_bench.id,
+            .send_agent_message_in_space(
+                default_space.id,
                 "agent-a",
                 "agent-b",
                 "delegate",
@@ -2892,17 +2888,17 @@ mod tests {
         ]]);
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let bench = storage
+        let space = storage
             .get_or_create_default()
             .await
-            .expect("get default bench");
+            .expect("get default space");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -2920,7 +2916,7 @@ mod tests {
             .await
             .expect("create external delegate message");
 
-        execute_external_delegate_message(state, delegate_msg, bench.id, None)
+        execute_external_delegate_message(state, delegate_msg, space.id, None)
             .await
             .expect("external delegation should complete");
 
@@ -2939,7 +2935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_delegate_message_requires_bench_id_before_persisting() {
+    async fn post_delegate_message_requires_space_id_before_persisting() {
         use swage_storage::store::AgentMessageStore;
 
         let (router, storage) = make_router();
@@ -2968,8 +2964,8 @@ mod tests {
         assert!(
             body["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("require bench_id")),
-            "validation error should explain the missing bench context: {body:?}"
+                .is_some_and(|message| message.contains("require space_id")),
+            "validation error should explain the missing space context: {body:?}"
         );
         assert!(
             storage
@@ -3092,7 +3088,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
-        assert!(body["bench_id"].is_string());
+        assert!(body["space_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
     }
@@ -3100,16 +3096,16 @@ mod tests {
     #[tokio::test]
     async fn get_lens_runtime_defaults_to_assistant() {
         let (router, storage) = make_router();
-        let bench = storage
+        let space = storage
             .get_or_create_default()
             .await
-            .expect("default bench");
+            .expect("default space");
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
+                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3129,16 +3125,16 @@ mod tests {
     #[tokio::test]
     async fn put_lens_runtime_persists_builder_lens() {
         let (router, storage) = make_router();
-        let bench = storage
+        let space = storage
             .get_or_create_default()
             .await
-            .expect("default bench");
+            .expect("default space");
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
+                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
                     .unwrap(),
@@ -3151,7 +3147,7 @@ mod tests {
         assert_eq!(body["active_lens"], "builder");
         assert_eq!(body["stage_modules"].as_array().unwrap().len(), 0);
 
-        let stored = swage_storage::store::LensStore::get_active_lens(&*storage, bench.id)
+        let stored = swage_storage::store::LensStore::get_active_lens(&*storage, space.id)
             .await
             .expect("stored lens");
         assert_eq!(stored.active_lens, AppLens::builder());
@@ -3160,10 +3156,10 @@ mod tests {
     #[tokio::test]
     async fn switching_lenses_does_not_change_workflow_capabilities() {
         let (router, storage) = make_router();
-        let bench = storage
+        let space = storage
             .get_or_create_default()
             .await
-            .expect("default bench");
+            .expect("default space");
 
         let before = router
             .clone()
@@ -3183,7 +3179,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/benches/{}/lens-runtime", bench.id))
+                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
                     .unwrap(),
@@ -3430,19 +3426,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/benches
+    // POST /api/spaces
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_benches_returns_201_with_json() {
+    async fn post_spaces_returns_201_with_json() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"name":"My Bench"}"#))
+                    .body(axum::body::Body::from(r#"{"name":"My Space"}"#))
                     .unwrap(),
             )
             .await
@@ -3452,17 +3448,17 @@ mod tests {
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
         assert!(body["slug"].is_string(), "response should have a slug");
-        assert_eq!(body["name"].as_str().unwrap(), "My Bench");
+        assert_eq!(body["name"].as_str().unwrap(), "My Space");
     }
 
     #[tokio::test]
-    async fn post_benches_empty_name_returns_422() {
+    async fn post_spaces_empty_name_returns_422() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":""}"#))
                     .unwrap(),
@@ -3474,7 +3470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_benches_duplicate_name_returns_409() {
+    async fn post_spaces_duplicate_name_returns_409() {
         let (router, _) = make_router();
 
         // First creation succeeds.
@@ -3483,7 +3479,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -3496,7 +3492,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -3508,17 +3504,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/benches
+    // GET /api/spaces
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_benches_returns_200_with_list() {
+    async fn get_spaces_returns_200_with_list() {
         let (router, _) = make_router();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3527,16 +3523,16 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        // At least the seeded default bench.
-        assert!(body["benches"].is_array());
+        // At least the seeded default space.
+        assert!(body["spaces"].is_array());
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/benches/:id
+    // GET /api/spaces/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_bench_by_id_returns_200() {
+    async fn get_space_by_id_returns_200() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -3544,7 +3540,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Fetched"}"#))
                     .unwrap(),
@@ -3558,7 +3554,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{id}"))
+                    .uri(format!("/api/spaces/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3571,14 +3567,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_bench_nonexistent_returns_404() {
+    async fn get_space_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{missing}"))
+                    .uri(format!("/api/spaces/{missing}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3588,11 +3584,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PUT /api/benches/:id
+    // PUT /api/spaces/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn put_bench_returns_200_with_updated_fields() {
+    async fn put_space_returns_200_with_updated_fields() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -3600,7 +3596,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Original"}"#))
                     .unwrap(),
@@ -3614,7 +3610,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/benches/{id}"))
+                    .uri(format!("/api/spaces/{id}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Renamed"}"#))
                     .unwrap(),
@@ -3628,14 +3624,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_bench_nonexistent_returns_404() {
+    async fn put_space_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/benches/{missing}"))
+                    .uri(format!("/api/spaces/{missing}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"X"}"#))
                     .unwrap(),
@@ -3646,11 +3642,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // DELETE /api/benches/:id
+    // DELETE /api/spaces/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn delete_bench_returns_204() {
+    async fn delete_space_returns_204() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -3658,7 +3654,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/benches")
+                    .uri("/api/spaces")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Deletable"}"#))
                     .unwrap(),
@@ -3672,7 +3668,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/benches/{id}"))
+                    .uri(format!("/api/spaces/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3683,20 +3679,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_default_bench_returns_409() {
-        use crate::service::BenchService;
+    async fn delete_default_space_returns_409() {
+        use crate::service::SpaceService;
 
         let (router, storage) = make_router();
-        // Get the default bench's ID.
-        let svc = BenchService::new(Arc::clone(&storage) as Arc<dyn BenchStore>);
-        let default_bench = svc.bench_store.get_or_create_default().await.unwrap();
-        let id = default_bench.id;
+        // Get the default space's ID.
+        let svc = SpaceService::new(Arc::clone(&storage) as Arc<dyn SpaceStore>);
+        let default_space = svc.space_store.get_or_create_default().await.unwrap();
+        let id = default_space.id;
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/benches/{id}"))
+                    .uri(format!("/api/spaces/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3707,26 +3703,26 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/benches/:bench_id/sessions
+    // GET /api/spaces/:space_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_bench_sessions_returns_200_with_array() {
+    async fn get_space_sessions_returns_200_with_array() {
         let (router, storage) = make_router();
 
-        // Create a named bench directly in storage.
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "my-bench".into(),
-                slug: "my-bench".into(),
+        // Create a named space directly in storage.
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "my-space".into(),
+                slug: "my-space".into(),
             })
             .await
             .unwrap();
 
-        // Add two sessions to that bench.
+        // Add two sessions to that space.
         storage
             .create_session(swage_storage::model::NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -3735,7 +3731,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -3747,7 +3743,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{}/sessions", bench.id))
+                    .uri(format!("/api/spaces/{}/sessions", space.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3762,20 +3758,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_bench_sessions_scopes_to_bench() {
+    async fn get_space_sessions_scopes_to_space() {
         let (router, storage) = make_router();
 
-        let bench_a = storage
-            .create(swage_storage::model::NewBench {
-                name: "bench-a".into(),
-                slug: "bench-a".into(),
+        let space_a = storage
+            .create(swage_storage::model::NewSpace {
+                name: "space-a".into(),
+                slug: "space-a".into(),
             })
             .await
             .unwrap();
-        let bench_b = storage
-            .create(swage_storage::model::NewBench {
-                name: "bench-b".into(),
-                slug: "bench-b".into(),
+        let space_b = storage
+            .create(swage_storage::model::NewSpace {
+                name: "space-b".into(),
+                slug: "space-b".into(),
             })
             .await
             .unwrap();
@@ -3783,7 +3779,7 @@ mod tests {
         // One session in A, two in B.
         storage
             .create_session(swage_storage::model::NewSession {
-                bench_id: bench_a.id,
+                space_id: space_a.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -3792,7 +3788,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                bench_id: bench_b.id,
+                space_id: space_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -3801,7 +3797,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                bench_id: bench_b.id,
+                space_id: space_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -3813,7 +3809,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{}/sessions", bench_a.id))
+                    .uri(format!("/api/spaces/{}/sessions", space_a.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3822,12 +3818,12 @@ mod tests {
 
         let body = body_json(resp).await;
         let list = body["conversations"].as_array().unwrap();
-        // Only sessions belonging to bench A.
+        // Only sessions belonging to space A.
         assert_eq!(list.len(), 1);
     }
 
     #[tokio::test]
-    async fn get_bench_sessions_returns_404_for_unknown_bench() {
+    async fn get_space_sessions_returns_404_for_unknown_space() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -3835,7 +3831,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{missing}/sessions"))
+                    .uri(format!("/api/spaces/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3848,17 +3844,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/benches/:bench_id/sessions
+    // POST /api/spaces/:space_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_bench_sessions_returns_201_with_json() {
+    async fn post_space_sessions_returns_201_with_json() {
         let (router, storage) = make_router();
 
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "my-bench".into(),
-                slug: "my-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "my-space".into(),
+                slug: "my-space".into(),
             })
             .await
             .unwrap();
@@ -3867,7 +3863,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/benches/{}/sessions", bench.id))
+                    .uri(format!("/api/spaces/{}/sessions", space.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3877,12 +3873,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string());
-        // Session should be associated with the specified bench.
-        assert_eq!(body["bench_id"].as_str().unwrap(), bench.id.to_string());
+        // Session should be associated with the specified space.
+        assert_eq!(body["space_id"].as_str().unwrap(), space.id.to_string());
     }
 
     #[tokio::test]
-    async fn post_bench_sessions_returns_404_for_unknown_bench() {
+    async fn post_space_sessions_returns_404_for_unknown_space() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -3890,7 +3886,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/benches/{missing}/sessions"))
+                    .uri(format!("/api/spaces/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3907,12 +3903,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_bench_teams_returns_201_with_json() {
+    async fn post_space_teams_returns_201_with_json() {
         let (router, storage) = make_router();
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "team-bench".into(),
-                slug: "team-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "team-space".into(),
+                slug: "team-space".into(),
             })
             .await
             .unwrap();
@@ -3921,7 +3917,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/benches/{}/teams", bench.id))
+                    .uri(format!("/api/spaces/{}/teams", space.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"name":"research","description":"Research team","entry_agent_id":"planner","agents":[{"id":"planner","display_name":"planner"},{"id":"reviewer","display_name":"reviewer"}],"tasks":[]}"#,
@@ -3942,19 +3938,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_bench_teams_returns_200_with_array() {
+    async fn get_space_teams_returns_200_with_array() {
         let (router, storage) = make_router();
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "team-list-bench".into(),
-                slug: "team-list-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "team-list-space".into(),
+                slug: "team-list-space".into(),
             })
             .await
             .unwrap();
 
         storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "research".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -3965,7 +3961,7 @@ mod tests {
             .unwrap();
         storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "review".into(),
                 description: String::new(),
                 entry_agent_id: "reviewer".into(),
@@ -3979,7 +3975,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/benches/{}/teams", bench.id))
+                    .uri(format!("/api/spaces/{}/teams", space.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3995,16 +3991,16 @@ mod tests {
     #[tokio::test]
     async fn put_team_returns_200_and_updates_members() {
         let (router, storage) = make_router();
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "team-update-bench".into(),
-                slug: "team-update-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "team-update-space".into(),
+                slug: "team-update-space".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "research".into(),
                 description: "Initial".into(),
                 entry_agent_id: "planner".into(),
@@ -4040,16 +4036,16 @@ mod tests {
     #[tokio::test]
     async fn delete_team_returns_204() {
         let (router, storage) = make_router();
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "team-delete-bench".into(),
-                slug: "team-delete-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "team-delete-space".into(),
+                slug: "team-delete-space".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "temporary".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -4106,16 +4102,16 @@ mod tests {
         let (router, storage) =
             make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "team-run-bench".into(),
-                slug: "team-run-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "team-run-space".into(),
+                slug: "team-run-space".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "analysis".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -4215,16 +4211,16 @@ def build_topology():
         let (router, storage) =
             make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
 
-        let bench = storage
-            .create(swage_storage::model::NewBench {
-                name: "single-run-bench".into(),
-                slug: "single-run-bench".into(),
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "single-run-space".into(),
+                slug: "single-run-space".into(),
             })
             .await
             .unwrap();
         let team = storage
             .create_team(swage_storage::model::NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "single".into(),
                 description: String::new(),
                 entry_agent_id: "planner".into(),
@@ -4478,7 +4474,7 @@ def build_topology():
         let shutdown_signal = CancellationToken::new();
         let mut state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn BenchStore>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
             provider as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

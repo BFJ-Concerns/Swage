@@ -3,13 +3,12 @@ pub mod agent_message;
 pub mod approval;
 pub mod attachment;
 pub mod audit;
-pub mod bench;
 pub mod channel_link;
 pub mod channel_queue;
 pub mod config_version;
 pub mod context_snapshot;
 pub mod delivery;
-pub mod execution_host;
+pub mod device;
 pub mod lens;
 pub mod material;
 pub mod message;
@@ -19,6 +18,7 @@ pub mod secret;
 pub mod session;
 pub mod shared_reference;
 pub mod skill_activation;
+pub mod space;
 pub mod team;
 pub mod thread;
 pub mod tool_call;
@@ -108,13 +108,13 @@ mod tests {
     async fn in_memory_opens_and_migrates() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
-        // Schema should be present — query the benches table.
+        // Schema should be present — query the spaces table.
         storage
             .with_conn(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM benches", [], |r| r.get::<_, i64>(0))
+                conn.query_row("SELECT COUNT(*) FROM spaces", [], |r| r.get::<_, i64>(0))
             })
             .await
-            .expect("benches table should exist after migration");
+            .expect("spaces table should exist after migration");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -137,13 +137,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn default_bench_seeded() {
+    async fn default_space_seeded() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         let count: i64 = storage
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM benches WHERE name = 'default'",
+                    "SELECT COUNT(*) FROM spaces WHERE name = 'default'",
                     [],
                     |r| r.get(0),
                 )
@@ -151,7 +151,7 @@ mod tests {
             .await
             .expect("query should succeed");
 
-        assert_eq!(count, 1, "exactly one default bench should be seeded");
+        assert_eq!(count, 1, "exactly one default space should be seeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]

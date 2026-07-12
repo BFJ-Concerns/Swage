@@ -12,12 +12,12 @@ export interface ConversationStore {
   readonly conversations: ConversationSummary[];
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
-  loadConversations(benchId: string): Promise<void>;
+  loadConversations(spaceId: string): Promise<void>;
   selectConversation(id: string): Promise<void>;
-  // benchId is required by the underlying store but optional here so that
+  // spaceId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
-  // threading benchId through every intermediate component.
-  createConversation(benchId?: string, selectedModelId?: string | null): Promise<void>;
+  // threading spaceId through every intermediate component.
+  createConversation(spaceId?: string, selectedModelId?: string | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   appendOptimisticUserMessage(message: {
     content: string;
@@ -128,10 +128,10 @@ export function createConversationStore(): ConversationStore {
     // Actions
     // ---------------------------------------------------------------------------
 
-    async loadConversations(benchId) {
+    async loadConversations(spaceId) {
       isLoadingStore.set(true);
       try {
-        const list = await api.listConversations(benchId);
+        const list = await api.listConversations(spaceId);
         conversationsStore.set(sortByRecency(list));
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
@@ -148,17 +148,17 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(benchId, selectedModelId) {
-      if (!benchId) {
-        throw new Error("benchId is required to create a conversation");
+    async createConversation(spaceId, selectedModelId) {
+      if (!spaceId) {
+        throw new Error("spaceId is required to create a conversation");
       }
 
-      const resp = await api.createConversation(benchId, selectedModelId);
+      const resp = await api.createConversation(spaceId, selectedModelId);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
-        bench_id: resp.bench_id,
+        space_id: resp.space_id,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,

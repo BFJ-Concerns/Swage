@@ -158,7 +158,7 @@ fn test_state_with_config(
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -517,7 +517,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
             MockProvider::text_round("second outcome"),
         ]),
     );
-    let bench = state.bench_store.get_or_create_default().await.unwrap();
+    let space = state.space_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -527,7 +527,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 every: "every 1 hours".into(),
             },
             SessionPolicy::Fresh {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
             },
         ),
@@ -582,7 +582,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
         .unwrap()
         .unwrap();
     assert_eq!(session.agent_id, "gateway");
-    assert_eq!(session.bench_id, bench.id);
+    assert_eq!(session.space_id, space.id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -657,7 +657,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let bench = state.bench_store.get_or_create_default().await.unwrap();
+    let space = state.space_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -667,7 +667,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -740,7 +740,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
         provider,
         config_with_gate_model(),
     );
-    let bench = state.bench_store.get_or_create_default().await.unwrap();
+    let space = state.space_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -750,7 +750,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -786,7 +786,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let bench = state.bench_store.get_or_create_default().await.unwrap();
+    let space = state.space_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -796,7 +796,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -837,7 +837,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
         &dir.path().join("gate-unknown.db"),
         MockProvider::new(vec![]),
     );
-    let bench = state.bench_store.get_or_create_default().await.unwrap();
+    let space = state.space_store.get_or_create_default().await.unwrap();
 
     let result = schedule::create_schedule(
         &state,
@@ -847,7 +847,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
                 every: "every 1 hours".into(),
             },
             session: SessionPolicy::Fresh {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
             },
             routing: None,

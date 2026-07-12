@@ -16,7 +16,7 @@ use swage_core::{
     ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    execution_host::{register_local_execution_host, spawn_attached_node},
+    device::{register_local_device, spawn_attached_device},
     secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
@@ -24,7 +24,7 @@ use swage_gateway::{
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 use swage_tool::context::MockToolContext;
 use swage_tool::tool::Tool;
@@ -80,18 +80,18 @@ impl LlmProvider for ChannelProvider {
     }
 }
 
-struct HostIdentityTool {
+struct DeviceIdentityTool {
     marker: &'static str,
 }
 
 #[async_trait]
-impl Tool for HostIdentityTool {
+impl Tool for DeviceIdentityTool {
     fn name(&self) -> &str {
-        "host_identity"
+        "device_identity"
     }
 
     fn description(&self) -> &str {
-        "Returns the execution-host marker."
+        "Returns the device marker."
     }
 
     fn parameters(&self) -> Value {
@@ -103,7 +103,7 @@ impl Tool for HostIdentityTool {
         _params: Value,
         _ctx: &dyn swage_tool::context::ToolContext,
     ) -> Result<Value, ToolError> {
-        Ok(json!({ "host": self.marker }))
+        Ok(json!({ "device": self.marker }))
     }
 }
 
@@ -118,7 +118,7 @@ async fn start_test_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     workspace_root: PathBuf,
-    register_local_host: bool,
+    include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(match db_path {
         Some(path) => SqliteStorage::open(path).unwrap(),
@@ -128,14 +128,14 @@ async fn start_test_server(
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
     );
-    if register_local_host {
-        register_local_execution_host(&state).await;
+    if include_local_device {
+        register_local_device(&state).await;
     }
     let router: Router = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -151,7 +151,7 @@ async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String 
         .secret_manager
         .create_secret(CreateSecretRequest {
             name: name.to_string(),
-            material_kind: "node_credential".into(),
+            material_kind: "device_credential".into(),
             owner_kind: "service".into(),
             backend_kind: "managed".into(),
             scope_kind: "gateway".into(),
@@ -214,8 +214,8 @@ async fn recovery_exports_are_listed_and_downloadable() {
     let exports = list_body["exports"].as_array().unwrap();
     assert_eq!(exports.len(), 1);
     assert_eq!(
-        exports[0]["benches"],
-        json!(export_body["benches"].as_array().unwrap().len())
+        exports[0]["spaces"],
+        json!(export_body["spaces"].as_array().unwrap().len())
     );
     assert!(exports[0]["size_bytes"].as_u64().unwrap() > 0);
 
@@ -227,13 +227,13 @@ async fn recovery_exports_are_listed_and_downloadable() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn channel_onboarding_pairs_node_and_delivers_first_message() {
+async fn channel_onboarding_pairs_device_and_delivers_first_message() {
     let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![channel_rx]);
     let dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (addr, state) = start_test_server(
@@ -246,38 +246,38 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
     .await;
     let shared_token_secret_ref = create_secret_ref(&state, "Pair token", "pair-secret").await;
 
-    let node_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "paired-node",
+    let device_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "paired-device",
         }) as Arc<dyn Tool>]);
-    let node = spawn_attached_node(
-        node_dispatcher,
+    let device = spawn_attached_device(
+        device_dispatcher,
         workspace.path().to_path_buf(),
         "pair-secret".to_string(),
     )
     .await;
 
     let (pair_status, pair_body) =
-        post_json(addr, "/api/onboarding/nodes/pairing-codes", json!({})).await;
+        post_json(addr, "/api/onboarding/devices/pairing-codes", json!({})).await;
     assert_eq!(pair_status, StatusCode::CREATED);
 
     let (redeem_status, redeem_body) = post_json(
         addr,
-        "/api/onboarding/nodes/redeem",
+        "/api/onboarding/devices/redeem",
         json!({
             "pairing_code": pair_body["pairing_code"],
-            "host_id": "paired-node-a",
-            "label": "Paired Node A",
-            "kind": "attached_node",
-            "base_url": node.base_url,
+            "device_id": "paired-device-a",
+            "label": "Paired Device A",
+            "kind": "attached_device",
+            "base_url": device.base_url,
             "shared_token_secret_ref": shared_token_secret_ref,
             "workspace_root": workspace.path().to_string_lossy(),
-            "capabilities": ["host_identity"]
+            "capabilities": ["device_identity"]
         }),
     )
     .await;
     assert_eq!(redeem_status, StatusCode::CREATED);
-    assert_eq!(redeem_body["host_id"], "paired-node-a");
+    assert_eq!(redeem_body["device_id"], "paired-device-a");
 
     let (link_status, link_body) = post_json(
         addr,
@@ -318,25 +318,25 @@ async fn channel_onboarding_pairs_node_and_delivers_first_message() {
     assert_eq!(inbound_body["session_id"], link_body["session_id"]);
     assert_eq!(inbound_body["response"], "paired hello");
 
-    let (hosts_status, hosts_body) = get_json(addr, "/api/execution-hosts").await;
-    assert_eq!(hosts_status, StatusCode::OK);
+    let (devices_status, devices_body) = get_json(addr, "/api/devices").await;
+    assert_eq!(devices_status, StatusCode::OK);
     assert!(
-        hosts_body["hosts"]
+        devices_body["devices"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|host| host["host_id"] == "paired-node-a"),
-        "paired node should be present after redeeming a pairing code: {hosts_body:?}"
+            .any(|device| device["device_id"] == "paired-device-a"),
+        "paired device should be present after redeeming a pairing code: {devices_body:?}"
     );
 
-    node.join_handle.abort();
+    device.join_handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance() {
     let _guard = with_secret_env();
     let gateway_workspace = tempfile::TempDir::new().unwrap();
-    let node_workspace = tempfile::TempDir::new().unwrap();
+    let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
     let origin_db = origin_dir.path().join("origin.db");
@@ -344,7 +344,7 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
 
     let origin_provider = ChannelProvider::new(vec![]);
     let origin_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (origin_addr, origin_state) = start_test_server(
@@ -358,35 +358,35 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     let recovery_secret_ref =
         create_secret_ref(&origin_state, "Recovery token", "recovery-secret").await;
 
-    let node_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "recovery-node",
+    let device_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "recovery-device",
         }) as Arc<dyn Tool>]);
-    let node = spawn_attached_node(
-        node_dispatcher,
-        node_workspace.path().to_path_buf(),
+    let device = spawn_attached_device(
+        device_dispatcher,
+        device_workspace.path().to_path_buf(),
         "recovery-secret".to_string(),
     )
     .await;
 
     let (_, pair_body) = post_json(
         origin_addr,
-        "/api/onboarding/nodes/pairing-codes",
+        "/api/onboarding/devices/pairing-codes",
         json!({}),
     )
     .await;
     let (redeem_status, _) = post_json(
         origin_addr,
-        "/api/onboarding/nodes/redeem",
+        "/api/onboarding/devices/redeem",
         json!({
             "pairing_code": pair_body["pairing_code"],
-            "host_id": "recovery-node-a",
-            "label": "Recovery Node A",
-            "kind": "attached_node",
-            "base_url": node.base_url,
+            "device_id": "recovery-device-a",
+            "label": "Recovery Device A",
+            "kind": "attached_device",
+            "base_url": device.base_url,
             "shared_token_secret_ref": recovery_secret_ref,
-            "workspace_root": node_workspace.path().to_string_lossy(),
-            "capabilities": ["host_identity"]
+            "workspace_root": device_workspace.path().to_string_lossy(),
+            "capabilities": ["device_identity"]
         }),
     )
     .await;
@@ -424,7 +424,7 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
 
     let destination_provider = ChannelProvider::new(vec![]);
     let destination_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (destination_addr, _destination_state) = start_test_server(
@@ -448,14 +448,14 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     assert_eq!(links_body["links"][0]["integration"], "dev_dm");
     assert_eq!(links_body["links"][0]["account"], "workspace-a");
 
-    let (_, hosts_body) = get_json(destination_addr, "/api/execution-hosts").await;
+    let (_, devices_body) = get_json(destination_addr, "/api/devices").await;
     assert!(
-        hosts_body["hosts"]
+        devices_body["devices"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|host| host["host_id"] == "recovery-node-a"),
-        "import should restore execution hosts: {hosts_body:?}"
+            .any(|device| device["device_id"] == "recovery-device-a"),
+        "import should restore devices: {devices_body:?}"
     );
 
     let (_, schedules_body) = get_json(destination_addr, "/api/schedules").await;
@@ -465,14 +465,14 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         "continuation"
     );
 
-    node.join_handle.abort();
+    device.join_handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_restores_service_after_installation_move() {
     let _guard = with_secret_env();
     let gateway_workspace = tempfile::TempDir::new().unwrap();
-    let node_workspace = tempfile::TempDir::new().unwrap();
+    let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
     let origin_db = origin_dir.path().join("origin.db");
@@ -480,7 +480,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
 
     let origin_provider = ChannelProvider::new(vec![]);
     let origin_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (origin_addr, origin_state) = start_test_server(
@@ -493,35 +493,35 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     .await;
     let moved_secret_ref = create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
 
-    let node_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "moved-node",
+    let device_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "moved-device",
         }) as Arc<dyn Tool>]);
-    let node = spawn_attached_node(
-        node_dispatcher,
-        node_workspace.path().to_path_buf(),
+    let device = spawn_attached_device(
+        device_dispatcher,
+        device_workspace.path().to_path_buf(),
         "moved-secret".to_string(),
     )
     .await;
 
     let (_, pair_body) = post_json(
         origin_addr,
-        "/api/onboarding/nodes/pairing-codes",
+        "/api/onboarding/devices/pairing-codes",
         json!({}),
     )
     .await;
     let _ = post_json(
         origin_addr,
-        "/api/onboarding/nodes/redeem",
+        "/api/onboarding/devices/redeem",
         json!({
             "pairing_code": pair_body["pairing_code"],
-            "host_id": "moved-node-a",
-            "label": "Moved Node A",
-            "kind": "attached_node",
-            "base_url": node.base_url,
+            "device_id": "moved-device-a",
+            "label": "Moved Device A",
+            "kind": "attached_device",
+            "base_url": device.base_url,
             "shared_token_secret_ref": moved_secret_ref,
-            "workspace_root": node_workspace.path().to_string_lossy(),
-            "capabilities": ["host_identity"]
+            "workspace_root": device_workspace.path().to_string_lossy(),
+            "capabilities": ["device_identity"]
         }),
     )
     .await;
@@ -541,7 +541,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(10);
     let destination_provider = ChannelProvider::new(vec![channel_rx]);
     let destination_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (destination_addr, destination_state) = start_test_server(
@@ -587,24 +587,24 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     assert_eq!(inbound_status, StatusCode::ACCEPTED);
     assert_eq!(inbound_body["response"], "restored channel reply");
 
-    let host = swage_gateway::execution_host::resolve_execution_host(
+    let resolved_device = swage_gateway::device::resolve_device(
         &destination_state,
-        Some(&json!({ "execution_host_id": "moved-node-a" })),
+        Some(&json!({ "device_id": "moved-device-a" })),
     )
     .await
-    .expect("imported execution host should resolve after installation move");
+    .expect("imported device should resolve after installation move");
     let mut ctx = MockToolContext::new("gateway", "recovery-session");
-    ctx.working_directory = node_workspace.path().to_path_buf();
-    let tool_result = swage_gateway::execution_host::execute_on_remote_host(
+    ctx.working_directory = device_workspace.path().to_path_buf();
+    let tool_result = swage_gateway::device::execute_on_remote_device(
         &destination_state.secret_manager,
-        &host,
-        "host_identity",
+        &resolved_device,
+        "device_identity",
         &json!({}),
         &ctx,
     )
     .await
     .unwrap();
-    assert_eq!(tool_result["host"], "moved-node");
+    assert_eq!(tool_result["device"], "moved-device");
 
-    node.join_handle.abort();
+    device.join_handle.abort();
 }

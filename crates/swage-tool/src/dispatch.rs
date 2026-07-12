@@ -161,7 +161,7 @@ impl ToolDispatcher {
     ///
     /// Useful for sharing the same registry across multiple dispatchers with
     /// different permission configurations (e.g., the gateway builds a per-turn
-    /// dispatcher with bench-specific permissions but the same tool set).
+    /// dispatcher with space-specific permissions but the same tool set).
     pub fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
     }
@@ -180,7 +180,7 @@ impl ToolDispatcher {
     ///
     /// The normal permission resolver still runs first. The filter is for
     /// broader per-turn gates that are known before model invocation, such as
-    /// remote execution host capabilities. Approval-gated tools should return
+    /// remote device capabilities. Approval-gated tools should return
     /// `true` here; approval is an allowed-but-paused state, not a denial.
     pub fn with_advertisement_filter(mut self, filter: Arc<ToolAdvertisementFilter>) -> Self {
         self.advertisement_filter = Some(filter);

@@ -21,7 +21,7 @@
 <script module lang="ts">
   // The stable status vocabulary. Domain code maps a state to one of these;
   // it is a presentation concern, not a wire type — the server sends domain
-  // states (a job's "active", a node's "connected"), and the caller registers
+  // states (a job's "active", a device's "connected"), and the caller registers
   // them here.
   export type Register =
     | "calm" // steady, present, all-good — the quiet default

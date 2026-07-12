@@ -5,19 +5,19 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, Bench, BenchSlug,
-    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
-    DeliveryRecord, EdgeEvaluation, ExecutionHostRegistration, InboundAudit, LensPreference,
-    LensRecord, Material, Message, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest,
-    NewAttachment, NewAuditEvent, NewBackgroundJob, NewBench, NewChannelInboundMessage,
-    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation,
-    NewExecutionHostRegistration, NewLensRecord, NewMaterial, NewMessage, NewNodeExecution,
-    NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
-    NewSharedReferenceEvent, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-    NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent,
-    SharedReferenceKind, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
+    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
+    EdgeEvaluation, InboundAudit, LensPreference, LensRecord, Material, Message,
+    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
+    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
+    NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewLensRecord, NewMaterial,
+    NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+    NewTurn, NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SharedReferenceEvent, SharedReferenceKind, Space, SpaceSlug, Team, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateSchedule,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -25,30 +25,30 @@ use crate::model::{
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-pub trait BenchStore: Send + Sync {
-    async fn create(&self, bench: NewBench) -> Result<Bench, StorageError>;
-    async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError>;
-    async fn get_by_name(&self, name: &str) -> Result<Option<Bench>, StorageError>;
-    /// Get the default bench, creating it if it does not exist.
-    async fn get_or_create_default(&self) -> Result<Bench, StorageError>;
-    /// Return all benches ordered by created_at ascending.
-    async fn list_all(&self) -> Result<Vec<Bench>, StorageError>;
-    /// Look up a bench by its slug.
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Bench>, StorageError>;
-    /// Partially update a bench. Only `Some` fields are changed.
+pub trait SpaceStore: Send + Sync {
+    async fn create(&self, space: NewSpace) -> Result<Space, StorageError>;
+    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError>;
+    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError>;
+    /// Get the default space, creating it if it does not exist.
+    async fn get_or_create_default(&self) -> Result<Space, StorageError>;
+    /// Return all spaces ordered by created_at ascending.
+    async fn list_all(&self) -> Result<Vec<Space>, StorageError>;
+    /// Look up a space by its slug.
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError>;
+    /// Partially update a space. Only `Some` fields are changed.
     ///
-    /// Returns the updated bench, or `StorageError::NotFound` if `id` is unknown.
+    /// Returns the updated space, or `StorageError::NotFound` if `id` is unknown.
     async fn update(
         &self,
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<BenchSlug>,
-    ) -> Result<Bench, StorageError>;
-    /// Delete a bench and cascade its sessions.
+        slug: Option<SpaceSlug>,
+    ) -> Result<Space, StorageError>;
+    /// Delete a space and cascade its sessions.
     ///
-    /// Returns `true` if the bench existed and was removed, `false` if not found.
-    /// Returns `StorageError::ConstraintViolation` if called on the default bench.
+    /// Returns `true` if the space existed and was removed, `false` if not found.
+    /// Returns `StorageError::ConstraintViolation` if called on the default space.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
@@ -64,9 +64,9 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         id: Uuid,
     ) -> Result<Option<WorkspaceAttachment>, StorageError>;
 
-    async fn list_workspace_attachments_by_bench(
+    async fn list_workspace_attachments_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Vec<WorkspaceAttachment>, StorageError>;
 
     async fn set_workspace_trust(
@@ -81,9 +81,9 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         is_missing: bool,
     ) -> Result<WorkspaceAttachment, StorageError>;
 
-    async fn set_bench_default_workspace(
+    async fn set_space_default_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<(), StorageError>;
 
@@ -94,8 +94,8 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
 pub trait SessionStore: Send + Sync {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError>;
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
-    /// List sessions in the bench ordered by updated_at DESC.
-    async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError>;
+    /// List sessions in the space ordered by updated_at DESC.
+    async fn list_by_space(&self, space_id: Uuid) -> Result<Vec<Session>, StorageError>;
     /// List sessions belonging to an agent, ordered by updated_at DESC.
     async fn list_sessions_by_agent_id(&self, agent_id: &str)
     -> Result<Vec<Session>, StorageError>;
@@ -124,10 +124,10 @@ pub trait SessionStore: Send + Sync {
 
 #[async_trait]
 pub trait LensStore: Send + Sync {
-    async fn get_active_lens(&self, bench_id: Uuid) -> Result<LensPreference, StorageError>;
+    async fn get_active_lens(&self, space_id: Uuid) -> Result<LensPreference, StorageError>;
     async fn set_active_lens(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         lens: AppLens,
     ) -> Result<LensPreference, StorageError>;
     async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError>;
@@ -145,13 +145,13 @@ pub trait LensStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait ExecutionHostStore: Send + Sync {
-    async fn upsert_execution_host(
+pub trait DeviceStore: Send + Sync {
+    async fn upsert_device(
         &self,
-        host: NewExecutionHostRegistration,
-    ) -> Result<ExecutionHostRegistration, StorageError>;
-    async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError>;
-    async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError>;
+        host: NewDeviceRegistration,
+    ) -> Result<DeviceRegistration, StorageError>;
+    async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError>;
+    async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -204,7 +204,7 @@ pub trait AgentMemoryStore: Send + Sync {
     async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError>;
     async fn list_agent_memories(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
@@ -224,7 +224,7 @@ pub trait ConfigurationVersionStore: Send + Sync {
     ) -> Result<Option<ConfigurationVersion>, StorageError>;
     async fn list_configuration_versions(
         &self,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
     ) -> Result<Vec<ConfigurationVersion>, StorageError>;
     async fn list_configuration_versions_for_entity(
         &self,
@@ -267,9 +267,9 @@ pub trait AttachmentStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
-    async fn list_attachments_by_bench(
+    async fn list_attachments_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
     async fn update_attachment_ingestion(
         &self,
@@ -316,7 +316,7 @@ pub trait MaterialStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Material>, StorageError>;
-    async fn list_materials_by_bench(&self, bench_id: Uuid) -> Result<Vec<Material>, StorageError>;
+    async fn list_materials_by_space(&self, space_id: Uuid) -> Result<Vec<Material>, StorageError>;
     async fn update_material_content(
         &self,
         id: Uuid,
@@ -330,7 +330,7 @@ pub trait MaterialStore: Send + Sync {
         id: Uuid,
         scope_kind: crate::model::AttachmentScopeKind,
         session_id: Option<Uuid>,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError>;
 }
@@ -341,11 +341,11 @@ pub trait TeamStore: Send + Sync {
     async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
     async fn get_team_by_name(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         name: &str,
     ) -> Result<Option<Team>, StorageError>;
-    /// List teams in a bench ordered by created_at ascending.
-    async fn list_teams_by_bench(&self, bench_id: Uuid) -> Result<Vec<Team>, StorageError>;
+    /// List teams in a space ordered by created_at ascending.
+    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError>;
     /// Partially update a team. Only `Some` fields are changed.
     async fn update_team(
         &self,
@@ -546,10 +546,10 @@ pub trait ContextSnapshotStore: Send + Sync {
     /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
     /// was stored for that turn.
     async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
-    /// List recent context snapshots for a bench, newest first.
-    async fn list_snapshots_by_bench(
+    /// List recent context snapshots for a space, newest first.
+    async fn list_snapshots_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
 }
@@ -896,8 +896,8 @@ pub trait ChannelQueueStore: Send + Sync {
 
 /// Combined storage interface implemented by `SqliteStorage`.
 ///
-/// `BenchStore` is not included — it is independently available and consumers
-/// that need bench operations import it separately.
+/// `SpaceStore` is not included — it is independently available and consumers
+/// that need space operations import it separately.
 pub trait Storage:
     TeamStore
     + SessionStore
@@ -906,7 +906,7 @@ pub trait Storage:
     + AttachmentStore
     + BackgroundJobStore
     + MaterialStore
-    + ExecutionHostStore
+    + DeviceStore
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
@@ -939,7 +939,7 @@ impl<T> Storage for T where
         + AttachmentStore
         + BackgroundJobStore
         + MaterialStore
-        + ExecutionHostStore
+        + DeviceStore
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
@@ -980,23 +980,23 @@ mod tests {
     struct StubStorage;
 
     #[async_trait]
-    impl BenchStore for StubStorage {
-        async fn create(&self, _: NewBench) -> Result<Bench, StorageError> {
+    impl SpaceStore for StubStorage {
+        async fn create(&self, _: NewSpace) -> Result<Space, StorageError> {
             unimplemented!()
         }
-        async fn get(&self, _: Uuid) -> Result<Option<Bench>, StorageError> {
+        async fn get(&self, _: Uuid) -> Result<Option<Space>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_name(&self, _: &str) -> Result<Option<Bench>, StorageError> {
+        async fn get_by_name(&self, _: &str) -> Result<Option<Space>, StorageError> {
             unimplemented!()
         }
-        async fn get_or_create_default(&self) -> Result<Bench, StorageError> {
+        async fn get_or_create_default(&self) -> Result<Space, StorageError> {
             unimplemented!()
         }
-        async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
+        async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_slug(&self, _: &str) -> Result<Option<Bench>, StorageError> {
+        async fn get_by_slug(&self, _: &str) -> Result<Option<Space>, StorageError> {
             unimplemented!()
         }
         async fn update(
@@ -1004,8 +1004,8 @@ mod tests {
             _: Uuid,
             _: Option<String>,
             _: Option<String>,
-            _: Option<BenchSlug>,
-        ) -> Result<Bench, StorageError> {
+            _: Option<SpaceSlug>,
+        ) -> Result<Space, StorageError> {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -1021,7 +1021,7 @@ mod tests {
         async fn get_session(&self, _: Uuid) -> Result<Option<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_by_bench(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
+        async fn list_by_space(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
@@ -1097,19 +1097,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl ExecutionHostStore for StubStorage {
-        async fn upsert_execution_host(
+    impl DeviceStore for StubStorage {
+        async fn upsert_device(
             &self,
-            _: NewExecutionHostRegistration,
-        ) -> Result<ExecutionHostRegistration, StorageError> {
+            _: NewDeviceRegistration,
+        ) -> Result<DeviceRegistration, StorageError> {
             unimplemented!()
         }
-        async fn list_execution_hosts(
-            &self,
-        ) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
+        async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError> {
             unimplemented!()
         }
-        async fn delete_execution_host(&self, _: &str) -> Result<bool, StorageError> {
+        async fn delete_device(&self, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -1349,7 +1347,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_workspace_attachments_by_bench(
+        async fn list_workspace_attachments_by_space(
             &self,
             _: Uuid,
         ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
@@ -1372,7 +1370,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn set_bench_default_workspace(
+        async fn set_space_default_workspace(
             &self,
             _: Uuid,
             _: Option<Uuid>,
@@ -1406,7 +1404,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_attachments_by_bench(
+        async fn list_attachments_by_space(
             &self,
             _: Uuid,
         ) -> Result<Vec<Attachment>, StorageError> {
@@ -1492,7 +1490,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_materials_by_bench(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
+        async fn list_materials_by_space(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
             unimplemented!()
         }
 
@@ -1536,7 +1534,7 @@ mod tests {
         async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
             unimplemented!()
         }
-        async fn list_teams_by_bench(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
+        async fn list_teams_by_space(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
             unimplemented!()
         }
         async fn update_team(
@@ -1693,9 +1691,9 @@ mod tests {
         async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
-        async fn list_snapshots_by_bench(
+        async fn list_snapshots_by_space(
             &self,
-            _bench_id: Uuid,
+            _space_id: Uuid,
             _limit: usize,
         ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
             unimplemented!()
@@ -2196,7 +2194,7 @@ mod tests {
             let id = Uuid::new_v4();
             std::mem::drop(t.create_agent_memory(NewAgentMemoryRecord {
                 id,
-                bench_id: Uuid::new_v4(),
+                space_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
                 turn_id: Uuid::new_v4(),
                 topology_run_id: None,
@@ -2229,7 +2227,7 @@ mod tests {
             let id = Uuid::new_v4();
             std::mem::drop(t.create_configuration_version(NewConfigurationVersion {
                 id,
-                bench_id: Some(Uuid::new_v4()),
+                space_id: Some(Uuid::new_v4()),
                 session_id: None,
                 entity_kind: "team".into(),
                 entity_id: "team-1".into(),

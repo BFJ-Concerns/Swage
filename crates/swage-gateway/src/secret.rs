@@ -471,7 +471,7 @@ fn generate_material(
 ) -> Result<String, GatewayError> {
     let length = requested_length.unwrap_or(32).max(16);
     match material_kind {
-        "token" | "provider_key" | "channel_token" | "node_credential" | "plugin_secret" => {
+        "token" | "provider_key" | "channel_token" | "device_credential" | "plugin_secret" => {
             Ok(make_alphabetic_secret("swg", length))
         }
         "password" => Ok(make_password(length)),

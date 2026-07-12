@@ -1,7 +1,7 @@
 //! HTTP client for the Swage gateway REST API.
 //!
 //! Wraps reqwest with typed methods covering the full gateway surface:
-//! health checks, graceful shutdown, conversation CRUD, and bench CRUD.
+//! health checks, graceful shutdown, conversation CRUD, and space CRUD.
 //! Constructed from a gateway address; also supports discovery from runtime
 //! metadata so consumers don't need to know where the metadata lives.
 
@@ -14,36 +14,36 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Bench request / response types
+// Space request / response types
 // ---------------------------------------------------------------------------
 
-/// Client-side view of a bench returned by the gateway.
+/// Client-side view of a space returned by the gateway.
 #[derive(Debug, Clone, Deserialize)]
-pub struct BenchResponse {
+pub struct SpaceResponse {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
     pub created_at: DateTime<Utc>,
 }
 
-/// Response from the list-benches endpoint.
+/// Response from the list-spaces endpoint.
 #[derive(Debug, Clone, Deserialize)]
-pub struct BenchListResponse {
-    pub benches: Vec<BenchResponse>,
+pub struct SpaceListResponse {
+    pub spaces: Vec<SpaceResponse>,
 }
 
-/// Request body for creating a new bench.
+/// Request body for creating a new space.
 #[derive(Debug, Serialize)]
-pub struct CreateBenchRequest {
+pub struct CreateSpaceRequest {
     pub name: String,
 }
 
-/// Request body for partially updating a bench.
+/// Request body for partially updating a space.
 ///
 /// `None` fields are omitted from the JSON body — the gateway interprets an
 /// absent field as "no change" rather than "clear this field".
 #[derive(Debug, Serialize)]
-pub struct UpdateBenchRequest {
+pub struct UpdateSpaceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -51,7 +51,7 @@ pub struct UpdateBenchRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkspaceAttachmentResponse {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub label: String,
     pub path: String,
     pub permissions: Vec<String>,
@@ -336,15 +336,15 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    // --- Bench CRUD ---
+    // --- Space CRUD ---
 
-    /// Creates a new bench.
+    /// Creates a new space.
     ///
-    /// Calls `POST /api/benches` with a JSON body containing the bench name.
-    /// Returns the created bench on success.
-    pub async fn create_bench(&self, name: &str) -> Result<BenchResponse, ClientError> {
-        let url = format!("{}/api/benches", self.base_url);
-        let body = CreateBenchRequest {
+    /// Calls `POST /api/spaces` with a JSON body containing the space name.
+    /// Returns the created space on success.
+    pub async fn create_space(&self, name: &str) -> Result<SpaceResponse, ClientError> {
+        let url = format!("{}/api/spaces", self.base_url);
+        let body = CreateSpaceRequest {
             name: name.to_string(),
         };
         let response = self
@@ -357,12 +357,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Lists all benches.
+    /// Lists all spaces.
     ///
-    /// Calls `GET /api/benches`. Returns a list response wrapping all known
-    /// benches.
-    pub async fn list_benches(&self) -> Result<BenchListResponse, ClientError> {
-        let url = format!("{}/api/benches", self.base_url);
+    /// Calls `GET /api/spaces`. Returns a list response wrapping all known
+    /// spaces.
+    pub async fn list_spaces(&self) -> Result<SpaceListResponse, ClientError> {
+        let url = format!("{}/api/spaces", self.base_url);
         let response = self
             .client
             .get(&url)
@@ -372,12 +372,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Fetches a single bench by ID.
+    /// Fetches a single space by ID.
     ///
-    /// Calls `GET /api/benches/{id}`. Returns `UnexpectedResponse` with HTTP 404
-    /// if the bench does not exist.
-    pub async fn get_bench(&self, id: Uuid) -> Result<BenchResponse, ClientError> {
-        let url = format!("{}/api/benches/{}", self.base_url, id);
+    /// Calls `GET /api/spaces/{id}`. Returns `UnexpectedResponse` with HTTP 404
+    /// if the space does not exist.
+    pub async fn get_space(&self, id: Uuid) -> Result<SpaceResponse, ClientError> {
+        let url = format!("{}/api/spaces/{}", self.base_url, id);
         let response = self
             .client
             .get(&url)
@@ -387,17 +387,17 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Updates a bench's metadata.
+    /// Updates a space's metadata.
     ///
-    /// Calls `PUT /api/benches/{id}`. Fields set to `None` are omitted from the
+    /// Calls `PUT /api/spaces/{id}`. Fields set to `None` are omitted from the
     /// request body and left unchanged by the gateway.
-    pub async fn update_bench(
+    pub async fn update_space(
         &self,
         id: Uuid,
         name: Option<&str>,
-    ) -> Result<BenchResponse, ClientError> {
-        let url = format!("{}/api/benches/{}", self.base_url, id);
-        let body = UpdateBenchRequest {
+    ) -> Result<SpaceResponse, ClientError> {
+        let url = format!("{}/api/spaces/{}", self.base_url, id);
+        let body = UpdateSpaceRequest {
             name: name.map(str::to_string),
         };
         let response = self
@@ -410,11 +410,11 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn list_bench_workspaces(
+    pub async fn list_space_workspaces(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<WorkspaceAttachmentListResponse, ClientError> {
-        let url = format!("{}/api/benches/{}/workspaces", self.base_url, bench_id);
+        let url = format!("{}/api/spaces/{}/workspaces", self.base_url, space_id);
         let response = self
             .client
             .get(&url)
@@ -424,12 +424,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn attach_bench_workspace(
+    pub async fn attach_space_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         request: CreateWorkspaceAttachmentRequest,
     ) -> Result<WorkspaceAttachmentResponse, ClientError> {
-        let url = format!("{}/api/benches/{}/workspaces", self.base_url, bench_id);
+        let url = format!("{}/api/spaces/{}/workspaces", self.base_url, space_id);
         let response = self
             .client
             .post(&url)
@@ -440,15 +440,15 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn update_bench_workspace_trust(
+    pub async fn update_space_workspace_trust(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Uuid,
         is_trusted: bool,
     ) -> Result<WorkspaceAttachmentResponse, ClientError> {
         let url = format!(
-            "{}/api/benches/{}/workspaces/{}/trust",
-            self.base_url, bench_id, workspace_id
+            "{}/api/spaces/{}/workspaces/{}/trust",
+            self.base_url, space_id, workspace_id
         );
         let response = self
             .client
@@ -460,14 +460,14 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn detach_bench_workspace(
+    pub async fn detach_space_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), ClientError> {
         let url = format!(
-            "{}/api/benches/{}/workspaces/{}",
-            self.base_url, bench_id, workspace_id
+            "{}/api/spaces/{}/workspaces/{}",
+            self.base_url, space_id, workspace_id
         );
         let response = self
             .client
@@ -479,11 +479,11 @@ impl GatewayClient {
         Ok(())
     }
 
-    /// Deletes a bench by ID.
+    /// Deletes a space by ID.
     ///
-    /// Calls `DELETE /api/benches/{id}`. Returns `Ok(())` on success.
-    pub async fn delete_bench(&self, id: Uuid) -> Result<(), ClientError> {
-        let url = format!("{}/api/benches/{}", self.base_url, id);
+    /// Calls `DELETE /api/spaces/{id}`. Returns `Ok(())` on success.
+    pub async fn delete_space(&self, id: Uuid) -> Result<(), ClientError> {
+        let url = format!("{}/api/spaces/{}", self.base_url, id);
 
         let response = self
             .client
@@ -575,7 +575,7 @@ impl GatewayClient {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -598,7 +598,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -649,24 +649,24 @@ struct CreateConversationRequest<'a> {
 // ---------------------------------------------------------------------------
 
 impl GatewayClient {
-    /// Creates a new conversation inside a specific bench, returning its metadata.
+    /// Creates a new conversation inside a specific space, returning its metadata.
     ///
-    /// Calls `POST /api/benches/{bench_id}/sessions`. Returns 404 if the
-    /// bench does not exist.
-    pub async fn create_bench_conversation(
+    /// Calls `POST /api/spaces/{space_id}/sessions`. Returns 404 if the
+    /// space does not exist.
+    pub async fn create_space_conversation(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<ConversationResponse, ClientError> {
-        self.create_bench_conversation_with_model(bench_id, None)
+        self.create_space_conversation_with_model(space_id, None)
             .await
     }
 
-    pub async fn create_bench_conversation_with_model(
+    pub async fn create_space_conversation_with_model(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         selected_model_id: Option<&str>,
     ) -> Result<ConversationResponse, ClientError> {
-        let url = format!("{}/api/benches/{bench_id}/sessions", self.base_url);
+        let url = format!("{}/api/spaces/{space_id}/sessions", self.base_url);
 
         let mut request = self.client.post(&url);
         if selected_model_id.is_some() {
@@ -836,7 +836,7 @@ impl GatewayClient {
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        self.send_agent_message_with_bench(
+        self.send_agent_message_with_space(
             None,
             sender_agent_id,
             recipient_agent_id,
@@ -847,19 +847,19 @@ impl GatewayClient {
         .await
     }
 
-    /// Send a typed inter-agent message scoped to a bench.
+    /// Send a typed inter-agent message scoped to a space.
     /// Calls `POST /api/messages`.
-    pub async fn send_agent_message_in_bench(
+    pub async fn send_agent_message_in_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         sender_agent_id: &str,
         recipient_agent_id: &str,
         kind: &str,
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        self.send_agent_message_with_bench(
-            Some(bench_id),
+        self.send_agent_message_with_space(
+            Some(space_id),
             sender_agent_id,
             recipient_agent_id,
             kind,
@@ -869,9 +869,9 @@ impl GatewayClient {
         .await
     }
 
-    async fn send_agent_message_with_bench(
+    async fn send_agent_message_with_space(
         &self,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         sender_agent_id: &str,
         recipient_agent_id: &str,
         kind: &str,
@@ -884,7 +884,7 @@ impl GatewayClient {
             "recipient_agent_id": recipient_agent_id,
             "kind": kind,
             "correlation_id": correlation_id,
-            "bench_id": bench_id,
+            "space_id": space_id,
             "payload": payload,
         });
 
@@ -1059,50 +1059,50 @@ impl GatewayClient {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod bench_type_tests {
+mod space_type_tests {
     use super::*;
 
-    const SAMPLE_BENCH_JSON: &str = r#"{
+    const SAMPLE_SPACE_JSON: &str = r#"{
         "id": "550e8400-e29b-41d4-a716-446655440000",
-        "name": "My Bench",
-        "slug": "my-bench",
+        "name": "My Space",
+        "slug": "my-space",
         "created_at": "2024-01-01T00:00:00Z"
     }"#;
 
     #[test]
-    fn bench_response_deserialises_from_json() {
-        let resp: BenchResponse = serde_json::from_str(SAMPLE_BENCH_JSON).unwrap();
-        assert_eq!(resp.name, "My Bench");
-        assert_eq!(resp.slug, "my-bench");
+    fn space_response_deserialises_from_json() {
+        let resp: SpaceResponse = serde_json::from_str(SAMPLE_SPACE_JSON).unwrap();
+        assert_eq!(resp.name, "My Space");
+        assert_eq!(resp.slug, "my-space");
     }
 
     #[test]
-    fn bench_list_response_deserialises_empty() {
-        let json = r#"{"benches": []}"#;
-        let resp: BenchListResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.benches.is_empty());
+    fn space_list_response_deserialises_empty() {
+        let json = r#"{"spaces": []}"#;
+        let resp: SpaceListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.spaces.is_empty());
     }
 
     #[test]
-    fn bench_list_response_deserialises_with_entries() {
-        let json = format!(r#"{{"benches": [{SAMPLE_BENCH_JSON}]}}"#);
-        let resp: BenchListResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(resp.benches.len(), 1);
-        assert_eq!(resp.benches[0].slug, "my-bench");
+    fn space_list_response_deserialises_with_entries() {
+        let json = format!(r#"{{"spaces": [{SAMPLE_SPACE_JSON}]}}"#);
+        let resp: SpaceListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.spaces.len(), 1);
+        assert_eq!(resp.spaces[0].slug, "my-space");
     }
 
     #[test]
-    fn create_bench_request_serialises_name_only() {
-        let req = CreateBenchRequest {
-            name: "My Bench".to_string(),
+    fn create_space_request_serialises_name_only() {
+        let req = CreateSpaceRequest {
+            name: "My Space".to_string(),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["name"], "My Bench");
+        assert_eq!(json["name"], "My Space");
     }
 
     #[test]
-    fn update_bench_request_serialises_partial() {
-        let req = UpdateBenchRequest {
+    fn update_space_request_serialises_partial() {
+        let req = UpdateSpaceRequest {
             name: Some("New Name".to_string()),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -1111,7 +1111,7 @@ mod bench_type_tests {
 
     #[test]
     fn workspace_attachment_request_serialises_scope() {
-        let req = UpdateBenchRequest {
+        let req = UpdateSpaceRequest {
             name: Some("Renamed".to_string()),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -1215,17 +1215,17 @@ mod tests {
     #[test]
     fn conversation_response_deserialises_from_gateway_json() {
         let id = Uuid::new_v4();
-        let bench_id = Uuid::new_v4();
+        let space_id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "bench_id": bench_id,
+            "space_id": space_id,
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
         });
 
         let conv: ConversationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(conv.id, id);
-        assert_eq!(conv.bench_id, bench_id);
+        assert_eq!(conv.space_id, space_id);
     }
 
     #[test]
@@ -1281,7 +1281,7 @@ mod tests {
         let id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "bench_id": Uuid::new_v4(),
+            "space_id": Uuid::new_v4(),
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "messages": [

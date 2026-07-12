@@ -1,6 +1,6 @@
-//! Memory element — bench memory content for the assembly engine.
+//! Memory element — space memory content for the assembly engine.
 //!
-//! The memory element wraps the bench's persistent memory string and exposes
+//! The memory element wraps the space's persistent memory string and exposes
 //! it as a system message. It is available to the assembly engine but the
 //! default assembly does NOT include it in assembled output — this preserves
 //! legacy behaviour where memory is tool-accessible rather than prepended.
@@ -11,7 +11,7 @@ use swage_core::{ChatMessage, Role};
 use crate::element::ContextElement;
 use crate::tokeniser::Tokeniser;
 
-/// A context element carrying the bench's persistent memory content.
+/// A context element carrying the space's persistent memory content.
 ///
 /// Produces a single `Role::System` message containing the memory text, or
 /// no messages if the memory is empty. Priority 50 places it between
@@ -19,19 +19,19 @@ use crate::tokeniser::Tokeniser;
 pub struct MemoryElement {
     // The raw memory content — empty string means no memory is available.
     content: String,
-    // Bench name, reported as the element's provenance.
-    bench_name: String,
+    // Space name, reported as the element's provenance.
+    space_name: String,
 }
 
 impl MemoryElement {
     /// Create a new memory element.
     ///
-    /// - `content` — the bench's memory text (may be empty)
-    /// - `bench_name` — used in the assembly report's `source` field
-    pub fn new(content: String, bench_name: String) -> Self {
+    /// - `content` — the space's memory text (may be empty)
+    /// - `space_name` — used in the assembly report's `source` field
+    pub fn new(content: String, space_name: String) -> Self {
         Self {
             content,
-            bench_name,
+            space_name,
         }
     }
 }
@@ -68,7 +68,7 @@ impl ContextElement for MemoryElement {
     }
 
     fn source(&self) -> String {
-        format!("bench memory: {}", self.bench_name)
+        format!("space memory: {}", self.space_name)
     }
 }
 
@@ -99,7 +99,7 @@ mod tests {
     fn non_empty_memory_produces_system_message() {
         let element = MemoryElement::new(
             "The user prefers concise answers.".to_string(),
-            "my-bench".to_string(),
+            "my-space".to_string(),
         );
 
         let messages = element.content();
@@ -114,7 +114,7 @@ mod tests {
     /// Empty memory produces no messages — the element is a no-op in assembly.
     #[test]
     fn empty_memory_produces_no_messages() {
-        let element = MemoryElement::new("".to_string(), "empty-bench".to_string());
+        let element = MemoryElement::new("".to_string(), "empty-space".to_string());
 
         assert!(
             element.content().is_empty(),
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn token_count_reflects_memory_content() {
         let element =
-            MemoryElement::new("Some memory content.".to_string(), "test-bench".to_string());
+            MemoryElement::new("Some memory content.".to_string(), "test-space".to_string());
 
         let tokeniser = MockTokeniser;
         let count = element.token_count(&tokeniser);
@@ -137,7 +137,7 @@ mod tests {
     /// Empty memory returns zero tokens — no messages to count.
     #[test]
     fn empty_memory_returns_zero_tokens() {
-        let element = MemoryElement::new("".to_string(), "test-bench".to_string());
+        let element = MemoryElement::new("".to_string(), "test-space".to_string());
 
         let tokeniser = MockTokeniser;
         assert_eq!(element.token_count(&tokeniser), 0);
@@ -150,13 +150,13 @@ mod tests {
         assert_eq!(element.priority(), 50);
     }
 
-    /// source() includes the bench name for provenance in the assembly report.
+    /// source() includes the space name for provenance in the assembly report.
     #[test]
-    fn source_includes_bench_name() {
-        let element = MemoryElement::new("content".to_string(), "swage-bench".to_string());
+    fn source_includes_space_name() {
+        let element = MemoryElement::new("content".to_string(), "swage-space".to_string());
         assert!(
-            element.source().contains("swage-bench"),
-            "source should include the bench name"
+            element.source().contains("swage-space"),
+            "source should include the space name"
         );
     }
 

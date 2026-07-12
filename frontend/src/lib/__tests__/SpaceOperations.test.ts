@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
-import WorkbenchOperations from "../components/WorkbenchOperations.svelte";
+import SpaceOperations from "../components/SpaceOperations.svelte";
 import * as materialsApi from "../api/materials";
 import * as workflowApi from "../api/workflows";
 
@@ -52,7 +52,7 @@ function clickButton(label: string): void {
   button.click();
 }
 
-describe("WorkbenchOperations", () => {
+describe("SpaceOperations", () => {
   let component: MountedComponent | undefined;
   let changed: () => void;
 
@@ -68,7 +68,7 @@ describe("WorkbenchOperations", () => {
       id: "material-1",
       scope_kind: "session",
       session_id: "session-1",
-      bench_id: null,
+      space_id: null,
       source_kind: "manual",
       source_attachment_id: null,
       status: "active",
@@ -86,7 +86,7 @@ describe("WorkbenchOperations", () => {
       message: "Review the queue.",
       status: "active",
       spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "fresh", bench_id: "bench-1", agent_id: "gateway" },
+      session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
       routing: {
         deliver_to_origin: false,
         home_target: null,
@@ -101,7 +101,7 @@ describe("WorkbenchOperations", () => {
     });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({
       version: 1,
-      benches: [{}],
+      spaces: [{}],
       sessions: [{}, {}],
       schedules: [],
     });
@@ -110,7 +110,7 @@ describe("WorkbenchOperations", () => {
         id: "attachment-1",
         scope_kind: "session",
         session_id: "session-1",
-        bench_id: null,
+        space_id: null,
         kind: "text",
         status: "queued",
         filename: "notes.txt",
@@ -148,10 +148,10 @@ describe("WorkbenchOperations", () => {
   });
 
   it("saves a session material through the material API", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
         onChanged: changed,
       },
@@ -160,7 +160,7 @@ describe("WorkbenchOperations", () => {
 
     setFieldValue(inputByPlaceholder("Deployment checklist"), "Runbook");
     setFieldValue(
-      textareaByPlaceholder("Capture a constraint, checklist, or bench note."),
+      textareaByPlaceholder("Capture a constraint, checklist, or space note."),
       "Ship it.",
     );
     clickButton("Save material");
@@ -177,10 +177,10 @@ describe("WorkbenchOperations", () => {
   });
 
   it("queues an attachment for the active conversation", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
       },
     });
@@ -207,10 +207,10 @@ describe("WorkbenchOperations", () => {
   });
 
   it("creates a fresh-session schedule with a gate", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
       },
     });
@@ -232,17 +232,17 @@ describe("WorkbenchOperations", () => {
     expect(workflowApi.createSchedule).toHaveBeenCalledWith({
       message: "Review the queue.",
       spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "fresh", bench_id: "bench-1", agent_id: "gateway" },
+      session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
       routing: null,
       gate: { model: "cheap", criteria: "Only when the queue is non-empty." },
     });
   });
 
   it("blocks a ticked gate with a blank model before submitting", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
       },
     });
@@ -262,10 +262,10 @@ describe("WorkbenchOperations", () => {
   });
 
   it("creates a continuation schedule against the active conversation", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
       },
     });
@@ -287,10 +287,10 @@ describe("WorkbenchOperations", () => {
   });
 
   it("surfaces recovery export counts", async () => {
-    component = mount(WorkbenchOperations, {
+    component = mount(SpaceOperations, {
       target: document.body,
       props: {
-        benchId: "bench-1",
+        spaceId: "space-1",
         sessionId: "session-1",
       },
     });
@@ -300,7 +300,7 @@ describe("WorkbenchOperations", () => {
     await flushUi();
 
     expect(workflowApi.exportRecoveryBundle).toHaveBeenCalled();
-    expect(document.body.textContent).toContain("benches: 1");
+    expect(document.body.textContent).toContain("spaces: 1");
     expect(document.body.textContent).toContain("sessions: 2");
   });
 });

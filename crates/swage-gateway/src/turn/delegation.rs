@@ -1,8 +1,8 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
     GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    build_agent_config_for_bench_workspace, build_approval_registrar,
-    build_gateway_dispatcher_with_unsandboxed_degradation, delegated_target_instructions_for_bench,
+    build_agent_config_for_space_workspace, build_approval_registrar,
+    build_gateway_dispatcher_with_unsandboxed_degradation, delegated_target_instructions_for_space,
     load_session_config, mpsc, shutdown_sandbox_guard,
 };
 use swage_agent::DelegationOutcome;
@@ -32,38 +32,38 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
-        bench_id: Uuid,
+        space_id: Uuid,
         cancel_token: CancellationToken,
         completion_mode: DelegateCompletionMode,
     ) -> Result<DelegationOutcome, AgentError> {
-        let bench = self.state.bench_store.get(bench_id).await?.ok_or_else(|| {
-            AgentError::InvalidConfig(format!("delegation bench {bench_id} no longer exists"))
+        let space = self.state.space_store.get(space_id).await?.ok_or_else(|| {
+            AgentError::InvalidConfig(format!("delegation space {space_id} no longer exists"))
         })?;
 
         let target_resolved =
-            load_session_config(&self.state, &bench.slug, target_agent_id).map_err(|error| {
+            load_session_config(&self.state, &space.slug, target_agent_id).map_err(|error| {
                 AgentError::InvalidConfig(format!(
-                    "failed to load config for delegated agent '{target_agent_id}' in bench '{}': {error}",
-                    bench.slug
+                    "failed to load config for delegated agent '{target_agent_id}' in space '{}': {error}",
+                    space.slug
                 ))
             })?;
 
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
             .await?;
-        let target_agent_config = build_agent_config_for_bench_workspace(
+        let target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
             &target_resolved,
             None,
-            bench_id,
+            space_id,
             sender_turn_id,
             active_workspace_attachment_id,
         )
         .await;
-        let target_instructions = delegated_target_instructions_for_bench(
+        let target_instructions = delegated_target_instructions_for_space(
             &target_resolved.instructions,
-            &bench.slug,
+            &space.slug,
             target_agent_id,
         );
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
@@ -78,7 +78,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 config: &target_resolved,
                 agent_config: &target_agent_config,
                 session_metadata: None,
-                bench_id: Some(bench_id),
+                space_id: Some(space_id),
                 active_workspace_attachment_id,
                 ws_tx: silent_ws_tx,
             },
@@ -149,7 +149,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .execute_delegation(
                         &delegate_msg,
                         Some(sender_turn_id),
-                        bench_id,
+                        space_id,
                         target_agent_config,
                         target_instructions,
                         target_context_transfer_config,
@@ -199,7 +199,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .execute_delegation(
                             &delegate_msg,
                             Some(sender_turn_id),
-                            bench_id,
+                            space_id,
                             target_agent_config,
                             target_instructions,
                             target_context_transfer_config,

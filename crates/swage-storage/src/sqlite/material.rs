@@ -32,7 +32,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 fn row_to_material(row: &rusqlite::Row<'_>) -> rusqlite::Result<Material> {
     let id: String = row.get(0)?;
     let session_id: Option<String> = row.get(2)?;
-    let bench_id: Option<String> = row.get(3)?;
+    let space_id: Option<String> = row.get(3)?;
     let source_attachment_id: Option<String> = row.get(5)?;
     let created_at: String = row.get(10)?;
     let updated_at: String = row.get(11)?;
@@ -50,7 +50,7 @@ fn row_to_material(row: &rusqlite::Row<'_>) -> rusqlite::Result<Material> {
                 )
             })?,
         session_id: session_id.as_deref().map(parse_uuid).transpose()?,
-        bench_id: bench_id.as_deref().map(parse_uuid).transpose()?,
+        space_id: space_id.as_deref().map(parse_uuid).transpose()?,
         source_kind: row
             .get::<_, String>(4)?
             .parse::<MaterialSourceKind>()
@@ -89,7 +89,7 @@ const MATERIAL_SELECT: &str = "SELECT
         id,
         scope_kind,
         session_id,
-        bench_id,
+        space_id,
         source_kind,
         source_attachment_id,
         status,
@@ -109,14 +109,14 @@ impl MaterialStore for SqliteStorage {
             let now = Utc::now().to_rfc3339();
             conn.execute(
                 "INSERT INTO materials (
-                    id, scope_kind, session_id, bench_id, source_kind, source_attachment_id,
+                    id, scope_kind, session_id, space_id, source_kind, source_attachment_id,
                     status, title, relative_path, mime_type, content_text, created_at, updated_at, archived_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?11, NULL)",
                 params![
                     material.id.to_string(),
                     material.scope_kind.to_string(),
                     material.session_id.map(|id| id.to_string()),
-                    material.bench_id.map(|id| id.to_string()),
+                    material.space_id.map(|id| id.to_string()),
                     material.source_kind.to_string(),
                     material.source_attachment_id.map(|id| id.to_string()),
                     material.title,
@@ -178,12 +178,12 @@ impl MaterialStore for SqliteStorage {
         .await
     }
 
-    async fn list_materials_by_bench(&self, bench_id: Uuid) -> Result<Vec<Material>, StorageError> {
+    async fn list_materials_by_space(&self, space_id: Uuid) -> Result<Vec<Material>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "{MATERIAL_SELECT} WHERE bench_id = ?1 AND scope_kind = 'bench' ORDER BY created_at ASC, id ASC"
+                "{MATERIAL_SELECT} WHERE space_id = ?1 AND scope_kind = 'space' ORDER BY created_at ASC, id ASC"
             ))?;
-            stmt.query_map(params![bench_id.to_string()], row_to_material)?
+            stmt.query_map(params![space_id.to_string()], row_to_material)?
                 .collect()
         })
         .await
@@ -255,7 +255,7 @@ impl MaterialStore for SqliteStorage {
         id: Uuid,
         scope_kind: AttachmentScopeKind,
         session_id: Option<Uuid>,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError> {
         let relative_path = relative_path.to_string();
@@ -265,7 +265,7 @@ impl MaterialStore for SqliteStorage {
                 "UPDATE materials
                  SET scope_kind = ?2,
                      session_id = ?3,
-                     bench_id = ?4,
+                     space_id = ?4,
                      relative_path = ?5,
                      status = 'active',
                      archived_at = NULL,
@@ -275,7 +275,7 @@ impl MaterialStore for SqliteStorage {
                     id.to_string(),
                     scope_kind.to_string(),
                     session_id.map(|id| id.to_string()),
-                    bench_id.map(|id| id.to_string()),
+                    space_id.map(|id| id.to_string()),
                     relative_path,
                     now,
                 ],
@@ -293,16 +293,16 @@ impl MaterialStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{BenchStore, SessionStore};
+    use crate::store::{SessionStore, SpaceStore};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn material_round_trips_archive_restore_and_promote() {
         let storage = SqliteStorage::in_memory().unwrap();
         let material_id = Uuid::new_v4();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -310,14 +310,14 @@ mod tests {
             .await
             .unwrap();
         let session_id = session.id;
-        let bench_id = bench.id;
+        let space_id = space.id;
 
         let created = storage
             .create_material(NewMaterial {
                 id: material_id,
                 scope_kind: AttachmentScopeKind::Session,
                 session_id: Some(session_id),
-                bench_id: Some(bench_id),
+                space_id: Some(space_id),
                 source_kind: MaterialSourceKind::Manual,
                 source_attachment_id: None,
                 title: "Draft".into(),
@@ -340,16 +340,16 @@ mod tests {
         let promoted = storage
             .promote_material(
                 material_id,
-                AttachmentScopeKind::Bench,
+                AttachmentScopeKind::Space,
                 None,
-                Some(bench_id),
+                Some(space_id),
                 "shared/draft.md",
             )
             .await
             .unwrap();
-        assert_eq!(promoted.scope_kind, AttachmentScopeKind::Bench);
+        assert_eq!(promoted.scope_kind, AttachmentScopeKind::Space);
         assert_eq!(promoted.session_id, None);
-        assert_eq!(promoted.bench_id, Some(bench_id));
+        assert_eq!(promoted.space_id, Some(space_id));
         assert_eq!(promoted.relative_path, "shared/draft.md");
 
         let updated = storage

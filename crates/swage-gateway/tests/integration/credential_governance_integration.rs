@@ -15,7 +15,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::store::{BenchStore, Storage};
+use swage_storage::store::{SpaceStore, Storage};
 use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
 
 use crate::support::ProcessEnvGuard;
@@ -66,7 +66,7 @@ fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -196,7 +196,7 @@ async fn secret_management_surface_covers_types_rotation_validation_and_audit() 
             "material_kind": "ssh_key",
             "owner_kind": "service",
             "backend_kind": "managed",
-            "scope_kind": "node",
+            "scope_kind": "device",
             "scope_id": "docker-a",
             "value": "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----"
         }),

@@ -16,7 +16,7 @@ use crate::state::AppState;
 const WORKSPACE_EXTENSION_ROOT: &str = ".swage/extensions";
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CreateBenchExtensionRequest {
+pub struct CreateSpaceExtensionRequest {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
@@ -32,7 +32,7 @@ pub struct CreateBenchExtensionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct UpdateBenchExtensionRequest {
+pub struct UpdateSpaceExtensionRequest {
     pub display_name: Option<String>,
     pub description: String,
     #[serde(default)]
@@ -47,7 +47,7 @@ pub struct UpdateBenchExtensionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BenchExtensionResponse {
+pub struct SpaceExtensionResponse {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
@@ -61,22 +61,22 @@ pub struct BenchExtensionResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct BenchExtensionListResponse {
-    pub extensions: Vec<BenchExtensionResponse>,
+pub struct SpaceExtensionListResponse {
+    pub extensions: Vec<SpaceExtensionResponse>,
 }
 
-pub async fn list_bench_extensions(
+pub async fn list_space_extensions(
     state: &AppState,
-    bench_id: Uuid,
-) -> Result<BenchExtensionListResponse, GatewayError> {
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    space_id: Uuid,
+) -> Result<SpaceExtensionListResponse, GatewayError> {
+    let space = state
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
 
-    let managed_root = managed_extension_root(&bench.slug)?;
-    let workspace_roots = workspace_extension_roots(state, bench_id).await?;
+    let managed_root = managed_extension_root(&space.slug)?;
+    let workspace_roots = workspace_extension_roots(state, space_id).await?;
 
     let mut extensions = Vec::new();
     extensions.extend(scan_extension_root_path(
@@ -93,19 +93,19 @@ pub async fn list_bench_extensions(
     }
     extensions.sort_by(|left, right| left.name.cmp(&right.name));
 
-    Ok(BenchExtensionListResponse { extensions })
+    Ok(SpaceExtensionListResponse { extensions })
 }
 
-pub async fn create_bench_extension(
+pub async fn create_space_extension(
     state: &AppState,
-    bench_id: Uuid,
-    request: CreateBenchExtensionRequest,
-) -> Result<BenchExtensionResponse, GatewayError> {
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    space_id: Uuid,
+    request: CreateSpaceExtensionRequest,
+) -> Result<SpaceExtensionResponse, GatewayError> {
+    let space = state
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let name = validate_extension_name(&request.name)?;
     validate_extension_body(
         &request.description,
@@ -116,7 +116,7 @@ pub async fn create_bench_extension(
         request.tool.as_ref(),
     )?;
 
-    let extension_dir = managed_extension_root(&bench.slug)?.join(&name);
+    let extension_dir = managed_extension_root(&space.slug)?.join(&name);
     write_capability_bundle(
         &extension_dir,
         &name,
@@ -134,17 +134,17 @@ pub async fn create_bench_extension(
     read_extension_response(&extension_dir, &name, "active".into(), "managed".into())
 }
 
-pub async fn update_bench_extension(
+pub async fn update_space_extension(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
     extension_name: &str,
-    request: UpdateBenchExtensionRequest,
-) -> Result<BenchExtensionResponse, GatewayError> {
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    request: UpdateSpaceExtensionRequest,
+) -> Result<SpaceExtensionResponse, GatewayError> {
+    let space = state
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let name = validate_extension_name(extension_name)?;
     validate_extension_body(
         &request.description,
@@ -155,7 +155,7 @@ pub async fn update_bench_extension(
         request.tool.as_ref(),
     )?;
 
-    let extension_dir = managed_extension_root(&bench.slug)?.join(&name);
+    let extension_dir = managed_extension_root(&space.slug)?.join(&name);
     write_capability_bundle(
         &extension_dir,
         &name,
@@ -175,11 +175,11 @@ pub async fn update_bench_extension(
 
 pub async fn approve_workspace_extension(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
     extension_name: &str,
-) -> Result<BenchExtensionResponse, GatewayError> {
+) -> Result<SpaceExtensionResponse, GatewayError> {
     let name = validate_extension_name(extension_name)?;
-    let workspace_roots = workspace_extension_roots(state, bench_id).await?;
+    let workspace_roots = workspace_extension_roots(state, space_id).await?;
     let matching_sources = workspace_roots
         .into_iter()
         .map(|root| root.join(&name))
@@ -199,33 +199,33 @@ pub async fn approve_workspace_extension(
         }
     };
 
-    let bench = state
-        .bench_store
-        .get(bench_id)
+    let space = state
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     ensure_skill_dir_exists(source_dir, &name).await?;
-    let target_dir = managed_extension_root(&bench.slug)?.join(&name);
+    let target_dir = managed_extension_root(&space.slug)?.join(&name);
     copy_directory_recursive(source_dir, &target_dir).await?;
 
     read_extension_response(&target_dir, &name, "active".into(), "managed".into())
 }
 
-fn managed_extension_root(bench_slug: &str) -> Result<PathBuf, GatewayError> {
+fn managed_extension_root(space_slug: &str) -> Result<PathBuf, GatewayError> {
     Ok(resolve_root()
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("benches")
-        .join(bench_slug)
+        .join("spaces")
+        .join(space_slug)
         .join("skills"))
 }
 
 async fn workspace_extension_roots(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
 ) -> Result<Vec<PathBuf>, GatewayError> {
     let workspaces = state
         .storage
-        .list_workspace_attachments_by_bench(bench_id)
+        .list_workspace_attachments_by_space(space_id)
         .await?;
     Ok(workspaces
         .into_iter()
@@ -237,14 +237,14 @@ fn scan_extension_root_path(
     root: &Path,
     status: &str,
     source_kind: &str,
-) -> Result<Vec<BenchExtensionResponse>, GatewayError> {
-    let (bundles, warnings) = discover_capability_bundles(root, HierarchyLevel::Bench);
+) -> Result<Vec<SpaceExtensionResponse>, GatewayError> {
+    let (bundles, warnings) = discover_capability_bundles(root, HierarchyLevel::Space);
     for warning in warnings {
-        tracing::warn!(path = %warning.path.display(), reason = %warning.reason, "skipping invalid bench capability bundle");
+        tracing::warn!(path = %warning.path.display(), reason = %warning.reason, "skipping invalid space capability bundle");
     }
     Ok(bundles
         .into_iter()
-        .map(|bundle| BenchExtensionResponse {
+        .map(|bundle| SpaceExtensionResponse {
             name: bundle.name,
             display_name: bundle.display_name,
             description: bundle.description,
@@ -264,9 +264,9 @@ fn read_extension_response(
     extension_name: &str,
     status: String,
     source_kind: String,
-) -> Result<BenchExtensionResponse, GatewayError> {
-    let capability = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Bench)?;
-    Ok(BenchExtensionResponse {
+) -> Result<SpaceExtensionResponse, GatewayError> {
+    let capability = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Space)?;
+    Ok(SpaceExtensionResponse {
         name: capability.name,
         display_name: capability.display_name,
         description: capability.description,
@@ -294,7 +294,7 @@ async fn ensure_skill_dir_exists(
             "workspace extension '{extension_name}' is not a directory"
         )));
     }
-    let _ = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Bench)?;
+    let _ = read_capability_bundle(extension_dir, extension_name, HierarchyLevel::Space)?;
     Ok(())
 }
 

@@ -92,9 +92,9 @@ When adding or restructuring a tool:
 Two trait methods govern how a tool's secret-bearing parameters are handled. Both default to empty.
 
 - **`sensitive_keys() -> &[&str]`** names the parameter *keys* whose values should be redacted in logs and hook output. The framework replaces the value with `[REDACTED]` for the logging copy (`redact_params` in `params.rs`); `execute()` still receives the real value. Set this for any parameter that carries an API token, password, OAuth credential, or other secret payload. This is distinct from output leak detection (which scans the *return value* via `swage-safety`'s `LeakDetector`); `sensitive_keys` covers the *input* side.
-- **`host_secret_keys() -> &[&str]`** names parameter keys that may hold secret *references* the gateway resolves at the host boundary before execution. A tool that opts in can receive an injected raw secret without exposing it to the model or across the sandbox IPC. Use this when the tool needs a real credential to do its work but the model should only ever see a reference to it.
+- **`device_secret_keys() -> &[&str]`** names parameter keys that may hold secret *references* the gateway resolves at the host boundary before execution. A tool that opts in can receive an injected raw secret without exposing it to the model or across the sandbox IPC. Use this when the tool needs a real credential to do its work but the model should only ever see a reference to it.
 
-A related method, **`requires_host_execution() -> bool`**, forces the tool to run in the gateway process rather than the sandbox child. Set it when the tool needs gateway-only state, host networking, or typed errors the sandbox IPC layer cannot preserve. Conversely, a tool that does *not* set it can be routed to the sandbox child, which runs its own separately-built tool list — so it must also appear in the sandbox catalogue (see the *Wiring Checklist*).
+A related method, **`requires_device_execution() -> bool`**, forces the tool to run in the gateway process rather than the sandbox child. Set it when the tool needs gateway-only state, device networking, or typed errors the sandbox IPC layer cannot preserve. Conversely, a tool that does *not* set it can be routed to the sandbox child, which runs its own separately-built tool list — so it must also appear in the sandbox catalogue (see the *Wiring Checklist*).
 
 The lists name parameter *keys*, not values. The framework handles redaction and resolution.
 
@@ -105,11 +105,11 @@ When adding a new tool, every entry in this list must be updated in the same cha
 - [ ] the `Tool` impl exists and compiles
 - [ ] the tool is registered with the `ToolRegistry` — `register_builtin` for a Swage built-in (which bypasses the protected-namespace guard), `register` for a user/extension tool (which is rejected if it collides with a protected name)
 - [ ] if it is a built-in, its name is added to `PROTECTED_NAMES` in `crates/swage-tool/src/registry.rs` so user tools cannot shadow it
-- [ ] if the tool can run in the sandbox child (it does not set `requires_host_execution()`), it is added to the **sandbox tool catalogue** as well — `build_sandbox_agent_tools` in `crates/swage-gateway/src/main.rs` builds the sandbox child's tool list separately from the gateway registry, so a tool registered and advertised in the gateway but missing here will pass schema and permission checks and then fail at execution in sandbox mode. A host-only tool must instead deliberately set `requires_host_execution()` so it never routes to the child.
+- [ ] if the tool can run in the sandbox child (it does not set `requires_device_execution()`), it is added to the **sandbox tool catalogue** as well — `build_sandbox_agent_tools` in `crates/swage-gateway/src/main.rs` builds the sandbox child's tool list separately from the gateway registry, so a tool registered and advertised in the gateway but missing here will pass schema and permission checks and then fail at execution in sandbox mode. A device-only tool must instead deliberately set `requires_device_execution()` so it never routes to the child.
 - [ ] the permission model lets the intended agents reach it — a direct `allow`, membership in a granted bundle, or a deliberate `require_approval` entry
 - [ ] any skill that relies on the tool lists it in `tools:` for documentation, and the agents activating that skill have permission config that actually allows it
 - [ ] any test that enumerates the tool catalogue or the protected namespace has been updated
-- [ ] `sensitive_keys` / `host_secret_keys` / `requires_host_execution` are set if the tool handles secrets or needs host execution
+- [ ] `sensitive_keys` / `device_secret_keys` / `requires_device_execution` are set if the tool handles secrets or needs device execution
 
 ## When Restructuring An Existing Tool
 

@@ -124,7 +124,7 @@ pub(crate) fn classify_presence(presence: &PresenceSnapshotResponse) -> &'static
         .iter()
         .any(|machine| machine.state != "connected")
     {
-        "degraded: disconnected node"
+        "degraded: disconnected device"
     } else if presence.gateway.active_turn_count > 0 {
         "healthy: busy"
     } else {
@@ -208,8 +208,8 @@ mod tests {
                 disconnected_at: None,
             }],
             machines: vec![MachinePresenceResponse {
-                machine_id: "node-a".to_string(),
-                label: Some("Node A".to_string()),
+                machine_id: "device-a".to_string(),
+                label: Some("Device A".to_string()),
                 state: "connected".to_string(),
                 registered_at: Utc::now(),
                 last_seen_at: Utc::now(),
@@ -236,8 +236,8 @@ mod tests {
             },
             clients: vec![],
             machines: vec![MachinePresenceResponse {
-                machine_id: "node-a".to_string(),
-                label: Some("Node A".to_string()),
+                machine_id: "device-a".to_string(),
+                label: Some("Device A".to_string()),
                 state: "stale".to_string(),
                 registered_at: Utc::now(),
                 last_seen_at: Utc::now(),
@@ -246,6 +246,9 @@ mod tests {
             }],
         };
 
-        assert_eq!(classify_presence(&presence), "degraded: disconnected node");
+        assert_eq!(
+            classify_presence(&presence),
+            "degraded: disconnected device"
+        );
     }
 }

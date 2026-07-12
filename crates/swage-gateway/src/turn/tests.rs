@@ -21,20 +21,20 @@ use swage_provider::LlmProvider;
 use swage_storage::{
     model::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
-        AttachmentScopeKind, AttachmentStatus, BackgroundJob, Bench, BenchSlug, ChannelLink,
-        EdgeEvaluation, ExecutionHostRegistration, Material, MaterialStatus, Message,
-        NewAgentMessage, NewApprovalRequest, NewAttachment, NewBackgroundJob, NewBench,
-        NewChannelLink, NewEdgeEvaluation, NewExecutionHostRegistration, NewMaterial, NewMessage,
-        NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSession, NewTeam,
-        NewThread, NewToolCall, NewTopologyRun, NewTurn, NewWorkspaceAttachment, NodeExecution,
-        NodeExecutionState, NodeRetry, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
-        ScheduleStatus, Session, Team, Thread, ThreadState, ToolCallRecord, TopologyRun,
-        TopologyRunState, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+        AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
+        EdgeEvaluation, Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest,
+        NewAttachment, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewEdgeEvaluation,
+        NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun,
+        NewSession, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
+        NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, Schedule,
+        ScheduleRun, ScheduleRunState, ScheduleRunUpdate, ScheduleStatus, Session, Space,
+        SpaceSlug, Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+        TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
-        AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, BenchStore,
-        ChannelLinkStore, ContextSnapshotStore, ExecutionHostStore, MaterialStore, MessageStore,
-        ScheduleStore, SessionStore, SkillActivationStore, TeamStore, ThreadStore, ToolCallStore,
+        AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
+        ContextSnapshotStore, DeviceStore, MaterialStore, MessageStore, ScheduleStore,
+        SessionStore, SkillActivationStore, SpaceStore, TeamStore, ThreadStore, ToolCallStore,
         TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
@@ -439,7 +439,7 @@ pub(crate) struct MockStorage {
 
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
-    pub(crate) benches: HashMap<Uuid, Bench>,
+    pub(crate) spaces: HashMap<Uuid, Space>,
     pub(crate) teams: HashMap<Uuid, Team>,
     pub(crate) thread_branches: Vec<swage_storage::ThreadBranch>,
     pub(crate) topology_runs: HashMap<Uuid, TopologyRun>,
@@ -448,7 +448,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) node_retries: Vec<NodeRetry>,
     pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
     pub(crate) sessions: HashMap<Uuid, Session>,
-    pub(crate) execution_hosts: HashMap<String, ExecutionHostRegistration>,
+    pub(crate) devices: HashMap<String, DeviceRegistration>,
     pub(crate) channel_links: HashMap<(String, String, String), ChannelLink>,
     pub(crate) threads: HashMap<Uuid, Thread>,
     pub(crate) turns: HashMap<Uuid, Turn>,
@@ -515,49 +515,49 @@ impl MockStorage {
 }
 
 #[async_trait]
-impl BenchStore for MockStorage {
-    async fn create(&self, bench: NewBench) -> Result<Bench, StorageError> {
-        let p = Bench {
+impl SpaceStore for MockStorage {
+    async fn create(&self, space: NewSpace) -> Result<Space, StorageError> {
+        let p = Space {
             id: Uuid::new_v4(),
-            name: bench.name,
+            name: space.name,
             description: String::new(),
             is_default: false,
-            slug: bench.slug,
+            slug: space.slug,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        self.db.lock().await.benches.insert(p.id, p.clone());
+        self.db.lock().await.spaces.insert(p.id, p.clone());
         Ok(p)
     }
 
-    async fn get(&self, id: Uuid) -> Result<Option<Bench>, StorageError> {
-        Ok(self.db.lock().await.benches.get(&id).cloned())
+    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError> {
+        Ok(self.db.lock().await.spaces.get(&id).cloned())
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<Bench>, StorageError> {
+    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
-            .benches
+            .spaces
             .values()
             .find(|p| p.name == name)
             .cloned())
     }
 
-    async fn get_or_create_default(&self) -> Result<Bench, StorageError> {
+    async fn get_or_create_default(&self) -> Result<Space, StorageError> {
         if let Some(p) = self
             .db
             .lock()
             .await
-            .benches
+            .spaces
             .values()
-            .find(|bench| bench.is_default)
+            .find(|space| space.is_default)
             .cloned()
         {
             return Ok(p);
         }
-        let bench = Bench {
+        let space = Space {
             id: Uuid::new_v4(),
             name: "default".to_string(),
             description: String::new(),
@@ -566,22 +566,22 @@ impl BenchStore for MockStorage {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        self.db.lock().await.benches.insert(bench.id, bench.clone());
-        Ok(bench)
+        self.db.lock().await.spaces.insert(space.id, space.clone());
+        Ok(space)
     }
 
-    async fn list_all(&self) -> Result<Vec<Bench>, StorageError> {
-        let mut benches: Vec<Bench> = self.db.lock().await.benches.values().cloned().collect();
-        benches.sort_by_key(|p| p.created_at);
-        Ok(benches)
+    async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
+        let mut spaces: Vec<Space> = self.db.lock().await.spaces.values().cloned().collect();
+        spaces.sort_by_key(|p| p.created_at);
+        Ok(spaces)
     }
 
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Bench>, StorageError> {
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
-            .benches
+            .spaces
             .values()
             .find(|p| p.slug == slug)
             .cloned())
@@ -592,12 +592,12 @@ impl BenchStore for MockStorage {
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<BenchSlug>,
-    ) -> Result<Bench, StorageError> {
+        slug: Option<SpaceSlug>,
+    ) -> Result<Space, StorageError> {
         let mut db = self.db.lock().await;
-        match db.benches.get_mut(&id) {
+        match db.spaces.get_mut(&id) {
             None => Err(StorageError::NotFound {
-                entity: "Bench".into(),
+                entity: "Space".into(),
                 id: id.to_string(),
             }),
             Some(p) => {
@@ -618,12 +618,12 @@ impl BenchStore for MockStorage {
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
         let mut db = self.db.lock().await;
-        match db.benches.get(&id) {
+        match db.spaces.get(&id) {
             None => Ok(false),
             Some(p) if p.name == "default" => Err(StorageError::ConstraintViolation(
-                "cannot delete the default bench".into(),
+                "cannot delete the default space".into(),
             )),
-            _ => Ok(db.benches.remove(&id).is_some()),
+            _ => Ok(db.spaces.remove(&id).is_some()),
         }
     }
 }
@@ -635,7 +635,7 @@ impl TeamStore for MockStorage {
         let members = Team::member_ids_from_agents(&team.agents);
         let created = Team {
             id: Uuid::new_v4(),
-            bench_id: team.bench_id,
+            space_id: team.space_id,
             name: team.name,
             description: team.description,
             entry_agent_id: team.entry_agent_id,
@@ -659,7 +659,7 @@ impl TeamStore for MockStorage {
 
     async fn get_team_by_name(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         name: &str,
     ) -> Result<Option<Team>, StorageError> {
         Ok(self
@@ -668,18 +668,18 @@ impl TeamStore for MockStorage {
             .await
             .teams
             .values()
-            .find(|team| team.bench_id == bench_id && team.name == name)
+            .find(|team| team.space_id == space_id && team.name == name)
             .cloned())
     }
 
-    async fn list_teams_by_bench(&self, bench_id: Uuid) -> Result<Vec<Team>, StorageError> {
+    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError> {
         let mut teams: Vec<Team> = self
             .db
             .lock()
             .await
             .teams
             .values()
-            .filter(|team| team.bench_id == bench_id)
+            .filter(|team| team.space_id == space_id)
             .cloned()
             .collect();
         teams.sort_by_key(|team| team.created_at);
@@ -989,7 +989,7 @@ impl SessionStore for MockStorage {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError> {
         let s = Session {
             id: Uuid::new_v4(),
-            bench_id: session.bench_id,
+            space_id: session.space_id,
             agent_id: session.agent_id,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1005,14 +1005,14 @@ impl SessionStore for MockStorage {
         Ok(self.db.lock().await.sessions.get(&id).cloned())
     }
 
-    async fn list_by_bench(&self, bench_id: Uuid) -> Result<Vec<Session>, StorageError> {
+    async fn list_by_space(&self, space_id: Uuid) -> Result<Vec<Session>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
             .sessions
             .values()
-            .filter(|s| s.bench_id == bench_id)
+            .filter(|s| s.space_id == space_id)
             .cloned()
             .collect())
     }
@@ -1115,7 +1115,7 @@ impl WorkspaceAttachmentStore for MockStorage {
         let now = chrono::Utc::now();
         let record = WorkspaceAttachment {
             id: Uuid::new_v4(),
-            bench_id: workspace.bench_id,
+            space_id: workspace.space_id,
             label: workspace.label,
 
             path: workspace.path.clone(),
@@ -1142,9 +1142,9 @@ impl WorkspaceAttachmentStore for MockStorage {
         Ok(self.db.lock().await.workspace_attachments.get(&id).cloned())
     }
 
-    async fn list_workspace_attachments_by_bench(
+    async fn list_workspace_attachments_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
         let mut workspaces = self
             .db
@@ -1152,7 +1152,7 @@ impl WorkspaceAttachmentStore for MockStorage {
             .await
             .workspace_attachments
             .values()
-            .filter(|workspace| workspace.bench_id == bench_id)
+            .filter(|workspace| workspace.space_id == space_id)
             .cloned()
             .collect::<Vec<_>>();
         workspaces.sort_by_key(|workspace| workspace.created_at);
@@ -1195,9 +1195,9 @@ impl WorkspaceAttachmentStore for MockStorage {
         Ok(workspace.clone())
     }
 
-    async fn set_bench_default_workspace(
+    async fn set_space_default_workspace(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<(), StorageError> {
         let mut db = self.db.lock().await;
@@ -1208,14 +1208,14 @@ impl WorkspaceAttachmentStore for MockStorage {
                     id: workspace_id.to_string(),
                 }
             })?;
-            if workspace.bench_id != bench_id {
+            if workspace.space_id != space_id {
                 return Err(StorageError::ConstraintViolation(format!(
-                    "workspace attachment {workspace_id} does not belong to bench {bench_id}"
+                    "workspace attachment {workspace_id} does not belong to space {space_id}"
                 )));
             }
         }
         for workspace in db.workspace_attachments.values_mut() {
-            if workspace.bench_id == bench_id {
+            if workspace.space_id == space_id {
                 workspace.is_default = Some(workspace.id) == workspace_id;
                 workspace.updated_at = chrono::Utc::now();
             }
@@ -1238,18 +1238,18 @@ impl WorkspaceAttachmentStore for MockStorage {
 impl swage_storage::store::LensStore for MockStorage {
     async fn get_active_lens(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<swage_storage::LensPreference, StorageError> {
         let active_lens = self
             .db
             .lock()
             .await
             .active_lenses
-            .get(&bench_id)
+            .get(&space_id)
             .cloned()
             .unwrap_or_else(swage_storage::AppLens::assistant);
         Ok(swage_storage::LensPreference {
-            bench_id,
+            space_id,
             active_lens,
             updated_at: chrono::Utc::now(),
         })
@@ -1257,7 +1257,7 @@ impl swage_storage::store::LensStore for MockStorage {
 
     async fn set_active_lens(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         lens: swage_storage::AppLens,
     ) -> Result<swage_storage::LensPreference, StorageError> {
         let mut db = self.db.lock().await;
@@ -1267,9 +1267,9 @@ impl swage_storage::store::LensStore for MockStorage {
                 id: lens.to_string(),
             });
         }
-        db.active_lenses.insert(bench_id, lens.clone());
+        db.active_lenses.insert(space_id, lens.clone());
         Ok(swage_storage::LensPreference {
-            bench_id,
+            space_id,
             active_lens: lens,
             updated_at: chrono::Utc::now(),
         })
@@ -1339,13 +1339,13 @@ impl swage_storage::store::LensStore for MockStorage {
 }
 
 #[async_trait]
-impl ExecutionHostStore for MockStorage {
-    async fn upsert_execution_host(
+impl DeviceStore for MockStorage {
+    async fn upsert_device(
         &self,
-        host: NewExecutionHostRegistration,
-    ) -> Result<ExecutionHostRegistration, StorageError> {
-        let registration = ExecutionHostRegistration {
-            host_id: host.host_id,
+        host: NewDeviceRegistration,
+    ) -> Result<DeviceRegistration, StorageError> {
+        let registration = DeviceRegistration {
+            device_id: host.device_id,
             label: host.label,
             kind: host.kind,
             base_url: host.base_url,
@@ -1358,36 +1358,24 @@ impl ExecutionHostStore for MockStorage {
         self.db
             .lock()
             .await
-            .execution_hosts
-            .insert(registration.host_id.clone(), registration.clone());
+            .devices
+            .insert(registration.device_id.clone(), registration.clone());
         Ok(registration)
     }
 
-    async fn list_execution_hosts(&self) -> Result<Vec<ExecutionHostRegistration>, StorageError> {
-        let mut hosts: Vec<ExecutionHostRegistration> = self
-            .db
-            .lock()
-            .await
-            .execution_hosts
-            .values()
-            .cloned()
-            .collect();
-        hosts.sort_by(|left, right| {
+    async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError> {
+        let mut devices: Vec<DeviceRegistration> =
+            self.db.lock().await.devices.values().cloned().collect();
+        devices.sort_by(|left, right| {
             left.registered_at
                 .cmp(&right.registered_at)
-                .then_with(|| left.host_id.cmp(&right.host_id))
+                .then_with(|| left.device_id.cmp(&right.device_id))
         });
-        Ok(hosts)
+        Ok(devices)
     }
 
-    async fn delete_execution_host(&self, host_id: &str) -> Result<bool, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .execution_hosts
-            .remove(host_id)
-            .is_some())
+    async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError> {
+        Ok(self.db.lock().await.devices.remove(device_id).is_some())
     }
 }
 
@@ -1412,7 +1400,7 @@ impl ChannelLinkStore for MockStorage {
             integration: link.integration,
             account: link.account,
             conversation: link.conversation,
-            bench_id: link.bench_id,
+            space_id: link.space_id,
             agent_id: link.agent_id,
             session_id: link.session_id,
             home_target: link.home_target,
@@ -1773,7 +1761,7 @@ impl AttachmentStore for MockStorage {
             id: attachment.id,
             scope_kind: attachment.scope_kind,
             session_id: attachment.session_id,
-            bench_id: attachment.bench_id,
+            space_id: attachment.space_id,
             kind: attachment.kind,
             status: AttachmentStatus::Pending,
             filename: attachment.filename,
@@ -1824,9 +1812,9 @@ impl AttachmentStore for MockStorage {
         Ok(attachments)
     }
 
-    async fn list_attachments_by_bench(
+    async fn list_attachments_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError> {
         let mut attachments: Vec<Attachment> = self
             .db
@@ -1834,7 +1822,7 @@ impl AttachmentStore for MockStorage {
             .await
             .attachments
             .values()
-            .filter(|attachment| attachment.bench_id == Some(bench_id))
+            .filter(|attachment| attachment.space_id == Some(space_id))
             .cloned()
             .collect();
         attachments.sort_by_key(|attachment| attachment.created_at);
@@ -2010,7 +1998,7 @@ impl MaterialStore for MockStorage {
             id: material.id,
             scope_kind: material.scope_kind,
             session_id: material.session_id,
-            bench_id: material.bench_id,
+            space_id: material.space_id,
             source_kind: material.source_kind,
             source_attachment_id: material.source_attachment_id,
             status: MaterialStatus::Active,
@@ -2065,7 +2053,7 @@ impl MaterialStore for MockStorage {
         Ok(materials)
     }
 
-    async fn list_materials_by_bench(&self, bench_id: Uuid) -> Result<Vec<Material>, StorageError> {
+    async fn list_materials_by_space(&self, space_id: Uuid) -> Result<Vec<Material>, StorageError> {
         let mut materials: Vec<Material> = self
             .db
             .lock()
@@ -2073,8 +2061,8 @@ impl MaterialStore for MockStorage {
             .materials
             .values()
             .filter(|material| {
-                material.bench_id == Some(bench_id)
-                    && material.scope_kind == AttachmentScopeKind::Bench
+                material.space_id == Some(space_id)
+                    && material.scope_kind == AttachmentScopeKind::Space
             })
             .cloned()
             .collect();
@@ -2139,7 +2127,7 @@ impl MaterialStore for MockStorage {
         id: Uuid,
         scope_kind: AttachmentScopeKind,
         session_id: Option<Uuid>,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError> {
         let mut db = self.db.lock().await;
@@ -2152,7 +2140,7 @@ impl MaterialStore for MockStorage {
             })?;
         material.scope_kind = scope_kind;
         material.session_id = session_id;
-        material.bench_id = bench_id;
+        material.space_id = space_id;
         material.relative_path = relative_path.to_string();
         material.status = MaterialStatus::Active;
         material.archived_at = None;
@@ -2477,9 +2465,9 @@ impl ContextSnapshotStore for MockStorage {
             .map(|(report_json, _)| report_json.clone()))
     }
 
-    async fn list_snapshots_by_bench(
+    async fn list_snapshots_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
         let db = self.db.lock().await;
@@ -2494,13 +2482,13 @@ impl ContextSnapshotStore for MockStorage {
             let Some(session) = db.sessions.get(&thread.session_id) else {
                 continue;
             };
-            if session.bench_id != bench_id {
+            if session.space_id != space_id {
                 continue;
             }
             records.push(swage_storage::ContextSnapshotRecord {
                 turn_id: *turn_id,
                 session_id: session.id,
-                bench_id,
+                space_id,
                 created_at: *created_at,
                 report_json: report_json.clone(),
             });
@@ -3046,7 +3034,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
     ) -> Result<swage_storage::AgentMemoryRecord, StorageError> {
         let record = swage_storage::AgentMemoryRecord {
             id: record.id,
-            bench_id: record.bench_id,
+            space_id: record.space_id,
             session_id: record.session_id,
             turn_id: record.turn_id,
             topology_run_id: record.topology_run_id,
@@ -3082,7 +3070,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
 
     async fn list_agent_memories(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
@@ -3095,7 +3083,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
             .await
             .agent_memories
             .iter()
-            .filter(|record| record.bench_id == bench_id)
+            .filter(|record| record.space_id == space_id)
             .filter(|record| agent_id.is_none_or(|id| record.agent_id == id))
             .filter(|record| session_id.is_none_or(|id| record.session_id == id))
             .filter(|record| {
@@ -3125,7 +3113,7 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
     ) -> Result<swage_storage::ConfigurationVersion, StorageError> {
         let record = swage_storage::ConfigurationVersion {
             id: version.id,
-            bench_id: version.bench_id,
+            space_id: version.space_id,
             session_id: version.session_id,
             entity_kind: version.entity_kind,
             entity_id: version.entity_id,
@@ -3163,11 +3151,11 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
 
     async fn list_configuration_versions(
         &self,
-        bench_id: Option<Uuid>,
+        space_id: Option<Uuid>,
     ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
         let mut versions = self.db.lock().await.configuration_versions.clone();
-        if let Some(bench_id) = bench_id {
-            versions.retain(|version| version.bench_id == Some(bench_id));
+        if let Some(space_id) = space_id {
+            versions.retain(|version| version.space_id == Some(space_id));
         }
         versions.sort_by_key(|version| std::cmp::Reverse(version.created_at));
         Ok(versions)
@@ -3461,16 +3449,16 @@ async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
 ) -> (AppState, Uuid) {
-    // Create the default bench via BenchStore.
-    let bench = storage
+    // Create the default space via SpaceStore.
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     // Create a session.
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -3493,7 +3481,7 @@ async fn make_state_with_storage(
     let provider = Arc::new(MockProvider::new(provider_chunks));
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -3511,14 +3499,14 @@ pub(crate) async fn make_state_with_config(
 ) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -3540,7 +3528,7 @@ pub(crate) async fn make_state_with_config(
     let provider = Arc::new(MockProvider::new(provider_chunks));
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         provider as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -3629,14 +3617,14 @@ async fn full_turn_stores_messages_and_completes() {
 async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let storage = Arc::new(MockStorage::new());
 
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -3657,7 +3645,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
 
     let state = Arc::new(AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -3930,14 +3918,14 @@ impl crate::tool::Tool for BlockingMockTool {
 async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -3960,7 +3948,7 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -3980,14 +3968,14 @@ async fn make_state_with_capturing_tools(
 ) {
     let storage = Arc::new(MockStorage::new());
 
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4010,7 +3998,7 @@ async fn make_state_with_capturing_tools(
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -4222,13 +4210,13 @@ async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_co
     ];
 
     let storage = Arc::new(MockStorage::new());
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4252,7 +4240,7 @@ async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_co
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
@@ -4606,13 +4594,13 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4654,7 +4642,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         first_provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -4781,13 +4769,13 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4839,7 +4827,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         first_provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -4942,13 +4930,13 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5046,7 +5034,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -5130,13 +5118,13 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
 
@@ -5224,7 +5212,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -5547,13 +5535,13 @@ async fn approval_resumption_keeps_structured_tool_messages() {
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("default bench");
+        .expect("default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5605,16 +5593,16 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         CapturingMultiRoundProvider::new(vec![parent_round, child_round, parent_resume_round]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
-    let bench_skill_dir = swage_home
+    let space_skill_dir = swage_home
         .path()
-        .join("benches/default/skills/foreground-only");
-    std::fs::create_dir_all(&bench_skill_dir).expect("create foreground skill directory");
+        .join("spaces/default/skills/foreground-only");
+    std::fs::create_dir_all(&space_skill_dir).expect("create foreground skill directory");
     std::fs::write(
-        bench_skill_dir.join("SKILL.md"),
+        space_skill_dir.join("SKILL.md"),
         "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
     )
     .expect("write foreground skill");
-    let target_agent_dir = swage_home.path().join("benches/default/agents/agent-b");
+    let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
     std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
         .expect("create delegated agent directory");
     std::fs::write(
@@ -5635,7 +5623,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig {
             communication: swage_config::CommunicationConfig {
@@ -5791,13 +5779,13 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_tool_detaches_child_and_persists_result_after_release() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("default bench");
+        .expect("default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5826,7 +5814,7 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
         ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         dispatcher,
@@ -5958,13 +5946,13 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("default bench");
+        .expect("default space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5997,7 +5985,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         DetachedGatedProvider::new(child_started.clone(), child_release);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -6012,7 +6000,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             "gateway",
             parent_turn.id,
-            bench.id,
+            space.id,
             CancellationToken::new(),
             DelegateCompletionMode::Detach,
         )
@@ -6124,7 +6112,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
 // -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
-// Bench context and config resolution tests
+// Space context and config resolution tests
 // -----------------------------------------------------------------------
 
 struct CapturingProvider {
@@ -6203,10 +6191,10 @@ impl crate::tool::Tool for ContextCaptureTool {
 /// Create a storage with a session + thread and return (storage, session_id).
 async fn make_storage_with_session() -> (Arc<MockStorage>, Uuid) {
     let storage = Arc::new(MockStorage::new());
-    let bench = storage.get_or_create_default().await.expect("bench");
+    let space = storage.get_or_create_default().await.expect("space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6258,7 +6246,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![capture_tool as Arc<dyn crate::tool::Tool>]),
@@ -6291,7 +6279,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 }
 
 #[tokio::test]
-async fn process_turn_resolves_config_per_bench_and_completes_turn() {
+async fn process_turn_resolves_config_per_space_and_completes_turn() {
     let chunks = vec![
         StreamChunk::Delta {
             content: "Hello".into(),
@@ -6303,18 +6291,18 @@ async fn process_turn_resolves_config_per_bench_and_completes_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
 
     let storage = Arc::new(MockStorage::new());
-    let bench = BenchStore::create(
+    let space = SpaceStore::create(
         &*storage,
-        swage_storage::model::NewBench {
-            name: "Test Config Bench".to_string(),
-            slug: "test-config-resolution-no-bench-toml".into(),
+        swage_storage::model::NewSpace {
+            name: "Test Config Space".to_string(),
+            slug: "test-config-resolution-no-space-toml".into(),
         },
     )
     .await
-    .expect("create test bench");
+    .expect("create test space");
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6334,7 +6322,7 @@ async fn process_turn_resolves_config_per_bench_and_completes_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -6380,7 +6368,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -6473,7 +6461,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -6529,7 +6517,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -6616,7 +6604,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -6743,13 +6731,13 @@ impl crate::tool::Tool for WorkspaceGatedReadTool {
 fn registered_remote_host(
     capabilities: Vec<String>,
     workspace_roots: Vec<std::path::PathBuf>,
-) -> crate::execution_host::RegisteredExecutionHost {
-    crate::execution_host::RegisteredExecutionHost {
-        host_id: "node-a".into(),
+) -> crate::device::RegisteredDevice {
+    crate::device::RegisteredDevice {
+        device_id: "device-a".into(),
         label: None,
-        kind: crate::execution_host::ExecutionHostKind::AttachedNode,
+        kind: crate::device::DeviceKind::AttachedDevice,
         base_url: Some("http://127.0.0.1:32001".into()),
-        shared_token_secret_ref: Some("secret://execution-host/node-a".into()),
+        shared_token_secret_ref: Some("secret://device/device-a".into()),
         workspace_root: workspace_roots
             .first()
             .cloned()
@@ -6799,19 +6787,19 @@ fn gateway_advertisement_filter_keeps_remote_capability_with_matching_workspace(
 #[tokio::test]
 async fn tool_context_working_directory_is_passed_during_tool_execution() {
     let storage = Arc::new(MockStorage::new());
-    let bench = BenchStore::create(
+    let space = SpaceStore::create(
         &*storage,
-        NewBench {
-            name: "my-bench".to_string(),
-            slug: "my-bench".into(),
+        NewSpace {
+            name: "my-space".to_string(),
+            slug: "my-space".into(),
         },
     )
     .await
-    .expect("create bench");
+    .expect("create space");
 
     let session = storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6853,7 +6841,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -7245,9 +7233,9 @@ fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> Pe
 }
 
 #[test]
-fn bench_scoped_approval_grant_only_removes_gate_for_matching_bench() {
-    let matching_bench_id = Uuid::new_v4();
-    let other_bench_id = Uuid::new_v4();
+fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
+    let matching_space_id = Uuid::new_v4();
+    let other_space_id = Uuid::new_v4();
     let mut config = swage_config::ResolvedConfig::default();
     config.tools.permissions.require_approval =
         vec![swage_config::model::RequireApprovalEntry::Simple(
@@ -7255,28 +7243,28 @@ fn bench_scoped_approval_grant_only_removes_gate_for_matching_bench() {
         )];
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
-        bench_id: Some(matching_bench_id),
+        space_id: Some(matching_space_id),
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
         access: None,
     }]);
 
     let matching =
-        super::build_permission_config(&config, &config, Some(matching_bench_id), &grants);
-    let other = super::build_permission_config(&config, &config, Some(other_bench_id), &grants);
-    let no_bench = super::build_permission_config(&config, &config, None, &grants);
+        super::build_permission_config(&config, &config, Some(matching_space_id), &grants);
+    let other = super::build_permission_config(&config, &config, Some(other_space_id), &grants);
+    let no_space = super::build_permission_config(&config, &config, None, &grants);
 
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
-    assert_eq!(no_bench.require_approval.len(), 1);
+    assert_eq!(no_space.require_approval.len(), 1);
 }
 
 #[tokio::test]
 async fn workspace_summary_is_empty_when_no_attachments_exist() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let bench_id = Uuid::new_v4();
+    let space_id = Uuid::new_v4();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
 
     assert!(!summary.has_read);
     assert!(!summary.has_write);
@@ -7285,10 +7273,10 @@ async fn workspace_summary_is_empty_when_no_attachments_exist() {
 #[tokio::test]
 async fn workspace_summary_ignores_untrusted_attachments() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let bench_id = Uuid::new_v4();
+    let space_id = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            bench_id,
+            space_id,
             label: "untrusted".into(),
             path: "/tmp/untrusted".into(),
             permissions: vec!["read".into(), "write".into()],
@@ -7297,7 +7285,7 @@ async fn workspace_summary_ignores_untrusted_attachments() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
 
     assert!(
         !summary.has_read,
@@ -7312,10 +7300,10 @@ async fn workspace_summary_ignores_untrusted_attachments() {
 #[tokio::test]
 async fn workspace_summary_combines_grants_across_trusted_attachments() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let bench_id = Uuid::new_v4();
+    let space_id = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            bench_id,
+            space_id,
             label: "read-only".into(),
             path: "/tmp/read".into(),
             permissions: vec!["read".into()],
@@ -7325,7 +7313,7 @@ async fn workspace_summary_combines_grants_across_trusted_attachments() {
         .unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            bench_id,
+            space_id,
             label: "write-only".into(),
             path: "/tmp/write".into(),
             permissions: vec!["write".into()],
@@ -7334,20 +7322,20 @@ async fn workspace_summary_combines_grants_across_trusted_attachments() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, bench_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
 
     assert!(summary.has_read);
     assert!(summary.has_write);
 }
 
 #[tokio::test]
-async fn workspace_summary_only_aggregates_target_bench() {
+async fn workspace_summary_only_aggregates_target_space() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let target_bench = Uuid::new_v4();
-    let other_bench = Uuid::new_v4();
+    let target_space = Uuid::new_v4();
+    let other_space = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            bench_id: other_bench,
+            space_id: other_space,
             label: "other".into(),
             path: "/tmp/other".into(),
             permissions: vec!["read".into(), "write".into()],
@@ -7356,7 +7344,7 @@ async fn workspace_summary_only_aggregates_target_bench() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, target_bench).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, target_space).await;
 
     assert!(!summary.has_read);
     assert!(!summary.has_write);
@@ -7479,7 +7467,7 @@ fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing(
 
     assert!(
         policy.deny.is_empty(),
-        "missing bench workspace grants must inherit global permissions rather than denying"
+        "missing space workspace grants must inherit global permissions rather than denying"
     );
 }
 
@@ -7514,7 +7502,7 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         vec![],
         history,
         String::new(),
-        "My Bench".to_string(),
+        "My Space".to_string(),
     );
 
     // Should produce four elements: prompts, skills (empty), memory, and history.
@@ -7537,7 +7525,7 @@ fn build_assembly_elements_with_empty_instructions() {
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
         String::new(),
-        "My Bench".to_string(),
+        "My Space".to_string(),
     );
 
     assert_eq!(elements.len(), 4);
@@ -7554,8 +7542,8 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         "Be helpful.",
         vec![],
         vec![],
-        "Important bench context".to_string(),
-        "My Bench".to_string(),
+        "Important space context".to_string(),
+        "My Space".to_string(),
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -7575,30 +7563,30 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         }
     });
     assert!(
-        text.is_some_and(|t| t.contains("Important bench context")),
+        text.is_some_and(|t| t.contains("Important space context")),
         "memory message should contain the provided content"
     );
 }
 
-/// load_bench_memory returns an empty string when the bench has no
+/// load_space_memory returns an empty string when the space has no
 /// memory directory.
 #[tokio::test]
-async fn load_bench_memory_returns_empty_when_dir_absent() {
+async fn load_space_memory_returns_empty_when_dir_absent() {
     let dir = tempfile::tempdir().unwrap();
     // No memory directory created — the helper should not panic.
-    let result = load_bench_memory(dir.path(), "no-such-bench").await;
+    let result = load_space_memory(dir.path(), "no-such-space").await;
     assert!(
         result.is_empty(),
         "should return empty string when memory dir is absent"
     );
 }
 
-/// load_bench_memory reads all .md files from the memory directory and
+/// load_space_memory reads all .md files from the memory directory and
 /// joins them in alphabetical filename order.
 #[tokio::test]
-async fn load_bench_memory_concatenates_md_files_alphabetically() {
+async fn load_space_memory_concatenates_md_files_alphabetically() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("benches").join("my-bench").join("memory");
+    let memory_dir = dir.path().join("spaces").join("my-space").join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     // b_notes sorts after a_context.
@@ -7607,7 +7595,7 @@ async fn load_bench_memory_concatenates_md_files_alphabetically() {
     // Non-.md file must not be included.
     std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
 
-    let result = load_bench_memory(dir.path(), "my-bench").await;
+    let result = load_space_memory(dir.path(), "my-space").await;
 
     assert!(
         result.contains("First file content"),
@@ -7631,17 +7619,17 @@ async fn load_bench_memory_concatenates_md_files_alphabetically() {
     );
 }
 
-/// load_bench_memory skips files with only whitespace content.
+/// load_space_memory skips files with only whitespace content.
 #[tokio::test]
-async fn load_bench_memory_skips_empty_files() {
+async fn load_space_memory_skips_empty_files() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("benches").join("my-bench").join("memory");
+    let memory_dir = dir.path().join("spaces").join("my-space").join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
     std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
 
-    let result = load_bench_memory(dir.path(), "my-bench").await;
+    let result = load_space_memory(dir.path(), "my-space").await;
 
     assert!(result.contains("Real content"));
     assert!(
@@ -8057,7 +8045,7 @@ async fn secret_refs_stay_out_of_snapshots_and_persisted_tool_arguments() {
             &["secret"]
         }
 
-        fn host_secret_keys(&self) -> &[&str] {
+        fn device_secret_keys(&self) -> &[&str] {
             &["secret"]
         }
 

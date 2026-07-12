@@ -1455,9 +1455,9 @@ impl Agent {
                     }
                 };
 
-                let Some(bench_id) = execution.bench_id else {
+                let Some(space_id) = execution.space_id else {
                     return Ok((
-                        "delegation is not available — bench context is missing".to_string(),
+                        "delegation is not available — space context is missing".to_string(),
                         true,
                         "error".to_string(),
                     ));
@@ -1503,7 +1503,7 @@ impl Agent {
                         transferred_context,
                         &self.config.agent_id,
                         execution.turn_id,
-                        bench_id,
+                        space_id,
                         cancel_token.clone(),
                         completion_mode,
                     )

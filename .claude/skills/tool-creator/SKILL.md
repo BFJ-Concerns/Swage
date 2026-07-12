@@ -10,7 +10,7 @@ metadata:
 
 Guide the session through designing, adding, and revising the tools the Swage agent calls.
 
-A Swage tool is a Rust type implementing the `Tool` trait in `crates/swage-tool/src/tool.rs`. The trait surface is small: `name`, `description`, `parameters` (JSON Schema), `execute`, plus optional `sensitive_keys`, `host_secret_keys`, `requires_host_execution`, and a `definition()` convenience the framework forwards to the provider. The model picks tools entirely from the `name`, `description`, and parameter schema it sees, so the value of the work sits in those three surfaces, not in `execute`.
+A Swage tool is a Rust type implementing the `Tool` trait in `crates/swage-tool/src/tool.rs`. The trait surface is small: `name`, `description`, `parameters` (JSON Schema), `execute`, plus optional `sensitive_keys`, `device_secret_keys`, `requires_device_execution`, and a `definition()` convenience the framework forwards to the provider. The model picks tools entirely from the `name`, `description`, and parameter schema it sees, so the value of the work sits in those three surfaces, not in `execute`.
 
 The calibration point: the built-in tools under `crates/swage-gateway/src/tool/` are the house style for naming, schema shape, and dispatch wiring. Read a couple before writing a new one. Vague descriptions that merely restate the name are the failure mode this skill is here to break.
 
@@ -52,7 +52,7 @@ For new tools, edits, and rewrites alike:
 4. What are the side effects? Does the call write state, emit a message, hit an external service, cost money, become visible to the user, or affect other sessions or agents?
 5. Which existing tools sit nearest to it? Could it be an `action` parameter on one of them instead of a new tool?
 6. What does the model currently get wrong (for rewrites)? Wrong tool chosen, wrong parameters, wrong frequency, ignored entirely?
-7. Does the tool touch secrets or sensitive values that need redaction (`sensitive_keys`) or host-side secret resolution (`host_secret_keys`)?
+7. Does the tool touch secrets or sensitive values that need redaction (`sensitive_keys`) or host-side secret resolution (`device_secret_keys`)?
 
 Run this as a back-and-forth. The questions exist to surface the design choice and the description targets — not to be filled in mechanically.
 

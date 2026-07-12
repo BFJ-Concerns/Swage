@@ -37,7 +37,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, store::BenchStore};
+use swage_storage::{SqliteStorage, store::SpaceStore};
 
 use crate::support::ProcessEnvGuard;
 
@@ -127,7 +127,7 @@ async fn start_test_server_with_config(
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(provider),
         config,
         dispatcher,

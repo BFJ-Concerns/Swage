@@ -125,16 +125,16 @@ mod tests {
     use serde_json::json;
 
     use crate::sqlite::SqliteStorage;
-    use crate::store::{BenchStore, DeliveryStore, SessionStore};
+    use crate::store::{DeliveryStore, SessionStore, SpaceStore};
     use crate::{NewDeliveryRecord, NewSession};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_and_lists_by_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

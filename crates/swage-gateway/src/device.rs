@@ -17,7 +17,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use swage_core::ToolError;
-use swage_storage::model::NewExecutionHostRegistration;
+use swage_storage::model::NewDeviceRegistration;
 use swage_tool::context::{SerializableToolContext, ToolContext};
 use swage_tool::dispatch::ToolDispatcher;
 
@@ -25,48 +25,48 @@ use crate::secret::SecretManager;
 use crate::state::AppState;
 use crate::tool::workspace::resolve_workspace_root;
 
-pub const LOCAL_EXECUTION_HOST_ID: &str = "local";
+pub const LOCAL_DEVICE_ID: &str = "local";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionHostKind {
+pub enum DeviceKind {
     Local,
-    AttachedNode,
+    AttachedDevice,
     Docker,
     Ssh,
 }
 
-impl std::fmt::Display for ExecutionHostKind {
+impl std::fmt::Display for DeviceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = match self {
-            ExecutionHostKind::Local => "local",
-            ExecutionHostKind::AttachedNode => "attached_node",
-            ExecutionHostKind::Docker => "docker",
-            ExecutionHostKind::Ssh => "ssh",
+            DeviceKind::Local => "local",
+            DeviceKind::AttachedDevice => "attached_device",
+            DeviceKind::Docker => "docker",
+            DeviceKind::Ssh => "ssh",
         };
         write!(f, "{value}")
     }
 }
 
-impl std::str::FromStr for ExecutionHostKind {
+impl std::str::FromStr for DeviceKind {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "local" => Ok(Self::Local),
-            "attached_node" => Ok(Self::AttachedNode),
+            "attached_device" => Ok(Self::AttachedDevice),
             "docker" => Ok(Self::Docker),
             "ssh" => Ok(Self::Ssh),
-            other => Err(format!("unknown execution host kind: {other}")),
+            other => Err(format!("unknown device kind: {other}")),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RegisteredExecutionHost {
-    pub host_id: String,
+pub struct RegisteredDevice {
+    pub device_id: String,
     pub label: Option<String>,
-    pub kind: ExecutionHostKind,
+    pub kind: DeviceKind,
     pub base_url: Option<String>,
     pub shared_token_secret_ref: Option<String>,
     pub workspace_root: PathBuf,
@@ -76,13 +76,13 @@ pub struct RegisteredExecutionHost {
 }
 
 #[derive(Debug, Default)]
-pub struct ExecutionHostRuntime {
-    pub hosts: HashMap<String, RegisteredExecutionHost>,
+pub struct DeviceRuntime {
+    pub devices: HashMap<String, RegisteredDevice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionHostResponse {
-    pub host_id: String,
+pub struct DeviceResponse {
+    pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
     pub base_url: Option<String>,
@@ -93,15 +93,15 @@ pub struct ExecutionHostResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionHostListResponse {
-    pub hosts: Vec<ExecutionHostResponse>,
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterExecutionHostRequest {
-    pub host_id: String,
+pub struct RegisterDeviceRequest {
+    pub device_id: String,
     pub label: Option<String>,
-    #[serde(default = "default_remote_host_kind")]
+    #[serde(default = "default_remote_device_kind")]
     pub kind: String,
     pub base_url: String,
     pub shared_token_secret_ref: String,
@@ -112,8 +112,8 @@ pub struct RegisterExecutionHostRequest {
     pub capabilities: Vec<String>,
 }
 
-fn default_remote_host_kind() -> String {
-    ExecutionHostKind::AttachedNode.to_string()
+fn default_remote_device_kind() -> String {
+    DeviceKind::AttachedDevice.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,23 +130,23 @@ pub struct RemoteToolExecutionResponse {
 }
 
 #[derive(Clone)]
-struct TransportBackedHostState {
-    kind: ExecutionHostKind,
+struct TransportBackedDeviceState {
+    kind: DeviceKind,
     shared_token: String,
     dispatcher: Arc<ToolDispatcher>,
     capabilities: Vec<String>,
     workspace_roots: Vec<PathBuf>,
 }
 
-pub fn make_local_execution_host(
+pub fn make_local_device(
     config: &swage_config::ResolvedConfig,
     dispatcher: &ToolDispatcher,
-) -> RegisteredExecutionHost {
+) -> RegisteredDevice {
     let workspace_root = resolve_workspace_root(config);
-    RegisteredExecutionHost {
-        host_id: LOCAL_EXECUTION_HOST_ID.to_string(),
+    RegisteredDevice {
+        device_id: LOCAL_DEVICE_ID.to_string(),
         label: Some("Local machine".to_string()),
-        kind: ExecutionHostKind::Local,
+        kind: DeviceKind::Local,
         base_url: None,
         shared_token_secret_ref: None,
         workspace_root: workspace_root.clone(),
@@ -161,23 +161,25 @@ pub fn make_local_execution_host(
     }
 }
 
-pub async fn register_local_execution_host(state: &AppState) {
-    let local_host = make_local_execution_host(&state.config, state.tool_dispatcher.as_ref());
-    let mut runtime = state.execution_hosts.lock().await;
-    runtime.hosts.insert(local_host.host_id.clone(), local_host);
+pub async fn register_local_device(state: &AppState) {
+    let local_device = make_local_device(&state.config, state.tool_dispatcher.as_ref());
+    let mut runtime = state.devices.lock().await;
+    runtime
+        .devices
+        .insert(local_device.device_id.clone(), local_device);
 }
 
-pub async fn register_remote_execution_host(
+pub async fn register_remote_device(
     state: &AppState,
-    request: RegisterExecutionHostRequest,
-) -> Result<RegisteredExecutionHost, swage_core::GatewayError> {
+    request: RegisterDeviceRequest,
+) -> Result<RegisteredDevice, swage_core::GatewayError> {
     let workspace_root = PathBuf::from(&request.workspace_root);
     let workspace_roots =
         normalise_workspace_roots(workspace_root.clone(), request.workspace_roots);
-    let host = RegisteredExecutionHost {
-        host_id: request.host_id,
+    let device = RegisteredDevice {
+        device_id: request.device_id,
         label: request.label.clone(),
-        kind: ExecutionHostKind::from_str(&request.kind).unwrap_or(ExecutionHostKind::AttachedNode),
+        kind: DeviceKind::from_str(&request.kind).unwrap_or(DeviceKind::AttachedDevice),
         base_url: Some(request.base_url),
         shared_token_secret_ref: Some(request.shared_token_secret_ref),
         workspace_root,
@@ -188,63 +190,62 @@ pub async fn register_remote_execution_host(
 
     state
         .storage
-        .upsert_execution_host(NewExecutionHostRegistration {
-            host_id: host.host_id.clone(),
-            label: host.label.clone(),
-            kind: host.kind.to_string(),
-            base_url: host.base_url.clone().unwrap_or_default(),
-            shared_token: host.shared_token_secret_ref.clone().unwrap_or_default(),
-            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: host
+        .upsert_device(NewDeviceRegistration {
+            device_id: device.device_id.clone(),
+            label: device.label.clone(),
+            kind: device.kind.to_string(),
+            base_url: device.base_url.clone().unwrap_or_default(),
+            shared_token: device.shared_token_secret_ref.clone().unwrap_or_default(),
+            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: device
                 .workspace_roots
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-            capabilities: host.capabilities.clone(),
+            capabilities: device.capabilities.clone(),
         })
         .await
         .map_err(swage_core::GatewayError::Storage)?;
 
-    let mut runtime = state.execution_hosts.lock().await;
-    runtime.hosts.insert(host.host_id.clone(), host.clone());
+    let mut runtime = state.devices.lock().await;
+    runtime
+        .devices
+        .insert(device.device_id.clone(), device.clone());
     drop(runtime);
 
     crate::presence::upsert_machine_heartbeat(
         state,
         crate::presence::MachineHeartbeatRequest {
-            machine_id: host.host_id.clone(),
-            label: host.label.clone(),
+            machine_id: device.device_id.clone(),
+            label: device.label.clone(),
             stale_after_secs: 30,
         },
     )
     .await;
 
-    Ok(host)
+    Ok(device)
 }
 
-pub async fn restore_registered_execution_hosts(
-    state: &AppState,
-) -> Result<(), swage_core::StorageError> {
-    let persisted_hosts = state.storage.list_execution_hosts().await?;
-    let mut runtime = state.execution_hosts.lock().await;
+pub async fn restore_registered_devices(state: &AppState) -> Result<(), swage_core::StorageError> {
+    let persisted_devices = state.storage.list_devices().await?;
+    let mut runtime = state.devices.lock().await;
 
-    for host in persisted_hosts {
-        runtime.hosts.insert(
-            host.host_id.clone(),
-            RegisteredExecutionHost {
-                host_id: host.host_id,
-                label: host.label,
-                kind: ExecutionHostKind::from_str(&host.kind)
-                    .unwrap_or(ExecutionHostKind::AttachedNode),
-                base_url: Some(host.base_url),
-                shared_token_secret_ref: Some(host.shared_token),
-                workspace_root: PathBuf::from(&host.workspace_root),
+    for device in persisted_devices {
+        runtime.devices.insert(
+            device.device_id.clone(),
+            RegisteredDevice {
+                device_id: device.device_id,
+                label: device.label,
+                kind: DeviceKind::from_str(&device.kind).unwrap_or(DeviceKind::AttachedDevice),
+                base_url: Some(device.base_url),
+                shared_token_secret_ref: Some(device.shared_token),
+                workspace_root: PathBuf::from(&device.workspace_root),
                 workspace_roots: normalise_workspace_roots(
-                    PathBuf::from(&host.workspace_root),
-                    host.workspace_roots,
+                    PathBuf::from(&device.workspace_root),
+                    device.workspace_roots,
                 ),
-                capabilities: host.capabilities,
-                registered_at: host.registered_at,
+                capabilities: device.capabilities,
+                registered_at: device.registered_at,
             },
         );
     }
@@ -252,98 +253,98 @@ pub async fn restore_registered_execution_hosts(
     Ok(())
 }
 
-pub async fn list_execution_hosts(state: &AppState) -> ExecutionHostListResponse {
-    let runtime = state.execution_hosts.lock().await;
-    let mut hosts = runtime
-        .hosts
+pub async fn list_devices(state: &AppState) -> DeviceListResponse {
+    let runtime = state.devices.lock().await;
+    let mut devices = runtime
+        .devices
         .values()
         .cloned()
-        .map(|host| ExecutionHostResponse {
-            host_id: host.host_id,
-            label: host.label,
-            kind: host.kind.to_string(),
-            base_url: host.base_url,
-            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: host
+        .map(|device| DeviceResponse {
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind.to_string(),
+            base_url: device.base_url,
+            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: device
                 .workspace_roots
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-            capabilities: host.capabilities,
-            registered_at: host.registered_at,
+            capabilities: device.capabilities,
+            registered_at: device.registered_at,
         })
         .collect::<Vec<_>>();
-    hosts.sort_by(|left, right| left.host_id.cmp(&right.host_id));
-    ExecutionHostListResponse { hosts }
+    devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    DeviceListResponse { devices }
 }
 
-pub async fn resolve_execution_host(
+pub async fn resolve_device(
     state: &AppState,
     session_metadata: Option<&serde_json::Value>,
-) -> Option<RegisteredExecutionHost> {
-    let runtime = state.execution_hosts.lock().await;
-    select_execution_host(&runtime.hosts, session_metadata)
+) -> Option<RegisteredDevice> {
+    let runtime = state.devices.lock().await;
+    select_device(&runtime.devices, session_metadata)
 }
 
-fn select_execution_host(
-    hosts: &HashMap<String, RegisteredExecutionHost>,
+fn select_device(
+    devices: &HashMap<String, RegisteredDevice>,
     session_metadata: Option<&serde_json::Value>,
-) -> Option<RegisteredExecutionHost> {
-    if let Some(host_id) = session_metadata
-        .and_then(|metadata| metadata.get("execution_host_id"))
+) -> Option<RegisteredDevice> {
+    if let Some(device_id) = session_metadata
+        .and_then(|metadata| metadata.get("device_id"))
         .and_then(|value| value.as_str())
-        && let Some(host) = hosts.get(host_id)
+        && let Some(device) = devices.get(device_id)
     {
-        return Some(host.clone());
+        return Some(device.clone());
     }
 
     if let Some(preferred_kind) = session_metadata
         .and_then(|metadata| metadata.get("execution_backend"))
         .and_then(|value| value.as_str())
-        .and_then(|value| ExecutionHostKind::from_str(value).ok())
+        .and_then(|value| DeviceKind::from_str(value).ok())
     {
-        let mut matching_hosts = hosts
+        let mut matching_devices = devices
             .values()
-            .filter(|host| host.kind == preferred_kind)
+            .filter(|device| device.kind == preferred_kind)
             .cloned()
             .collect::<Vec<_>>();
-        matching_hosts.sort_by(|left, right| left.host_id.cmp(&right.host_id));
-        if let Some(host) = matching_hosts.into_iter().next() {
-            return Some(host);
+        matching_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        if let Some(device) = matching_devices.into_iter().next() {
+            return Some(device);
         }
     }
 
-    if let Some(local) = hosts.get(LOCAL_EXECUTION_HOST_ID) {
+    if let Some(local) = devices.get(LOCAL_DEVICE_ID) {
         return Some(local.clone());
     }
 
-    let mut attached_hosts = hosts
+    let mut attached_devices = devices
         .values()
-        .filter(|host| host.kind != ExecutionHostKind::Local)
+        .filter(|device| device.kind != DeviceKind::Local)
         .cloned()
         .collect::<Vec<_>>();
-    attached_hosts.sort_by(|left, right| left.host_id.cmp(&right.host_id));
-    attached_hosts.into_iter().next()
+    attached_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    attached_devices.into_iter().next()
 }
 
-pub async fn execute_on_remote_host(
+pub async fn execute_on_remote_device(
     secret_manager: &SecretManager,
-    host: &RegisteredExecutionHost,
+    device: &RegisteredDevice,
     tool_name: &str,
     params: &Value,
     ctx: &dyn ToolContext,
 ) -> Result<Value, ToolError> {
-    if host.kind == ExecutionHostKind::Local {
+    if device.kind == DeviceKind::Local {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
-                "execution host '{}' uses the local backend and cannot be called through transport",
-                host.host_id
+                "device '{}' uses the local backend and cannot be called through transport",
+                device.device_id
             ),
         });
     }
 
-    if !host
+    if !device
         .capabilities
         .iter()
         .any(|capability| capability == tool_name)
@@ -351,30 +352,31 @@ pub async fn execute_on_remote_host(
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
-                "execution host '{}' does not expose tool '{}'",
-                host.host_id, tool_name
+                "device '{}' does not expose tool '{}'",
+                device.device_id, tool_name
             ),
         });
     }
 
-    if !context_within_workspaces(ctx, &host.workspace_roots) {
+    if !context_within_workspaces(ctx, &device.workspace_roots) {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
-                "gateway context for '{}' escapes execution host workspace",
-                host.host_id
+                "gateway context for '{}' escapes device workspace",
+                device.device_id
             ),
         });
     }
 
     let url = format!(
-        "{}/api/node/execute-tool",
-        host.base_url
+        "{}/api/device/execute-tool",
+        device
+            .base_url
             .as_deref()
             .unwrap_or_default()
             .trim_end_matches('/')
     );
-    let shared_token = match host.shared_token_secret_ref.as_deref() {
+    let shared_token = match device.shared_token_secret_ref.as_deref() {
         Some(reference) => {
             secret_manager
                 .resolve(reference)
@@ -389,8 +391,8 @@ pub async fn execute_on_remote_host(
             return Err(ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
                 message: format!(
-                    "execution host '{}' is missing its shared token secret reference",
-                    host.host_id
+                    "device '{}' is missing its shared token secret reference",
+                    device.device_id
                 ),
             });
         }
@@ -409,10 +411,7 @@ pub async fn execute_on_remote_host(
         .await
         .map_err(|error| ToolError::ExecutionFailed {
             name: tool_name.to_string(),
-            message: format!(
-                "failed to contact execution host '{}': {error}",
-                host.host_id
-            ),
+            message: format!("failed to contact device '{}': {error}", device.device_id),
         })?;
 
     if !response.status().is_success() {
@@ -421,8 +420,8 @@ pub async fn execute_on_remote_host(
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             message: format!(
-                "execution host '{}' rejected tool call with status {}: {}",
-                host.host_id, status, body
+                "device '{}' rejected tool call with status {}: {}",
+                device.device_id, status, body
             ),
         });
     }
@@ -434,8 +433,8 @@ pub async fn execute_on_remote_host(
             .map_err(|error| ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
                 message: format!(
-                    "execution host '{}' returned invalid JSON: {error}",
-                    host.host_id
+                    "device '{}' returned invalid JSON: {error}",
+                    device.device_id
                 ),
             })?;
     Ok(payload.output)
@@ -472,8 +471,8 @@ fn normalise_workspace_roots(primary: PathBuf, roots: Vec<String>) -> Vec<PathBu
     normalised
 }
 
-async fn remote_host_execute_tool(
-    State(state): State<TransportBackedHostState>,
+async fn remote_device_execute_tool(
+    State(state): State<TransportBackedDeviceState>,
     Json(request): Json<RemoteToolExecutionRequest>,
 ) -> Result<Json<RemoteToolExecutionResponse>, (StatusCode, String)> {
     if request.shared_token != state.shared_token {
@@ -487,20 +486,14 @@ async fn remote_host_execute_tool(
     {
         return Err((
             StatusCode::FORBIDDEN,
-            format!(
-                "tool '{}' is not exposed by this execution host",
-                request.tool_name
-            ),
+            format!("tool '{}' is not exposed by this device", request.tool_name),
         ));
     }
 
     if !context_within_workspaces(&request.context, &state.workspace_roots) {
         return Err((
             StatusCode::FORBIDDEN,
-            format!(
-                "gateway context escapes {} execution-host workspace",
-                state.kind
-            ),
+            format!("gateway context escapes {} device workspace", state.kind),
         ));
     }
 
@@ -520,24 +513,24 @@ async fn remote_host_execute_tool(
     }))
 }
 
-pub struct TransportBackedHostHandle {
+pub struct TransportBackedDeviceHandle {
     pub base_url: String,
     pub join_handle: JoinHandle<()>,
 }
 
-pub async fn spawn_transport_backed_host(
-    kind: ExecutionHostKind,
+pub async fn spawn_transport_backed_device(
+    kind: DeviceKind,
     dispatcher: ToolDispatcher,
     workspace_root: PathBuf,
     shared_token: String,
-) -> TransportBackedHostHandle {
+) -> TransportBackedDeviceHandle {
     let capabilities = dispatcher
         .registry()
         .list()
         .into_iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    let state = TransportBackedHostState {
+    let state = TransportBackedDeviceState {
         kind,
         shared_token,
         dispatcher: Arc::new(dispatcher),
@@ -545,7 +538,7 @@ pub async fn spawn_transport_backed_host(
         workspace_roots: vec![workspace_root],
     };
     let router = Router::new()
-        .route("/api/node/execute-tool", post(remote_host_execute_tool))
+        .route("/api/device/execute-tool", post(remote_device_execute_tool))
         .route(
             "/api/health",
             get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
@@ -564,19 +557,19 @@ pub async fn spawn_transport_backed_host(
             .expect("test server should run");
     });
 
-    TransportBackedHostHandle {
+    TransportBackedDeviceHandle {
         base_url: format!("http://{addr}"),
         join_handle,
     }
 }
 
-pub async fn spawn_attached_node(
+pub async fn spawn_attached_device(
     dispatcher: ToolDispatcher,
     workspace_root: PathBuf,
     shared_token: String,
-) -> TransportBackedHostHandle {
-    spawn_transport_backed_host(
-        ExecutionHostKind::AttachedNode,
+) -> TransportBackedDeviceHandle {
+    spawn_transport_backed_device(
+        DeviceKind::AttachedDevice,
         dispatcher,
         workspace_root,
         shared_token,
@@ -584,13 +577,13 @@ pub async fn spawn_attached_node(
     .await
 }
 
-pub async fn register_attached_node_with_gateway(
+pub async fn register_attached_device_with_gateway(
     gateway_url: &str,
-    request: &RegisterExecutionHostRequest,
+    request: &RegisterDeviceRequest,
 ) -> reqwest::Result<()> {
     Client::new()
         .post(format!(
-            "{}/api/execution-hosts/register",
+            "{}/api/devices/register",
             gateway_url.trim_end_matches('/')
         ))
         .json(request)
@@ -617,9 +610,9 @@ mod tests {
         crate::secret::SecretManager::new(storage)
     }
 
-    fn registered_host(host_id: &str, kind: ExecutionHostKind) -> RegisteredExecutionHost {
-        RegisteredExecutionHost {
-            host_id: host_id.to_string(),
+    fn registered_device(device_id: &str, kind: DeviceKind) -> RegisteredDevice {
+        RegisteredDevice {
+            device_id: device_id.to_string(),
             label: None,
             kind,
             base_url: Some("http://127.0.0.1:1".to_string()),
@@ -628,7 +621,7 @@ mod tests {
             ),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_roots: vec![PathBuf::from("/tmp/workspace")],
-            capabilities: vec!["host_identity".to_string()],
+            capabilities: vec!["device_identity".to_string()],
             registered_at: Utc::now(),
         }
     }
@@ -642,7 +635,7 @@ mod tests {
         }
 
         fn description(&self) -> &str {
-            "Return the tool context observed by the execution host."
+            "Return the tool context observed by the device."
         }
 
         fn parameters(&self) -> Value {
@@ -704,66 +697,66 @@ mod tests {
     }
 
     #[test]
-    fn select_execution_host_prefers_metadata_backend_kind() {
-        let hosts = HashMap::from([
+    fn select_device_prefers_metadata_backend_kind() {
+        let devices = HashMap::from([
             (
-                LOCAL_EXECUTION_HOST_ID.to_string(),
-                registered_host(LOCAL_EXECUTION_HOST_ID, ExecutionHostKind::Local),
+                LOCAL_DEVICE_ID.to_string(),
+                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
-                registered_host("docker-a", ExecutionHostKind::Docker),
+                registered_device("docker-a", DeviceKind::Docker),
             ),
             (
                 "ssh-a".to_string(),
-                registered_host("ssh-a", ExecutionHostKind::Ssh),
+                registered_device("ssh-a", DeviceKind::Ssh),
             ),
         ]);
 
-        let selected = select_execution_host(
-            &hosts,
+        let selected = select_device(
+            &devices,
             Some(&serde_json::json!({"execution_backend": "ssh"})),
         )
-        .expect("host should resolve");
+        .expect("device should resolve");
 
-        assert_eq!(selected.host_id, "ssh-a");
+        assert_eq!(selected.device_id, "ssh-a");
     }
 
     #[test]
-    fn select_execution_host_prefers_explicit_host_id_over_backend_kind() {
-        let hosts = HashMap::from([
+    fn select_device_prefers_explicit_device_id_over_backend_kind() {
+        let devices = HashMap::from([
             (
-                LOCAL_EXECUTION_HOST_ID.to_string(),
-                registered_host(LOCAL_EXECUTION_HOST_ID, ExecutionHostKind::Local),
+                LOCAL_DEVICE_ID.to_string(),
+                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
-                registered_host("docker-a", ExecutionHostKind::Docker),
+                registered_device("docker-a", DeviceKind::Docker),
             ),
             (
                 "ssh-a".to_string(),
-                registered_host("ssh-a", ExecutionHostKind::Ssh),
+                registered_device("ssh-a", DeviceKind::Ssh),
             ),
         ]);
 
-        let selected = select_execution_host(
-            &hosts,
+        let selected = select_device(
+            &devices,
             Some(&serde_json::json!({
-                "execution_host_id": "docker-a",
+                "device_id": "docker-a",
                 "execution_backend": "ssh"
             })),
         )
-        .expect("host should resolve");
+        .expect("device should resolve");
 
-        assert_eq!(selected.host_id, "docker-a");
+        assert_eq!(selected.device_id, "docker-a");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_host_rejects_unadvertised_tool_before_network_call() {
-        let host = RegisteredExecutionHost {
-            host_id: "remote-a".to_string(),
+    async fn execute_on_remote_device_rejects_unadvertised_tool_before_network_call() {
+        let device = RegisteredDevice {
+            device_id: "remote-a".to_string(),
             label: None,
-            kind: ExecutionHostKind::AttachedNode,
+            kind: DeviceKind::AttachedDevice,
             base_url: Some("http://127.0.0.1:1".to_string()),
             shared_token_secret_ref: Some(
                 "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
@@ -784,9 +777,9 @@ mod tests {
         };
 
         let secret_manager = test_secret_manager();
-        let error = execute_on_remote_host(
+        let error = execute_on_remote_device(
             &secret_manager,
-            &host,
+            &device,
             "shell",
             &serde_json::json!({}),
             &ctx,
@@ -797,11 +790,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_host_rejects_context_outside_workspace_before_network_call() {
-        let host = RegisteredExecutionHost {
-            host_id: "remote-a".to_string(),
+    async fn execute_on_remote_device_rejects_context_outside_workspace_before_network_call() {
+        let device = RegisteredDevice {
+            device_id: "remote-a".to_string(),
             label: None,
-            kind: ExecutionHostKind::AttachedNode,
+            kind: DeviceKind::AttachedDevice,
             base_url: Some("http://127.0.0.1:1".to_string()),
             shared_token_secret_ref: Some(
                 "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
@@ -822,27 +815,23 @@ mod tests {
         };
 
         let secret_manager = test_secret_manager();
-        let error = execute_on_remote_host(
+        let error = execute_on_remote_device(
             &secret_manager,
-            &host,
+            &device,
             "shell",
             &serde_json::json!({}),
             &ctx,
         )
         .await
         .expect_err("out-of-root context should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("escapes execution host workspace")
-        );
+        assert!(error.to_string().contains("escapes device workspace"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_host_preserves_tool_context_across_transport() {
+    async fn execute_on_remote_device_preserves_tool_context_across_transport() {
         let workspace = tempfile::TempDir::new().expect("workspace root");
         let workspace_root = workspace.path().to_path_buf();
-        let handle = spawn_attached_node(
+        let handle = spawn_attached_device(
             ToolDispatcher::allow_all(vec![Arc::new(ObservingTool) as Arc<dyn Tool>]),
             workspace_root.clone(),
             "shared-token".to_string(),
@@ -853,19 +842,16 @@ mod tests {
         let secret_manager = crate::secret::SecretManager::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
         );
-        let token_variable = format!(
-            "SWAGE_TEST_EXECUTION_HOST_TOKEN_{}",
-            Uuid::new_v4().simple()
-        );
+        let token_variable = format!("SWAGE_TEST_DEVICE_TOKEN_{}", Uuid::new_v4().simple());
         unsafe { std::env::set_var(&token_variable, "shared-token") };
         let secret = secret_manager
             .create_secret(crate::secret::CreateSecretRequest {
-                name: "Execution host token".into(),
+                name: "Device token".into(),
                 material_kind: "plugin_secret".into(),
                 owner_kind: "service".into(),
                 backend_kind: "env".into(),
                 scope_kind: "plugin".into(),
-                scope_id: Some("execution-host".into()),
+                scope_id: Some("device".into()),
                 metadata: None,
                 value: None,
                 external_reference: Some(token_variable.clone()),
@@ -874,10 +860,10 @@ mod tests {
             .unwrap();
 
         let turn_id = Uuid::new_v4();
-        let host = RegisteredExecutionHost {
-            host_id: "attached-a".to_string(),
+        let device = RegisteredDevice {
+            device_id: "attached-a".to_string(),
             label: None,
-            kind: ExecutionHostKind::AttachedNode,
+            kind: DeviceKind::AttachedDevice,
             base_url: Some(handle.base_url.clone()),
             shared_token_secret_ref: Some(secret.reference),
             workspace_root: workspace_root.clone(),
@@ -899,10 +885,15 @@ mod tests {
             turn_id: Some(turn_id),
         };
 
-        let output =
-            execute_on_remote_host(&secret_manager, &host, "observe_context", &json!({}), &ctx)
-                .await
-                .expect("remote host should execute advertised tool");
+        let output = execute_on_remote_device(
+            &secret_manager,
+            &device,
+            "observe_context",
+            &json!({}),
+            &ctx,
+        )
+        .await
+        .expect("remote device should execute advertised tool");
 
         assert_eq!(output["agent_id"], "agent-a");
         assert_eq!(output["session_id"], "session-1");
