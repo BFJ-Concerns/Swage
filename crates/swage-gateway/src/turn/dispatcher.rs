@@ -90,6 +90,15 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
 pub(super) struct TurnSandboxBuild {
     sandbox: Option<Arc<dyn Sandbox>>,
     isolation: ExecutionIsolation,
+    backend: SandboxBackend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxBackend {
+    None,
+    Bubblewrap,
+    Fallback,
+    TestHarness,
 }
 
 fn require_degraded_execution_opt_in(
@@ -174,6 +183,7 @@ pub(super) async fn build_turn_sandbox(
             isolation: ExecutionIsolation::Degraded {
                 reason: "sandbox_disabled_by_configuration".into(),
             },
+            backend: SandboxBackend::None,
         });
     }
     if std::env::current_exe().ok().is_some_and(|path| {
@@ -185,6 +195,7 @@ pub(super) async fn build_turn_sandbox(
         return Ok(TurnSandboxBuild {
             sandbox: None,
             isolation: ExecutionIsolation::Isolated,
+            backend: SandboxBackend::TestHarness,
         });
     }
     #[cfg(test)]
@@ -192,9 +203,29 @@ pub(super) async fn build_turn_sandbox(
         return Ok(TurnSandboxBuild {
             sandbox: None,
             isolation: ExecutionIsolation::Isolated,
+            backend: SandboxBackend::TestHarness,
         });
     }
 
+    build_turn_sandbox_for_backend_selection(
+        state,
+        config,
+        agent_config,
+        workspace_policy,
+        swage_sandbox::find_bwrap().is_ok(),
+        true,
+    )
+    .await
+}
+
+async fn build_turn_sandbox_for_backend_selection(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    agent_config: &AgentConfig,
+    workspace_policy: Option<&TrustedWorkspacePolicy>,
+    bubblewrap_available: bool,
+    spawn_fallback: bool,
+) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     let sandbox_config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
         swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
@@ -218,7 +249,7 @@ pub(super) async fn build_turn_sandbox(
     };
 
     let degradation_reason;
-    if swage_sandbox::find_bwrap().is_ok() {
+    if bubblewrap_available {
         let mut sandbox =
             swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler());
         match sandbox.spawn_agent().await {
@@ -226,6 +257,7 @@ pub(super) async fn build_turn_sandbox(
                 return Ok(TurnSandboxBuild {
                     sandbox: Some(Arc::new(sandbox) as Arc<dyn Sandbox>),
                     isolation: ExecutionIsolation::Isolated,
+                    backend: SandboxBackend::Bubblewrap,
                 });
             }
             Err(error) if !config.sandbox.allow_degraded_execution => return Err(error),
@@ -240,12 +272,15 @@ pub(super) async fn build_turn_sandbox(
     }
 
     let mut fallback = swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler());
-    fallback.spawn_agent().await?;
+    if spawn_fallback {
+        fallback.spawn_agent().await?;
+    }
     Ok(TurnSandboxBuild {
         sandbox: Some(Arc::new(fallback) as Arc<dyn Sandbox>),
         isolation: ExecutionIsolation::Degraded {
             reason: degradation_reason,
         },
+        backend: SandboxBackend::Fallback,
     })
 }
 
@@ -285,6 +320,7 @@ pub(crate) async fn build_gateway_dispatcher(
 
     let sandbox_build =
         build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
+    tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
@@ -437,5 +473,54 @@ mod tests {
         assert_eq!(events[0].entity_id, turn_id.to_string());
         assert_eq!(events[0].event_kind, "execution_isolation_degraded");
         assert_eq!(events[0].metadata["execution_context"], "scheduled turn");
+    }
+
+    #[tokio::test]
+    async fn unavailable_bubblewrap_selects_and_records_opted_in_fallback_sandbox() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.allow_degraded_execution = true;
+
+        // Do not spawn the child here: Cargo's unit-test binary is not the
+        // sandbox agent entrypoint. Backend construction and selection are the
+        // behaviour under test; FallbackSandbox's real child process has its
+        // own integration coverage in sandbox_entrypoint_integration.rs.
+        let build = build_turn_sandbox_for_backend_selection(
+            &state,
+            &config,
+            &agent_config,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("the explicit opt-in should select the fallback sandbox");
+        assert_eq!(build.backend, SandboxBackend::Fallback);
+        assert!(build.sandbox.is_some());
+        assert_eq!(
+            build.isolation,
+            ExecutionIsolation::Degraded {
+                reason: "bubblewrap_unavailable".into(),
+            }
+        );
+
+        let turn_id = Uuid::new_v4();
+        record_degraded_execution(
+            &state,
+            &build.isolation,
+            "scheduled turn",
+            Some(session_id),
+            Some(turn_id),
+        )
+        .await
+        .expect("fallback selection should be recorded before execution");
+        let events = state.storage.list_audit_events().await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.entity_id == turn_id.to_string()
+                && event.metadata["reason"] == "bubblewrap_unavailable"
+        }));
     }
 }
