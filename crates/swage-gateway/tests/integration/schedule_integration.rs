@@ -29,8 +29,8 @@ use tokio::sync::oneshot;
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
 use swage_protocol::client::schedule::{
-    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleSpec, ScheduleStatus, SessionPolicy,
-    SkipReason, UpdateScheduleRequest,
+    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleCreator, ScheduleSpec, ScheduleStatus,
+    SessionPolicy, SkipReason, UpdateScheduleRequest,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
@@ -392,6 +392,7 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
                 spec,
                 continuation(create_conversation(&router).await),
             ),
+            ScheduleCreator::User,
         )
         .await
         .unwrap();
@@ -453,6 +454,7 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
             },
             continuation(first_session),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -465,6 +467,7 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
             },
             continuation(second_session),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -531,6 +534,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 agent_id: "gateway".into(),
             },
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -607,6 +611,7 @@ async fn continuation_policy_reuses_the_named_session() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -676,6 +681,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
                 criteria: Some("Run only when there are unreviewed alerts.".into()),
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -759,6 +765,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -805,6 +812,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -856,6 +864,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await;
     assert!(
@@ -884,6 +893,7 @@ async fn due_run_meeting_an_executing_predecessor_is_skipped_and_recorded() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -954,6 +964,7 @@ async fn busy_continuation_session_skips_the_run_deliberately() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1001,6 +1012,7 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
             }),
             gate: None,
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1050,6 +1062,7 @@ async fn empty_successful_run_records_a_distinct_state() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1095,6 +1108,7 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
                 },
                 continuation(session_id),
             ),
+            ScheduleCreator::User,
         )
     };
     let schedule_a = make_schedule().await.unwrap();
@@ -1182,9 +1196,13 @@ async fn paused_future_one_shot_resumes_and_still_fires() {
     let session_id = create_conversation(&router).await;
 
     let moment = Utc::now() + Duration::hours(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, moment),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
 
     schedule::pause_schedule(&state, created.id).await.unwrap();
     let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
@@ -1210,9 +1228,13 @@ async fn paused_lapsed_one_shot_resumes_completed_without_firing() {
     let session_id = create_conversation(&router).await;
 
     let lapsed = Utc::now() - Duration::hours(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, lapsed))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, lapsed),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
     schedule::pause_schedule(&state, created.id).await.unwrap();
 
     let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
@@ -1237,9 +1259,13 @@ async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
     let session_id = create_conversation(&router).await;
 
     let moment = Utc::now() - Duration::seconds(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, moment),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
 
     // Fire it.
     schedule::tick_once(&state, Utc::now()).await.unwrap();
@@ -1308,6 +1334,7 @@ async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
     let created = schedule::create_schedule(
         &state,
         one_shot_request(session_id, Utc::now() - Duration::seconds(1)),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1450,6 +1477,7 @@ async fn delivery_failure_preserves_output_on_the_failed_run() {
                 continuation(session_id),
             )
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1578,6 +1606,7 @@ async fn concurrent_manual_triggers_run_one_and_skip_the_overlap_cleanly() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1639,6 +1668,7 @@ async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();

@@ -1209,8 +1209,8 @@ pub struct ActiveSkillRecord {
 // Wire-visible schedule types come from the protocol crate — one
 // definition, stored as TEXT columns via their string forms.
 pub use swage_protocol::client::schedule::{
-    GateConfig, GateDecision, GateVerdict, ScheduleRunState, ScheduleRunTrigger, ScheduleStatus,
-    SessionPolicy, SkipReason,
+    GateConfig, GateDecision, GateVerdict, ScheduleCreator, ScheduleRunState, ScheduleRunTrigger,
+    ScheduleStatus, SessionPolicy, SkipReason,
 };
 
 /// Canonical schedule kinds supported by the scheduler.
@@ -1263,6 +1263,8 @@ pub struct Schedule {
     /// Original schedule expression as authored.
     pub expression: String,
     pub session_policy: SessionPolicy,
+    /// Where this schedule came from — a person or an agent.
+    pub creator: ScheduleCreator,
     /// Delivery routing configuration serialised as JSON.
     pub delivery_routing: serde_json::Value,
     pub gate: Option<GateConfig>,
@@ -1946,6 +1948,7 @@ pub struct NewSchedule {
     pub kind: ScheduleKind,
     pub expression: String,
     pub session_policy: SessionPolicy,
+    pub creator: ScheduleCreator,
     pub delivery_routing: serde_json::Value,
     pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,

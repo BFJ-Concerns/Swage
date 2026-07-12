@@ -21,8 +21,9 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     NewNodeExecution, NewSchedule, NewScheduleRun, NewSession, NewTeam, NewThread, NewTopologyRun,
-    NewTurn, NodeExecutionState, ScheduleKind, ScheduleRunState, ScheduleRunTrigger,
-    ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage, TopologyRunState, TurnState,
+    NewTurn, NodeExecutionState, ScheduleCreator, ScheduleKind, ScheduleRunState,
+    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage,
+    TopologyRunState, TurnState,
     model::TopologyNodeRecordKind,
     store::{
         ScheduleStore, SessionStore, SpaceStore, Storage, TeamStore, ThreadStore,
@@ -319,6 +320,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
             kind: ScheduleKind::Cron,
             expression: "0 * * * * *".into(),
             session_policy: SessionPolicy::Continuation { session_id },
+            creator: ScheduleCreator::User,
             delivery_routing: json!({"store_local_output": true}),
             gate: None,
             next_run_at: None,

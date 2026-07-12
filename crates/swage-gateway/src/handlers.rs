@@ -768,7 +768,9 @@ pub async fn create_schedule(
     State(state): State<AppState>,
     Json(req): Json<schedule_wire::CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<schedule_wire::Schedule>), ApiError> {
-    let response = crate::schedule::create_schedule(&state, req).await?;
+    // Creation over the HTTP surface is a person's action.
+    let response =
+        crate::schedule::create_schedule(&state, req, schedule_wire::ScheduleCreator::User).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 

@@ -24,8 +24,8 @@ use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role};
 use swage_protocol::client::schedule as wire;
 use swage_storage::{
     GateConfig, GateDecision, GateVerdict, NewAuditEvent, NewSchedule, NewScheduleRun, Schedule,
-    ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
-    ScheduleStatus, SessionPolicy, SkipReason, UpdateSchedule,
+    ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
+    ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SkipReason, UpdateSchedule,
 };
 
 use crate::channel_gateway::{
@@ -209,6 +209,7 @@ fn parse_interval(text: &str) -> Result<Duration, GatewayError> {
 pub async fn create_schedule(
     state: &AppState,
     request: wire::CreateScheduleRequest,
+    creator: ScheduleCreator,
 ) -> Result<wire::Schedule, GatewayError> {
     if request.message.trim().is_empty() {
         return Err(GatewayError::ValidationError(
@@ -236,6 +237,7 @@ pub async fn create_schedule(
             kind: parsed.kind(),
             expression: parsed.expression(),
             session_policy: request.session,
+            creator,
             delivery_routing: routing_to_value(&routing)?,
             gate: request.gate,
             next_run_at: parsed.initial_next_run_at(now),
@@ -1093,6 +1095,7 @@ fn map_schedule(schedule: Schedule) -> Result<wire::Schedule, GatewayError> {
         status: schedule.status,
         spec: ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?.into_spec(),
         session: schedule.session_policy,
+        creator: schedule.creator,
         routing: serde_json::from_value(schedule.delivery_routing).map_err(|error| {
             GatewayError::ValidationError(format!("invalid stored delivery routing: {error}"))
         })?,

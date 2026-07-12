@@ -6,8 +6,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    GateConfig, GateDecision, NewSchedule, NewScheduleRun, Schedule, ScheduleRun, ScheduleRunState,
-    ScheduleRunUpdate, SessionPolicy, UpdateSchedule,
+    GateConfig, GateDecision, NewSchedule, NewScheduleRun, Schedule, ScheduleCreator, ScheduleRun,
+    ScheduleRunState, ScheduleRunUpdate, SessionPolicy, UpdateSchedule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
@@ -96,6 +96,36 @@ fn session_policy_columns(
     }
 }
 
+/// Reassemble schedule provenance from its flattened columns.
+fn parse_creator(kind: &str, agent_id: Option<String>) -> rusqlite::Result<ScheduleCreator> {
+    let invalid = |message: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            16,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )),
+        )
+    };
+    match kind {
+        "user" => Ok(ScheduleCreator::User),
+        "agent" => Ok(ScheduleCreator::Agent {
+            agent_id: agent_id
+                .ok_or_else(|| invalid("agent creator row is missing creator_agent_id".into()))?,
+        }),
+        other => Err(invalid(format!("unknown schedule creator: {other}"))),
+    }
+}
+
+/// Flatten schedule provenance into its column values.
+fn creator_columns(creator: &ScheduleCreator) -> (&'static str, Option<String>) {
+    match creator {
+        ScheduleCreator::User => ("user", None),
+        ScheduleCreator::Agent { agent_id } => ("agent", Some(agent_id.clone())),
+    }
+}
+
 fn gate_from_columns(model: Option<String>, criteria: Option<String>) -> Option<GateConfig> {
     model.map(|model| GateConfig { model, criteria })
 }
@@ -121,7 +151,7 @@ fn gate_decision_from_columns(
 
 const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, space_id, \
      agent_id, session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at, \
-     created_at, updated_at";
+     created_at, updated_at, creator_kind, creator_agent_id";
 
 fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let id: String = row.get(0)?;
@@ -140,6 +170,8 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let last_run_at: Option<String> = row.get(13)?;
     let created_at: String = row.get(14)?;
     let updated_at: String = row.get(15)?;
+    let creator_kind: String = row.get(16)?;
+    let creator_agent_id: Option<String> = row.get(17)?;
 
     Ok(Schedule {
         id: parse_uuid(&id)?,
@@ -148,6 +180,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
         kind: parse_enum(3, &kind)?,
         expression,
         session_policy: parse_session_policy(&session_policy, space_id, agent_id, session_id)?,
+        creator: parse_creator(&creator_kind, creator_agent_id)?,
         delivery_routing: serde_json::from_str(&delivery_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 9,
@@ -224,6 +257,7 @@ impl ScheduleStore for SqliteStorage {
             let now_str = now.to_rfc3339();
             let (policy, space_id, agent_id, session_id) =
                 session_policy_columns(&schedule.session_policy);
+            let (creator_kind, creator_agent_id) = creator_columns(&schedule.creator);
             let next_run_at = serialise_optional_dt(schedule.next_run_at);
             let last_run_at = serialise_optional_dt(schedule.last_run_at);
             let (gate_model, gate_criteria) = match &schedule.gate {
@@ -234,9 +268,10 @@ impl ScheduleStore for SqliteStorage {
             conn.execute(
                 "INSERT INTO schedules
                  (id, message, status, kind, expression, session_policy, space_id, agent_id,
-                  session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at,
-                  created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
+                  session_id, creator_kind, creator_agent_id, delivery_json, gate_model,
+                  gate_criteria, next_run_at, last_run_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                  ?17, ?17)",
                 params![
                     id.to_string(),
                     &schedule.message,
@@ -247,6 +282,8 @@ impl ScheduleStore for SqliteStorage {
                     &space_id,
                     &agent_id,
                     &session_id,
+                    creator_kind,
+                    &creator_agent_id,
                     &delivery_json,
                     &gate_model,
                     &gate_criteria,
@@ -263,6 +300,7 @@ impl ScheduleStore for SqliteStorage {
                 kind: schedule.kind,
                 expression: schedule.expression,
                 session_policy: schedule.session_policy,
+                creator: schedule.creator,
                 delivery_routing: schedule.delivery_routing,
                 gate: schedule.gate,
                 next_run_at: schedule.next_run_at,
@@ -331,6 +369,7 @@ impl ScheduleStore for SqliteStorage {
             kind: update.kind.unwrap_or(existing.kind),
             expression: update.expression.unwrap_or(existing.expression),
             session_policy: existing.session_policy,
+            creator: existing.creator,
             delivery_routing: update.delivery_routing.unwrap_or(existing.delivery_routing),
             gate: update.gate.unwrap_or(existing.gate),
             next_run_at: update.next_run_at.unwrap_or(existing.next_run_at),
@@ -645,6 +684,7 @@ mod tests {
                 space_id,
                 agent_id: "gateway".into(),
             },
+            creator: ScheduleCreator::User,
             delivery_routing: serde_json::json!({"store_local_output": true}),
             gate: None,
             next_run_at: Some(Utc::now()),
@@ -716,6 +756,38 @@ mod tests {
             SessionPolicy::Continuation { session_id }
         );
         assert!(fetched.gate.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn creator_provenance_round_trips() {
+        let (storage, space_id, _) = make_storage_with_session().await;
+
+        // fresh_schedule stamps User; an agent-created schedule carries the
+        // agent id through storage unchanged.
+        let user = storage
+            .create_schedule(fresh_schedule(space_id))
+            .await
+            .unwrap();
+        let agent = storage
+            .create_schedule(NewSchedule {
+                creator: ScheduleCreator::Agent {
+                    agent_id: "researcher".into(),
+                },
+                ..fresh_schedule(space_id)
+            })
+            .await
+            .unwrap();
+
+        let fetched_user = storage.get_schedule(user.id).await.unwrap().unwrap();
+        assert_eq!(fetched_user.creator, ScheduleCreator::User);
+
+        let fetched_agent = storage.get_schedule(agent.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched_agent.creator,
+            ScheduleCreator::Agent {
+                agent_id: "researcher".into()
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
