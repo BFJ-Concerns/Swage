@@ -3,7 +3,6 @@
   import {
     bytesToBase64,
     createAttachment,
-    createSchedule,
     exportRecoveryBundle,
     fetchVoiceCapabilities,
   } from "../api/workflows";
@@ -11,8 +10,6 @@
     MaterialScopeKind,
     VoiceCapabilitiesResponse,
   } from "../types";
-  import type { ScheduleSpec } from "../protocol/ScheduleSpec";
-  import type { SessionPolicy } from "../protocol/SessionPolicy";
 
   interface Props {
     spaceId: string | null;
@@ -27,16 +24,6 @@
   let noteScope = $state<MaterialScopeKind>("session");
   let attachmentScope = $state<MaterialScopeKind>("session");
   let selectedFile = $state<File | null>(null);
-  let scheduleMessage = $state("");
-  let scheduleKind = $state<"interval" | "cron" | "one_shot">("interval");
-  let scheduleEvery = $state("every 1 hours");
-  let scheduleCron = $state("0 0 9 * * * *");
-  let scheduleAt = $state("");
-  let schedulePolicy = $state<"fresh" | "continuation">("fresh");
-  let scheduleAgentId = $state("gateway");
-  let gateEnabled = $state(false);
-  let gateModel = $state("");
-  let gateCriteria = $state("");
   let voiceCapabilities = $state<VoiceCapabilitiesResponse | null>(null);
   let recoverySummary = $state<string | null>(null);
   let errorMessage = $state<string | null>(null);
@@ -141,67 +128,6 @@
     });
   }
 
-  function buildScheduleSpec(): ScheduleSpec {
-    if (scheduleKind === "interval") {
-      const every = scheduleEvery.trim();
-      if (!every) throw new Error("Interval schedules need an 'every N minutes' cadence.");
-      return { kind: "interval", every };
-    }
-    if (scheduleKind === "cron") {
-      const cron = scheduleCron.trim();
-      if (!cron) throw new Error("Cron schedules need a cron expression.");
-      return { kind: "cron", cron };
-    }
-    const at = scheduleAt.trim();
-    if (!at) throw new Error("One-off schedules need a moment to fire at.");
-    // datetime-local inputs omit the zone; treat the value as local time.
-    return { kind: "one_shot", at: new Date(at).toISOString() };
-  }
-
-  function buildSessionPolicy(): SessionPolicy {
-    if (schedulePolicy === "continuation") {
-      if (!sessionId) {
-        throw new Error("Open a conversation to schedule work that continues it.");
-      }
-      return { policy: "continuation", session_id: sessionId };
-    }
-    if (!spaceId) throw new Error("Select a space before scheduling work.");
-    const agentId = scheduleAgentId.trim();
-    if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return { policy: "fresh", space_id: spaceId, agent_id: agentId };
-  }
-
-  async function scheduleWork(): Promise<void> {
-    await runAction("schedule", async () => {
-      const message = scheduleMessage.trim();
-      if (!message) throw new Error("Scheduled work needs a prompt.");
-
-      // A ticked gate with no model is an incomplete choice, not a silent
-      // "no gate" — surface it before the request goes out.
-      if (gateEnabled && !gateModel.trim()) {
-        throw new Error("Enter a gate model, or turn the gate check off.");
-      }
-
-      const created = await createSchedule({
-        message,
-        spec: buildScheduleSpec(),
-        session: buildSessionPolicy(),
-        routing: null,
-        gate: gateEnabled
-          ? {
-              model: gateModel.trim(),
-              criteria: gateCriteria.trim() || null,
-            }
-          : null,
-      });
-
-      scheduleMessage = "";
-      return created.next_run_at
-        ? `Schedule created — next run ${new Date(created.next_run_at).toLocaleString()}.`
-        : `Schedule created: ${created.status}.`;
-    });
-  }
-
   async function exportRecovery(): Promise<void> {
     await runAction("recovery", async () => {
       const bundle = await exportRecoveryBundle();
@@ -295,83 +221,6 @@
       </label>
       <button class="primary" onclick={queueAttachment} disabled={busyAction === "attachment" || !spaceId}>
         {busyAction === "attachment" ? "Queueing..." : "Queue ingestion"}
-      </button>
-    </section>
-
-    <section class="operation-card">
-      <div>
-        <strong>Schedule work</strong>
-        <p>Ask an agent to do something on a cadence, on the clock, or once.</p>
-      </div>
-      <label>
-        <span>Prompt</span>
-        <textarea bind:value={scheduleMessage} rows="3" placeholder="Run the review checklist."></textarea>
-      </label>
-      <label>
-        <span>When</span>
-        <select bind:value={scheduleKind}>
-          <option value="interval">On a cadence</option>
-          <option value="cron">On the clock (cron)</option>
-          <option value="one_shot">Once, at a moment</option>
-        </select>
-      </label>
-      {#if scheduleKind === "interval"}
-        <label>
-          <span>Cadence</span>
-          <input bind:value={scheduleEvery} placeholder="every 1 hours" />
-        </label>
-      {:else if scheduleKind === "cron"}
-        <label>
-          <span>Cron expression</span>
-          <input bind:value={scheduleCron} placeholder="0 0 9 * * * *" />
-        </label>
-      {:else}
-        <label>
-          <span>Moment</span>
-          <input type="datetime-local" bind:value={scheduleAt} />
-        </label>
-      {/if}
-      <div class="scope-toggle" role="tablist" aria-label="Schedule session policy">
-        <button
-          class:active={schedulePolicy === "fresh"}
-          onclick={() => (schedulePolicy = "fresh")}
-        >
-          Fresh session
-        </button>
-        <button
-          class:active={schedulePolicy === "continuation"}
-          disabled={!sessionId}
-          onclick={() => (schedulePolicy = "continuation")}
-        >
-          This conversation
-        </button>
-      </div>
-      {#if schedulePolicy === "fresh"}
-        <label>
-          <span>Agent</span>
-          <input bind:value={scheduleAgentId} placeholder="gateway" />
-        </label>
-      {/if}
-      <label class="gate-toggle">
-        <input type="checkbox" bind:checked={gateEnabled} />
-        <span>Check with a small model first</span>
-      </label>
-      {#if gateEnabled}
-        <label>
-          <span>Gate model</span>
-          <input bind:value={gateModel} placeholder="model id or alias" />
-        </label>
-        <label>
-          <span>Run when…</span>
-          <textarea
-            bind:value={gateCriteria}
-            rows="2"
-            placeholder="Only when there is something new to act on."
-          ></textarea>
-        </label>
-      {/if}
-      <button class="primary" onclick={scheduleWork} disabled={busyAction === "schedule" || !spaceId}>
-        {busyAction === "schedule" ? "Scheduling..." : "Schedule"}
       </button>
     </section>
   </div>
@@ -469,24 +318,12 @@
   }
 
   input,
-  select,
   textarea {
     border-radius: 16px;
     border: 1px solid rgba(120, 53, 15, 0.14);
     background: rgba(255, 255, 255, 0.76);
     padding: 12px 14px;
     resize: vertical;
-  }
-
-  .gate-toggle {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .gate-toggle input[type="checkbox"] {
-    width: auto;
-    padding: 0;
   }
 
   .feedback {

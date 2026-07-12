@@ -59,6 +59,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
           status: "active",
           spec: { kind: "interval", every: "every 5 minutes" },
           session: { policy: "continuation", session_id: "conv-1" },
+          creator: { kind: "user" },
           routing: {
             deliver_to_origin: false,
             home_target: null,
