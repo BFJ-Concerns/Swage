@@ -39,7 +39,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
         "workspace" => &["path"],
-        "sandbox" => &["enabled"],
+        "sandbox" => &["enabled", "allow_degraded_execution"],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
@@ -137,7 +137,9 @@ fn check_field_type(
         ("models", "default_model_id") => ("string", matches!(value, Value::String(_))),
         ("models", "entries") => ("table", matches!(value, Value::Table(_))),
         ("workspace", "path") => ("string", matches!(value, Value::String(_))),
-        ("sandbox", "enabled") => ("boolean", matches!(value, Value::Boolean(_))),
+        ("sandbox", "enabled" | "allow_degraded_execution") => {
+            ("boolean", matches!(value, Value::Boolean(_)))
+        }
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),

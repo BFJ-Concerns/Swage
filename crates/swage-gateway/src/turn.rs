@@ -218,6 +218,12 @@ enum SandboxDegradationApproval {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnAttendance {
+    Attended,
+    Unattended,
+}
+
 struct SandboxDegradationApprovalRequest<'a> {
     config: &'a swage_config::ResolvedConfig,
     ws_tx: &'a mpsc::UnboundedSender<ServerEvent>,
@@ -470,6 +476,7 @@ pub async fn process_turn(
         subscription,
         output_schema_override,
         None,
+        TurnAttendance::Attended,
     )
     .await
 }
@@ -489,6 +496,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let session = state
@@ -748,7 +756,26 @@ pub(crate) async fn process_turn_with_existing_turn(
     .await
     {
         Ok(build) => build,
-        Err(error) if config.sandbox.enabled => {
+        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
+            let detected_degradation = ExecutionIsolation::Degraded {
+                reason: format!("sandbox_setup_failed: {error}"),
+            };
+            if let Err(audit_error) = record_degraded_execution(
+                state,
+                &detected_degradation,
+                "interactive turn",
+                Some(session_id),
+                Some(prepared_turn_id),
+            )
+            .await
+            {
+                state
+                    .storage
+                    .update_turn_state(prepared_turn_id, TurnState::Failed)
+                    .await?;
+                state.active_turns.lock().await.remove(&session_id);
+                return Err(audit_error);
+            }
             let approval = request_sandbox_degradation_approval(
                 state,
                 SandboxDegradationApprovalRequest {
@@ -793,7 +820,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             }
 
             let mut unsandboxed_config = config.clone();
-            unsandboxed_config.sandbox.enabled = false;
+            unsandboxed_config.sandbox.allow_degraded_execution = true;
             build_gateway_dispatcher(
                 state,
                 &unsandboxed_config,
@@ -806,8 +833,57 @@ pub(crate) async fn process_turn_with_existing_turn(
             .await
             .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string()))?
         }
-        Err(error) => return Err(GatewayError::WebSocketError(error.to_string())),
+        Err(error) => {
+            let isolation = ExecutionIsolation::Degraded {
+                reason: format!("sandbox_setup_failed: {error}"),
+            };
+            let _ = ws_tx.send(ServerEvent::Error {
+                code: "sandbox_unavailable".into(),
+                message: format!("Sandbox setup failed; the turn was not executed: {error}"),
+            });
+            state
+                .storage
+                .update_turn_state(prepared_turn_id, TurnState::Failed)
+                .await?;
+            state.active_turns.lock().await.remove(&session_id);
+            record_degraded_execution(
+                state,
+                &isolation,
+                "unattended turn",
+                Some(session_id),
+                Some(prepared_turn_id),
+            )
+            .await?;
+            return Err(GatewayError::WebSocketError(format!(
+                "sandbox setup failed; execution was blocked: {error}"
+            )));
+        }
     };
+    let execution_context = match attendance {
+        TurnAttendance::Attended => "interactive turn",
+        TurnAttendance::Unattended => "unattended turn",
+    };
+    if let Err(error) = record_degraded_execution(
+        state,
+        &dispatcher_build.isolation,
+        execution_context,
+        Some(session_id),
+        Some(prepared_turn_id),
+    )
+    .await
+    {
+        shutdown_sandbox_guard(
+            &dispatcher_build.sandbox_guard,
+            "failed to shut down sandbox after degradation audit failure",
+        )
+        .await;
+        state
+            .storage
+            .update_turn_state(prepared_turn_id, TurnState::Failed)
+            .await?;
+        state.active_turns.lock().await.remove(&session_id);
+        return Err(error);
+    }
     let sandbox_guard = dispatcher_build.sandbox_guard;
     let dispatcher = dispatcher_build.dispatcher;
 

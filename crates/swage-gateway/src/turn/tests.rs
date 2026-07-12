@@ -7920,6 +7920,7 @@ async fn existing_placeholder_turn_receives_provider_visible_snapshot() {
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
         Some(placeholder.id),
+        TurnAttendance::Attended,
     )
     .await
     .expect("placeholder turn should complete");

@@ -251,7 +251,7 @@ pub fn spawn_poll_loop_until_cancelled(
 ) -> Option<JoinHandle<()>> {
     let client = state.telegram.as_ref()?.clone();
     Some(tokio::spawn(async move {
-        run_poll_loop(state, client, shutdown).await;
+        Box::pin(run_poll_loop(state, client, shutdown)).await;
     }))
 }
 
@@ -1494,7 +1494,7 @@ mod tests {
         let poll_state = state.clone();
         let poll_client = bad_client.clone();
         let handle = tokio::spawn(async move {
-            run_poll_loop(poll_state, poll_client, shutdown.clone()).await;
+            Box::pin(run_poll_loop(poll_state, poll_client, shutdown.clone())).await;
         });
         tokio::time::sleep(Duration::from_millis(150)).await;
         handle.abort();
